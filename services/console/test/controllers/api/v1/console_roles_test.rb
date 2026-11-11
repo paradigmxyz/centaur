@@ -39,6 +39,52 @@ module Api
         assert_not role.grants.exists?(static_secret: static_secrets(:acme_staging_api_key))
       end
 
+      test "the assign-role picker filter is admin-only" do
+        assert_admin_only_api :get, api_v1_roles_path(exclude_principal: principals(:acme_channel).oid, limit: 200)
+        assert_admin_only_api :get, api_v1_roles_path(q: "infra", limit: 200)
+      end
+
+      test "exclude_principal omits the roles assigned to that principal across all pages" do
+        principal = principals(:acme_channel)
+        assert_equal [ roles(:acme_infra) ], principal.roles.to_a
+        extra = Array.new(201) { |i| Role.create!(foreign_id: format("picker-%03d", i), name: "Picker #{i}", created_by: @operator) }
+        principal.roles << extra.last
+
+        get api_v1_roles_path(exclude_principal: principal.oid, limit: 200)
+        assert_response :ok
+        total = Role.count - 2
+        assert_equal total, json_body.dig("meta", "total")
+        assert_equal 2, json_body.dig("meta", "total_pages")
+        ids = json_body["data"].pluck("id")
+
+        get api_v1_roles_path(exclude_principal: principal.oid, limit: 200, page: 2)
+        assert_response :ok
+        ids += json_body["data"].pluck("id")
+        assert_equal total, ids.uniq.size
+        assert_not_includes ids, roles(:acme_infra).oid
+        assert_not_includes ids, extra.last.oid
+        assert_includes ids, extra[-2].oid
+      end
+
+      test "q searches role name and foreign_id case-insensitively and composes with exclude_principal" do
+        Role.create!(foreign_id: "db-readers", name: "Warehouse 100%", created_by: @operator)
+        get api_v1_roles_path(q: "WAREHOUSE", limit: 200)
+        assert_equal [ "db-readers" ], json_body["data"].pluck("foreign_id")
+        get api_v1_roles_path(q: "100%", limit: 200)
+        assert_equal [ "db-readers" ], json_body["data"].pluck("foreign_id")
+        get api_v1_roles_path(q: "%", limit: 200)
+        assert_equal [ "db-readers" ], json_body["data"].pluck("foreign_id")
+
+        get api_v1_roles_path(q: "infra", exclude_principal: principals(:acme_channel).oid, limit: 200)
+        assert_response :ok
+        assert_equal %w[globex-infra infra], json_body["data"].pluck("foreign_id").sort
+      end
+
+      test "exclude_principal with an unknown principal is a 404" do
+        get api_v1_roles_path(exclude_principal: "prn_missing")
+        assert_response :not_found
+      end
+
       test "an unknown role oid is a 404" do
         get api_v1_role_path("rol_missing")
         assert_response :not_found

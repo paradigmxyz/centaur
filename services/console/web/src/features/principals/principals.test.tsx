@@ -52,11 +52,33 @@ function secretsHandler(all: { id: string }[], granted: Record<string, string[]>
   };
 }
 
+const adminRole = { id: "role_admin", foreign_id: "admin", name: "Admin" };
+
+/**
+ * GET /api/v1/roles as the server answers it: `exclude_principal` drops the
+ * roles in `assigned`, `q` matches name or foreign_id, and pages hold `limit`.
+ */
+function rolesHandler(all: { id: string; foreign_id: string | null; name: string | null }[], assigned: Record<string, string[]>) {
+  return ({ url }: { url: URL }) => {
+    const excluded = new Set(assigned[url.searchParams.get("exclude_principal") ?? ""] ?? []);
+    const q = (url.searchParams.get("q") ?? "").toLowerCase();
+    const data = all
+      .filter((role) => !excluded.has(role.id))
+      .filter((role) => !q || `${role.name ?? ""} ${role.foreign_id ?? ""}`.toLowerCase().includes(q));
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    const page = Number(url.searchParams.get("page") ?? 1);
+    return {
+      data: data.slice((page - 1) * limit, page * limit),
+      meta: { page, limit, total: data.length, total_pages: Math.ceil(data.length / limit) },
+    };
+  };
+}
+
 function detailApi(overrides: Record<string, unknown> = {}) {
   return mockApi({
     "GET /api/v1/principals/prn_bob": { data: principal },
     "GET /api/v1/principals/prn_bob/roles": { data: principal.roles },
-    "GET /api/v1/roles": { data: [...principal.roles, { id: "role_admin", foreign_id: "admin", name: "Admin" }], meta: meta(2) },
+    "GET /api/v1/roles": rolesHandler([...principal.roles, adminRole], { prn_bob: ["role_infra"] }),
     "GET /api/v1/principals/prn_bob/grants": {
       data: [{ id: "grant_1", principal_id: "prn_bob", static_secret_id: "ssr_gh", grantable: staticSecret, created_at: "" }],
       meta: meta(1),
@@ -211,9 +233,12 @@ describe("principal detail", () => {
     });
     renderRoute(<PrincipalDetailPage />, { path: "/console/principals/:id", url: "/console/principals/prn_bob" });
 
+    // The first assignable role is preselected, as the legacy select did.
+    expect(await screen.findByRole("combobox", { name: "Role to assign" })).toHaveTextContent("Admin");
     await userEvent.click(await screen.findByRole("button", { name: "Assign role" }));
     await waitFor(() => expect(api.calls("POST /api/v1/principals/prn_bob/roles")).toHaveLength(1));
     expect(api.calls("POST /api/v1/principals/prn_bob/roles")[0]?.body).toEqual({ data: { role_id: "role_admin" } });
+    expect(api.calls("GET /api/v1/roles").every((call) => call.url.searchParams.get("exclude_principal") === "prn_bob")).toBe(true);
 
     await userEvent.click(screen.getByRole("combobox", { name: "Secret to grant" }));
     expect(await screen.findByRole("option", { name: /BigQuery/ })).toBeInTheDocument();
@@ -278,6 +303,58 @@ describe("principal detail failures and limits", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByRole("button", { name: "Grant secret" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Secret to grant" })).not.toBeInTheDocument();
+  });
+
+  it("offers and assigns roles beyond the first 200 through server-side search", async () => {
+    const many = Array.from({ length: 201 }, (_, i) => ({
+      id: `role_${String(i).padStart(3, "0")}`,
+      foreign_id: `team-${String(i).padStart(3, "0")}`,
+      name: `Team ${String(i).padStart(3, "0")}`,
+    }));
+    const api = detailApi({
+      "GET /api/v1/roles": rolesHandler([...principal.roles, ...many], { prn_bob: ["role_infra"] }),
+      "POST /api/v1/principals/prn_bob/roles": { data: { id: "role_200" } },
+    });
+    renderDetail();
+
+    await userEvent.click(await screen.findByRole("combobox", { name: "Role to assign" }));
+    expect(await screen.findByRole("option", { name: "Team 000" })).toBeInTheDocument();
+    expect(screen.getAllByRole("option")).toHaveLength(200);
+    expect(screen.queryByRole("option", { name: "Team 200" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Infra" })).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 200 of 201 roles. Search to find the rest.")).toBeInTheDocument();
+
+    await userEvent.type(screen.getByPlaceholderText("Search roles"), "team-200");
+    await userEvent.click(await screen.findByRole("option", { name: "Team 200" }));
+    expect(screen.getByRole("combobox", { name: "Role to assign" })).toHaveTextContent("Team 200");
+    await userEvent.click(screen.getByRole("button", { name: "Assign role" }));
+    await waitFor(() => expect(api.calls("POST /api/v1/principals/prn_bob/roles")).toHaveLength(1));
+    expect(api.calls("POST /api/v1/principals/prn_bob/roles")[0]?.body).toEqual({ data: { role_id: "role_200" } });
+    const search = api.calls("GET /api/v1/roles").find((call) => call.url.searchParams.get("q") === "team-200");
+    expect(search?.url.searchParams.get("exclude_principal")).toBe("prn_bob");
+  });
+
+  it("hides the assign form only when every role is assigned", async () => {
+    const api = detailApi({ "GET /api/v1/roles": rolesHandler(principal.roles, { prn_bob: ["role_infra"] }) });
+    renderDetail();
+    expect(await screen.findByRole("table", { name: "Roles" })).toBeInTheDocument();
+    await waitFor(() => expect(api.calls("GET /api/v1/roles")).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("button", { name: "Assign role" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Role to assign" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the assign form when the assignable-roles request fails, and reports picker errors", async () => {
+    const api = detailApi({ "GET /api/v1/roles": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderDetail();
+    await userEvent.click(await screen.findByRole("combobox", { name: "Role to assign" }));
+    expect(await screen.findByText("Could not load roles: database unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No roles found.")).not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    // Nothing is preselected, so assigning asks for a pick instead of posting.
+    await userEvent.click(screen.getByRole("button", { name: "Assign role" }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(api.calls("POST /api/v1/principals/prn_bob/roles")).toHaveLength(0);
   });
 
   it("shows load errors instead of empty states for grants and roles", async () => {

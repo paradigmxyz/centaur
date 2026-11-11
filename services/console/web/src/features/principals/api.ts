@@ -101,12 +101,39 @@ export function usePrincipalRoles(id: string) {
   });
 }
 
-/** All roles, for the assign-role select (roles are few; 200 is the API max). */
-export function useAllRoles() {
+/** Root of the roles-list keys the assign-role picker reads (owned by the roles slice). */
+const ROLE_LISTS = ["roles", "list"] as const;
+
+/** The API maximum page size; the picker searches server-side beyond it. */
+export const ROLE_PICKER_LIMIT = 200;
+
+function assignableRolesQuery(id: string, params: { q?: string; limit: number }) {
+  const query = { exclude_principal: id, limit: params.limit, ...(params.q ? { q: params.q } : {}) };
+  return {
+    queryKey: [...ROLE_LISTS, query] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      api.get<ListEnvelope<RoleSummary>>("/api/v1/roles", query, signal),
+  };
+}
+
+/**
+ * Roles not yet assigned to the principal (the server excludes them across
+ * all pages): `total` decides whether the assign form shows, and `first` is
+ * the picker's default, as the legacy select preselected its first option.
+ */
+export function useAssignableRoleSummary(id: string) {
   return useQuery({
-    queryKey: ["roles", "list", { limit: 200 }],
-    queryFn: ({ signal }) => api.get<ListEnvelope<RoleSummary>>("/api/v1/roles", { limit: 200 }, signal),
-    select: (body) => body.data,
+    ...assignableRolesQuery(id, { limit: 1 }),
+    select: (body) => ({ total: body.meta.total, first: body.data[0] ?? null }),
+  });
+}
+
+/** One search page of assignable roles for the picker, fetched while it is open. */
+export function useAssignableRoles(id: string, q: string, enabled: boolean) {
+  return useQuery({
+    ...assignableRolesQuery(id, { q, limit: ROLE_PICKER_LIMIT }),
+    enabled,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -144,6 +171,9 @@ export function usePrincipalMutations(id: string) {
   const queryClient = useQueryClient();
   const refresh = () => queryClient.invalidateQueries({ queryKey: principalKeys.detail(id) });
   const refreshAll = () => queryClient.invalidateQueries({ queryKey: principalKeys.all });
+  // Role assignments also change which roles the picker may offer.
+  const refreshRoles = () =>
+    Promise.all([refreshAll(), queryClient.invalidateQueries({ queryKey: ROLE_LISTS })]);
   // Grant changes also change which secrets the picker may offer.
   const refreshGrants = () =>
     Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: SECRETS_ROOT })]);
@@ -165,11 +195,11 @@ export function usePrincipalMutations(id: string) {
     }),
     assignRole: useMutation({
       mutationFn: (roleId: string) => api.post(`${base}/${id}/roles`, { data: { role_id: roleId } }),
-      onSuccess: refreshAll,
+      onSuccess: refreshRoles,
     }),
     unassignRole: useMutation({
       mutationFn: (roleId: string) => api.delete(`${base}/${id}/roles/${roleId}`),
-      onSuccess: refreshAll,
+      onSuccess: refreshRoles,
     }),
     grantSecret: useMutation({
       mutationFn: (secret: Pick<GrantableSummary, "kind" | "id">) =>

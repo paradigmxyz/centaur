@@ -1701,7 +1701,7 @@ Returns `201`:
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |
-| `GET`    | `/api/v1/roles` | List. `labels[k]=v` and pagination are optional. |
+| `GET`    | `/api/v1/roles` | List. `labels[k]=v` and pagination are optional. `q` matches `name` or `foreign_id` (case-insensitive substring). `exclude_principal=<principal oid>` omits the roles already assigned to that principal, across all pages (the Console assign-role picker); an unknown principal is a `404`. |
 | `GET`    | `/api/v1/roles/:id` | Fetch one. |
 | `GET`    | `/api/v1/roles/lookup/:foreign_id` | Fetch by foreign id. `404` if missing. |
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
