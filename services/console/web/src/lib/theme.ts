@@ -32,6 +32,7 @@ export function resolveTheme(preference = getPreference()): ResolvedTheme {
 export function applyTheme(preference = getPreference()) {
   const theme = resolveTheme(preference);
   document.documentElement.dataset.consoleTheme = theme;
+  document.documentElement.classList.toggle("dark", theme === "dark");
   const favicon = document.querySelector<HTMLLinkElement>("link[data-console-favicon]");
   favicon?.setAttribute("href", theme === "light" ? "/icon-light.svg" : "/icon-dark.svg");
   listeners.forEach((listener) => listener());

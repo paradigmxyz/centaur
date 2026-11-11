@@ -8,16 +8,13 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // btn-primary from the legacy console.
-        default:
-          "border border-primary/40 bg-primary/10 text-centaur-300 hover:bg-primary/20 hover:text-centaur-200 light:text-primary light:hover:text-primary",
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
         destructive:
-          "border border-red-500/40 text-red-300 hover:border-red-500/60 hover:bg-red-500/10 focus-visible:ring-destructive/20 light:text-red-700",
+          "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40",
         outline:
           "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
-        // btn-secondary from the legacy console.
         secondary:
-          "border border-border text-zinc-400 hover:border-primary/40 hover:text-centaur-300 light:text-[#5f656c] light:hover:text-primary",
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         ghost:
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
