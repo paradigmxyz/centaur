@@ -2,7 +2,7 @@
 // model (form-model.ts) with per-kind sections; the payload goes to the
 // kind's own /api/v1 resource (POST to create, PATCH to update).
 import { useState } from "react";
-import { Controller, FormProvider, useForm, useFormContext, useWatch } from "react-hook-form";
+import { Controller, FormProvider, useForm, useFormContext, useWatch, type FieldPath } from "react-hook-form";
 import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -20,6 +20,7 @@ import {
   storedSource,
   toFormValues,
   toPayload,
+  validateForm,
   type SecretFormValues,
 } from "../form-model";
 import {
@@ -73,12 +74,21 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
   const navigate = useNavigate();
   const save = useSaveSecret(kind, record?.id);
   const [details, setDetails] = useState<Details>({});
+  const [clientErrors, setClientErrors] = useState<string[]>([]);
   const form = useForm<SecretFormValues>({ defaultValues: toFormValues(kind, record) });
   const hasStoredInline = storedSource(kind, record)?.source_type === "control_plane";
-  const summary = errorMessages(details);
+  const summary = clientErrors.length > 0 ? clientErrors : errorMessages(details);
 
   const onSubmit = form.handleSubmit(async (values) => {
     setDetails({});
+    const checked = validateForm(kind, values, hasStoredInline);
+    setClientErrors(checked.messages);
+    if (checked.messages.length > 0) {
+      for (const [field, message] of Object.entries(checked.fields)) {
+        form.setError(field as FieldPath<SecretFormValues>, { type: "client", message });
+      }
+      return;
+    }
     try {
       const body = await save.mutateAsync(toPayload(kind, values, record));
       toast.success(record ? "Secret updated." : "Secret created.");

@@ -12,6 +12,7 @@ import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
 
 import { useRoleGrantMutations, useRoleGrants, type RoleGrant } from "../api";
+import { QueryErrorAlert } from "../query-error";
 
 /** The "Roles" section: assign the secret to roles and unassign role grants. */
 export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
@@ -104,11 +105,12 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
           </div>
         )}
       </div>
+      {grants.isError && (
+        <QueryErrorAlert what="role grants" error={grants.error} onRetry={() => void grants.refetch()} />
+      )}
       {grants.isLoading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : grants.isError ? (
-        <p className="text-sm text-red-400">{errorMessage(grants.error)}</p>
-      ) : rows.length === 0 ? (
+      ) : !grants.data ? null : rows.length === 0 ? (
         <EmptyState>No roles assigned.</EmptyState>
       ) : (
         <DataTable caption="Roles" columns={columns} rows={rows} rowKey={(grant) => grant.id} empty="No roles assigned." />

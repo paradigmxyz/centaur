@@ -13,6 +13,7 @@ import { secretKindLabel } from "@/lib/secret-kinds";
 
 import { isFormKind, secretTitle, useDeleteSecret, useSecretDetail, type FormKind, type SecretDetail as Detail } from "../api";
 import { ConfigurationSection, RequestRulesSection, SignedHeadersSection, SourcesSection } from "../sections/DetailSections";
+import { QueryErrorAlert } from "../query-error";
 import { RoleGrantsSection } from "../sections/RoleGrantsSection";
 
 export default function SecretDetailPage() {
@@ -25,12 +26,16 @@ export default function SecretDetailPage() {
 
 function SecretDetail() {
   const { kind = "", id = "" } = useParams();
-  const { data: secret } = useSecretDetail(kind, id);
+  // Suspense query: an initial failure goes to the route error boundary; a
+  // failed background refetch keeps the last data and shows the alert.
+  const query = useSecretDetail(kind, id);
+  const secret = query.data;
   const title = secretTitle(secret);
   useDocumentTitle(title);
 
   return (
     <>
+      {query.isError && <QueryErrorAlert what="this secret" error={query.error} onRetry={() => void query.refetch()} />}
       <div className="mb-8">
         <BackLink to="/console/secrets">back to secrets</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">

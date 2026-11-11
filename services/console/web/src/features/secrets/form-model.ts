@@ -333,3 +333,68 @@ function fullMessage(attribute: string, message: string): string {
   const words = attribute.replace(/_/g, " ").replace(/\./g, " ");
   return `${words.charAt(0).toUpperCase()}${words.slice(1)} ${message}`;
 }
+
+export interface ClientValidation {
+  /** Inline errors keyed by form field path. */
+  fields: Record<string, string>;
+  /** Summary lines (same style as the server summary). */
+  messages: string[];
+}
+
+/**
+ * Client-side checks for input the API would reject late or silently drop:
+ * required fields, a source with no reference, a new inline source with no
+ * value, label/setting rows with a value but no key (dropped on save), and
+ * rule rows with methods or paths but no host or CIDR.
+ */
+export function validateForm(kind: FormKind, values: SecretFormValues, hasStoredInline: boolean): ClientValidation {
+  const fields: Record<string, string> = {};
+  const messages: string[] = [];
+  const add = (field: string | null, message: string, summary: string) => {
+    if (field) fields[field] = message;
+    messages.push(summary);
+  };
+
+  if (kind === "pg_dsn") {
+    if (!values.foreign_id.trim()) add("foreign_id", "can't be blank", "Foreign ID can't be blank");
+    if (!values.database.trim()) add("database", "can't be blank", "Database can't be blank");
+  }
+  if (kind === "gcp_auth" && splitTerms(values.scopes).length === 0) {
+    add("scopes", "must include at least one scope", "Scopes must include at least one scope");
+  }
+
+  const usesSource = !(kind === "gcp_auth" && values.credential_mode === "workload_identity");
+  if (usesSource) {
+    const type = values.source.source_type;
+    if (type === "control_plane") {
+      if (values.source.secret === "" && !hasStoredInline) {
+        add("source.secret", "can't be blank", "Source: Inline value can't be blank");
+      }
+    } else if (SOURCE_REF_KEYS[type] && !values.source.reference.trim()) {
+      const label = REFERENCE_LABELS[type] ?? "Reference";
+      add("source.reference", "can't be blank", `Source: ${label} can't be blank`);
+    }
+  }
+
+  values.labels.forEach((row, index) => {
+    if (!row.key.trim() && row.value.trim()) add(null, "", `Label ${index + 1}: key can't be blank`);
+  });
+
+  if (kind === "pg_dsn") {
+    values.settings.forEach((setting, index) => {
+      if (!setting.name.trim() && setting.value.trim()) add(null, "", `Setting ${index + 1}: name can't be blank`);
+    });
+  } else {
+    values.rules.forEach((rule, index) => {
+      const target = rule.host.trim() || rule.cidr.trim();
+      if (!target && (rule.http_methods.length > 0 || rule.paths.length > 0)) {
+        add(null, "", `Rule ${index + 1}: set a host or a CIDR`);
+      }
+    });
+    if (kind === "gcp_id_token" && rulesPayload(values.rules).length === 0) {
+      add(null, "", "Rules must include at least one rule");
+    }
+  }
+
+  return { fields, messages };
+}

@@ -23,6 +23,7 @@ import { SECRET_KIND_SLUGS, secretKindLabel } from "@/lib/secret-kinds";
 import { cn } from "@/lib/utils";
 
 import { FORM_KINDS, useSecretList, useSecretTotal, type SecretListItem } from "../api";
+import { QueryErrorAlert } from "../query-error";
 
 const ALL_TYPES = "all";
 
@@ -114,16 +115,26 @@ function SecretsList() {
         actions={<AddSecretMenu />}
       />
       <SecretFilters q={q} type={type} />
-      <DataTable
-        fixed
-        caption="Secrets"
-        columns={columns}
-        rows={list.data?.data}
-        loading={list.isLoading}
-        rowKey={(secret) => `${secret.kind}:${secret.id}`}
-        empty={filtered ? "No secrets match these filters." : "No secrets yet."}
-        pagination={list.data ? { meta: list.data.meta, unit: "secret", onPageChange: setPage } : undefined}
-      />
+      {list.isError ? (
+        <QueryErrorAlert what="secrets" error={list.error} onRetry={() => void list.refetch()} />
+      ) : (
+        total.isError && (
+          <QueryErrorAlert what="the secret count" error={total.error} onRetry={() => void total.refetch()} />
+        )
+      )}
+      {/* A failed request shows the alert, never the empty state; stale rows stay visible after a failed refetch. */}
+      {(!list.isError || list.data) && (
+        <DataTable
+          fixed
+          caption="Secrets"
+          columns={columns}
+          rows={list.data?.data}
+          loading={list.isLoading}
+          rowKey={(secret) => `${secret.kind}:${secret.id}`}
+          empty={filtered ? "No secrets match these filters." : "No secrets yet."}
+          pagination={list.data ? { meta: list.data.meta, unit: "secret", onPageChange: setPage } : undefined}
+        />
+      )}
     </>
   );
 }

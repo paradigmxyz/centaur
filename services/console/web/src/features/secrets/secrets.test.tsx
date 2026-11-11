@@ -1,8 +1,10 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Component, type ReactNode } from "react";
 import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { errorMessage } from "@/lib/api";
 import { adminMe, apiResponse, mockApi, operatorMe, renderRoute } from "@/test/utils";
 
 import SecretDetailPage from "./pages/SecretDetail";
@@ -313,6 +315,7 @@ describe("new secret", () => {
       }),
     });
     renderRoute(<SecretNewPage />, { path: "/console/secrets/:kind/new", url: "/console/secrets/static/new" });
+    await userEvent.type(screen.getByLabelText("Environment variable"), "TOKEN");
     await userEvent.click(screen.getByRole("button", { name: "Add rule" }));
     await userEvent.type(screen.getByLabelText("Rule 1 host"), "h.example.com");
     await userEvent.type(screen.getByLabelText("Rule 1 CIDR"), "10.0.0.0/8");
@@ -504,5 +507,146 @@ describe("edit secret", () => {
         source: { source_type: "env", config: { var: "GITHUB_TOKEN" } },
       },
     });
+  });
+});
+
+const failure = apiResponse(500, { error: { message: "upstream exploded" } });
+
+class Boundary extends Component<{ children: ReactNode }, { error: unknown }> {
+  state = { error: null as unknown };
+  static getDerivedStateFromError(error: unknown) {
+    return { error };
+  }
+  render() {
+    return this.state.error ? <p>boundary: {errorMessage(this.state.error)}</p> : this.props.children;
+  }
+}
+
+describe("failed requests", () => {
+  it("shows an error instead of the empty list state", async () => {
+    mockApi({ "GET /api/v1/secrets": failure });
+    renderRoute(<SecretsListPage />, { path: "/console/secrets" });
+    expect(await screen.findByText("Could not load secrets: upstream exploded")).toBeInTheDocument();
+    expect(screen.queryByText("No secrets yet.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Secrets" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("keeps the rows and shows an error when a refetch fails", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/secrets": ({ url }: { url: URL }) =>
+        fail ? failure : url.searchParams.get("limit") === "1" ? { data: [], meta: meta(1) } : { data: [listItem], meta: meta(1) },
+    });
+    const { queryClient } = renderRoute(<SecretsListPage />, { path: "/console/secrets" });
+    expect(await screen.findByRole("link", { name: "GitHub token" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("Could not load secrets: upstream exploded")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "GitHub token" })).toBeInTheDocument();
+  });
+
+  it("reports a failed secret count", async () => {
+    mockApi({
+      "GET /api/v1/secrets": ({ url }: { url: URL }) =>
+        url.searchParams.get("limit") === "1" ? failure : { data: [listItem], meta: meta(1) },
+    });
+    renderRoute(<SecretsListPage />, { path: "/console/secrets" });
+    expect(await screen.findByText("Could not load the secret count: upstream exploded")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "GitHub token" })).toBeInTheDocument();
+  });
+
+  it("shows an error instead of 'No roles assigned.' when role grants fail", async () => {
+    detailApi({ "GET /api/v1/secrets/static/ssr_gh/role_grants": failure });
+    renderRoute(<SecretDetailPage />, { path: "/console/secrets/:kind/:id", url: "/console/secrets/static/ssr_gh" });
+    expect(await screen.findByText("Could not load role grants: upstream exploded")).toBeInTheDocument();
+    expect(screen.queryByText("No roles assigned.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Assign role" })).not.toBeInTheDocument();
+  });
+
+  it("sends an initial detail failure to the error boundary", async () => {
+    mockApi({ "GET /api/v1/secrets/static/ssr_gh": failure });
+    renderRoute(
+      <Boundary>
+        <SecretDetailPage />
+      </Boundary>,
+      { path: "/console/secrets/:kind/:id", url: "/console/secrets/static/ssr_gh" },
+    );
+    expect(await screen.findByText("boundary: upstream exploded")).toBeInTheDocument();
+  });
+
+  it("keeps the detail and shows an error when its refetch fails", async () => {
+    let fail = false;
+    detailApi({ "GET /api/v1/secrets/static/ssr_gh": () => (fail ? failure : { data: detail }) });
+    const { queryClient } = renderRoute(<SecretDetailPage />, {
+      path: "/console/secrets/:kind/:id",
+      url: "/console/secrets/static/ssr_gh",
+    });
+    expect(await screen.findByRole("heading", { name: "GitHub token" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("Could not load this secret: upstream exploded")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "GitHub token" })).toBeInTheDocument();
+  });
+
+  it("shows an error on the edit page when a refetch fails", async () => {
+    let fail = false;
+    detailApi({
+      "GET /api/v1/static_secrets/ssr_gh": () =>
+        fail ? failure : { data: { ...detail, source: { source_type: "env", config: { var: "X" } }, created_at: "" } },
+    });
+    const { queryClient } = renderRoute(<SecretEditPage />, {
+      path: "/console/secrets/:kind/:id/edit",
+      url: "/console/secrets/static/ssr_gh/edit",
+    });
+    expect(await screen.findByRole("heading", { name: "Edit GitHub token" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("Could not load this secret: upstream exploded")).toBeInTheDocument();
+  });
+});
+
+describe("client-side validation", () => {
+  it("requires pg_dsn identity, database, and a source reference before sending", async () => {
+    const api = mockApi({});
+    renderRoute(<SecretNewPage />, { path: "/console/secrets/:kind/new", url: "/console/secrets/pg_dsn/new" });
+    await userEvent.click(screen.getByRole("button", { name: "Add setting" }));
+    await userEvent.type(screen.getByLabelText("Setting 1 value"), "orphan");
+    await userEvent.click(screen.getByRole("button", { name: "Create secret" }));
+
+    expect(await screen.findByText("4 errors prevented this secret from saving:")).toBeInTheDocument();
+    expect(screen.getByText("Foreign ID can't be blank")).toBeInTheDocument();
+    expect(screen.getByText("Database can't be blank")).toBeInTheDocument();
+    expect(screen.getByText("Source: Environment variable can't be blank")).toBeInTheDocument();
+    expect(screen.getByText("Setting 1: name can't be blank")).toBeInTheDocument();
+    expect(screen.getByLabelText("Database *")).toHaveAttribute("aria-invalid", "true");
+    expect(api.calls()).toHaveLength(0);
+  });
+
+  it("requires an inline value for a new inline source, scopes, and a host or CIDR per rule", async () => {
+    const api = mockApi({});
+    renderRoute(<SecretNewPage />, { path: "/console/secrets/:kind/new", url: "/console/secrets/gcp_auth/new" });
+    await userEvent.click(screen.getByRole("combobox", { name: "Backend" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Inline Value" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add rule" }));
+    await userEvent.click(within(screen.getByRole("group", { name: "Rule 1 HTTP methods" })).getByRole("button", { name: "GET" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add label" }));
+    await userEvent.type(screen.getByLabelText("Labels 1 value"), "platform");
+    await userEvent.click(screen.getByRole("button", { name: "Create secret" }));
+
+    expect(await screen.findByText("Scopes must include at least one scope")).toBeInTheDocument();
+    expect(screen.getByText("Source: Inline value can't be blank")).toBeInTheDocument();
+    expect(screen.getByText("Rule 1: set a host or a CIDR")).toBeInTheDocument();
+    expect(screen.getByText("Label 1: key can't be blank")).toBeInTheDocument();
+    expect(api.calls()).toHaveLength(0);
+  });
+
+  it("requires a rule for gcp_id_token secrets", async () => {
+    const api = mockApi({});
+    renderRoute(<SecretNewPage />, { path: "/console/secrets/:kind/new", url: "/console/secrets/gcp_id_token/new" });
+    await userEvent.type(screen.getByLabelText("Environment variable"), "KEYFILE");
+    await userEvent.click(screen.getByRole("button", { name: "Create secret" }));
+    expect(await screen.findByText("Rules must include at least one rule")).toBeInTheDocument();
+    expect(api.calls()).toHaveLength(0);
   });
 });

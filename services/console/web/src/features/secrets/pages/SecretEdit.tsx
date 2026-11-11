@@ -10,6 +10,7 @@ import { secretKindLabel } from "@/lib/secret-kinds";
 
 import { isFormKind, secretTitle, useKindRecord, useSecretDetail, type FormKind } from "../api";
 import { SecretForm } from "../forms/SecretForm";
+import { QueryErrorAlert } from "../query-error";
 
 export default function SecretEditPage() {
   return (
@@ -33,14 +34,20 @@ function SecretEditRoute() {
 }
 
 function SecretEdit({ kind, id }: { kind: FormKind; id: string }) {
-  const { data: detail } = useSecretDetail(kind, id);
-  const { data: record } = useKindRecord(kind, id);
+  // Suspense queries: an initial failure goes to the route error boundary; a
+  // failed background refetch keeps the last data and shows the alert.
+  const detailQuery = useSecretDetail(kind, id);
+  const recordQuery = useKindRecord(kind, id);
+  const detail = detailQuery.data;
+  const record = recordQuery.data;
+  const failed = detailQuery.isError ? detailQuery : recordQuery.isError ? recordQuery : null;
   const title = secretTitle(detail);
   useDocumentTitle(`Edit ${title}`);
   const managed = detail.managed_by;
 
   return (
     <>
+      {failed && <QueryErrorAlert what="this secret" error={failed.error} onRetry={() => void failed.refetch()} />}
       <div className="mb-8">
         <BackLink to={`/console/secrets/${kind}/${id}`}>back to secret</BackLink>
         <div className="mt-2 flex flex-wrap items-center gap-3">
