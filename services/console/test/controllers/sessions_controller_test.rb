@@ -26,8 +26,8 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "login redirects to the protected console URL the user first requested" do
-    get console_credentials_url(kind: "oauth")
-    assert_redirected_to login_path
+    # A signed-out SPA deep link remembers itself (SpaController).
+    get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
     post login_url, params: { email: @operator.email, password: "password123456" }
@@ -37,7 +37,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "unsafe methods do not replace the remembered login destination" do
-    get console_credentials_url(kind: "oauth")
+    get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
     post console_roles_url, params: { role: { foreign_id: "new-role" } }

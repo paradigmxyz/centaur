@@ -1,7 +1,6 @@
 # The console's shared key/value row editor: an ordered map of rows, each
 # { key:, value: }, collapsed into a hash keyed by name. Rows with a blank key
-# are dropped. Backs labels on every console form and token-endpoint headers on
-# broker credentials.
+# are dropped. Backs labels on the legacy console forms.
 module KvRowParams
   extend ActiveSupport::Concern
 

@@ -1,9 +1,5 @@
-# Credentials slice: broker credentials (HTML console routes).
-
-get "console/credentials", to: "console#credentials", as: :console_credentials
-# Create/edit form for broker credentials. Declared before the show route so
-# /console/credentials/new wins over the generic `:id` match.
-namespace :console do
-  resources :broker_credentials, only: %i[new create edit update destroy], path: "credentials"
-end
-get "console/credentials/:id", to: "console#credential", as: :console_credential
+# Credentials slice (broker credentials). The pages live in the SPA
+# (web/src/features/credentials) on top of /api/v1/broker_credentials; Rails
+# only keeps path helpers for links from legacy pages.
+direct(:console_credentials) { "/console/credentials" }
+direct(:console_credential) { |oid| "/console/credentials/#{oid}" }
