@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import compose_system_prompt
 
@@ -144,6 +146,89 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 target.read_text(),
                 "base\n\n\n---\n\noverlay\n",
             )
+
+    def _compose_with_overlays(
+        self, root: Path, overlays: dict[str, dict[str, str]]
+    ) -> str:
+        home = root / "home"
+        workspace = root / "workspace"
+        home.mkdir()
+        workspace.mkdir()
+        (home / "AGENTS.md").write_text("base\n")
+        repo_mount = home / "github"
+        for repo, files in overlays.items():
+            sandbox_dir = repo_mount / repo / "services" / "sandbox"
+            sandbox_dir.mkdir(parents=True)
+            for name, text in files.items():
+                (sandbox_dir / name).write_text(text)
+
+        target = workspace / "AGENTS.md"
+        compose_system_prompt.compose_system_prompt(
+            home_dir=home,
+            target_prompt=target,
+            repo_mount=repo_mount,
+        )
+        return target.read_text()
+
+    def test_appends_hook_output_after_its_repo_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = self._compose_with_overlays(
+                Path(tmp),
+                {
+                    "acme/first": {
+                        "SYSTEM_PROMPT.md": "first overlay\n",
+                        "SYSTEM_PROMPT.sh": 'echo "hook in $(basename "$PWD")"\n',
+                    },
+                    "acme/second": {"SYSTEM_PROMPT.md": "second overlay\n"},
+                },
+            )
+
+            self.assertEqual(
+                prompt,
+                "base\n\n\n---\n\nfirst overlay\n\n\n---\n\nhook in first\n"
+                "\n\n---\n\nsecond overlay\n",
+            )
+
+    def test_hook_without_static_prompt_is_appended(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = self._compose_with_overlays(
+                Path(tmp),
+                {"acme/overlay": {"SYSTEM_PROMPT.sh": "printf 'generated\\n'\n"}},
+            )
+
+            self.assertEqual(prompt, "base\n\n\n---\n\ngenerated\n")
+
+    def test_skips_failing_and_empty_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("sys.stderr"):
+                prompt = self._compose_with_overlays(
+                    Path(tmp),
+                    {
+                        "acme/empty": {"SYSTEM_PROMPT.sh": "echo '   '\n"},
+                        "acme/failing": {
+                            "SYSTEM_PROMPT.md": "failing overlay\n",
+                            "SYSTEM_PROMPT.sh": "echo partial\nexit 3\n",
+                        },
+                    },
+                )
+
+            self.assertEqual(prompt, "base\n\n\n---\n\nfailing overlay\n")
+
+    def test_skips_hook_that_times_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {compose_system_prompt.HOOK_TIMEOUT_ENV: "0.2"},
+                ),
+                mock.patch("sys.stderr"),
+            ):
+                prompt = self._compose_with_overlays(
+                    Path(tmp),
+                    {"acme/slow": {"SYSTEM_PROMPT.sh": "echo late\nsleep 30 & wait\n"}},
+                )
+
+            self.assertEqual(prompt, "base\n")
 
 
 if __name__ == "__main__":

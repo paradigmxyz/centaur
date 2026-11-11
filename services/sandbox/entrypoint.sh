@@ -429,7 +429,8 @@ unset _centaur_tools_auto_reload
 
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
-# Prompt overlays from mounted repos are appended when present.
+# Prompt overlays from mounted repos are appended when present: each repo's
+# services/sandbox/SYSTEM_PROMPT.md, then the stdout of its SYSTEM_PROMPT.sh.
 # The selected persona is appended when AGENTS_PERSONA.md exists in the sandbox home.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
 compose-system-prompt \
