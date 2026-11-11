@@ -1,5 +1,5 @@
-# Secrets slice: secret list/detail, per-kind forms, role grants, and the
-# personal SSH key page (HTML console routes).
+# Secrets slice: secret list/detail, per-kind forms, role grants
+# (HTML console routes). The personal SSH key lives in console_skills.rb.
 
 get "console/secrets", to: "console#secrets", as: :console_secrets
 # One controller per secret kind for the create/edit forms. Declared before the
@@ -13,8 +13,3 @@ namespace :console do
   delete "secrets/:kind/:id/roles/:grant_id", to: "secrets#revoke_role_grant", as: :secret_revoke_role_grant
 end
 get "console/secrets/:kind/:id", to: "console#secret", as: :console_secret
-namespace :console do
-  resource :ssh_key, only: %i[show edit update destroy] do
-    post :validate_key
-  end
-end
