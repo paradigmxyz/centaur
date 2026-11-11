@@ -14,12 +14,33 @@ module ConsoleApiAuthHelper
   MEMBER_TOKEN = "iak_member-token".freeze
   DISABLED_TOKEN = "iak_disabled-token".freeze
 
-  # Signs +user+ in through the password login form, establishing the console
-  # session cookie for the current integration session.
+  # Signs +user+ in the way the SPA login page does (POST /api/v1/session with
+  # the login CSRF token), establishing the console session cookie for the
+  # current integration session.
   def sign_in_console(user, password: TEST_PASSWORD)
-    post login_path, params: { email: user.email, password: password }
-    @console_csrf_token = nil
+    console_password_login(user.email, password)
     user
+  end
+
+  # POST /api/v1/session for +email+; the response (status, redirect_to) is
+  # left for the caller to inspect.
+  def console_password_login(email, password = TEST_PASSWORD)
+    get api_v1_auth_config_path
+    token = JSON.parse(response.body).dig("data", "csrf_token")
+    post api_v1_session_path, params: { data: { email: email, password: password } },
+                              headers: { "X-CSRF-Token" => token }, as: :json
+    @console_csrf_token = nil
+  end
+
+  # DELETE /api/v1/session, as the SPA's sign-out button does.
+  def console_sign_out
+    delete api_v1_session_path, headers: csrf_headers
+    @console_csrf_token = nil
+  end
+
+  # Where the last console_password_login sent the browser.
+  def console_login_redirect
+    JSON.parse(response.body).dig("data", "redirect_to")
   end
 
   # The session's CSRF token, as the SPA obtains it from GET /api/v1/me.

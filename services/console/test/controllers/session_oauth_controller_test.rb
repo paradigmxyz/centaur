@@ -99,7 +99,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
     state = start_flow
     get auth_callback_url(provider: "google"), params: { code: "the-code", state: state }
     assert_redirected_to console_integrations_path
-    delete logout_url
+    console_sign_out
 
     get auth_callback_url(provider: "google"), params: { code: "the-code", state: state }
     assert_redirected_to login_path

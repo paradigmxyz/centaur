@@ -105,11 +105,12 @@ module Api
       end
 
       test "auth config hands off the flash exactly once" do
-        post login_path, params: { email: @operator.email, password: "wrong" }
-        assert_redirected_to login_path
+        sign_in_console(@operator)
+        console_sign_out
+        assert_response :no_content
 
         get api_v1_auth_config_path
-        assert_equal({ "alert" => "Invalid email or password." }, json_body.dig("data", "flash"))
+        assert_equal({ "notice" => "Signed out." }, json_body.dig("data", "flash"))
         get api_v1_auth_config_path
         assert_equal({}, json_body.dig("data", "flash"))
       end

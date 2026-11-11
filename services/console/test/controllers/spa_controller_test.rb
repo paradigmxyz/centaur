@@ -45,8 +45,15 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
 
   test "a signed-out deep link is remembered for the post-login redirect" do
     get "/console/spa-only-page?q=1", headers: HTML
-    post login_path, params: { email: users(:acme_admin).email, password: "password123456" }
-    assert_redirected_to "/console/spa-only-page?q=1"
+    console_password_login(users(:acme_admin).email)
+    assert_equal "/console/spa-only-page?q=1", console_login_redirect
+  end
+
+  test "only allowlisted deep links are remembered" do
+    get "/login?return_to=%2Fconsole", headers: HTML
+    assert_nil session[:return_to]
+    get "/console/a%2e%2e/b", headers: HTML
+    assert_nil session[:return_to]
   end
 
   test "non-HTML requests to SPA paths keep the JSON 404" do
@@ -76,7 +83,7 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "legacy HTML routes still take precedence" do
+  test "Rails protocol routes take precedence over the SPA" do
     # OAuth protocol endpoints stay Rails routes after the UI moves to the SPA.
     get "/oauth/unknown-app/start", headers: HTML
     assert_response :redirect

@@ -3,6 +3,8 @@
 # SPA through GET /api/v1/me, so this controller is deliberately public: the
 # HTML shell holds no data.
 class SpaController < ActionController::Base
+  include ConsoleSignIn
+
   class_attribute :index_path, default: Rails.public_path.join("spa", "index.html")
 
   NOT_BUILT_MESSAGE = <<~TEXT.freeze
@@ -24,12 +26,12 @@ class SpaController < ActionController::Base
 
   private
 
-  # Mirrors ApplicationController#store_return_to_for_login so a signed-out
-  # deep link lands back on the same page after the login redirect.
+  # A signed-out deep link ("/" or a /console page) is remembered so the
+  # browser lands back on it after signing in. Only allowlisted paths
+  # (ConsoleReturnPath) are stored; the SPA's own auth pages never are.
   def remember_return_path
     return if session[:user_id]
-    return unless request.path == "/" || request.path.start_with?("/console")
 
-    session[:return_to] = request.fullpath
+    remember_console_return_path(request.fullpath)
   end
 end

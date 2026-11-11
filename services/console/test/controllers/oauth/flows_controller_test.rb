@@ -165,7 +165,7 @@ module Oauth
     end
 
     def sign_in(user)
-      post login_url, params: { email: user.email, password: "password123456" }
+      console_password_login(user.email)
     end
 
     # Failures redirect to the SPA result page and hand it the outcome in the
@@ -183,7 +183,7 @@ module Oauth
     attr_reader :oauth_result
 
     def sign_out
-      delete logout_url
+      console_sign_out
     end
 
     # Runs /start and returns the state extracted from the IdP redirect (the flow
@@ -1130,7 +1130,7 @@ module Oauth
       assert_equal "/oauth/google~team/start", session[:return_to]
 
       sign_in users(:member_user)
-      assert_redirected_to "/oauth/google~team/start"
+      assert_equal "/oauth/google~team/start", console_login_redirect
 
       state = start_flow(slug: app.slug)
       get oauth_callback_url(slug: app.slug), params: { state: state, error: "access_denied" }

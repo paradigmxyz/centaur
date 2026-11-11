@@ -240,6 +240,15 @@ module Api
         assert_equal false, json_body.dig("data", "descoped")
       end
 
+      test "restoring when not descoped is a no-op" do
+        sign_in_console(users(:acme_admin))
+        delete api_v1_descope_path, headers: csrf_headers
+        assert_response :ok
+        assert_equal false, json_body.dig("data", "descoped")
+        get api_v1_principals_path
+        assert_response :ok
+      end
+
       test "session destroy signs the cookie session out" do
         sign_in_console(users(:member_user))
         token = console_csrf_token

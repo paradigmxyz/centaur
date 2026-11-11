@@ -131,7 +131,7 @@ module Mcp
       bad = "javascript://x/%0aalert(document.domain)//"
       client = create_client
       client.update_column(:redirect_uris, [ bad ])
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       assert_no_difference [ -> { McpOauthAuthorizationCode.count }, -> { McpOauthConsent.count } ] do
         get "/mcp/oauth/authorize", params: authorize_params(client).merge(redirect_uri: bad)
@@ -144,7 +144,7 @@ module Mcp
     test "authorize rejects non-loopback plain HTTP redirect URIs even when already stored" do
       client = create_client
       client.update_column(:redirect_uris, [ "http://evil.example/callback" ])
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       assert_no_difference -> { McpOauthAuthorizationCode.count } do
         get "/mcp/oauth/authorize",
@@ -161,8 +161,8 @@ module Mcp
 
       assert_redirected_to login_path
 
-      post login_url, params: { email: @operator.email, password: "password123456" }
-      assert_match %r{\Ahttp://www.example.com/mcp/oauth/authorize\?}, response.location
+      console_password_login(@operator.email)
+      assert_match %r{\A/mcp/oauth/authorize\?}, console_login_redirect
     end
 
     test "authorize accepts dynamic loopback redirect ports" do
@@ -170,7 +170,7 @@ module Mcp
       approval_params = authorize_params(client).merge(
         redirect_uri: "http://localhost:49153/callback"
       )
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       ticket = nil
       assert_no_difference -> { McpOauthAuthorizationCode.count } do
@@ -191,7 +191,7 @@ module Mcp
 
     test "authorization approval denial redirects without issuing a code" do
       client = create_client
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       assert_no_difference -> { McpOauthAuthorizationCode.count } do
         decide(start_consent(authorize_params(client)), "deny")
@@ -207,7 +207,7 @@ module Mcp
 
     test "authorize hands the SPA a consent ticket instead of rendering a page" do
       client = create_client
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       get "/mcp/oauth/authorize", params: authorize_params(client)
       assert_response :redirect
@@ -218,7 +218,7 @@ module Mcp
 
     test "authorize returns trusted-client errors to the registered redirect_uri" do
       client = create_client
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       {
         { scope: "admin" } => "invalid_scope",
@@ -239,7 +239,7 @@ module Mcp
 
     test "authorize never redirects to an unknown client or unregistered redirect_uri" do
       client = create_client
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       get "/mcp/oauth/authorize", params: authorize_params(client).merge(client_id: "moc_unknown")
       assert_response :bad_request
@@ -252,7 +252,7 @@ module Mcp
 
     test "authorize sends pending users to the holding page and signs out disabled ones" do
       client = create_client
-      post login_url, params: { email: users(:pending_user).email, password: "password123456" }
+      console_password_login(users(:pending_user).email)
       get "/mcp/oauth/authorize", params: authorize_params(client)
       assert_redirected_to pending_path
 
@@ -267,7 +267,7 @@ module Mcp
 
     test "the legacy form approval endpoint is gone" do
       client = create_client
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       assert_no_difference -> { McpOauthAuthorizationCode.count } do
         post "/mcp/oauth/authorize", params: authorize_params(client).merge(decision: "approve")
@@ -474,7 +474,7 @@ module Mcp
 
     def authorize_code(client)
       approval_params = authorize_params(client)
-      post login_url, params: { email: @operator.email, password: "password123456" }
+      console_password_login(@operator.email)
 
       ticket = nil
       assert_no_difference -> { McpOauthAuthorizationCode.count } do

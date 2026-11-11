@@ -4,7 +4,7 @@
 # The pages themselves (/login, /pending, /oauth/result, /mcp/oauth/consent)
 # live in the SPA (web/src/features/auth-pages) and are served by the SPA
 # fallback. Rails keeps the protocol endpoints (redirects and JSON) and the
-# path helpers legacy redirects use.
+# path helpers those redirects use.
 direct(:login) { "/login" }
 direct(:pending) { "/pending" }
 
@@ -17,11 +17,8 @@ get "service-worker", to: "pwa#service_worker", as: :pwa_service_worker
 # custom-scheme URL in ?target= onto an in-app path and redirects.
 get "launch", to: "launch#show", as: :launch
 
-# Redirect-only form endpoints: password sign-in (the SPA uses
-# POST /api/v1/session) and sign-out for the legacy account menu (the SPA uses
-# DELETE /api/v1/session).
-post "login", to: "sessions#create"
-delete "logout", to: "sessions#destroy", as: :logout
+# Password sign-in and sign-out are POST/DELETE /api/v1/session (below and
+# api.rb).
 
 # Console SSO login, keyed by provider (/auth/google/start). Deliberately
 # unauthenticated; distinct /auth/* prefix avoids colliding with the broker's

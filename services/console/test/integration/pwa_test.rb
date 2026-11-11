@@ -22,7 +22,7 @@ class PwaTest < ActionDispatch::IntegrationTest
   end
 
   test "launch maps web+centaur targets onto in-app paths" do
-    post login_url, params: { email: users(:member_user).email, password: "password123456" }
+    console_password_login(users(:member_user).email)
 
     get launch_url(target: "web+centaur://console/workflows")
     assert_redirected_to "/console/workflows"
@@ -55,12 +55,12 @@ class PwaTest < ActionDispatch::IntegrationTest
     get launch_url(target: "web+centaur://console/integrations")
     assert_redirected_to login_path
 
-    post login_url, params: { email: users(:member_user).email, password: "password123456" }
-    assert_redirected_to "/launch?target=web%2Bcentaur%3A%2F%2Fconsole%2Fintegrations"
+    console_password_login(users(:member_user).email)
+    assert_equal "/launch?target=web%2Bcentaur%3A%2F%2Fconsole%2Fintegrations", console_login_redirect
   end
 
   test "launch sends pending users to the holding page" do
-    post login_url, params: { email: users(:pending_user).email, password: "password123456" }
+    console_password_login(users(:pending_user).email)
     get launch_url(target: "web+centaur://console/integrations")
     assert_redirected_to pending_path
   end
