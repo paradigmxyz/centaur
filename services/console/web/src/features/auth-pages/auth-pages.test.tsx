@@ -152,6 +152,69 @@ describe("login page", () => {
     expect(api.calls("POST /api/v1/session").at(-1)?.headers["X-CSRF-Token"]).toBe("token-2");
   });
 
+  it("leaves no password in the mutation or query cache after a failed or successful sign-in", async () => {
+    const secret = "pw-plaintext-6c1f";
+    let posts = 0;
+    mockApi({
+      "GET /api/v1/auth/config": authConfig(),
+      "POST /api/v1/session": () =>
+        ++posts === 1
+          ? apiResponse(422, { error: { message: "Invalid email or password.", details: { reason: "invalid_credentials" } } })
+          : { data: { status: "active", redirect_to: "/console/principals" } },
+    });
+    const { queryClient, unmount } = renderRoute(<LoginPage />, { path: "/login" });
+    const cached = () =>
+      JSON.stringify([
+        queryClient.getMutationCache().getAll().map((m) => m.state),
+        queryClient.getQueryCache().getAll().map((q) => [q.queryKey, q.state.data]),
+      ]);
+
+    await userEvent.type(await screen.findByLabelText("Email"), "ops@example.test");
+    await userEvent.type(screen.getByLabelText("Password"), secret);
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid email or password.");
+    // The error survives the reset; the password field is cleared.
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    await waitFor(() => expect(cached()).not.toContain(secret));
+
+    await userEvent.type(screen.getByLabelText("Password"), secret);
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/console/principals"));
+    await waitFor(() => expect(cached()).not.toContain(secret));
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+
+    unmount();
+    await waitFor(() => expect(cached()).not.toContain(secret));
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+  });
+
+  it("drops an in-flight sign-in from the mutation cache when the page unmounts", async () => {
+    const secret = "pw-inflight-91ab";
+    let release: () => void = () => {};
+    const config = new Response(JSON.stringify(authConfig()), { status: 200 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) =>
+        String(input).startsWith("/api/v1/auth/config")
+          ? Promise.resolve(config.clone())
+          : new Promise<Response>((resolve) => {
+              release = () =>
+                resolve(new Response(JSON.stringify({ data: { status: "active", redirect_to: "/console" } }), { status: 200 }));
+            }),
+      ),
+    );
+    const { queryClient, unmount } = renderRoute(<LoginPage />, { path: "/login" });
+
+    await userEvent.type(await screen.findByLabelText("Email"), "ops@example.test");
+    await userEvent.type(screen.getByLabelText("Password"), secret);
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    unmount();
+    release();
+
+    await waitFor(() => expect(queryClient.getMutationCache().getAll()).toHaveLength(0));
+    expect(JSON.stringify(queryClient.getQueryCache().getAll().map((q) => [q.queryKey, q.state.data]))).not.toContain(secret);
+  });
+
   it("shows a failed bootstrap request instead of an empty sign-in card", async () => {
     mockApi({ "GET /api/v1/auth/config": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
     renderRoute(<LoginPage />, { path: "/login" });

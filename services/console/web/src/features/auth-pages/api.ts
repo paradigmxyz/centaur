@@ -78,9 +78,18 @@ export function useAuthConfig(returnTo?: string | null) {
   });
 }
 
-/** POST /api/v1/session. A stale CSRF token (signed in or out elsewhere) is refreshed once. */
+/**
+ * POST /api/v1/session. A stale CSRF token (signed in or out elsewhere) is
+ * refreshed once.
+ *
+ * The variables hold the password: gcTime 0 drops the mutation from the
+ * MutationCache as soon as no component observes it, and callers must
+ * reset() it once it settles (copy any error message out first). The password
+ * never goes into a query key or the query cache.
+ */
 export function useSignIn() {
   return useMutation({
+    gcTime: 0,
     mutationFn: async (credentials: { email: string; password: string }) => {
       const send = () =>
         apiRequest<DataEnvelope<SignInResult>>("/api/v1/session", {

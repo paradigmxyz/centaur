@@ -25,6 +25,10 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
+  // The sign-in mutation is reset as soon as it settles so the password does
+  // not linger in the MutationCache; its outcome is kept here instead.
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const redirectTo = config.data?.redirect_to;
   useEffect(() => {
@@ -40,9 +44,21 @@ export default function LoginPage() {
     };
     setFieldErrors(errors);
     if (errors.email || errors.password) return;
+    setSubmitError(null);
+    setSubmitting(true);
     signIn.mutate(
       { email: email.trim(), password },
-      { onSuccess: (result) => navigation.assign(safeLocalPath(result.redirect_to)) },
+      {
+        onSuccess: (result) => navigation.assign(safeLocalPath(result.redirect_to)),
+        onError: (error) => {
+          setSubmitError(errorMessage(error));
+          setSubmitting(false);
+        },
+        onSettled: () => {
+          setPassword("");
+          signIn.reset();
+        },
+      },
     );
   };
 
@@ -66,7 +82,7 @@ export default function LoginPage() {
   }
 
   const { providers, password_login: passwordLogin, flash } = config.data;
-  const alert = signIn.isError ? errorMessage(signIn.error) : flash.alert;
+  const alert = submitError ?? flash.alert;
 
   return (
     <>
@@ -147,7 +163,7 @@ export default function LoginPage() {
               </div>
             </div>
             <div className="mt-6">
-              <Button type="submit" className="w-full" disabled={signIn.isPending || signIn.isSuccess}>
+              <Button type="submit" className="w-full" disabled={submitting}>
                 Sign in
               </Button>
             </div>
