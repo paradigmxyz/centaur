@@ -626,16 +626,25 @@ fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
 
 #[test]
 fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
-    // The fake composer stands in for `compose-system-prompt`: it records each
-    // run, writes the prompt the harness reads, and prints to stdout, which must
-    // never reach the protocol channel.
+    // A real overlay hook prints to stdout, which must never reach the protocol
+    // channel. The fake composer records each run and copies the hook output it
+    // is given into the prompt the fake harness reads.
+    let overlay = temp_path("first-turn-overlay");
+    let hook = overlay.join("services/sandbox/hooks/first-turn-prompt.sh");
+    std::fs::create_dir_all(hook.parent().expect("hook dir")).expect("create hook dir");
+    std::fs::write(&hook, "printf hooked\n").expect("write hook");
     let prompt = temp_path("first-turn-prompt.md");
     let runs = temp_path("first-turn-prompt-runs.log");
     let composer = temp_path("fake-compose-system-prompt.sh");
     std::fs::write(
         &composer,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {runs}\nprintf hooked > {prompt}\necho not-json\n",
+            concat!(
+                "#!/bin/sh\n",
+                "echo \"$1 $2 $3\" >> {runs}\n",
+                "cat \"$4\" > {prompt}\n",
+                "echo not-json\n"
+            ),
             runs = shell_quote(&runs),
             prompt = shell_quote(&prompt),
         ),
@@ -656,6 +665,7 @@ fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
         ),
         prompt = shell_quote(&prompt),
     );
+    let overlay_path = overlay.to_string_lossy().into_owned();
     let composer_path = composer.to_string_lossy().into_owned();
 
     let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
@@ -663,7 +673,7 @@ fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
         Some(fake_claude),
         None,
         &[
-            ("CENTAUR_OVERLAY_REPO_DIRS", "/overlays/acme/overlay"),
+            ("CENTAUR_OVERLAY_REPO_DIRS", &overlay_path),
             ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
         ],
     );
@@ -676,54 +686,12 @@ fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
     assert_completed_turn(&second);
     assert_eq!(
         std::fs::read_to_string(&runs).expect("composer runs"),
-        "--target-prompt AGENTS.md --first-turn-prompt-hooks --hooks-timeout-seconds 10 --report-json\n"
+        "--target-prompt AGENTS.md --first-turn-prompt\n"
     );
     for path in [&prompt, &runs, &composer] {
         let _ = std::fs::remove_file(path);
     }
-}
-
-#[test]
-fn blocks_mode_stops_a_composer_that_runs_past_the_hooks_time_limit() {
-    // A composer that ignores its time limit must not hold the first turn:
-    // harness-server stops it shortly after the limit and the turn still runs.
-    let composer = temp_path("fake-stuck-compose-system-prompt.sh");
-    std::fs::write(&composer, "#!/bin/sh\nexec sleep 30\n").expect("write fake composer");
-    let mut permissions = std::fs::metadata(&composer)
-        .expect("composer metadata")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
-    let fake_claude = concat!(
-        "printf '%s\\n' ",
-        "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
-        "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"ran\"}]}}' ",
-        "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ran\"}'"
-    );
-    let composer_path = composer.to_string_lossy().into_owned();
-
-    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
-        Harness::ClaudeCode,
-        Some(fake_claude.to_string()),
-        None,
-        &[
-            ("CENTAUR_OVERLAY_REPO_DIRS", "/overlays/acme/overlay"),
-            ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
-            ("CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS", "0.2"),
-        ],
-    );
-    let started = Instant::now();
-    let turn = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
-    let elapsed = started.elapsed();
-    bridge.finish_successfully();
-    let _ = std::fs::remove_file(&composer);
-
-    assert_completed_turn(&turn);
-    assert_eq!(turn.text_from_deltas, "ran");
-    assert!(
-        elapsed < Duration::from_secs(6),
-        "first turn waited {elapsed:?} for a stuck composer"
-    );
+    let _ = std::fs::remove_dir_all(&overlay);
 }
 
 #[test]
@@ -1731,7 +1699,6 @@ impl BridgeProcess {
             "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
             "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN",
-            "CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS",
             "CENTAUR_OVERLAY_REPO_DIRS",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",

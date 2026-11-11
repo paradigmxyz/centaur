@@ -3,17 +3,21 @@
 //! Each blocks server starts its harness lazily on the first user message. By
 //! then the sandbox claim has bound the session's proxy credentials, so overlay
 //! hooks run here rather than at boot (when a warm sandbox belongs to no
-//! session). `compose-system-prompt` reruns them and rewrites the workspace
-//! `AGENTS.md`, which the harness reads as it starts.
+//! session). Their output is passed to `compose-system-prompt`, which rewrites
+//! the workspace `AGENTS.md` that the harness reads as it starts.
 
 use std::env;
-use std::io::{self, Read};
+use std::fs;
+use std::io::Read;
+use std::os::unix::process::CommandExt as _;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, ExitStatus, Stdio};
 use std::sync::Once;
+use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
-use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::otel::{PromptHookRun, PromptHooksRun, TraceContext, record_first_turn_prompt_hooks};
 
@@ -21,19 +25,17 @@ use crate::otel::{PromptHookRun, PromptHooksRun, TraceContext, record_first_turn
 /// the configured overlay sources. A public-only session mounts only public
 /// repos, so a private overlay listed here has no hook on disk.
 const OVERLAY_REPO_DIRS_ENV: &str = "CENTAUR_OVERLAY_REPO_DIRS";
+const HOOK_PATH: &str = "services/sandbox/hooks/first-turn-prompt.sh";
+/// One time limit for every hook in the pass.
+const TIMEOUT_ENV: &str = "CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS";
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_BYTES_ENV: &str = "CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES";
+const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 const COMPOSE_BIN_ENV: &str = "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN";
 const DEFAULT_COMPOSE_BIN: &str = "compose-system-prompt";
 /// Relative to the workspace, which is the harness-server working directory.
 const TARGET_PROMPT: &str = "AGENTS.md";
-/// The one time limit for every hook in the pass.
-const HOOKS_TIMEOUT_ENV: &str = "CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS";
-const DEFAULT_HOOKS_TIMEOUT: Duration = Duration::from_secs(10);
-/// Extra time the composer gets past the hooks limit to start up and write the
-/// prompt before it is stopped.
-const COMPOSER_GRACE: Duration = Duration::from_secs(2);
-/// How long the composer gets after SIGTERM to kill its running hook.
-const COMPOSER_TERM_GRACE: Duration = Duration::from_secs(1);
-const COMPOSER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Runs the hooks once per process, before the first turn, and records their
 /// timing on that turn's trace. A failure keeps the boot-time prompt and never
@@ -43,197 +45,342 @@ const COMPOSER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub(crate) fn run_first_turn_prompt_hooks(trace: Option<&TraceContext>, harness: &str) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        if env::var(OVERLAY_REPO_DIRS_ENV).map_or(true, |dirs| dirs.trim().is_empty()) {
+        let repos = overlay_repo_dirs();
+        if repos.is_empty() {
             return;
         }
-        let run = compose_with_hooks(hooks_timeout());
-        let elapsed_ms = run
-            .ended_at
-            .duration_since(run.started_at)
-            .unwrap_or_default()
-            .as_millis();
+        let started_at = SystemTime::now();
+        let hooks = run_hooks(&repos, timeout(), max_bytes());
+        let outcome = compose(&hooks);
+        let run = PromptHooksRun {
+            started_at,
+            ended_at: SystemTime::now(),
+            outcome,
+            hooks: hooks.into_iter().map(|hook| hook.run).collect(),
+        };
+        let elapsed = run.ended_at.duration_since(started_at).unwrap_or_default();
         eprintln!(
-            "first-turn prompt hooks {} in {elapsed_ms}ms ({} hooks)",
-            run.outcome,
+            "first-turn prompt hooks {outcome} in {}ms ({} hooks)",
+            elapsed.as_millis(),
             run.hooks.len()
         );
         record_first_turn_prompt_hooks(trace, harness, &run);
     });
 }
 
-fn hooks_timeout() -> Duration {
-    let Ok(raw) = env::var(HOOKS_TIMEOUT_ENV) else {
-        return DEFAULT_HOOKS_TIMEOUT;
-    };
-    match raw.trim().parse::<f64>().ok().and_then(|seconds| {
-        (seconds > 0.0)
-            .then(|| Duration::try_from_secs_f64(seconds).ok())
-            .flatten()
-    }) {
-        Some(timeout) => timeout,
-        None => {
-            eprintln!("ignoring invalid {HOOKS_TIMEOUT_ENV}={raw:?}");
-            DEFAULT_HOOKS_TIMEOUT
-        }
-    }
+struct HookOutcome {
+    run: PromptHookRun,
+    output: Option<Vec<u8>>,
 }
 
-fn compose_with_hooks(timeout: Duration) -> PromptHooksRun {
-    let bin = env::var(COMPOSE_BIN_ENV).unwrap_or_else(|_| DEFAULT_COMPOSE_BIN.to_owned());
+fn overlay_repo_dirs() -> Vec<PathBuf> {
+    env::var(OVERLAY_REPO_DIRS_ENV)
+        .unwrap_or_default()
+        .split(':')
+        .filter(|dir| !dir.trim().is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn timeout() -> Duration {
+    positive_env(TIMEOUT_ENV, |raw| {
+        raw.parse::<f64>()
+            .ok()
+            .filter(|seconds| *seconds > 0.0)
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+    })
+    .unwrap_or(DEFAULT_TIMEOUT)
+}
+
+fn max_bytes() -> usize {
+    positive_env(MAX_BYTES_ENV, |raw| {
+        raw.parse::<usize>().ok().filter(|bytes| *bytes > 0)
+    })
+    .unwrap_or(DEFAULT_MAX_BYTES)
+}
+
+fn positive_env<T>(name: &str, parse: impl Fn(&str) -> Option<T>) -> Option<T> {
+    let raw = env::var(name).ok()?;
+    let parsed = parse(raw.trim());
+    if parsed.is_none() {
+        eprintln!("ignoring invalid {name}={raw:?}");
+    }
+    parsed
+}
+
+/// Runs each overlay's hook in order under one shared deadline. The hook running
+/// when it expires is killed; hooks still left are skipped.
+fn run_hooks(repos: &[PathBuf], timeout: Duration, max_bytes: usize) -> Vec<HookOutcome> {
+    let deadline = Instant::now() + timeout;
+    repos
+        .iter()
+        .map(|repo| (repo, repo.join(HOOK_PATH)))
+        .filter(|(_, hook)| hook.is_file())
+        .map(|(repo, hook)| run_hook(repo, &hook, deadline, max_bytes))
+        .collect()
+}
+
+fn run_hook(repo: &Path, hook: &Path, deadline: Instant, max_bytes: usize) -> HookOutcome {
     let started_at = SystemTime::now();
-    let finish = |outcome, hooks| PromptHooksRun {
-        started_at,
-        ended_at: SystemTime::now(),
-        outcome,
-        hooks,
+    let finish = |status: &str, output: Option<Vec<u8>>, exit_code: Option<i32>| {
+        if !matches!(status, "ok" | "empty") {
+            eprintln!("first-turn prompt hook {}: {status}", hook.display());
+        }
+        HookOutcome {
+            run: PromptHookRun {
+                repo: repo.display().to_string(),
+                hook: hook.display().to_string(),
+                status: status.to_owned(),
+                started_at,
+                ended_at: SystemTime::now(),
+                output_bytes: output.as_ref().map_or(0, |output| output.len() as u64),
+                exit_code: exit_code.map(i64::from),
+            },
+            output: output.filter(|_| status == "ok"),
+        }
     };
-    // stdout is captured for the hook report, never inherited: the
-    // harness-server stdout is the protocol channel.
-    let spawned = ProcessCommand::new(&bin)
-        .args([
-            "--target-prompt",
-            TARGET_PROMPT,
-            "--first-turn-prompt-hooks",
-            "--hooks-timeout-seconds",
-            &timeout.as_secs_f64().to_string(),
-            "--report-json",
-        ])
+
+    // A hook must live inside its overlay repo, not behind a symlink to an
+    // arbitrary (possibly agent-writable) path.
+    let inside_repo = match (hook.canonicalize(), repo.canonicalize()) {
+        (Ok(hook), Ok(repo)) => hook.starts_with(repo),
+        _ => false,
+    };
+    if !inside_repo {
+        return finish("outside_repo", None, None);
+    }
+    if Instant::now() >= deadline {
+        return finish("skipped", None, None);
+    }
+    // Its own process group, so a timeout kills everything the hook started.
+    // stdout is captured, never inherited: the harness-server stdout is the
+    // protocol channel.
+    let mut child = match ProcessCommand::new("bash")
+        .arg(hook)
+        .current_dir(repo)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .spawn();
-    let mut child = match spawned {
+        .spawn()
+    {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("first-turn prompt hooks did not run: {bin}: {error}");
-            return finish("not_run", Vec::new());
+            eprintln!(
+                "first-turn prompt hook {} failed to start: {error}",
+                hook.display()
+            );
+            return finish("start_failed", None, None);
         }
     };
-    // Hooks never inherit the composer's stdout, so it closes when the
-    // composer exits and this reader cannot outlive it.
-    let reader = child.stdout.take().map(|mut stdout| {
+    let (output_tx, output_rx) = mpsc::channel();
+    if let Some(mut stdout) = child.stdout.take() {
         thread::spawn(move || {
-            let mut report = Vec::new();
-            let _ = stdout.read_to_end(&mut report);
-            report
-        })
-    });
-    let exit = wait_with_deadline(&mut child, Instant::now() + timeout + COMPOSER_GRACE);
-    let report = reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
-    let hooks = serde_json::from_slice::<HooksReport>(&report)
-        .map(|report| report.hooks.into_iter().map(PromptHookRun::from).collect());
-    match (exit, hooks) {
-        (Ok(Some(status)), Ok(hooks)) if status.success() => finish("composed", hooks),
-        (Ok(Some(status)), Err(error)) if status.success() => {
-            eprintln!("first-turn prompt hook report unreadable: {error}");
-            finish("report_unreadable", Vec::new())
-        }
-        (Ok(Some(status)), hooks) => {
-            eprintln!("first-turn prompt hooks failed: {bin} {status}");
-            finish("failed", hooks.unwrap_or_default())
-        }
-        (Ok(None), _) => {
-            eprintln!("first-turn prompt hooks stopped: {bin} ran past the hooks time limit");
-            finish("timeout", Vec::new())
-        }
-        (Err(error), _) => {
-            eprintln!("first-turn prompt hooks failed: waiting on {bin}: {error}");
-            finish("failed", Vec::new())
-        }
+            let mut output = Vec::new();
+            let _ = stdout.read_to_end(&mut output);
+            let _ = output_tx.send(output);
+        });
+    }
+    // A child that left the group (setsid) can hold stdout open past the hook,
+    // so the output read is bounded by the deadline too.
+    let output = output_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let status = wait_until(&mut child, deadline);
+    let (Ok(output), Some(status)) = (output, status) else {
+        kill_group(&mut child);
+        return finish("timeout", None, None);
+    };
+    let exit_code = status.code();
+    if !status.success() {
+        finish("failed", Some(output), exit_code)
+    } else if output.len() > max_bytes {
+        finish("oversized", Some(output), exit_code)
+    } else if String::from_utf8_lossy(&output).trim().is_empty() {
+        finish("empty", Some(output), exit_code)
+    } else {
+        finish("ok", Some(output), exit_code)
     }
 }
 
-/// Waits for the composer until `deadline`, then stops it: SIGTERM first so it
-/// can kill its running hook, then SIGKILL. `None` means it was stopped.
-fn wait_with_deadline(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitStatus>> {
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
+fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
         }
-        thread::sleep(COMPOSER_POLL_INTERVAL);
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn kill_group(child: &mut Child) {
     if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: kill takes no pointers; the child is not yet reaped, so the
-        // pid still names it.
+        // SAFETY: killpg takes no pointers. The hook is not yet reaped, so its
+        // pid still names its process group.
         unsafe {
-            libc::kill(pid, libc::SIGTERM);
+            libc::killpg(pid, libc::SIGKILL);
         }
     }
-    let kill_at = Instant::now() + COMPOSER_TERM_GRACE;
-    while Instant::now() < kill_at {
-        if child.try_wait()?.is_some() {
-            return Ok(None);
-        }
-        thread::sleep(COMPOSER_POLL_INTERVAL);
+    let _ = child.wait();
+}
+
+/// Writes each `ok` hook's output to a temp file and recomposes the workspace
+/// prompt with them. Returns the pass outcome for the span.
+fn compose(hooks: &[HookOutcome]) -> &'static str {
+    let outputs: Vec<&[u8]> = hooks
+        .iter()
+        .filter_map(|hook| hook.output.as_deref())
+        .collect();
+    if outputs.is_empty() {
+        return "no_output";
     }
-    let _ = child.kill();
-    child.wait()?;
-    Ok(None)
-}
-
-#[derive(Debug, Deserialize)]
-struct HooksReport {
-    hooks: Vec<HookReport>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HookReport {
-    repo: String,
-    hook: String,
-    status: String,
-    /// Unix seconds.
-    started_at: f64,
-    ended_at: f64,
-    #[serde(default)]
-    output_bytes: u64,
-    exit_code: Option<i64>,
-}
-
-impl From<HookReport> for PromptHookRun {
-    fn from(report: HookReport) -> Self {
-        Self {
-            repo: report.repo,
-            hook: report.hook,
-            status: report.status,
-            started_at: unix_seconds(report.started_at),
-            ended_at: unix_seconds(report.ended_at),
-            output_bytes: report.output_bytes,
-            exit_code: report.exit_code,
+    let pass = Uuid::new_v4().simple();
+    let mut files = Vec::new();
+    for (index, output) in outputs.iter().enumerate() {
+        let path = env::temp_dir().join(format!("centaur-first-turn-prompt-{pass}-{index}.md"));
+        if let Err(error) = fs::write(&path, output) {
+            eprintln!(
+                "first-turn prompt hooks: writing {}: {error}",
+                path.display()
+            );
+            remove_all(&files);
+            return "compose_failed";
+        }
+        files.push(path);
+    }
+    let bin = env::var(COMPOSE_BIN_ENV).unwrap_or_else(|_| DEFAULT_COMPOSE_BIN.to_owned());
+    let mut command = ProcessCommand::new(&bin);
+    command.args(["--target-prompt", TARGET_PROMPT]);
+    for file in &files {
+        command.arg("--first-turn-prompt").arg(file);
+    }
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status();
+    remove_all(&files);
+    match status {
+        Ok(status) if status.success() => "composed",
+        Ok(status) => {
+            eprintln!("first-turn prompt hooks: {bin} {status}");
+            "compose_failed"
+        }
+        Err(error) => {
+            eprintln!("first-turn prompt hooks: {bin}: {error}");
+            "compose_failed"
         }
     }
 }
 
-fn unix_seconds(seconds: f64) -> SystemTime {
-    Duration::try_from_secs_f64(seconds).map_or(UNIX_EPOCH, |offset| UNIX_EPOCH + offset)
+fn remove_all(files: &[PathBuf]) {
+    for file in files {
+        let _ = fs::remove_file(file);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn hook_report_converts_unix_seconds_and_optional_fields() {
-        let report: HooksReport = serde_json::from_str(
-            r#"{"hooks":[
-                {"repo":"/r/a","hook":"/r/a/h.sh","status":"ok","started_at":1.5,
-                 "ended_at":2.25,"output_bytes":3,"exit_code":0},
-                {"repo":"/r/b","hook":"/r/b/h.sh","status":"timeout","started_at":2.0,
-                 "ended_at":12.0,"exit_code":null}
-            ]}"#,
-        )
-        .expect("report parses");
-        let runs: Vec<PromptHookRun> = report.hooks.into_iter().map(Into::into).collect();
+    fn overlay(root: &Path, name: &str, script: &str) -> PathBuf {
+        let repo = root.join(name);
+        let hook = repo.join(HOOK_PATH);
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, script).unwrap();
+        repo
+    }
 
-        assert_eq!(
-            runs[0].ended_at.duration_since(runs[0].started_at).unwrap(),
-            Duration::from_millis(750)
-        );
-        assert_eq!(runs[0].output_bytes, 3);
-        assert_eq!(runs[0].exit_code, Some(0));
-        assert_eq!(runs[1].status, "timeout");
-        assert_eq!(runs[1].output_bytes, 0);
-        assert_eq!(runs[1].exit_code, None);
+    fn temp_root() -> PathBuf {
+        let root = env::temp_dir().join(format!("first-turn-hooks-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn statuses(hooks: &[HookOutcome]) -> Vec<&str> {
+        hooks.iter().map(|hook| hook.run.status.as_str()).collect()
+    }
+
+    #[test]
+    fn runs_hooks_in_order_and_reports_each_outcome() {
+        let root = temp_root();
+        let repos = vec![
+            overlay(&root, "ok", "echo \"from $(basename \"$PWD\")\"\n"),
+            root.join("not-mounted"),
+            overlay(&root, "empty", "echo '   '\n"),
+            overlay(&root, "failing", "echo partial\nexit 3\n"),
+            overlay(&root, "large", "head -c 100 /dev/zero | tr '\\0' x\n"),
+        ];
+
+        let hooks = run_hooks(&repos, Duration::from_secs(10), 50);
+
+        assert_eq!(statuses(&hooks), ["ok", "empty", "failed", "oversized"]);
+        assert_eq!(hooks[0].output.as_deref(), Some(&b"from ok\n"[..]));
+        assert_eq!(hooks[0].run.exit_code, Some(0));
+        assert_eq!(hooks[2].run.exit_code, Some(3));
+        assert!(hooks[1..].iter().all(|hook| hook.output.is_none()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn one_time_limit_covers_every_hook() {
+        let root = temp_root();
+        let repos = vec![
+            overlay(&root, "a", "sleep 0.3\necho a\n"),
+            overlay(&root, "b", "sleep 30\n"),
+            overlay(&root, "c", "echo c\n"),
+        ];
+
+        let started = Instant::now();
+        let hooks = run_hooks(&repos, Duration::from_millis(800), DEFAULT_MAX_BYTES);
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(statuses(&hooks), ["ok", "timeout", "skipped"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timeout_does_not_wait_for_children_that_left_the_group() {
+        let root = temp_root();
+        let pid_file = root.join("escaped.pid");
+        let repos = vec![overlay(
+            &root,
+            "escape",
+            &format!(
+                "setsid sleep 30 & echo $! > {}\nexit 0\n",
+                pid_file.display()
+            ),
+        )];
+
+        let started = Instant::now();
+        let hooks = run_hooks(&repos, Duration::from_millis(300), DEFAULT_MAX_BYTES);
+        let elapsed = started.elapsed();
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            // SAFETY: kill takes no pointers.
+            unsafe {
+                libc::kill(pid.trim().parse().unwrap(), libc::SIGKILL);
+            }
+        }
+
+        assert!(elapsed < Duration::from_secs(3), "waited {elapsed:?}");
+        assert_eq!(statuses(&hooks), ["timeout"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ignores_a_hook_that_resolves_outside_its_repo() {
+        let root = temp_root();
+        let outside = root.join("outside.sh");
+        fs::write(&outside, "echo escaped\n").unwrap();
+        let repo = root.join("overlay");
+        let hook = repo.join(HOOK_PATH);
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &hook).unwrap();
+
+        let hooks = run_hooks(&[repo], Duration::from_secs(10), DEFAULT_MAX_BYTES);
+
+        assert_eq!(statuses(&hooks), ["outside_repo"]);
+        assert!(hooks[0].output.is_none());
+        let _ = fs::remove_dir_all(root);
     }
 }

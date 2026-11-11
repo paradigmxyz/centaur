@@ -495,7 +495,7 @@ fn trace_attributes(trace: &TraceContext) -> Vec<KeyValue> {
     attributes
 }
 
-/// One overlay prompt hook run, as reported by `compose-system-prompt`.
+/// One overlay prompt hook run.
 #[derive(Debug, Clone)]
 pub(crate) struct PromptHookRun {
     pub(crate) repo: String,
@@ -509,14 +509,13 @@ pub(crate) struct PromptHookRun {
     pub(crate) exit_code: Option<i64>,
 }
 
-/// The whole first-turn hook pass: the composer process and each hook it ran.
+/// The whole first-turn hook pass: every hook, then rewriting the prompt.
 #[derive(Debug)]
 pub(crate) struct PromptHooksRun {
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: SystemTime,
-    /// `composed`, `report_unreadable` (prompt composed, hook timing lost),
-    /// `failed` (composer exited non-zero), `timeout` (composer stopped at the
-    /// hooks time limit), or `not_run` (composer could not start).
+    /// `composed`, `no_output` (no hook printed prompt text), or
+    /// `compose_failed` (the prompt could not be rewritten).
     pub(crate) outcome: &'static str,
     pub(crate) hooks: Vec<PromptHookRun>,
 }
@@ -572,10 +571,10 @@ fn record_first_turn_prompt_hooks_with_tracer(
         .with_start_time(run.started_at)
         .with_attributes(attributes)
         .start_with_context(tracer, parent);
-    span.set_status(if run.outcome == "composed" {
-        Status::Ok
+    span.set_status(if run.outcome == "compose_failed" {
+        Status::error("first-turn prompt hooks compose_failed")
     } else {
-        Status::error(format!("first-turn prompt hooks {}", run.outcome))
+        Status::Ok
     });
     let hooks_context = parent.with_remote_span_context(span.span_context().clone());
     for hook in &run.hooks {
