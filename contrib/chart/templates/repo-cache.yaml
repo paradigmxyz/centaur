@@ -36,6 +36,9 @@
 {{- end }}
 {{- $repoCacheRepositories = uniq $repoCacheRepositories -}}
 {{- if $repoCacheRepositories }}
+{{- if ge (int .Values.repoCache.gitShutdownGraceSeconds) (int .Values.repoCache.terminationGracePeriodSeconds) }}
+{{- fail "repoCache.gitShutdownGraceSeconds must be less than repoCache.terminationGracePeriodSeconds" }}
+{{- end }}
 {{- $repoCacheHasGithubToken := or .Values.repoCache.githubToken.existingSecretName .Values.repoCache.githubToken.token -}}
 {{- $repoCacheImageRepository := default .Values.sandbox.image.repository .Values.repoCache.image.repository -}}
 {{- $repoCacheImageTag := default .Values.sandbox.image.tag .Values.repoCache.image.tag -}}
@@ -99,6 +102,7 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "repo-cache") | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.repoCache.terminationGracePeriodSeconds }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
@@ -119,6 +123,10 @@ spec:
               value: {{ join " " $repoCacheRepositoryVisibilityEntries | quote }}
             - name: SYNC_INTERVAL_SECONDS
               value: {{ .Values.repoCache.syncIntervalSeconds | quote }}
+            - name: GIT_COMMAND_TIMEOUT_SECONDS
+              value: {{ .Values.repoCache.gitCommandTimeoutSeconds | quote }}
+            - name: GIT_SHUTDOWN_GRACE_SECONDS
+              value: {{ .Values.repoCache.gitShutdownGraceSeconds | quote }}
             - name: GIT_TERMINAL_PROMPT
               value: "0"
           readinessProbe:
