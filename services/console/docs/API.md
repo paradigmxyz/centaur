@@ -1,6 +1,6 @@
 # iron-control API
 
-`iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
+`iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication or a console session cookie, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
 
 - [Authentication](#authentication)
 - [Conventions](#conventions)
@@ -39,6 +39,70 @@ A missing or invalid token returns `401`:
 ```json
 { "error": { "message": "invalid or missing API key" } }
 ```
+
+### Console session (browser SPA)
+
+The console SPA calls the same `/api/v1` endpoints with the console session
+cookie instead of a bearer token. An `Authorization` header, when present, is
+authoritative: an invalid bearer token is rejected and never falls back to the
+cookie.
+
+- Cookie-authenticated requests other than `GET`/`HEAD` must send the
+  session's CSRF token as `X-CSRF-Token` (from `GET /api/v1/me`). A missing or
+  invalid token, or a cross-site `Origin`, returns `403` with
+  `details.reason = "csrf"`. Bearer requests do not use CSRF tokens.
+- A disabled account's session is cleared and the request returns `401` with
+  `details.reason = "account_disabled"`.
+- A pending account receives `403` with `details.reason = "account_pending"`,
+  except on endpoints open to pending accounts (`GET /api/v1/me`,
+  `DELETE /api/v1/session`).
+
+### Authorization
+
+Endpoints are admin-only unless documented otherwise. A non-admin caller
+receives `403` with `details.reason = "admin_required"` (message
+`"API key owner is not an admin"` for bearer keys, `"admin access required"`
+for sessions). Endpoints documented as open to active users scope their records
+to the caller unless the caller is an acting admin.
+
+An admin session may pause its admin permissions ("view as operator"); while
+descoped, admin-only endpoints return `403` for that session. Bearer keys are
+unaffected.
+
+### Session endpoints
+
+| Method | Path | Access | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/me` | session or bearer, including pending sessions | Caller identity and SPA navigation flags |
+| `POST` | `/api/v1/descope` | admin session | Pause admin permissions for this session |
+| `DELETE` | `/api/v1/descope` | active session | Restore admin permissions |
+| `DELETE` | `/api/v1/session` | session (no-op for bearer) | Sign the console session out (`204`) |
+
+`GET /api/v1/me` response (sent with `Cache-Control: no-store`):
+
+```json
+{
+  "data": {
+    "user": { "id": "usr_…", "email": "ops@example.com", "name": null, "status": "active", "admin": true },
+    "auth_method": "session",
+    "acting_admin": true,
+    "descoped": false,
+    "csrf_token": "…",
+    "features": { "api_clients": false, "password_login": true },
+    "nav": {
+      "control": true, "principals": true, "roles": true, "secrets": true,
+      "credentials": true, "oauth_apps": true, "users": true, "api_clients": false,
+      "settings": true, "workflows": true, "integrations": true, "skills": true,
+      "scheduled_tasks": true
+    }
+  }
+}
+```
+
+`csrf_token` is `null` for bearer callers. `POST`/`DELETE /api/v1/descope`
+return `{ "data": { "descoped": true|false } }`; bearer callers receive `422`.
+
+### Proxy tokens
 
 `iron-proxy` instances authenticate to [proxy sync](#proxy-sync), served by the separate `proxy-sync` service, with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
 

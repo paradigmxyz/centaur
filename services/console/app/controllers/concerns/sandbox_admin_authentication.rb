@@ -10,7 +10,10 @@ module SandboxAdminAuthentication
   include SandboxTokenAuthentication
 
   included do
-    skip_before_action :authenticate_api_key!
+    skip_before_action :authenticate_request!
+    skip_before_action :require_active_account!
+    skip_before_action :verify_session_csrf_token!
+    skip_before_action :require_admin!
     before_action :authenticate_sandbox_admin!
   end
 

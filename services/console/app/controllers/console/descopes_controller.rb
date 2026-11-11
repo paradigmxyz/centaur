@@ -11,8 +11,7 @@ module Console
     before_action :require_admin, only: :create
 
     def create
-      session[:descoped] = true
-      Rails.logger.info("console_descope_started admin=#{current_user.email}")
+      start_console_descope!
       # No flash: the persistent descope banner already announces the state.
       redirect_to default_console_landing_path
     end
@@ -20,8 +19,7 @@ module Console
     def destroy
       return redirect_to default_console_landing_path unless descoped?
 
-      session.delete(:descoped)
-      Rails.logger.info("console_descope_stopped admin=#{current_user.email}")
+      stop_console_descope!
       redirect_to console_principals_path, notice: "Admin permissions restored."
     end
   end

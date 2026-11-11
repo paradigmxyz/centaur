@@ -1,18 +1,92 @@
 module Api
+  # Base for the operator JSON API under /api/v1.
+  #
+  # A request authenticates with EITHER a bearer ApiKey (machine callers, CLIs)
+  # OR the console session cookie (the browser SPA). An Authorization header,
+  # when present, is authoritative: a bad bearer token never falls back to the
+  # cookie. Cookie-authenticated requests that are not GET/HEAD must carry the
+  # session's CSRF token in X-CSRF-Token (fetch it from GET /api/v1/me); bearer
+  # requests skip CSRF because browsers never attach them ambiently.
+  #
+  # Authorization is per endpoint. Every action is admin-only unless the
+  # controller opts in with `allow_active_users` (any active account; scope
+  # records with `owned_scope` / `require_owner_or_admin!`) or
+  # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me). For
+  # session requests the admin check honours the "view as operator" descope.
   class BaseController < ActionController::API
     include ApiRequestSupport
+    include ConsoleSession
+    include ActionController::RequestForgeryProtection
 
-    before_action :authenticate_api_key!
+    CSRF_SAFE_METHODS = %w[GET HEAD].freeze
+
+    # The railtie only applies forgery-protection defaults to
+    # ActionController::Base; share its Origin-header check with the API.
+    self.forgery_protection_origin_check = ActionController::Base.forgery_protection_origin_check
+
+    before_action :authenticate_request!
+    before_action :require_active_account!
+    before_action :verify_session_csrf_token!
+    before_action :require_admin!
 
     rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
     attr_reader :current_api_key
 
+    # Opts actions into any active (approved, not disabled) account instead of
+    # the admin-only default. The action must scope what it loads to the
+    # caller unless acting_admin?.
+    def self.allow_active_users(**options)
+      skip_before_action :require_admin!, **options
+    end
+
+    # Opts actions into pending accounts as well (session requests only; a
+    # pending API key owner is still rejected). Implies allow_active_users.
+    def self.allow_pending_users(**options)
+      skip_before_action :require_admin!, **options
+      skip_before_action :require_active_account!, **options
+    end
+
     def current_user
-      current_api_key&.user
+      return current_api_key&.user if api_key_authenticated?
+
+      console_session_user if session_authenticated?
     end
 
     private
+
+    # :api_key, :session, or nil before authentication.
+    attr_reader :auth_method
+
+    def api_key_authenticated?
+      auth_method == :api_key
+    end
+
+    def session_authenticated?
+      auth_method == :session
+    end
+
+    # Admin check for authorization decisions. Bearer callers act with their
+    # owner's admin flag; session callers lose it while descoped.
+    def acting_admin?
+      return false unless current_user&.admin?
+
+      !descoped?
+    end
+
+    def descoped?
+      session_authenticated? && console_session_descoped?
+    end
+
+    def authenticate_request!
+      if request.headers["Authorization"].present?
+        authenticate_api_key!
+      elsif console_session_user
+        authenticate_session!
+      else
+        render_error(status: :unauthorized, message: "invalid or missing API key")
+      end
+    end
 
     def authenticate_api_key!
       token = bearer_token
@@ -20,9 +94,59 @@ module Api
       unless current_api_key&.user&.active?
         return render_error(status: :unauthorized, message: "invalid or missing API key")
       end
-      return if current_api_key.user.admin?
 
-      render_error(status: :forbidden, message: "API key owner is not an admin")
+      @auth_method = :api_key
+    end
+
+    # A disabled session user is signed out on every endpoint, including the
+    # ones open to pending accounts.
+    def authenticate_session!
+      if console_session_user.disabled?
+        reset_session
+        return render_error(status: :unauthorized, message: "account disabled",
+                            details: { reason: "account_disabled" })
+      end
+
+      @auth_method = :session
+    end
+
+    # Bearer owners are already required to be active. A pending session user
+    # gets 403 so the SPA can show the holding page.
+    def require_active_account!
+      return unless session_authenticated?
+      return if console_session_user.active?
+
+      render_error(status: :forbidden, message: "account pending approval", details: { reason: "account_pending" })
+    end
+
+    def verify_session_csrf_token!
+      return unless session_authenticated?
+      return if CSRF_SAFE_METHODS.include?(request.request_method)
+      return if valid_request_origin? && any_authenticity_token_valid?
+
+      render_error(status: :forbidden, message: "invalid or missing CSRF token", details: { reason: "csrf" })
+    end
+
+    def require_admin!
+      return if acting_admin?
+
+      message = api_key_authenticated? ? "API key owner is not an admin" : "admin access required"
+      render_error(status: :forbidden, message: message, details: { reason: "admin_required" })
+    end
+
+    # Records an active-user endpoint may expose: everything for an acting
+    # admin, otherwise only rows whose +owner+ association/column is the caller.
+    def owned_scope(scope, owner: :user)
+      acting_admin? ? scope : scope.where(owner => current_user)
+    end
+
+    # Guard for a single record loaded by an active-user endpoint. Renders 404
+    # (not 403) so record existence is not disclosed to non-owners.
+    def require_owner_or_admin!(record, owner: :user)
+      return true if acting_admin? || record.public_send(owner) == current_user
+
+      render_error(status: :not_found, message: "not found")
+      false
     end
 
     def render_not_found(e)

@@ -165,6 +165,10 @@ Rails.application.routes.draw do
 
   namespace :api do
     namespace :v1 do
+      # Console SPA session endpoints (session cookie or bearer; see docs/API.md).
+      resource :me, only: :show, controller: :me
+      resource :descope, only: %i[create destroy]
+      resource :session, only: :destroy
       # Each secret type is addressable by opaque oid or globally unique foreign_id.
       # The /lookup/default/... form is a temporary compatibility alias.
       resources :static_secrets, only: %i[index show create update destroy] do

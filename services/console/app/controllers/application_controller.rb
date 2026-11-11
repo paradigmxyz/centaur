@@ -1,4 +1,6 @@
 class ApplicationController < ActionController::Base
+  include ConsoleSession
+
   # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
   allow_browser versions: :modern
 
@@ -39,21 +41,15 @@ class ApplicationController < ActionController::Base
   before_action :require_active_account
   private
 
-  # The signed-in operator for cookie-session (console) requests, or nil. Distinct
-  # from Api::BaseController#current_user, which resolves a User from an API key.
+  # The signed-in operator for cookie-session (console) requests, or nil.
+  # Api::BaseController resolves the same session user (or an API key owner).
   def current_user
-    @current_user ||= User.find_by(id: session[:user_id]) if session[:user_id]
+    console_session_user
   end
 
-  # Whether this admin has temporarily descoped themselves to operator
-  # permissions ("view as operator"). Self-healing: the flag is dropped if the
-  # user is no longer an admin, so it can never outlive the privileges it pauses.
+  # See ConsoleSession#console_session_descoped?.
   def descoped?
-    return false unless session[:descoped]
-    return true if current_user&.admin?
-
-    session.delete(:descoped)
-    false
+    console_session_descoped?
   end
 
   def password_login_enabled?
