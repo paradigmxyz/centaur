@@ -11,8 +11,11 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Invariants
 
-- Keep cookie-backed console sessions, bearer-authenticated operator APIs,
-  proxy sync authentication, and OAuth/MCP tokens as separate trust boundaries.
+- `/api/v1` operator endpoints accept either a bearer API key or the console
+  session cookie (the SPA). Cookie-authenticated writes require the session
+  CSRF token; every endpoint is admin-only (descope-aware) unless it opts in
+  with `allow_active_users`. Keep proxy sync authentication, sandbox JWTs, and
+  OAuth/MCP tokens as separate trust boundaries.
 - Secret plaintext may be accepted for creation or rotation but must never be
   returned, logged, rendered, inspected in tests, or stored outside encrypted
   model attributes and configured providers.
@@ -61,6 +64,16 @@ bin/rails db:prepare
 bin/rails test
 bin/rubocop
 bin/brakeman --quiet --no-pager --exit-on-warn --exit-on-error
+```
+
+The SPA lives in `web/` (Vite, React, TypeScript, shadcn/ui). From
+`services/console`:
+
+```bash
+pnpm -C web typecheck
+pnpm -C web lint
+pnpm -C web test
+pnpm -C web build   # into public/spa, served by Rails for HTML navigations
 ```
 
 `bin/ci` runs the full local CI sequence, including dependency audits, tests,

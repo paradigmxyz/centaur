@@ -163,7 +163,9 @@ export function usePrincipalMutations(id: string) {
     }),
     destroy: useMutation({
       mutationFn: () => api.delete(`${base}/${id}`),
-      onSuccess: () => queryClient.removeQueries({ queryKey: principalKeys.detail(id) }),
+      // Lists only: removing the detail query while its page is still mounted
+      // would refetch the deleted record.
+      onSuccess: () => queryClient.invalidateQueries({ queryKey: principalKeys.lists() }),
     }),
   };
 }
