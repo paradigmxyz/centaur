@@ -137,6 +137,10 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 reasoning,
                 trace_context,
             }) => {
+                crate::session_prompt::run_session_prompt_hooks(
+                    Some(&trace_context),
+                    crate::otel::harness_name(harness.kind()),
+                );
                 if let Some(model) = model {
                     state.model = model;
                 }

@@ -11,6 +11,7 @@ mod otel;
 pub mod pi;
 pub mod protocol;
 mod server;
+mod session_prompt;
 mod traits;
 mod turn;
 mod util;
