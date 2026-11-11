@@ -116,15 +116,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
-          working-directory: services/console
-          bundler-cache: true
+          persist-credentials: false
 
-      - name: Scan for security vulnerabilities in JavaScript dependencies
-        run: bin/importmap audit
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.9
+          run_install: false
+
+      - name: Scan for security vulnerabilities in the SPA's JavaScript dependencies
+        run: script/audit-web
 
   lint:
     runs-on: depot-ubuntu-24.04-16
@@ -154,6 +159,9 @@ jobs:
 
       - name: Lint code for consistent style
         run: bin/rubocop -f github
+
+      - name: Check that no server-rendered UI remains
+        run: script/check-no-ruby-ui
 
   test:
     runs-on: depot-ubuntu-24.04-16
@@ -203,12 +211,22 @@ jobs:
           # RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
         run: bin/rails db:test:prepare test
 
+      - name: Validate seeds
+        env:
+          RAILS_ENV: test
+          IRON_CONTROL_DB_HOST: localhost
+          IRON_CONTROL_DB_PORT: 5432
+          IRON_CONTROL_DB_USERNAME: postgres
+          IRON_CONTROL_DB_PASSWORD: postgres
+        run: bin/rails db:seed:replant
+
   console-ci-success:
     name: Console CI success
     runs-on: depot-ubuntu-24.04
     if: always()
     needs:
       - console_changes
+      - web
       - scan_ruby
       - scan_js
       - lint
@@ -221,5 +239,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: scan_ruby, scan_js, lint, test
+          allowed-skips: web, scan_ruby, scan_js, lint, test
           jobs: ${{ toJSON(needs) }}

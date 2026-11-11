@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Audits the console SPA's npm dependencies (services/console/web) for known
+# vulnerabilities. Replaces the importmap audit the server-rendered UI had.
+#
+# `pnpm audit` reports on the whole workspace lockfile and cannot be filtered
+# to one package, so this keeps only advisories with a dependency path through
+# @centaur/console-web and fails on those at or above AUDIT_LEVEL (default
+# high). Other workspace packages are audited by their own CI.
+#
+# Usage: script/audit-web [AUDIT_LEVEL]   (low | moderate | high | critical)
+set -euo pipefail
+
+cd "$(dirname "$0")/../web"
+
+level="${1:-${AUDIT_LEVEL:-high}}"
+report="$(mktemp)"
+trap 'rm -f "${report}"' EXIT
+
+# pnpm audit exits nonzero whenever it finds anything; the filter decides.
+pnpm audit --json >"${report}" || true
+
+node - "${report}" "${level}" <<'JS'
+const fs = require("fs");
+const [file, level] = process.argv.slice(2);
+const ranks = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
+if (!(level in ranks)) {
+  console.error(`audit-web: unknown audit level "${level}"`);
+  process.exit(2);
+}
+
+let report;
+try {
+  report = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (error) {
+  console.error(`audit-web: pnpm audit produced no JSON report (${error.message})`);
+  process.exit(2);
+}
+if (report.error) {
+  console.error(`audit-web: pnpm audit failed: ${report.error.message || JSON.stringify(report.error)}`);
+  process.exit(2);
+}
+
+const prefix = "services__console__web>";
+const findings = [];
+for (const advisory of Object.values(report.advisories || {})) {
+  const paths = (advisory.findings || []).flatMap((finding) => finding.paths || []);
+  const ours = paths.filter((path) => path.startsWith(prefix));
+  if (ours.length === 0) continue;
+  findings.push({ advisory, paths: ours, blocking: ranks[advisory.severity] >= ranks[level] });
+}
+
+for (const { advisory, paths, blocking } of findings) {
+  const tag = blocking ? "FAIL" : "note";
+  console.log(`${tag} ${advisory.severity} ${advisory.module_name} ${advisory.vulnerable_versions}: ${advisory.title}`);
+  console.log(`     ${advisory.url}`);
+  for (const path of paths.slice(0, 3)) console.log(`     via ${path}`);
+}
+
+const blocking = findings.filter((finding) => finding.blocking).length;
+console.log(`audit-web: ${findings.length} advisory(ies) for @centaur/console-web, ${blocking} at or above ${level}.`);
+process.exit(blocking > 0 ? 1 : 0);
+JS
