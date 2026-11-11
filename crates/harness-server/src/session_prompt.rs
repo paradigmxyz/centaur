@@ -179,11 +179,14 @@ fn run_hook(repo: &Path, hook: &Path, deadline: Instant, max_bytes: usize) -> Ho
     };
     let exit_code = status.code();
     if !status.success() {
-        finish("failed", Some(output), exit_code)
-    } else if String::from_utf8_lossy(&output).trim().is_empty() {
-        finish("empty", Some(output), exit_code)
-    } else {
-        finish("ok", Some(output), exit_code)
+        return finish("failed", Some(output), exit_code);
+    }
+    // Reject invalid text here, per hook, so it cannot fail the composer and
+    // drop every other hook's output with it.
+    match std::str::from_utf8(&output) {
+        Err(_) => finish("invalid_utf8", Some(output), exit_code),
+        Ok(text) if text.trim().is_empty() => finish("empty", Some(output), exit_code),
+        Ok(_) => finish("ok", Some(output), exit_code),
     }
 }
 
@@ -298,15 +301,21 @@ mod tests {
             overlay(&root, "empty", "echo '   '\n"),
             overlay(&root, "failing", "echo partial\nexit 3\n"),
             overlay(&root, "large", "head -c 100 /dev/zero | tr '\\0' x\n"),
+            overlay(&root, "binary", "printf 'bad \\377\\n'\n"),
+            overlay(&root, "after", "echo after\n"),
         ];
 
         let hooks = run_hooks(&repos, Duration::from_secs(10), 50);
 
-        assert_eq!(statuses(&hooks), ["ok", "empty", "failed", "oversized"]);
+        assert_eq!(
+            statuses(&hooks),
+            ["ok", "empty", "failed", "oversized", "invalid_utf8", "ok"]
+        );
+        assert_eq!(hooks[5].output.as_deref(), Some(&b"after\n"[..]));
         assert_eq!(hooks[0].output.as_deref(), Some(&b"from ok\n"[..]));
         assert_eq!(hooks[0].run.exit_code, Some(0));
         assert_eq!(hooks[2].run.exit_code, Some(3));
-        assert!(hooks[1..].iter().all(|hook| hook.output.is_none()));
+        assert!(hooks[1..5].iter().all(|hook| hook.output.is_none()));
         let _ = fs::remove_dir_all(root);
     }
 

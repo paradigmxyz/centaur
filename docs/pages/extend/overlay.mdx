@@ -174,8 +174,8 @@ prompt injection at system level.
 Hooks delay the first reply, so keep them fast. One 10-second limit covers
 every hook in the pass: hooks run in overlay order, a hook still running when
 the limit runs out is killed, and any hooks left are skipped. A hook that exits
-non-zero, is killed, or prints more than 64 KiB is logged and contributes
-nothing, and the turn still runs. Its
+non-zero, is killed, prints more than 64 KiB, or prints invalid UTF-8 is logged
+and contributes nothing, and the turn still runs. Its
 standard error goes to the sandbox log. A hook path that resolves outside its
 repo is ignored.
 
@@ -186,8 +186,8 @@ the hook runs until the time limit and its output is dropped.
 Each hook pass is traced on the triggering turn's trace as
 `<harness>.session_prompt_hooks`, with a `<harness>.session_prompt_hook`
 child per hook. The child spans carry `centaur.hook.repo`, `centaur.hook.status`
-(`ok`, `empty`, `failed`, `timeout`, `skipped`, `oversized`, `start_failed`, or
-`outside_repo`), `centaur.hook.output_bytes`, and `centaur.hook.exit_code`, so
+(`ok`, `empty`, `failed`, `timeout`, `skipped`, `oversized`, `invalid_utf8`,
+`start_failed`, or `outside_repo`), `centaur.hook.output_bytes`, and `centaur.hook.exit_code`, so
 hook latency on the first reply can be measured per overlay.
 
 ## Verify the overlay

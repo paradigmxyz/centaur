@@ -501,7 +501,8 @@ pub(crate) struct PromptHookRun {
     pub(crate) repo: String,
     pub(crate) hook: String,
     /// `ok`, `empty`, `failed`, `timeout`, `skipped`, `oversized`,
-    /// `start_failed`, or `outside_repo`; only `ok` contributes prompt text.
+    /// `invalid_utf8`, `start_failed`, or `outside_repo`; only `ok` contributes
+    /// prompt text.
     pub(crate) status: String,
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: SystemTime,
