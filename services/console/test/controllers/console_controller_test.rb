@@ -17,7 +17,7 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
     [ console_roles_url, console_secrets_url,
-      console_credentials_url, console_oauth_apps_url ].each do |url|
+      console_credentials_url ].each do |url|
       get url
       assert_redirected_to console_integrations_path
       assert_nil flash[:alert]
@@ -217,31 +217,6 @@ class ConsoleControllerTest < ActionDispatch::IntegrationTest
 
   test "credential detail page 404s for an unknown id" do
     get console_credential_url("bcr_missing")
-    assert_response :not_found
-  end
-
-  test "oauth apps table lists apps and links to detail" do
-    app = oauth_apps(:acme_google)
-    get console_oauth_apps_url
-    assert_response :ok
-    assert_select "a[href=?]", console_oauth_app_path(app.oid)
-    assert_select "span", text: app.provider
-  end
-
-  test "oauth app detail page shows config, the redirect URI, and a start URL" do
-    app = oauth_apps(:acme_google)
-    app.update!(client_secret: "shh")
-    get console_oauth_app_url(app.oid)
-    assert_response :ok
-    assert_select "h1", text: app.slug
-    assert_select "dd", text: app.client_id
-    assert_select "dd", text: "set" # client secret presence, never the value
-    assert_includes response.body, "/oauth/google/callback"
-    assert_includes response.body, "/oauth/google/start"
-  end
-
-  test "oauth app detail page 404s for an unknown id" do
-    get console_oauth_app_url("oap_missing")
     assert_response :not_found
   end
 

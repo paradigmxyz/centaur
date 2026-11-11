@@ -117,7 +117,7 @@ class Console::WorkflowsControllerTest < ActionDispatch::IntegrationTest
     delete logout_url
     post login_url, params: { email: users(:member_user).email, password: "password123456" }
 
-    get console_integrations_url
+    get console_skills_url
 
     assert_response :ok
     assert_select ".console-nav-link", text: "Control", count: 0

@@ -944,8 +944,9 @@ module Oauth
       assert_nil cred.provider_email
       assert_equal user, cred.created_by
 
-      get console_integrations_url
-      assert_select "a.btn-secondary[href=?]", "http://www.example.com/oauth/slack/start", text: "Reconnect"
+      get api_v1_integrations_path
+      slack = JSON.parse(response.body).dig("data", "apps").find { |app| app["slug"] == "slack" }
+      assert_equal "connected", slack.dig("connection", "status")
     end
 
     test "callback redirects signed-out users to login and mints nothing" do
