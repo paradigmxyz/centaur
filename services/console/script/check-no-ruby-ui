@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Lists server-rendered UI that remains in the console Rails app and exits
+# nonzero while any is left. The console UI lives in the SPA (web/); Rails
+# serves JSON under /api/v1, protocol redirects, and the built index.html.
+#
+# Usage: script/check-no-ruby-ui
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+
+offenders=0
+report() {
+  local title="$1"
+  shift
+  if [ "$#" -gt 0 ]; then
+    echo "== ${title}"
+    printf '  %s\n' "$@"
+    offenders=$((offenders + $#))
+  fi
+}
+
+# 1. Templates under app/views, except mailer layouts/templates.
+mapfile -t views < <(
+  find app/views -type f \( -name '*.erb' -o -name '*.haml' -o -name '*.slim' \) 2>/dev/null |
+    grep -Ev '^app/views/(layouts/mailer\.|[a-z_]+_mailer/)' | sort
+)
+report "View templates (app/views)" "${views[@]}"
+
+# 2. View helpers and browser JavaScript.
+mapfile -t helpers < <(find app/helpers -type f 2>/dev/null | sort)
+report "View helpers (app/helpers)" "${helpers[@]}"
+mapfile -t javascript < <(find app/javascript -type f 2>/dev/null | sort)
+report "Browser JavaScript (app/javascript)" "${javascript[@]}"
+
+# 3. Server-side UI asset pipeline gems and config.
+mapfile -t gems < <(
+  grep -nE '^\s*gem\s+"(stimulus-rails|turbo-rails|importmap-rails|tailwindcss-rails|propshaft)"' Gemfile |
+    sed 's/^/Gemfile:/'
+)
+report "UI gems (Gemfile)" "${gems[@]}"
+mapfile -t ui_config < <(
+  ls -1d config/importmap.rb config/tailwind.config.js bin/importmap app/assets/tailwind \
+    app/assets/stylesheets 2>/dev/null
+)
+report "UI asset config" "${ui_config[@]}"
+
+# 4. Controllers that render HTML templates or declare layouts. JSON, plain,
+# head, redirects, and send_file responses are fine.
+mapfile -t renders < <(
+  grep -rnE '^\s*layout\s+["a-z:]|render\s*\(?\s*(:[a-z_]+|"[^"]+"|template:|action:|partial:|html:|layout:)' \
+    app/controllers 2>/dev/null | sort
+)
+report "Controllers rendering HTML templates" "${renders[@]}"
+
+if [ "${offenders}" -gt 0 ]; then
+  echo
+  echo "check-no-ruby-ui: ${offenders} offender(s) remain."
+  exit 1
+fi
+
+echo "check-no-ruby-ui: no server-rendered UI remains."
