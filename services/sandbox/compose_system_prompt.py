@@ -34,7 +34,7 @@ def compose_system_prompt(
     home_dir: Path,
     target_prompt: Path,
     repo_mount: Path,
-    first_turn_prompts: list[Path] | None = None,
+    session_prompts: list[Path] | None = None,
 ) -> None:
     base_prompt = home_dir / "AGENTS_BASE.md"
     baked_prompt = home_dir / "AGENTS.md"
@@ -58,8 +58,8 @@ def compose_system_prompt(
         if _append_file_fragment(fragments, prompt_path):
             appended.add(resolved)
 
-    # Overlay first-turn-prompt hook output, written by harness-server.
-    for prompt_path in first_turn_prompts or []:
+    # Overlay session-prompt hook output, written by harness-server.
+    for prompt_path in session_prompts or []:
         _append_file_fragment(fragments, prompt_path)
 
     persona_prompt_path = home_dir / PERSONA_PROMPT
@@ -76,7 +76,7 @@ def main() -> int:
     parser.add_argument("--repo-mount")
     parser.add_argument("--target-prompt", required=True)
     parser.add_argument(
-        "--first-turn-prompt",
+        "--session-prompt",
         action="append",
         default=[],
         help="fragment to append before the persona prompt; repeatable",
@@ -88,7 +88,7 @@ def main() -> int:
         home_dir=home_dir,
         target_prompt=Path(args.target_prompt),
         repo_mount=Path(args.repo_mount) if args.repo_mount else home_dir / "github",
-        first_turn_prompts=[Path(path) for path in args.first_turn_prompt],
+        session_prompts=[Path(path) for path in args.session_prompt],
     )
     return 0
 

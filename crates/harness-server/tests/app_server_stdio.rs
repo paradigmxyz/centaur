@@ -625,16 +625,16 @@ fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
 }
 
 #[test]
-fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
+fn blocks_mode_runs_session_prompt_hooks_once_before_the_harness_starts() {
     // A real overlay hook prints to stdout, which must never reach the protocol
     // channel. The fake composer records each run and copies the hook output it
     // is given into the prompt the fake harness reads.
-    let overlay = temp_path("first-turn-overlay");
-    let hook = overlay.join("services/sandbox/hooks/first-turn-prompt.sh");
+    let overlay = temp_path("session-prompt-overlay");
+    let hook = overlay.join("services/sandbox/hooks/session-prompt.sh");
     std::fs::create_dir_all(hook.parent().expect("hook dir")).expect("create hook dir");
     std::fs::write(&hook, "printf hooked\n").expect("write hook");
-    let prompt = temp_path("first-turn-prompt.md");
-    let runs = temp_path("first-turn-prompt-runs.log");
+    let prompt = temp_path("session-prompt.md");
+    let runs = temp_path("session-prompt-runs.log");
     let composer = temp_path("fake-compose-system-prompt.sh");
     std::fs::write(
         &composer,
@@ -686,7 +686,7 @@ fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
     assert_completed_turn(&second);
     assert_eq!(
         std::fs::read_to_string(&runs).expect("composer runs"),
-        "--target-prompt AGENTS.md --first-turn-prompt\n"
+        "--target-prompt AGENTS.md --session-prompt\n"
     );
     for path in [&prompt, &runs, &composer] {
         let _ = std::fs::remove_file(path);

@@ -146,7 +146,7 @@ class ComposeSystemPromptTest(unittest.TestCase):
             )
 
 
-    def test_appends_first_turn_prompts_in_order_before_persona(self) -> None:
+    def test_appends_session_prompts_in_order_before_persona(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "home"
@@ -165,7 +165,7 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 home_dir=home,
                 target_prompt=target,
                 repo_mount=home / "github",
-                first_turn_prompts=[first, second],
+                session_prompts=[first, second],
             )
 
             self.assertEqual(

@@ -137,7 +137,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 reasoning,
                 trace_context,
             }) => {
-                crate::first_turn::run_first_turn_prompt_hooks(
+                crate::session_prompt::run_session_prompt_hooks(
                     Some(&trace_context),
                     crate::otel::harness_name(harness.kind()),
                 );

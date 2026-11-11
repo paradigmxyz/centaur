@@ -36,7 +36,7 @@ centaur-overlay/
     └── sandbox/
         ├── SYSTEM_PROMPT.md
         └── hooks/
-            └── first-turn-prompt.sh
+            └── session-prompt.sh
 ```
 
 Only include the directories your deployment needs.
@@ -158,7 +158,7 @@ there.
 
 | Hook | When | Effect |
 | --- | --- | --- |
-| `first-turn-prompt.sh` | Once per harness-server process (so again after a sandbox restart), before the first turn starts the harness | Standard output is appended to the system prompt after every `SYSTEM_PROMPT.md` and before the persona prompt, in overlay order. Empty output is ignored. |
+| `session-prompt.sh` | Once the sandbox serves a session: before the harness starts for the first message it handles, and again after a sandbox restart | Standard output is appended to the system prompt after every `SYSTEM_PROMPT.md` and before the persona prompt, in overlay order. Empty output is ignored. |
 
 ```bash
 #!/usr/bin/env bash
@@ -166,16 +166,16 @@ set -euo pipefail
 my-tool describe-for-agents
 ```
 
-By the first turn, the sandbox is bound to its session, so a hook runs with the
+By then the sandbox is bound to its session, so a hook runs with the
 same brokered credentials as the agent. Its output becomes system prompt text:
 do not print content fetched from users or third parties, which would be
 prompt injection at system level.
 
 Hooks delay the first reply, so keep them fast. One time limit,
-`CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS` (default 10), covers every hook
+`CENTAUR_SESSION_PROMPT_HOOKS_TIMEOUT_SECONDS` (default 10), covers every hook
 in the pass: hooks run in overlay order, a hook still running when the limit
 runs out is killed, and any hooks left are skipped. A hook that exits non-zero,
-is killed, or prints more than `CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES`
+is killed, or prints more than `CENTAUR_SESSION_PROMPT_HOOK_MAX_BYTES`
 (default 65536) is logged and contributes nothing, and the turn still runs. Its
 standard error goes to the sandbox log. A hook path that resolves outside its
 repo is ignored.
@@ -184,8 +184,8 @@ A hook's output is complete only when its standard output closes. Do not leave
 background processes holding it: redirect their output or `wait` for them, or
 the hook runs until the time limit and its output is dropped.
 
-Each hook pass is traced on the first turn's trace as
-`<harness>.first_turn_prompt_hooks`, with a `<harness>.first_turn_prompt_hook`
+Each hook pass is traced on the triggering turn's trace as
+`<harness>.session_prompt_hooks`, with a `<harness>.session_prompt_hook`
 child per hook. The child spans carry `centaur.hook.repo`, `centaur.hook.status`
 (`ok`, `empty`, `failed`, `timeout`, `skipped`, `oversized`, `start_failed`, or
 `outside_repo`), `centaur.hook.output_bytes`, and `centaur.hook.exit_code`, so

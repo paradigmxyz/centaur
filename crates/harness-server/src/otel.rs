@@ -509,7 +509,7 @@ pub(crate) struct PromptHookRun {
     pub(crate) exit_code: Option<i64>,
 }
 
-/// The whole first-turn hook pass: every hook, then rewriting the prompt.
+/// The whole session prompt hook pass: every hook, then rewriting the prompt.
 #[derive(Debug)]
 pub(crate) struct PromptHooksRun {
     pub(crate) started_at: SystemTime,
@@ -520,10 +520,11 @@ pub(crate) struct PromptHooksRun {
     pub(crate) hooks: Vec<PromptHookRun>,
 }
 
-/// Records a span for the first-turn hook pass, parented to the first turn's
-/// trace, with a child span per hook, so hook latency on the first reply can be
-/// measured. No-op without a trace parent or configured exporter.
-pub(crate) fn record_first_turn_prompt_hooks(
+/// Records a span for the session prompt hook pass, parented to the trace of the
+/// turn that triggered it, with a child span per hook, so the latency hooks add
+/// to that reply can be measured. No-op without a trace parent or configured
+/// exporter.
+pub(crate) fn record_session_prompt_hooks(
     trace: Option<&TraceContext>,
     harness: &str,
     run: &PromptHooksRun,
@@ -537,10 +538,10 @@ pub(crate) fn record_first_turn_prompt_hooks(
     let Some(tracer) = telemetry_tracer() else {
         return;
     };
-    record_first_turn_prompt_hooks_with_tracer(&tracer, &parent, trace, harness, run);
+    record_session_prompt_hooks_with_tracer(&tracer, &parent, trace, harness, run);
 }
 
-fn record_first_turn_prompt_hooks_with_tracer(
+fn record_session_prompt_hooks_with_tracer(
     tracer: &SdkTracer,
     parent: &Context,
     trace: &TraceContext,
@@ -553,7 +554,7 @@ fn record_first_turn_prompt_hooks_with_tracer(
         .filter(|hook| hook.status != "ok" && hook.status != "empty");
     let mut attributes = trace_attributes(trace);
     attributes.extend([
-        KeyValue::new("centaur.hooks.name", "first-turn-prompt"),
+        KeyValue::new("centaur.hooks.name", "session-prompt"),
         KeyValue::new("centaur.hooks.outcome", run.outcome),
         KeyValue::new("centaur.hooks.count", run.hooks.len() as i64),
         KeyValue::new("centaur.hooks.failed_count", failed_hooks.count() as i64),
@@ -566,13 +567,13 @@ fn record_first_turn_prompt_hooks_with_tracer(
                 .sum::<i64>(),
         ),
     ]);
-    let mut span = SpanBuilder::from_name(format!("{harness}.first_turn_prompt_hooks"))
+    let mut span = SpanBuilder::from_name(format!("{harness}.session_prompt_hooks"))
         .with_kind(SpanKind::Internal)
         .with_start_time(run.started_at)
         .with_attributes(attributes)
         .start_with_context(tracer, parent);
     span.set_status(if run.outcome == "compose_failed" {
-        Status::error("first-turn prompt hooks compose_failed")
+        Status::error("session prompt hooks compose_failed")
     } else {
         Status::Ok
     });
@@ -580,7 +581,7 @@ fn record_first_turn_prompt_hooks_with_tracer(
     for hook in &run.hooks {
         let mut attributes = trace_attributes(trace);
         attributes.extend([
-            KeyValue::new("centaur.hook.name", "first-turn-prompt"),
+            KeyValue::new("centaur.hook.name", "session-prompt"),
             KeyValue::new("centaur.hook.repo", hook.repo.clone()),
             KeyValue::new("centaur.hook.path", hook.hook.clone()),
             KeyValue::new("centaur.hook.status", hook.status.clone()),
@@ -589,7 +590,7 @@ fn record_first_turn_prompt_hooks_with_tracer(
         if let Some(exit_code) = hook.exit_code {
             attributes.push(KeyValue::new("centaur.hook.exit_code", exit_code));
         }
-        let mut hook_span = SpanBuilder::from_name(format!("{harness}.first_turn_prompt_hook"))
+        let mut hook_span = SpanBuilder::from_name(format!("{harness}.session_prompt_hook"))
             .with_kind(SpanKind::Internal)
             .with_start_time(hook.started_at)
             .with_attributes(attributes)
@@ -2218,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn first_turn_prompt_hooks_record_a_parent_span_with_a_child_per_hook() {
+    fn session_prompt_hooks_record_a_parent_span_with_a_child_per_hook() {
         let (exporter, _provider, tracer) = test_telemetry();
         let trace = trace_context();
         let parent = trace.parent_context().expect("parent context");
@@ -2226,7 +2227,7 @@ mod tests {
         let hook = |repo: &str, status: &str, start: u64, end: u64, exit_code| PromptHookRun {
             repo: format!("/home/agent/github/acme/{repo}"),
             hook: format!(
-                "/home/agent/github/acme/{repo}/services/sandbox/hooks/first-turn-prompt.sh"
+                "/home/agent/github/acme/{repo}/services/sandbox/hooks/session-prompt.sh"
             ),
             status: status.to_owned(),
             started_at: at(start),
@@ -2244,12 +2245,12 @@ mod tests {
             ],
         };
 
-        record_first_turn_prompt_hooks_with_tracer(&tracer, &parent, &trace, "claude", &run);
+        record_session_prompt_hooks_with_tracer(&tracer, &parent, &trace, "claude", &run);
 
         let spans = exporter.get_finished_spans().expect("spans");
         let hooks_span = spans
             .iter()
-            .find(|span| span.name == "claude.first_turn_prompt_hooks")
+            .find(|span| span.name == "claude.session_prompt_hooks")
             .expect("hooks span");
         assert_eq!(hooks_span.parent_span_id.to_string(), "1111111111111111");
         assert_eq!(hooks_span.start_time, at(1_000));
@@ -2282,7 +2283,7 @@ mod tests {
 
         let hook_spans: Vec<_> = spans
             .iter()
-            .filter(|span| span.name == "claude.first_turn_prompt_hook")
+            .filter(|span| span.name == "claude.session_prompt_hook")
             .collect();
         assert_eq!(hook_spans.len(), 2);
         for span in &hook_spans {

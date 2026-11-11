@@ -1,9 +1,10 @@
-//! Overlay `first-turn-prompt.sh` hooks.
+//! Overlay `session-prompt.sh` hooks: prompt text an overlay generates for the
+//! session a sandbox serves.
 //!
-//! Each blocks server starts its harness lazily on the first user message. By
-//! then the sandbox claim has bound the session's proxy credentials, so overlay
-//! hooks run here rather than at boot (when a warm sandbox belongs to no
-//! session). Their output is passed to `compose-system-prompt`, which rewrites
+//! Each blocks server starts its harness lazily on the first user message it
+//! receives. By then the sandbox claim has bound the session's proxy
+//! credentials, so overlay hooks run here rather than at boot (when a warm
+//! sandbox belongs to no session). Their output is passed to `compose-system-prompt`, which rewrites
 //! the workspace `AGENTS.md` that the harness reads as it starts.
 
 use std::env;
@@ -19,17 +20,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use uuid::Uuid;
 
-use crate::otel::{PromptHookRun, PromptHooksRun, TraceContext, record_first_turn_prompt_hooks};
+use crate::otel::{PromptHookRun, PromptHooksRun, TraceContext, record_session_prompt_hooks};
 
 /// Overlay repo roots that may run sandbox hooks, rendered by the chart from
 /// the configured overlay sources. A public-only session mounts only public
 /// repos, so a private overlay listed here has no hook on disk.
 const OVERLAY_REPO_DIRS_ENV: &str = "CENTAUR_OVERLAY_REPO_DIRS";
-const HOOK_PATH: &str = "services/sandbox/hooks/first-turn-prompt.sh";
+const HOOK_PATH: &str = "services/sandbox/hooks/session-prompt.sh";
 /// One time limit for every hook in the pass.
-const TIMEOUT_ENV: &str = "CENTAUR_FIRST_TURN_PROMPT_HOOKS_TIMEOUT_SECONDS";
+const TIMEOUT_ENV: &str = "CENTAUR_SESSION_PROMPT_HOOKS_TIMEOUT_SECONDS";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_BYTES_ENV: &str = "CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES";
+const MAX_BYTES_ENV: &str = "CENTAUR_SESSION_PROMPT_HOOK_MAX_BYTES";
 const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 const COMPOSE_BIN_ENV: &str = "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN";
 const DEFAULT_COMPOSE_BIN: &str = "compose-system-prompt";
@@ -37,12 +38,12 @@ const DEFAULT_COMPOSE_BIN: &str = "compose-system-prompt";
 const TARGET_PROMPT: &str = "AGENTS.md";
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Runs the hooks once per process, before the first turn, and records their
-/// timing on that turn's trace. A failure keeps the boot-time prompt and never
+/// Runs the hooks once per process, before the first turn it handles, and records
+/// their timing on that turn's trace. A failure keeps the boot-time prompt and never
 /// fails the turn.
 ///
 /// `harness` names the harness in span names, as in `<harness>.session_task.turn`.
-pub(crate) fn run_first_turn_prompt_hooks(trace: Option<&TraceContext>, harness: &str) {
+pub(crate) fn run_session_prompt_hooks(trace: Option<&TraceContext>, harness: &str) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let repos = overlay_repo_dirs();
@@ -60,11 +61,11 @@ pub(crate) fn run_first_turn_prompt_hooks(trace: Option<&TraceContext>, harness:
         };
         let elapsed = run.ended_at.duration_since(started_at).unwrap_or_default();
         eprintln!(
-            "first-turn prompt hooks {outcome} in {}ms ({} hooks)",
+            "session prompt hooks {outcome} in {}ms ({} hooks)",
             elapsed.as_millis(),
             run.hooks.len()
         );
-        record_first_turn_prompt_hooks(trace, harness, &run);
+        record_session_prompt_hooks(trace, harness, &run);
     });
 }
 
@@ -124,7 +125,7 @@ fn run_hook(repo: &Path, hook: &Path, deadline: Instant, max_bytes: usize) -> Ho
     let started_at = SystemTime::now();
     let finish = |status: &str, output: Option<Vec<u8>>, exit_code: Option<i32>| {
         if !matches!(status, "ok" | "empty") {
-            eprintln!("first-turn prompt hook {}: {status}", hook.display());
+            eprintln!("session prompt hook {}: {status}", hook.display());
         }
         HookOutcome {
             run: PromptHookRun {
@@ -167,7 +168,7 @@ fn run_hook(repo: &Path, hook: &Path, deadline: Instant, max_bytes: usize) -> Ho
         Ok(child) => child,
         Err(error) => {
             eprintln!(
-                "first-turn prompt hook {} failed to start: {error}",
+                "session prompt hook {} failed to start: {error}",
                 hook.display()
             );
             return finish("start_failed", None, None);
@@ -237,12 +238,9 @@ fn compose(hooks: &[HookOutcome]) -> &'static str {
     let pass = Uuid::new_v4().simple();
     let mut files = Vec::new();
     for (index, output) in outputs.iter().enumerate() {
-        let path = env::temp_dir().join(format!("centaur-first-turn-prompt-{pass}-{index}.md"));
+        let path = env::temp_dir().join(format!("centaur-session-prompt-{pass}-{index}.md"));
         if let Err(error) = fs::write(&path, output) {
-            eprintln!(
-                "first-turn prompt hooks: writing {}: {error}",
-                path.display()
-            );
+            eprintln!("session prompt hooks: writing {}: {error}", path.display());
             remove_all(&files);
             return "compose_failed";
         }
@@ -252,7 +250,7 @@ fn compose(hooks: &[HookOutcome]) -> &'static str {
     let mut command = ProcessCommand::new(&bin);
     command.args(["--target-prompt", TARGET_PROMPT]);
     for file in &files {
-        command.arg("--first-turn-prompt").arg(file);
+        command.arg("--session-prompt").arg(file);
     }
     let status = command
         .stdin(Stdio::null())
@@ -263,11 +261,11 @@ fn compose(hooks: &[HookOutcome]) -> &'static str {
     match status {
         Ok(status) if status.success() => "composed",
         Ok(status) => {
-            eprintln!("first-turn prompt hooks: {bin} {status}");
+            eprintln!("session prompt hooks: {bin} {status}");
             "compose_failed"
         }
         Err(error) => {
-            eprintln!("first-turn prompt hooks: {bin}: {error}");
+            eprintln!("session prompt hooks: {bin}: {error}");
             "compose_failed"
         }
     }
@@ -292,7 +290,8 @@ mod tests {
     }
 
     fn temp_root() -> PathBuf {
-        let root = env::temp_dir().join(format!("first-turn-hooks-{}", Uuid::new_v4().simple()));
+        let root =
+            env::temp_dir().join(format!("session-prompt-hooks-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&root).unwrap();
         root
     }
