@@ -106,6 +106,11 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
         toast.error(errorMessage(error));
         form.setError("root", { type: "server", message: errorMessage(error) });
       }
+    } finally {
+      // Drop the request body (which may hold an inline value) from the
+      // MutationCache and clear the write-only field, success or error.
+      save.reset();
+      form.setValue("source.secret", "");
     }
   });
 

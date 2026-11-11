@@ -193,10 +193,15 @@ export function useRoleGrantMutations(kind: string, id: string) {
   };
 }
 
-/** Create (no id) or PATCH (id) one form-kind secret. */
+/**
+ * Create (no id) or PATCH (id) one form-kind secret. The body may carry an
+ * inline source value, so the mutation is never retained in the
+ * MutationCache (gcTime 0); the form also calls reset() once it settles.
+ */
 export function useSaveSecret(kind: FormKind, id?: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: (data: Record<string, unknown>) =>
       id
         ? api.patch<DataEnvelope<KindRecord>>(`${KIND_RESOURCE[kind]}/${id}`, { data })

@@ -650,3 +650,56 @@ describe("client-side validation", () => {
     expect(api.calls()).toHaveLength(0);
   });
 });
+
+describe("inline values in client caches", () => {
+  const PLAINTEXT = "postgres://u:plaintext-pw@db.example/shop";
+  const cachedState = (queryClient: import("@tanstack/react-query").QueryClient) =>
+    JSON.stringify([
+      queryClient.getMutationCache().getAll().map((mutation) => mutation.state),
+      queryClient.getQueryCache().getAll().map((query) => [query.queryKey, query.state.data]),
+    ]);
+
+  async function fillInlineDsn() {
+    await userEvent.type(screen.getByLabelText("Foreign ID *"), "ui-shop");
+    await userEvent.type(screen.getByLabelText("Database *"), "shop");
+    await userEvent.click(screen.getByRole("combobox", { name: "Backend" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Inline Value" }));
+    await userEvent.type(screen.getByLabelText("Inline value"), PLAINTEXT);
+  }
+
+  it("leaves no plaintext in the mutation or query cache after a successful create and unmount", async () => {
+    const api = mockApi({ "POST /api/v1/pg_dsn_secrets": { data: { id: "pgd_new" } } });
+    const { queryClient, unmount } = renderRoute(<SecretNewPage />, {
+      path: "/console/secrets/:kind/new",
+      url: "/console/secrets/pg_dsn/new",
+      routes: [{ path: "/console/secrets/:kind/:id", element: <p>detail page</p> }],
+    });
+    await fillInlineDsn();
+    await userEvent.click(screen.getByRole("button", { name: "Create secret" }));
+    expect(await screen.findByText("detail page")).toBeInTheDocument();
+    expect(JSON.stringify(api.calls("POST /api/v1/pg_dsn_secrets")[0]?.body)).toContain(PLAINTEXT);
+    unmount();
+    await waitFor(() => expect(cachedState(queryClient)).not.toContain(PLAINTEXT));
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+  });
+
+  it("clears the inline value from the form and caches after a rejected save", async () => {
+    mockApi({
+      "POST /api/v1/pg_dsn_secrets": apiResponse(422, {
+        error: { message: "validation failed", details: { database: ["must match the DSN's database"] } },
+      }),
+    });
+    const { queryClient, unmount } = renderRoute(<SecretNewPage />, {
+      path: "/console/secrets/:kind/new",
+      url: "/console/secrets/pg_dsn/new",
+    });
+    await fillInlineDsn();
+    await userEvent.click(screen.getByRole("button", { name: "Create secret" }));
+    expect(await screen.findByText("Database must match the DSN's database")).toBeInTheDocument();
+    expect(screen.getByLabelText("Inline value")).toHaveValue("");
+    expect(document.body.innerHTML).not.toContain(PLAINTEXT);
+    await waitFor(() => expect(cachedState(queryClient)).not.toContain(PLAINTEXT));
+    unmount();
+    await waitFor(() => expect(cachedState(queryClient)).not.toContain(PLAINTEXT));
+  });
+});
