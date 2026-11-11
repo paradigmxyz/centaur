@@ -125,67 +125,57 @@ return `{ "data": { "descoped": true|false } }`; bearer callers receive `422`.
 
 ### Console auth pages
 
-Endpoints behind the SPA's signed-out pages (`/login`, `/pending`). The OAuth
-flows are intentionally not SPA pages: the MCP OAuth consent page and the
-broker OAuth result page are server-rendered by Rails (see
-[MCP OAuth consent](#mcp-oauth-consent) and the
-[consent flow](#oauth-consent-flow)).
+Sign-in is a step of the MCP OAuth flow, so the login and pending pages are
+intentionally server-rendered by Rails (a standalone page with plain CSS and no
+JavaScript), like the [MCP OAuth consent](#mcp-oauth-consent) page and the
+broker OAuth result page ([consent flow](#oauth-consent-flow)). They are not
+`/api/v1` endpoints and not SPA routes; the SPA takes over after sign-in. The
+form contract matches earlier console releases, so pods on either version
+accept each other's forms during a rolling deploy or rollback.
 
 | Method | Path | Access | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/auth/config` | public (no session or key needed) | Login-page bootstrap: sign-in methods, CSRF token, one-shot flash |
-| `POST` | `/api/v1/session` | public, CSRF token required | Password sign-in |
+| `GET` | `/login` | public | Login page: SSO buttons, the password form, the one-shot flash |
+| `POST` | `/login` | public, authenticity token required | Password sign-in (form post) |
+| `DELETE` | `/logout` | session, authenticity token required | Sign out (form post with `_method=delete`) |
+| `GET` | `/pending` | pending session | Holding page for an account awaiting approval |
 
-`GET /api/v1/auth/config` (sent with `Cache-Control: no-store`; ignores any
-`Authorization` header):
-
-```json
-{
-  "data": {
-    "providers": [ { "key": "google", "label": "Google", "start_path": "/auth/google/start" } ],
-    "password_login": true,
-    "csrf_token": "…",
-    "signed_in": false,
-    "redirect_to": null,
-    "flash": { "alert": "Sign in was canceled." }
-  }
-}
-```
-
-- `providers` lists the configured SSO providers; `start_path` begins the
-  browser redirect flow. `password_login` is `false` when
-  `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false`.
-- `csrf_token` is bound to the (possibly new) session; send it as
-  `X-CSRF-Token` to `POST /api/v1/session`.
-- `signed_in` is `true` for an active or pending session (a disabled
-  account's session is cleared). `redirect_to` is set only for an active
-  session: where the login page should send it (`?return_to=` when
-  allowlisted, else the landing page).
-- `?return_to=` from a signed-out browser is remembered for the post-login
-  redirect when it is an allowlisted same-origin path: `/`, `/console…`,
-  `/mcp/oauth/authorize`, `/oauth/<slug>/start`, or `/launch` (no scheme,
-  host, `//`, backslashes, control characters, or dot segments). Other values
-  are ignored.
-- `flash` hands off (once) the `notice`/`alert` left by a redirect: SSO
-  failures, sign-out (`"Signed out."`), or a disabled account bounced by a
-  Rails-owned route (`"Your account is disabled."`).
-
-`POST /api/v1/session` body `{ "data": { "email": "…", "password": "…" } }`
-(email is trimmed and matched case-insensitively). Success resets the session
-(fixation) and returns `{ "data": { "status": "active" | "pending", "redirect_to": "/console/principals" } }`;
-`redirect_to` is the remembered return path, the landing page, or `/pending`
-for a pending account. The next `GET /api/v1/me` carries the `notice`. Errors:
-`404` `password_login_disabled`, `422` `invalid_credentials` ("Invalid email
-or password."), `422` `account_disabled`, `403` `csrf`.
-
-`DELETE /api/v1/session` also leaves the `"Signed out."` notice for the login
-page.
+- `GET /login` (sent with `Cache-Control: no-store`) shows a "Continue with
+  <Provider>" link to `/auth/<provider>/start` for each configured SSO
+  provider and, unless `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false`, a form
+  posting `authenticity_token`, `email`, and `password` to `/login`. A
+  signed-in active session is redirected to `?return_to=` (when allowlisted)
+  or its landing page.
+- `?return_to=` from a signed-out browser (the SPA sends the current page on a
+  `401`) is remembered for the post-login redirect when it is an allowlisted
+  same-origin path: `/`, `/console…`, `/mcp/oauth/authorize` (or
+  `/mcp/oauth/authorize.html`), `/oauth/<slug>/start`, or `/launch`, with its
+  query kept (no scheme, host, `//`, backslashes, control characters, or dot
+  segments). Other values are ignored. Session-gated GET endpoints remember
+  the same way when they bounce a signed-out browser to `/login`.
+- `POST /login` trims the email and matches it case-insensitively. Success
+  resets the session (fixation) and redirects (`302`) to the remembered return
+  path or the landing page (`/console/principals` for admins,
+  `/console/integrations` otherwise) with the notice `"Signed in as <email>."`,
+  which the SPA shows from `GET /api/v1/me`. A pending account is signed in and
+  redirected to `/pending` ("Your account is awaiting approval."). Failures
+  re-render the login page: `404` "Email and password sign in is disabled.",
+  `422` "Invalid email or password.", `422` "Your account is disabled.". A
+  missing or invalid authenticity token, or a cross-site `Origin`, is a `422`.
+- `DELETE /logout` clears the session and redirects to `/login` with
+  `"Signed out."`. The SPA's sign-out button uses `DELETE /api/v1/session`
+  instead, which leaves the same notice.
+- `GET /pending` shows the signed-in email and a sign-out button. Active
+  sessions are redirected to their landing page and signed-out browsers to
+  `/login`.
+- SSO failures (`/auth/<provider>/*`) and disabled accounts bounced by a
+  Rails-owned route redirect to `/login` with an alert, which the page renders.
 
 #### MCP OAuth consent
 
 The MCP OAuth consent flow is intentionally server-rendered by Rails (not an
 SPA page), so installed MCP clients keep exactly the behaviour they were built
-against. Only the sign-in step goes through the SPA.
+against. The sign-in step (`/login`) is server-rendered too.
 
 Dynamic client registration (`POST /mcp/oauth/register`) accepts `https`
 redirect URIs, loopback `http`, and native private-use schemes (`cursor://`,

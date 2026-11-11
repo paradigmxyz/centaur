@@ -32,39 +32,45 @@ Operators manage credentials, principals, roles, and grants through the API or t
 
 The operator console lives in [`web/`](web/): Vite, React, TypeScript,
 shadcn/ui on Tailwind CSS, React Router, and TanStack Query. It covers every
-console page, including the signed-out ones (login and the pending-approval
-page). The OAuth flows are the one intentional exception: the MCP OAuth consent
-page and the broker OAuth result page stay server-rendered by Rails (see
-below), so installed MCP clients keep exactly the behaviour they were built
-against.
+console page after sign-in. Sign-in and the OAuth flows are the one
+intentional exception: the login and pending-approval pages, the MCP OAuth
+consent page, and the broker OAuth result page stay server-rendered by Rails
+(see below), so installed MCP clients keep exactly the behaviour they were
+built against, sign-in works without JavaScript, and pods on either side of a
+rolling deploy accept each other's forms.
 
 - **Serving.** `pnpm -C web build` writes the app to `public/spa` (asset URLs
   under `/spa/`). Any browser `GET`/`HEAD` navigation that no Rails route
   claims gets `public/spa/index.html` from `SpaController`, served `no-cache`;
   React Router renders the page, including its own not-found page. API,
   framework, and protocol prefixes (`/api`, `/rails`, `/spa`, `/assets`,
-  `/.well-known`, `/up`, `/mcp/oauth/token`, `/mcp/oauth/register`) never get
-  HTML. See `lib/spa_request.rb` and `config/routes/spa.rb`.
+  `/.well-known`, `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`,
+  `/pending`) never get the SPA: unknown paths there return the JSON 404. See `lib/spa_request.rb` and `config/routes/spa.rb`.
 - **Data.** The SPA only uses `/api/v1`, authenticated by the console session
   cookie. It reads the session, CSRF token, nav flags, and one-shot flash from
-  `GET /api/v1/me`, and sends `X-CSRF-Token` on every write. The signed-out
-  pages bootstrap from the public `GET /api/v1/auth/config`. See
+  `GET /api/v1/me`, and sends `X-CSRF-Token` on every write. A `401` sends the
+  browser to `/login?return_to=<current page>` (a full page load) and a pending
+  account to `/pending`; sign-out is `DELETE /api/v1/session`. See
   [docs/API.md](docs/API.md#authentication).
 - **Rails-owned browser routes.** `/auth/:provider/{start,callback}` (SSO),
   `/oauth/:slug/{start,callback}` (broker OAuth consent),
   `/mcp/oauth/{authorize,token,register}` and the
   `/.well-known` metadata (MCP OAuth), `/launch` (PWA protocol handler), and
   `/manifest` / `/service-worker` (PWA files from `config/pwa`). They answer
-  with redirects into the SPA or JSON.
-- **Server-rendered OAuth pages.** `GET /mcp/oauth/authorize` renders the MCP
-  consent page and `POST /mcp/oauth/authorize` (a standard Rails form with an
-  authenticity token) issues the code; `/oauth/:slug/{start,callback}` render
-  their failure page in the same response. Only the sign-in step goes through
-  the SPA (`/login` returns to the authorize URL). These pages use the
+  with redirects or JSON.
+- **Server-rendered sign-in and OAuth pages.** `GET /login` renders the login
+  page (SSO buttons and the password form), `POST /login` and
+  `DELETE /logout` are standard Rails forms with an authenticity token, and
+  `GET /pending` is the holding page for accounts awaiting approval (see
+  [docs/API.md](docs/API.md#console-auth-pages)). `GET /mcp/oauth/authorize`
+  renders the MCP consent page and `POST /mcp/oauth/authorize` issues the
+  code; `/oauth/:slug/{start,callback}` render their failure page in the same
+  response. After sign-in `/login` returns to the remembered page, such as the
+  authorize URL with its query. These pages use the
   standalone `layouts/oauth.html.erb` and plain CSS from `public/oauth-page`
   (the SPA's colours, dark by default and light under
   `prefers-color-scheme: light`), with no asset pipeline and no JavaScript.
-  `script/check-no-ruby-ui` allows exactly these views and the two
+  `script/check-no-ruby-ui` allows exactly these views and the three
   controllers that render them, and fails if any other template, view helper,
   browser JavaScript, or asset-pipeline gem comes back.
 
@@ -103,8 +109,8 @@ To use an existing PostgreSQL server instead, set
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
 
 For local development, sign in through the normal login page at
-`http://localhost:5173/login` (Vite) or `http://localhost:3000/login` (the built
-SPA served by Rails) with the seeded initial user's
+`http://localhost:5173/login` (Vite proxies it to Rails) or
+`http://localhost:3000/login` with the seeded initial user's
 `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
 credentials, the same as every other environment.
 

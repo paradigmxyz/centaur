@@ -11,27 +11,31 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Architecture
 
-- Rails has no server-rendered UI except the OAuth flows: no views (other
-  than the unused mailer layouts and the OAuth pages below), view helpers,
-  browser JavaScript, or asset pipeline. `script/check-no-ruby-ui` enforces
-  this in `bin/ci` and CI. Every console page, including login and pending,
-  is a route in `web/`.
-- The OAuth flows are intentionally server-rendered so installed MCP clients
-  see exactly the protocol behaviour they were built against: the MCP consent
-  page (`GET`/`POST /mcp/oauth/authorize`, a standard Rails form with an
-  authenticity token) and the broker OAuth result page
-  (`/oauth/:slug/{start,callback}`). They use `layouts/oauth.html.erb` and
-  plain CSS in `public/oauth-page` (no Stimulus, no JavaScript); keep its
-  colours in step with `web/src/index.css`. Do not move them into the SPA, and
-  keep their URLs, form field names, validation order, and error redirects
-  stable. Only the login step goes through the SPA.
+- Rails has no server-rendered UI except sign-in and the OAuth flows: no
+  views (other than the unused mailer layouts and the pages below), view
+  helpers, browser JavaScript, or asset pipeline. `script/check-no-ruby-ui`
+  enforces this in `bin/ci` and CI. Every console page after sign-in is a
+  route in `web/`.
+- Sign-in and the OAuth flows are intentionally server-rendered so installed
+  MCP clients and pods on either side of a rolling deploy see exactly the
+  protocol behaviour they were built against, and sign-in works without
+  JavaScript: the login and pending pages (`GET`/`POST /login`,
+  `DELETE /logout`, `GET /pending`; `SessionsController`), the MCP consent
+  page (`GET`/`POST /mcp/oauth/authorize`), and the broker OAuth result page
+  (`/oauth/:slug/{start,callback}`). Their forms are standard Rails forms
+  with an authenticity token. They use `layouts/oauth.html.erb` and plain CSS
+  in `public/oauth-page` (no Stimulus, no JavaScript); keep its colours in
+  step with `web/src/index.css`. Do not move them into the SPA, and keep
+  their URLs, form field names, messages, validation order, and redirects
+  stable. The SPA reaches `/login` and `/pending` with full page loads.
 - Rails serves `public/spa/index.html` (built by `pnpm -C web build`) for any
   browser navigation no route claims (`SpaController`, `lib/spa_request.rb`).
-  The remaining browser-facing Rails routes are protocol endpoints: SSO
-  (`/auth/:provider/*`), broker OAuth consent (`/oauth/:slug/*`), the MCP
-  OAuth server (`/mcp/oauth/*`, `/.well-known/*`), and the PWA files and
-  `/launch`. Apart from the OAuth pages above they answer with redirects or
-  JSON.
+  The remaining browser-facing Rails routes are the sign-in pages and
+  protocol endpoints: SSO (`/auth/:provider/*`), broker OAuth consent
+  (`/oauth/:slug/*`), the MCP OAuth server (`/mcp/oauth/*`, `/.well-known/*`),
+  and the PWA files and `/launch`. Apart from the pages above they answer with
+  redirects or JSON. Those namespaces, `/login`, `/logout`, and `/pending` are
+  excluded from the SPA fallback, so unknown paths there get the JSON 404.
 - Each console area owns `config/routes/console_<area>.rb` (its `/api/v1`
   additions and protocol routes) and `web/src/features/<area>/`. Shared SPA
   building blocks live in `web/src/components/` (see its `README.md`),
