@@ -1,9 +1,10 @@
 // Data access for the admin pages (users, API clients, system settings).
 // Query keys live under "admin" (see lib/query-keys.ts).
 //
-// API client secrets are never cached: the create/rotate responses are only
-// handed to the caller (mutations keep no result: gcTime 0) and detail
-// queries are refreshed by invalidation, not seeded from those responses.
+// API client secrets are never cached: the create/rotate mutations use
+// gcTime 0 and callers reset() them as soon as they settle, so the response
+// leaves the MutationCache; detail queries are refreshed by invalidation, never
+// seeded from those responses.
 import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 
 import { api, type DataEnvelope } from "@/lib/api";

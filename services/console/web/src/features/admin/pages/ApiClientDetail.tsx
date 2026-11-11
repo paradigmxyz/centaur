@@ -37,11 +37,23 @@ export default function ApiClientDetailPage() {
 }
 
 function ApiClientDetail({ id }: { id: string }) {
+  // Before the suspending query, so the handoff is consumed even if it fails.
+  const [secret, setSecret] = useIssuedSecret(id);
+  return <ApiClientDetailBody id={id} secret={secret} setSecret={setSecret} />;
+}
+
+function ApiClientDetailBody({
+  id,
+  secret,
+  setSecret,
+}: {
+  id: string;
+  secret: string | null;
+  setSecret: (secret: string | null) => void;
+}) {
   const { data: client } = useApiClient(id);
   const mutations = useApiClientMutations(id);
   const navigate = useNavigate();
-  // The plaintext secret lives only in this component's state.
-  const [secret, setSecret] = useIssuedSecret(id);
   const [principalRef, setPrincipalRef] = useState("");
   useDocumentTitle(client.name);
 
@@ -59,11 +71,14 @@ function ApiClientDetail({ id }: { id: string }) {
   const rotate = async () => {
     try {
       const body = await mutations.rotateSecret.mutateAsync();
-      mutations.rotateSecret.reset();
+      // The plaintext lives only in the parent's state.
       setSecret(body.data.secret);
       toast.success("Secret rotated. The previous secret no longer works.");
     } catch (error) {
       toast.error(errorMessage(error));
+    } finally {
+      // Drop the secret-bearing response from the MutationCache (gcTime 0).
+      mutations.rotateSecret.reset();
     }
   };
 

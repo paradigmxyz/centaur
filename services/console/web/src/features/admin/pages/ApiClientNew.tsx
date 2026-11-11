@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 
 import { API_CLIENT_SCOPES, useCreateApiClient } from "../api";
-import { stashIssuedSecret } from "../secret-handoff";
+import { apiClientPath, useStashIssuedSecret } from "../secret-handoff";
 import { ApiClientForm } from "../sections/ApiClientForm";
 
 export default function ApiClientNewPage() {
@@ -20,6 +20,7 @@ export default function ApiClientNewPage() {
 function ApiClientNew() {
   const navigate = useNavigate();
   const create = useCreateApiClient();
+  const stashIssuedSecret = useStashIssuedSecret();
 
   return (
     <>
@@ -30,14 +31,20 @@ function ApiClientNew() {
       <ApiClientForm
         mode="new"
         defaults={{ name: "", scopes: [...API_CLIENT_SCOPES] }}
-        error={create.error}
         cancelTo="/console/api_clients"
         onSubmit={async (input) => {
-          const body = await create.mutateAsync(input);
-          stashIssuedSecret(body.data.id, body.data.secret);
-          create.reset();
+          let id: string;
+          try {
+            // The response carries the plaintext secret: hand it off, then drop
+            // the mutation (gcTime 0) so it leaves the MutationCache.
+            const body = await create.mutateAsync(input);
+            id = body.data.id;
+            stashIssuedSecret(id, body.data.secret);
+          } finally {
+            create.reset();
+          }
           toast.success("API client created.");
-          navigate(`/console/api_clients/${body.data.id}`);
+          navigate(apiClientPath(id));
         }}
       />
     </>

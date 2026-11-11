@@ -1,4 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import { Component, type ReactNode } from "react";
+import { Route, Routes } from "react-router";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +12,7 @@ import ApiClientNewPage from "./pages/ApiClientNew";
 import ApiClientsListPage from "./pages/ApiClientsList";
 import SystemSettingsPage from "./pages/SystemSettingsPage";
 import UsersPage from "./pages/UsersPage";
+import { IssuedSecretScope } from "./secret-handoff";
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
@@ -22,6 +25,34 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+/** Stands in for the shell's route errorElement, which sits above the API client scope. */
+class TestErrorBoundary extends Component<{ children: ReactNode }, { error: unknown }> {
+  state = { error: null as unknown };
+  static getDerivedStateFromError(error: unknown) {
+    return { error };
+  }
+  render() {
+    return this.state.error ? <p>route error</p> : this.props.children;
+  }
+}
+
+/** The /console/api_clients subtree as registered in index.ts (scope layout + children). */
+function renderApiClientRoutes(url: string) {
+  return renderRoute(
+    <TestErrorBoundary>
+      <IssuedSecretScope>
+        <Routes>
+          <Route index element={<ApiClientsListPage />} />
+          <Route path="new" element={<ApiClientNewPage />} />
+          <Route path=":id" element={<ApiClientDetailPage />} />
+          <Route path=":id/edit" element={<ApiClientEditPage />} />
+        </Routes>
+      </IssuedSecretScope>
+    </TestErrorBoundary>,
+    { path: "/console/api_clients/*", url, me: apiClientsMe() },
+  );
+}
 
 const apiClientsMe = () => adminMe({ features: { api_clients: true, password_login: true }, nav: { ...adminMe().nav, api_clients: true } });
 
@@ -120,6 +151,19 @@ describe("users page", () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("You can't demote your own account."));
   });
 
+  it("labels the pending count without pluralizing, as the legacy page did", async () => {
+    mockApi({ "GET /api/v1/users": { data: [pending, { ...pending, id: "usr_p2", email: "p2@example.test" }], meta: { total: 2 } } });
+    renderRoute(<UsersPage />, { path: "/console/users" });
+    expect(await screen.findByRole("heading", { name: "2 pending approval" })).toBeInTheDocument();
+  });
+
+  it("shows a load error instead of the empty state", async () => {
+    mockApi({ "GET /api/v1/users": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderRoute(<UsersPage />, { path: "/console/users" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("database unavailable");
+    expect(screen.queryByText("No approved users yet.")).not.toBeInTheDocument();
+  });
+
   it("shows the empty state", async () => {
     mockApi({ "GET /api/v1/users": { data: [pending], meta: { total: 1 } } });
     renderRoute(<UsersPage />, { path: "/console/users" });
@@ -174,6 +218,13 @@ describe("API clients list", () => {
     expect(await screen.findByText("No API clients yet.")).toBeInTheDocument();
   });
 
+  it("shows a load error instead of the empty state", async () => {
+    mockApi({ "GET /api/v1/api_clients": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderRoute(<ApiClientsListPage />, { path: "/console/api_clients", me: apiClientsMe() });
+    expect(await screen.findByRole("alert")).toHaveTextContent("database unavailable");
+    expect(screen.queryByText("No API clients yet.")).not.toBeInTheDocument();
+  });
+
   it("is unreachable while the feature is off", async () => {
     const api = mockApi({});
     renderRoute(<ApiClientsListPage />, { path: "/console/api_clients", me: adminMe() });
@@ -188,11 +239,7 @@ describe("new API client", () => {
       "POST /api/v1/api_clients": { data: { ...client, secret: "plain-secret-value" } },
       "GET /api/v1/api_clients/apc_eval": { data: client },
     });
-    const { router } = renderRoute(<ApiClientNewPage />, {
-      path: "/console/api_clients/new",
-      me: apiClientsMe(),
-      routes: [{ path: "/console/api_clients/:id", element: <ApiClientDetailPage /> }],
-    });
+    const { router, queryClient } = renderApiClientRoutes("/console/api_clients/new");
 
     expect(screen.getByLabelText("sessions:read")).toBeChecked();
     expect(screen.getByLabelText("sessions:write")).toBeChecked();
@@ -212,6 +259,63 @@ describe("new API client", () => {
     // A later visit cannot show it again.
     await router.navigate("/console/api_clients/new");
     expect(await screen.findByRole("heading", { name: "New API Client" })).toBeInTheDocument();
+    await router.navigate("/console/api_clients/apc_eval");
+    expect(await screen.findByRole("heading", { name: "eval-runner" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Client secret" })).not.toBeInTheDocument();
+
+    // The plaintext never stays in TanStack's caches.
+    await router.navigate("/console/principals");
+    await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state))).not.toContain("plain-secret-value"));
+    expect(JSON.stringify(queryClient.getQueryCache().getAll().map((q) => [q.queryKey, q.state]))).not.toContain("plain-secret-value");
+  });
+
+  it("drops the handoff when the detail fetch fails and the user navigates away", async () => {
+    let detailFails = true;
+    mockApi({
+      "POST /api/v1/api_clients": { data: { ...client, secret: "plain-secret-value" } },
+      "GET /api/v1/api_clients/apc_eval": () =>
+        detailFails ? apiResponse(500, { error: { message: "boom" } }) : { data: client },
+    });
+    const { router, queryClient } = renderApiClientRoutes("/console/api_clients/new");
+
+    await userEvent.type(screen.getByLabelText("Name *"), "eval-runner");
+    await userEvent.click(screen.getByRole("button", { name: "Create API client" }));
+    expect(await screen.findByText("route error")).toBeInTheDocument();
+    // A suspense query rethrows its cached error on remount; start the revisit clean.
+    queryClient.removeQueries({ queryKey: ["admin"] });
+
+    await router.navigate("/console/principals");
+    expect(await screen.findByText("other page")).toBeInTheDocument();
+    detailFails = false;
+    await router.navigate("/console/api_clients/apc_eval");
+    expect(await screen.findByRole("heading", { name: "eval-runner" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Client secret" })).not.toBeInTheDocument();
+  });
+
+  it("drops the handoff when the user leaves before the detail page loads", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = mockApi({
+      "POST /api/v1/api_clients": { data: { ...client, secret: "plain-secret-value" } },
+      "GET /api/v1/api_clients": { data: [client], meta: { total: 1 } },
+      "GET /api/v1/api_clients/apc_eval": { data: client },
+    });
+    // Hold the detail fetch open until released.
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/v1/api_clients/apc_eval")) await gate;
+      return api.fetch(input, init);
+    });
+    const { router } = renderApiClientRoutes("/console/api_clients/new");
+
+    await userEvent.type(screen.getByLabelText("Name *"), "eval-runner");
+    await userEvent.click(screen.getByRole("button", { name: "Create API client" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/console/api_clients/apc_eval"));
+
+    await router.navigate("/console/api_clients");
+    expect(await screen.findByRole("link", { name: "apc_eval" })).toBeInTheDocument();
+    release();
     await router.navigate("/console/api_clients/apc_eval");
     expect(await screen.findByRole("heading", { name: "eval-runner" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Client secret" })).not.toBeInTheDocument();
@@ -307,7 +411,7 @@ describe("API client detail", () => {
   });
 
   it("rotates the secret after confirmation and shows it once", async () => {
-    const { api } = renderDetail({ "POST /api/v1/api_clients/apc_eval/rotate_secret": { data: { ...client, secret: "rotated-secret" } } });
+    const { api, queryClient, unmount } = renderDetail({ "POST /api/v1/api_clients/apc_eval/rotate_secret": { data: { ...client, secret: "rotated-secret" } } });
     await userEvent.click(await screen.findByRole("button", { name: "Rotate secret" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Rotate the secret?" });
     expect(within(dialog).getByText("The current secret and its access tokens stop working immediately.")).toBeInTheDocument();
@@ -316,6 +420,10 @@ describe("API client detail", () => {
     expect(await screen.findByRole("textbox", { name: "Client secret" })).toHaveValue("rotated-secret");
     expect(toast.success).toHaveBeenCalledWith("Secret rotated. The previous secret no longer works.");
     expect(api.calls("POST /api/v1/api_clients/apc_eval/rotate_secret")).toHaveLength(1);
+    await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state))).not.toContain("rotated-secret"));
+    expect(JSON.stringify(queryClient.getQueryCache().getAll().map((q) => q.state))).not.toContain("rotated-secret");
+    unmount();
+    expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state))).not.toContain("rotated-secret");
   });
 
   it("disables after confirmation and enables a disabled client", async () => {
@@ -469,11 +577,9 @@ describe("system settings", () => {
       "GET /api/v1/system_settings/slack_external_teams": apiResponse(503, { error: { message: "unavailable" } }),
     });
     renderRoute(<SystemSettingsPage />, { path: "/console/settings/edit" });
-    expect(
-      await screen.findByText(
-        "The allowed external workspaces could not be loaded from the Centaur API. Reload the page to try again.",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The allowed external workspaces could not be loaded from the Centaur API. Reload the page to try again.",
+    );
     expect(screen.queryByRole("button", { name: "Save Slack Connect workspaces" })).not.toBeInTheDocument();
   });
 

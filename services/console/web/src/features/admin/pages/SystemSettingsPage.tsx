@@ -215,9 +215,9 @@ function SlackConnectSection() {
       {teams.isLoading ? (
         <p className="text-sm text-subtle-foreground">Loading…</p>
       ) : teams.isError ? (
-        <p className="text-sm text-subtle-foreground">
+        <ErrorAlert className="mb-0">
           The allowed external workspaces could not be loaded from the Centaur API. Reload the page to try again.
-        </p>
+        </ErrorAlert>
       ) : (
         <form onSubmit={onSubmit} className="space-y-4">
           <FieldShell

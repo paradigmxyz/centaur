@@ -1,4 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { Link } from "react-router";
 import { z } from "zod";
@@ -23,19 +24,23 @@ interface ApiClientFormProps {
   /** New clients pick an optional default principal; existing ones manage principals on the detail page. */
   mode: "new" | "edit";
   defaults: { name: string; scopes: string[] };
-  error: unknown;
   cancelTo: string;
   onSubmit: (input: ApiClientInput) => Promise<void>;
 }
 
 /** The legacy api_clients/_form: name, (new only) default principal, scopes. */
-export function ApiClientForm({ mode, defaults, error, cancelTo, onSubmit }: ApiClientFormProps) {
+export function ApiClientForm({ mode, defaults, cancelTo, onSubmit }: ApiClientFormProps) {
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { name: defaults.name, principal: "", scopes: defaults.scopes },
   });
 
+  // Held here rather than read from the mutation, which callers reset as soon
+  // as it settles so no response stays in the MutationCache.
+  const [error, setError] = useState<unknown>(null);
+
   const submit = form.handleSubmit(async (values) => {
+    setError(null);
     try {
       await onSubmit({
         name: values.name,
@@ -43,6 +48,7 @@ export function ApiClientForm({ mode, defaults, error, cancelTo, onSubmit }: Api
         ...(mode === "new" && values.principal ? { principal: values.principal } : {}),
       });
     } catch (caught) {
+      setError(caught);
       applyApiErrors(form.setError, caught, FIELDS);
     }
   });

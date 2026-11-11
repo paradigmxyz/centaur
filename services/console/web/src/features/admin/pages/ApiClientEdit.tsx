@@ -32,7 +32,6 @@ function ApiClientEdit() {
       <ApiClientForm
         mode="edit"
         defaults={{ name: client.name, scopes: client.scopes }}
-        error={update.error}
         cancelTo={detailPath}
         onSubmit={async (input) => {
           await update.mutateAsync(input);

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { toast } from "sonner";
 
+import { ErrorAlert } from "@/components/alerts";
 import { StatusBadge, userStatusTone } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ControlTabs } from "@/components/control-tabs";
@@ -10,7 +11,6 @@ import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
-import { pluralize } from "@/lib/format";
 
 import { useUserAction, useUsers, type ConsoleUser, type UserAction } from "../api";
 
@@ -147,13 +147,16 @@ function UsersPage() {
       <ControlTabs />
       <PageHeader title="Users" subtitle="Operator accounts. Approve pending sign-ins, change roles, or disable access." />
 
+      {users.isError && <ErrorAlert>{errorMessage(users.error)}</ErrorAlert>}
+
       {pending.length > 0 && (
         <section aria-labelledby="pending-users-heading" className="mb-10">
           <h2
             id="pending-users-heading"
             className="mb-3 text-xs font-semibold tracking-wider text-amber-300/80 uppercase light:text-amber-700"
           >
-            {pluralize(pending.length, "pending approval")}
+            {/* Fixed label, as on the legacy page. */}
+            {pending.length} pending approval
           </h2>
           <div className="overflow-hidden rounded-sm border border-amber-500/30 bg-amber-500/[0.04]">
             <table className="min-w-full text-sm">
@@ -183,14 +186,16 @@ function UsersPage() {
         </section>
       )}
 
-      <DataTable
-        caption="Users"
-        columns={columns}
-        rows={users.data ? approved : undefined}
-        loading={users.isLoading}
-        rowKey={(user) => user.id}
-        empty={users.isError ? errorMessage(users.error) : "No approved users yet."}
-      />
+      {!users.isError && (
+        <DataTable
+          caption="Users"
+          columns={columns}
+          rows={users.data ? approved : undefined}
+          loading={users.isLoading}
+          rowKey={(user) => user.id}
+          empty="No approved users yet."
+        />
+      )}
     </>
   );
 }

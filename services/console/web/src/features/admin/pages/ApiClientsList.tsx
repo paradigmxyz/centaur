@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 
+import { ErrorAlert } from "@/components/alerts";
 import { ControlTabs } from "@/components/control-tabs";
 import { DataTable, type Column } from "@/components/data-table";
 import { PageHeader } from "@/components/page-header";
@@ -57,14 +58,18 @@ function ApiClientsList() {
           </Button>
         }
       />
-      <DataTable
-        caption="API clients"
-        columns={columns}
-        rows={clients.data}
-        loading={clients.isLoading}
-        rowKey={(client) => client.id}
-        empty={clients.isError ? errorMessage(clients.error) : "No API clients yet."}
-      />
+      {clients.isError ? (
+        <ErrorAlert>{errorMessage(clients.error)}</ErrorAlert>
+      ) : (
+        <DataTable
+          caption="API clients"
+          columns={columns}
+          rows={clients.data}
+          loading={clients.isLoading}
+          rowKey={(client) => client.id}
+          empty="No API clients yet."
+        />
+      )}
     </>
   );
 }

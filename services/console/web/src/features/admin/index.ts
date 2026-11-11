@@ -9,10 +9,17 @@ const admin: FeatureModule = {
   id: "admin",
   routes: [
     { path: "/console/users", lazy: () => import("./pages/UsersPage").then((m) => ({ Component: m.default })) },
-    { path: "/console/api_clients", lazy: () => import("./pages/ApiClientsList").then((m) => ({ Component: m.default })) },
-    { path: "/console/api_clients/new", lazy: () => import("./pages/ApiClientNew").then((m) => ({ Component: m.default })) },
-    { path: "/console/api_clients/:id", lazy: () => import("./pages/ApiClientDetail").then((m) => ({ Component: m.default })) },
-    { path: "/console/api_clients/:id/edit", lazy: () => import("./pages/ApiClientEdit").then((m) => ({ Component: m.default })) },
+    {
+      // Scopes the one-shot issued-secret handoff (create -> detail) to these routes.
+      path: "/console/api_clients",
+      lazy: () => import("./secret-handoff").then((m) => ({ Component: m.IssuedSecretScope })),
+      children: [
+        { index: true, lazy: () => import("./pages/ApiClientsList").then((m) => ({ Component: m.default })) },
+        { path: "new", lazy: () => import("./pages/ApiClientNew").then((m) => ({ Component: m.default })) },
+        { path: ":id", lazy: () => import("./pages/ApiClientDetail").then((m) => ({ Component: m.default })) },
+        { path: ":id/edit", lazy: () => import("./pages/ApiClientEdit").then((m) => ({ Component: m.default })) },
+      ],
+    },
     { path: "/console/settings", loader: () => redirect("/console/settings/edit") },
     { path: "/console/settings/edit", lazy: () => import("./pages/SystemSettingsPage").then((m) => ({ Component: m.default })) },
   ],
