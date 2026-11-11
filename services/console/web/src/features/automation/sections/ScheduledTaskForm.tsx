@@ -50,9 +50,19 @@ const schema = z
     custom_time: z.string(),
     enabled: z.boolean(),
   })
-  .refine((values) => values.schedule_preset !== "custom" || values.custom_time !== "", {
-    path: ["custom_time"],
-    message: "can't be blank",
+  // Rules the API would otherwise only report as a generic cron/channel error.
+  .superRefine((values, ctx) => {
+    if (values.delivery_mode === "channel" && values.delivery_channel.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["delivery_channel"], message: "Choose a Slack channel." });
+    }
+    if (values.schedule_preset === "custom") {
+      if (values.custom_days.length === 0) {
+        ctx.addIssue({ code: "custom", path: ["custom_days"], message: "Choose at least one day." });
+      }
+      if (values.custom_time === "") {
+        ctx.addIssue({ code: "custom", path: ["custom_time"], message: "can't be blank" });
+      }
+    }
   });
 
 type Values = z.infer<typeof schema>;
@@ -218,7 +228,7 @@ export function ScheduledTaskForm({ task, foreignAuthor = false, submitLabel, on
             <Controller
               control={form.control}
               name="custom_days"
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <div role="group" aria-labelledby="custom-days-label">
                   <span id="custom-days-label" className="mb-2 block text-xs font-medium text-muted-foreground">
                     Days
@@ -246,6 +256,9 @@ export function ScheduledTaskForm({ task, foreignAuthor = false, submitLabel, on
                       </label>
                     ))}
                   </div>
+                  {fieldState.error && (
+                    <p className="mt-1 text-xs text-red-400 light:text-red-700">{fieldState.error.message}</p>
+                  )}
                 </div>
               )}
             />

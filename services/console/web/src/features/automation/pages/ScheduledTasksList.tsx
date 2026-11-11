@@ -2,6 +2,7 @@ import { Clock } from "lucide-react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 
+import { ErrorAlert } from "@/components/alerts";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable, type Column } from "@/components/data-table";
 import { LocalTime } from "@/components/local-time";
@@ -130,14 +131,18 @@ function ScheduledTasksList() {
           </Button>
         }
       />
-      <DataTable
-        caption="Scheduled tasks"
-        columns={columns}
-        rows={tasks.data}
-        loading={tasks.isLoading}
-        rowKey={(task) => task.id ?? ""}
-        empty={tasks.isError ? errorMessage(tasks.error) : "No scheduled tasks yet."}
-      />
+      {tasks.isError ? (
+        <ErrorAlert>Could not load scheduled tasks: {errorMessage(tasks.error)}</ErrorAlert>
+      ) : (
+        <DataTable
+          caption="Scheduled tasks"
+          columns={columns}
+          rows={tasks.data}
+          loading={tasks.isLoading}
+          rowKey={(task) => task.id ?? ""}
+          empty="No scheduled tasks yet."
+        />
+      )}
     </>
   );
 }

@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 
-import { WarningAlert } from "@/components/alerts";
+import { ErrorAlert, WarningAlert } from "@/components/alerts";
 import { DataTable, type Column } from "@/components/data-table";
 import { LocalTime } from "@/components/local-time";
 import { useDocumentTitle } from "@/components/page-header";
@@ -101,17 +101,19 @@ function WorkflowsList() {
     <>
       <h2 className="mb-3 text-sm font-semibold text-heading">Workflow Runs</h2>
       {unavailable && <WarningAlert className="mb-4 px-4 py-3">{WORKFLOW_DB_UNAVAILABLE}</WarningAlert>}
-      <DataTable
-        caption="Workflow runs"
-        columns={columns}
-        rows={list.isError ? [] : list.data?.data}
-        loading={list.isLoading}
-        rowKey={(row) => row.workflow_key ?? row.label}
-        empty={
-          unavailable ? "No workflow runs available." : list.isError ? errorMessage(list.error) : "No workflow runs yet."
-        }
-        pagination={list.data && !list.isError ? { meta: list.data.meta, unit: "workflow", onPageChange: setPage } : undefined}
-      />
+      {list.isError && !unavailable ? (
+        <ErrorAlert>Could not load workflows: {errorMessage(list.error)}</ErrorAlert>
+      ) : (
+        <DataTable
+          caption="Workflow runs"
+          columns={columns}
+          rows={unavailable ? [] : list.data?.data}
+          loading={list.isLoading}
+          rowKey={(row) => row.workflow_key ?? row.label}
+          empty={unavailable ? "No workflow runs available." : "No workflow runs yet."}
+          pagination={list.data && !list.isError ? { meta: list.data.meta, unit: "workflow", onPageChange: setPage } : undefined}
+        />
+      )}
     </>
   );
 }

@@ -39,6 +39,7 @@ function WorkflowDetailRoute() {
     </div>
   );
 
+  // Error states win over cached data so a failed refetch is never hidden.
   if (workflow.isLoading) return <p className="text-sm text-muted-foreground">Loading…</p>;
   if (workflow.error instanceof ApiError && workflow.error.reason === "workflow_database_unavailable") {
     return (
@@ -58,11 +59,11 @@ function WorkflowDetailRoute() {
       </>
     );
   }
-  if (!workflow.data) {
+  if (workflow.isError || !workflow.data) {
     return (
       <>
         {back}
-        <ErrorAlert>{errorMessage(workflow.error)}</ErrorAlert>
+        <ErrorAlert>Could not load this workflow: {errorMessage(workflow.error)}</ErrorAlert>
       </>
     );
   }
@@ -282,19 +283,19 @@ function HistoricalRuns({ workflow }: { workflow: WorkflowDetail }) {
           ))}
         </div>
       )}
-      <DataTable
-        caption="Historical runs"
-        columns={runColumns}
-        rows={runs.isError ? [] : runs.data?.data}
-        loading={runs.isLoading}
-        rowKey={(run) => run.run_id}
-        empty={runs.isError ? errorMessage(runs.error) : "No runs match the selected filters."}
-        pagination={
-          runs.data && !runs.isError
-            ? { meta: runs.data.meta, unit: "run", onPageChange: setPage }
-            : undefined
-        }
-      />
+      {runs.isError ? (
+        <ErrorAlert>Could not load runs: {errorMessage(runs.error)}</ErrorAlert>
+      ) : (
+        <DataTable
+          caption="Historical runs"
+          columns={runColumns}
+          rows={runs.data?.data}
+          loading={runs.isLoading}
+          rowKey={(run) => run.run_id}
+          empty="No runs match the selected filters."
+          pagination={runs.data ? { meta: runs.data.meta, unit: "run", onPageChange: setPage } : undefined}
+        />
+      )}
     </>
   );
 }

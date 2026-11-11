@@ -150,7 +150,96 @@ describe("scheduled tasks list", () => {
   });
 });
 
+describe("scheduled task request failures", () => {
+  const failure = apiResponse(500, { error: { message: "database is down" } });
+
+  it("shows an error instead of the empty state when the list fails", async () => {
+    mockApi({ "GET /api/v1/scheduled_tasks": failure });
+    renderRoute(<ScheduledTasksListPage />, { path: "/console/scheduled_tasks", me: member });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load scheduled tasks: database is down");
+    expect(screen.queryByText("No scheduled tasks yet.")).not.toBeInTheDocument();
+  });
+
+  it("shows an error when a list refetch fails", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/scheduled_tasks": () => (fail ? failure : { data: [task] }) });
+    const { queryClient } = renderRoute(<ScheduledTasksListPage />, { path: "/console/scheduled_tasks", me: member });
+    expect(await screen.findByRole("link", { name: "Weekday summary" })).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["scheduled_tasks"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("database is down");
+  });
+
+  it("shows an error when the edit form's task refetch fails", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/scheduled_tasks/tsk_1": () => (fail ? failure : { data: task }) });
+    const { queryClient } = renderRoute(<ScheduledTaskEditPage />, {
+      path: "/console/scheduled_tasks/:id/edit",
+      url: "/console/scheduled_tasks/tsk_1/edit",
+      me: member,
+    });
+    expect(await screen.findByRole("heading", { name: "Edit Scheduled Task" })).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["scheduled_tasks"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load this task: database is down");
+  });
+
+  it("shows an error when the new form's defaults refetch fails", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/scheduled_tasks/new": () => (fail ? failure : { data: newTask }) });
+    const { queryClient } = renderRoute(<ScheduledTaskNewPage />, { path: "/console/scheduled_tasks/new", me: member });
+    expect(await screen.findByRole("heading", { name: "New Scheduled Task" })).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["scheduled_tasks"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load this task: database is down");
+  });
+
+  it("reports a failed delivery channel search in the picker", async () => {
+    mockApi({
+      "GET /api/v1/scheduled_tasks/new": { data: { ...newTask, delivery_mode: "channel" } },
+      "GET /api/v1/scheduled_tasks/slack_channel_options": failure,
+    });
+    renderRoute(<ScheduledTaskNewPage />, { path: "/console/scheduled_tasks/new", me: member });
+
+    await userEvent.type(await screen.findByRole("combobox", { name: "Delivery channel" }), "gen");
+    expect(await screen.findByText("database is down")).toBeInTheDocument();
+    expect(screen.queryByText("No matching Slack destinations.")).not.toBeInTheDocument();
+  });
+});
+
 describe("new scheduled task", () => {
+  it("requires a delivery channel in channel mode", async () => {
+    const api = mockApi({
+      "GET /api/v1/scheduled_tasks/new": { data: { ...newTask, delivery_mode: "channel" } },
+      "GET /api/v1/scheduled_tasks/slack_channel_options": { data: [], meta: { catalog_error: null } },
+    });
+    renderRoute(<ScheduledTaskNewPage />, { path: "/console/scheduled_tasks/new", me: member });
+
+    await userEvent.type(await screen.findByLabelText("Name"), "x");
+    await userEvent.type(screen.getByLabelText("Agent prompt"), "y");
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+    expect(await screen.findByText("Choose a Slack channel.")).toBeInTheDocument();
+    expect(api.calls("POST /api/v1/scheduled_tasks")).toHaveLength(0);
+  });
+
+  it("requires at least one day and a time for a custom schedule", async () => {
+    const api = mockApi({
+      "GET /api/v1/scheduled_tasks/new": { data: { ...newTask, schedule_preset: "custom", custom_days: [], custom_time: "" } },
+    });
+    renderRoute(<ScheduledTaskNewPage />, { path: "/console/scheduled_tasks/new", me: member });
+
+    await userEvent.type(await screen.findByLabelText("Name"), "x");
+    await userEvent.type(screen.getByLabelText("Agent prompt"), "y");
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+    expect(await screen.findByText("Choose at least one day.")).toBeInTheDocument();
+    expect(screen.getByText("can't be blank")).toBeInTheDocument();
+    expect(api.calls("POST /api/v1/scheduled_tasks")).toHaveLength(0);
+  });
+
   it("renders the single-turn form with DM delivery by default", async () => {
     mockApi({ "GET /api/v1/scheduled_tasks/new": { data: newTask } });
     renderRoute(<ScheduledTaskNewPage />, { path: "/console/scheduled_tasks/new", me: member });
@@ -261,7 +350,7 @@ describe("new scheduled task", () => {
 
   it("shows server errors in the summary and the custom schedule hint", async () => {
     mockApi({
-      "GET /api/v1/scheduled_tasks/new": { data: { ...newTask, schedule_preset: "custom", custom_days: [] } },
+      "GET /api/v1/scheduled_tasks/new": { data: { ...newTask, schedule_preset: "custom", custom_days: ["1"] } },
       "POST /api/v1/scheduled_tasks": apiResponse(422, {
         error: {
           message: "validation failed",
@@ -491,6 +580,59 @@ describe("workflows index", () => {
     renderRoute(<WorkflowsListPage />, { path: "/console/workflows", me: member });
     expect(await screen.findByText("other page")).toBeInTheDocument();
     expect(api.calls("GET /api/v1/workflows")).toHaveLength(0);
+  });
+});
+
+describe("workflow request failures", () => {
+  const failure = apiResponse(500, { error: { message: "upstream exploded" } });
+
+  it("shows an error instead of the empty state when the index fails", async () => {
+    mockApi({ "GET /api/v1/workflows": failure });
+    renderRoute(<WorkflowsListPage />, { path: "/console/workflows" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load workflows: upstream exploded");
+    expect(screen.queryByText("No workflow runs yet.")).not.toBeInTheDocument();
+  });
+
+  it("shows an error when an index refetch fails", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/workflows": () => (fail ? failure : { data: [workflowRow], meta: meta(1) }) });
+    const { queryClient } = renderRoute(<WorkflowsListPage />, { path: "/console/workflows" });
+    expect(await screen.findByRole("link", { name: "slack_sync" })).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["workflows"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("upstream exploded");
+  });
+
+  it("shows an error when the workflow fails to load or refetch", async () => {
+    let fail = true;
+    mockApi({
+      "GET /api/v1/workflows/slack_sync": () => (fail ? failure : { data: workflowDetail }),
+      "GET /api/v1/workflows/slack_sync/runs": { data: [workflowRun], meta: meta(1) },
+    });
+    const { queryClient } = renderRoute(<WorkflowDetailPage />, {
+      path: "/console/workflows/:id",
+      url: "/console/workflows/slack_sync",
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load this workflow: upstream exploded");
+
+    fail = false;
+    await queryClient.refetchQueries({ queryKey: ["workflows"] });
+    expect(await screen.findByRole("heading", { name: "slack_sync" })).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["workflows", "detail", "slack_sync"], exact: true });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load this workflow: upstream exploded");
+  });
+
+  it("shows an error instead of the filtered empty state when runs fail", async () => {
+    workflowApi({ "GET /api/v1/workflows/slack_sync/runs": failure });
+    renderRoute(<WorkflowDetailPage />, { path: "/console/workflows/:id", url: "/console/workflows/slack_sync" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load runs: upstream exploded");
+    expect(screen.queryByText("No runs match the selected filters.")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "slack_sync" })).toBeInTheDocument();
   });
 });
 
