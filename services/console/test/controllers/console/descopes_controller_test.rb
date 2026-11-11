@@ -24,7 +24,7 @@ module Console
       get api_v1_users_path
       assert_response :forbidden
 
-      get console_skills_url
+      get console_scheduled_tasks_url
       assert_response :ok
       assert_select ".console-descope-banner", /Admin permissions paused/
       assert_select ".console-nav-link", text: "Control", count: 0
@@ -51,7 +51,7 @@ module Console
       post console_descope_url
 
       admin.update!(admin: false)
-      get console_skills_url
+      get console_scheduled_tasks_url
       assert_response :ok
       assert_select ".console-descope-banner", count: 0
     end
@@ -64,11 +64,11 @@ module Console
 
     test "the account menu offers descope only to acting admins" do
       sign_in users(:acme_admin)
-      get console_skills_url
+      get console_scheduled_tasks_url
       assert_select ".console-signout-label", text: "View as operator"
 
       sign_in users(:member_user)
-      get console_skills_url
+      get console_scheduled_tasks_url
       assert_select ".console-signout-label", text: "View as operator", count: 0
     end
   end

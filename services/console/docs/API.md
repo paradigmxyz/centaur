@@ -26,6 +26,8 @@
 - [API clients](#api-clients)
 - [System settings](#system-settings)
 - [Skills](#skills)
+  - [Console skills](#console-skills)
+- [Personal SSH key](#personal-ssh-key)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
 
@@ -1920,6 +1922,52 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | `DELETE` | `/api/v1/sandbox/skills/:id/editors` | Remove an editor from an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
 
 Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. The editor list follows skill visibility: every principal that can read a shared skill can also read its editor list, while a private skill's list remains visible only to its owner and editors. Adding an editor is idempotent. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
+
+### Console skills
+
+The Console Skills pages use these endpoints. They accept a bearer API key or a Console session cookie (writes need `X-CSRF-Token`) and are open to every **active** user, not only admins. Visibility matches the agent catalog: every public skill, plus the caller's own skills and the skills the caller edits. Requests for any other skill return `404`. Owners and editors can update content. Only the owner can manage editors, share, or archive. An acting admin (not descoped) can additionally make any public skill private, for moderation.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/skills` | List. `tab=directory` (default, active public skills) or `tab=mine` (skills the caller owns or edits). Optional `q` does a full-text search within the tab. Ordered by `updated_at` desc. No pagination. |
+| `GET` | `/api/v1/skills/:id` | Read a visible skill by `skl_...` OID. |
+| `POST` | `/api/v1/skills` | Create from `data.name`, `data.description`, `data.instructions`, and optional `data.editor_ids` (user OIDs). New skills are public. Returns `201`. |
+| `PUT`/`PATCH` | `/api/v1/skills/:id` | Update an owned or editable skill. Send `data.lock_version` from the last read. A stale version returns `409` with `details.reason = "stale"`. `data.editor_ids` replaces the editor list for owners; editors' values are ignored, and omitting it keeps the current editors. |
+| `DELETE` | `/api/v1/skills/:id` | Archive an owned skill. Returns `204`. The name becomes reusable. |
+| `POST` | `/api/v1/skills/:id/share` | Make an owned skill public. |
+| `POST` | `/api/v1/skills/:id/unshare` | Make an owned skill private. An acting admin can do this to any public skill. |
+| `GET` | `/api/v1/skills/editor_candidates` | Active users other than the caller, ordered by email: `{id, name, email}`. Optional `q` filters by name or email. |
+
+List rows contain `id`, `name`, `description`, `visibility` (`private` or `shared`), `author`, `owner` (`{id, name, email}`), `updated_at`, and `viewer.owner`. A single skill adds the following fields:
+
+- `instructions`: the raw Markdown.
+- `content_html`: the instructions rendered as a sanitized GitHub-flavoured subset. Every source character is HTML-escaped, only `http(s)` links are kept, and only the tags `a blockquote br code del div em h1-h4 li ol p pre strong table tbody td th thead tr ul` and the attributes `class href rel target` survive.
+- `lock_version`, `checksum`, and `created_at`.
+- `editors`: active editors, ordered by email.
+- `viewer`: `{owner, can_edit, can_manage, can_unshare}`.
+
+Validation failures return `422` with per-field `details`: `name`, `description`, `instructions`, and `editors`. For example, `editors: ["include an unavailable user"]` is returned for an unknown, inactive, or owner OID.
+
+## Personal SSH key
+
+`/api/v1/me/ssh_key` manages the **caller's own** personal SSH key, an `SshKeySecret` owned by the caller. It is open to every active user, using either a bearer key or a session cookie with `X-CSRF-Token` on writes. There is no ID in the path, so a caller can only ever reach their own key. Every response sets `Cache-Control: no-store`. The private key is write-only. No response contains it, and that includes validation errors.
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| `GET` | `/api/v1/me/ssh_key` | The caller's key. When nothing has been saved yet, this returns `saved: false` with the default name `My SSH key` and null key fields. |
+| `PUT`/`PATCH` | `/api/v1/me/ssh_key` | Save `data.name` and `data.private_key`. A blank or omitted `private_key` keeps the stored key. On success, the key is granted to the caller's own principals: their Console principal, plus their Slack DM principal when a verified Slack identity is linked. Saving again repairs missing grants. `422` returns `details.name` and `details.private_key`. |
+| `DELETE` | `/api/v1/me/ssh_key` | Delete the key and every grant of it. Returns `204`, even when nothing was saved. |
+| `POST` | `/api/v1/me/ssh_key/validate` | Check `data.private_key` without saving it. `200` returns `{valid: true, message, fingerprint}`. `422` returns `error.message` with `details.valid = false`. |
+
+The key object contains these fields:
+
+- `id`, `saved`, `name`, and `has_private_key`.
+- `fingerprint`: SHA256.
+- `public_key`: OpenSSH `type base64`.
+- `created_at` and `updated_at`.
+- `grants`: each entry is `{id, grantee_type: "role"|"principal", grantee_id, label, principal_kind}`.
+
+Admins see personal keys as ordinary `ssh_key` secrets in [`GET /api/v1/secrets`](#secrets-all-kinds) and can grant them elsewhere.
 
 ## Proxies
 
