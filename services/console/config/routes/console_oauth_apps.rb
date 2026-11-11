@@ -14,3 +14,19 @@ namespace :console do
   resources :oauth_apps, only: %i[new create edit update], as: :oauth_app_forms
 end
 get "console/oauth_apps/:id", to: "console#oauth_app", as: :console_oauth_app
+
+# /api/v1 additions used by the OAuth apps and Integrations pages (see
+# docs/API.md#oauth-apps and docs/API.md#integrations).
+namespace :api do
+  namespace :v1 do
+    resources :oauth_apps, only: [] do
+      collection { post "presets/:provider", action: :preset, as: :preset }
+      member do
+        get "credentials"
+        get "provider_details"
+      end
+    end
+    resources :oauth_providers, only: %i[index]
+    resources :integrations, only: %i[index]
+  end
+end
