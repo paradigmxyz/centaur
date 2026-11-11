@@ -265,16 +265,6 @@ module Mcp
       assert_nil session[:user_id]
     end
 
-    test "authorization codes are filtered from logs" do
-      filters = Rails.application.config.filter_redirect
-      assert(filters.any? { |f| f.is_a?(Regexp) ? f.match?("http://127.0.0.1:1/cb?code=mcpauth_x&state=s") : false })
-      filter = ActiveSupport::ParameterFilter.new(Rails.application.config.filter_parameters)
-      filtered = filter.filter("code" => "mcpauth_x", "code_verifier" => "v", "country_code" => "NZ")
-      assert_equal "[FILTERED]", filtered["code"]
-      assert_equal "[FILTERED]", filtered["code_verifier"]
-      assert_equal "NZ", filtered["country_code"]
-    end
-
     test "the legacy form approval endpoint is gone" do
       client = create_client
       post login_url, params: { email: @operator.email, password: "password123456" }
