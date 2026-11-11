@@ -39,3 +39,6 @@
 
 # Overmind process-manager socket
 /.overmind.sock
+
+# Console SPA build output (services/console/web).
+/public/spa

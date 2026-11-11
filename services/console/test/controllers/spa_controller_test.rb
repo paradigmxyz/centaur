@@ -1,0 +1,67 @@
+require "test_helper"
+
+class SpaControllerTest < ActionDispatch::IntegrationTest
+  HTML = { "Accept" => "text/html,application/xhtml+xml" }.freeze
+
+  setup do
+    @dir = Dir.mktmpdir
+    @index = File.join(@dir, "index.html")
+    File.write(@index, "<!doctype html><div id=\"root\"></div>")
+    @previous_index_path = SpaController.index_path
+    SpaController.index_path = @index
+  end
+
+  teardown do
+    SpaController.index_path = @previous_index_path
+    FileUtils.remove_entry(@dir)
+  end
+
+  test "HTML navigations to SPA paths serve the built index" do
+    [ "/console/spa-only-page", "/console/spa-only/nested/prn_123", "/oauth/result" ].each do |path|
+      get path, headers: HTML
+      assert_response :ok, path
+      assert_includes response.body, "<div id=\"root\">"
+      assert_equal "no-cache", response.headers["Cache-Control"]
+      assert_match %r{text/html}, response.media_type
+    end
+  end
+
+  test "a signed-out deep link is remembered for the post-login redirect" do
+    get "/console/spa-only-page?q=1", headers: HTML
+    post login_path, params: { email: users(:acme_admin).email, password: "password123456" }
+    assert_redirected_to "/console/spa-only-page?q=1"
+  end
+
+  test "non-HTML requests to SPA paths keep the JSON 404" do
+    get "/console/spa-only-page", headers: { "Accept" => "application/json" }
+    assert_response :not_found
+    assert_equal({ "error" => { "message" => "not found" } }, JSON.parse(response.body))
+
+    get "/console/spa-only-page", headers: { "Accept" => "*/*" }
+    assert_response :not_found
+  end
+
+  test "non-GET requests to SPA paths keep the JSON 404" do
+    post "/console/spa-only-page", headers: HTML
+    assert_response :not_found
+  end
+
+  test "HTML requests outside the SPA prefixes keep the JSON 404" do
+    [ "/api/v1/nope", "/elsewhere", "/consolex" ].each do |path|
+      get path, headers: HTML
+      assert_response :not_found, path
+    end
+  end
+
+  test "legacy HTML routes still take precedence" do
+    get "/console/roles", headers: HTML
+    assert_redirected_to login_path
+  end
+
+  test "an unbuilt SPA explains how to build it" do
+    SpaController.index_path = File.join(@dir, "missing.html")
+    get "/console/spa-only-page", headers: HTML
+    assert_response :service_unavailable
+    assert_includes response.body, "pnpm -C services/console/web build"
+  end
+end
