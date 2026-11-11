@@ -194,6 +194,17 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "login returns to an MCP authorize request whose state carries an unencoded backslash" do
+    # origin/main remembered request.fullpath verbatim, so clients that send
+    # opaque state without encoding "\\" kept working; the return path must too.
+    query = "response_type=code&client_id=moc_x&redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback" \
+            "&scope=mcp%3Atools&state=opaque\\client-state&code_challenge=abc&code_challenge_method=S256"
+    get "/mcp/oauth/authorize?#{query}"
+    assert_redirected_to login_path
+    post login_url, params: { email: @operator.email, password: "password123456" }
+    assert_equal "http://www.example.com/mcp/oauth/authorize?#{query}", response.location
+  end
+
   test "unsafe methods do not replace the remembered login destination" do
     get "/console/credentials?kind=oauth", headers: HTML
     assert_equal "/console/credentials?kind=oauth", session[:return_to]

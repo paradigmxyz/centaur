@@ -32,6 +32,9 @@ module SpaRequest
   end
 
   def spa_path?(path)
-    EXCLUDED_PREFIXES.none? { |prefix| path == prefix || path.start_with?("#{prefix}/") }
+    # "/mcp", "/mcp/..." and format variants such as "/mcp.html" all stay out.
+    EXCLUDED_PREFIXES.none? do |prefix|
+      path == prefix || path.start_with?("#{prefix}/") || path.start_with?("#{prefix}.")
+    end
   end
 end

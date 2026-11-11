@@ -36,20 +36,25 @@ module ConsoleReturnPath
   def safe(raw)
     value = raw.to_s
     return nil if value.empty? || value.length > MAX_LENGTH
-    # Browsers treat "\" like "/" and strip tabs/newlines, so "/\evil.example"
-    # or "/\t/evil.example" can turn into a protocol-relative URL.
-    return nil if value.match?(/[\\[:cntrl:][:space:]]/)
-    return nil unless value.start_with?("/") && !value.start_with?("//")
+    # Fragments never reach the server and are dropped from the return path.
+    value = value.split("#", 2).first.to_s
+    path, query = value.split("?", 2)
+    # Browsers treat "\" like "/" and strip tabs/newlines in the path, so
+    # "/\evil.example" or "/\t/evil.example" can turn into a protocol-relative
+    # URL. The query is opaque to that resolution (OAuth clients put arbitrary
+    # state there, sometimes unencoded), so only control characters and spaces,
+    # which could split a Location header, are refused in it.
+    return nil if path.to_s.match?(/[\\[:cntrl:][:space:]]/)
+    return nil if query&.match?(/[[:cntrl:][:space:]]/)
+    return nil unless path.start_with?("/") && !path.start_with?("//")
 
-    uri = URI.parse(value)
-    return nil if uri.scheme || uri.host || uri.userinfo || uri.port
+    uri = URI.parse(path)
+    return nil if uri.scheme || uri.host || uri.userinfo || uri.port || uri.query
 
-    path = uri.path.to_s
-    return nil if dot_segment?(path)
-    return nil unless allowed_paths.any? { |pattern| pattern.match?(path) }
+    return nil if dot_segment?(uri.path.to_s)
+    return nil unless allowed_paths.any? { |pattern| pattern.match?(uri.path.to_s) }
 
-    uri.fragment = nil
-    uri.to_s
+    query.nil? ? path : "#{path}?#{query}"
   rescue URI::InvalidURIError
     nil
   end

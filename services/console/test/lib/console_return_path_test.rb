@@ -13,7 +13,10 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "/oauth/google/start?scopes=a+b" => "/oauth/google/start?scopes=a+b",
       "/oauth/google~team/start" => "/oauth/google~team/start",
       "/oauth/acme.google_v2-x/start" => "/oauth/acme.google_v2-x/start",
-      "/launch?target=web%2Bcentaur%3A%2F%2Fconsole" => "/launch?target=web%2Bcentaur%3A%2F%2Fconsole"
+      "/launch?target=web%2Bcentaur%3A%2F%2Fconsole" => "/launch?target=web%2Bcentaur%3A%2F%2Fconsole",
+      # Opaque OAuth state may carry an unencoded backslash, as origin/main accepted.
+      "/mcp/oauth/authorize?client_id=moc_1&state=opaque\\client-state" =>
+        "/mcp/oauth/authorize?client_id=moc_1&state=opaque\\client-state"
     }.each do |raw, expected|
       assert_equal expected, ConsoleReturnPath.safe(raw), raw
     end
@@ -28,7 +31,8 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "/oauth/google/callback?code=x", "/auth/google/callback", "/mcp/oauth/token",
       "/mcp/oauth/authorize.json", "/mcp/oauth/authorizex", "/mcp/oauth/authorize/x",
       "/oauth/../console", "/oauth/../start", "/oauth/./start", "/oauth/%2e%2e/start",
-      "/oauth/a%2Fb/start", "/oauth/a b/start", "/oauth/a@b/start", "/#{'a' * 5000}"
+      "/oauth/a%2Fb/start", "/oauth/a b/start", "/oauth/a@b/start", "/#{'a' * 5000}",
+      "/mcp/oauth/authorize?state=a\nLocation:%20x", "/mcp/oauth/authorize?state=a b", "/\\evil.example?x=\\"
     ].each do |raw|
       assert_nil ConsoleReturnPath.safe(raw), raw.inspect
     end
