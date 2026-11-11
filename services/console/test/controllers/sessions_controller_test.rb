@@ -104,13 +104,13 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
   end
 
 
-  test "a disabled user hitting a console page is signed out" do
+  test "a disabled user is signed out on their next console API request" do
     user = create_console_user
     sign_in_console(user)
     user.update!(status: :disabled)
-    get console_roles_url
-    assert_redirected_to login_path
-    assert_equal "Your account is disabled.", flash[:alert]
+    get api_v1_me_path
+    assert_response :unauthorized
+    assert_equal "account_disabled", json_body.dig("error", "details", "reason")
     assert_nil session[:user_id]
   end
 

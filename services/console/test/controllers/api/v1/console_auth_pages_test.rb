@@ -146,8 +146,10 @@ module Api
       end
 
       test "login returns to the protected console URL the user first requested" do
-        get console_credentials_url(kind: "oauth")
-        assert_redirected_to login_path
+        # Signed-out deep links are served the SPA shell, which remembers the
+        # destination; the SPA then sends the browser to /login.
+        get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
+        assert_response :ok
         assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
         api_sign_in(@operator.email)
@@ -156,7 +158,7 @@ module Api
       end
 
       test "login resets the session (no fixation) but keeps the return path" do
-        get console_credentials_url(kind: "oauth")
+        get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
         old_session_id = session.id.to_s
         api_sign_in(@operator.email)
         assert_not_equal old_session_id, session.id.to_s
@@ -244,10 +246,8 @@ module Api
         assert_equal @operator.id, session[:user_id]
       end
 
-      test "a pending user hitting a console page is bounced to the holding page" do
+      test "a pending user is refused by console APIs so the SPA bounces to the holding page" do
         api_sign_in(users(:pending_user).email)
-        get console_credentials_url
-        assert_redirected_to pending_path
         get api_v1_principals_path
         assert_response :forbidden
         assert_equal "account_pending", json_body.dig("error", "details", "reason")
