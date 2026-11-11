@@ -15,11 +15,12 @@ secrets:
 toolServer:
   enabled: false
 # Install only the baked-in tool CLIs a scenario runs: remote-ssh, for
-# e2e/tests/ssh.test.ts.
+# e2e/tests/ssh.test.ts, and demo, for e2e/tests/tools.test.ts, which also
+# expects every other baked-in tool to stay unmounted.
 sandbox:
   extraEnv:
     TOOLS_PATH: /opt/centaur/tools
-    TOOL_ALLOWLIST: ssh
+    TOOL_ALLOWLIST: ssh,demo
 repoCache:
   enabled: false
 
