@@ -451,6 +451,57 @@ module Api
         assert_response :bad_request
       end
 
+      test "secrets exclude a principal's direct grants but keep role-inherited ones" do
+        principal = principals(:acme_channel)
+        assert_admin_only_api :get, api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}")
+
+        get api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 200)
+        assert_response :ok
+        ids = json_body["data"].map { |s| s["id"] }
+        assert_not_includes ids, static_secrets(:github_token_inject).oid
+        assert_not_includes ids, static_secrets(:db_password_replace).oid
+        assert_not_includes ids, pg_dsn_secrets(:acme_analytics_pg).oid
+        # acme_prod_api_key is inherited through the acme_infra role, so it can still be granted directly.
+        assert_includes ids, static_secrets(:acme_prod_api_key).oid
+      end
+
+      test "secrets exclude a grantee's grants across every page" do
+        principal = principals(:acme_user_bob)
+        inject = { header: "X-Api-Key", formatter: "{{ .Value }}" }
+        granted = Array.new(5) do |i|
+          StaticSecret.create!(name: "aaa-paged-#{i}", inject_config: inject,
+                               created_by: users(:acme_admin)).tap do |secret|
+            principal.grants.create!(static_secret: secret, created_by: users(:acme_admin))
+          end
+        end
+        open_secret = StaticSecret.create!(name: "aaa-paged-open", inject_config: inject, created_by: users(:acme_admin))
+        expected_total = StaticSecret.count + GcpAuthSecret.count + GcpIdTokenSecret.count + AwsAuthSecret.count +
+                         OauthTokenSecret.count + PgDsnSecret.count + HmacSecret.count + SshKeySecret.count -
+                         principal.grants.count
+
+        seen = []
+        page = 1
+        loop do
+          get api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 2, page: page)
+          assert_response :ok
+          assert_equal expected_total, json_body.dig("meta", "total")
+          seen.concat(json_body["data"].map { |s| s["id"] })
+          break if page >= json_body.dig("meta", "total_pages")
+
+          page += 1
+        end
+        assert_equal expected_total, seen.size
+        assert_empty seen & granted.map(&:oid)
+        assert_includes seen, open_secret.oid
+      end
+
+      test "secrets reject an unknown or malformed grantee" do
+        get api_v1_secrets_path(exclude_grantee: "principal:prn_missing")
+        assert_response :not_found
+        get api_v1_secrets_path(exclude_grantee: "user:#{users(:acme_admin).id}")
+        assert_response :bad_request
+      end
+
       # -- Slack channel catalog -----------------------------------------------
 
       test "slack channels return bounded catalog matches and exclude an owner's channels" do

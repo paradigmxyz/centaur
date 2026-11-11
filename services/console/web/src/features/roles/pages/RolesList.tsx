@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 
+import { ErrorAlert } from "@/components/alerts";
 import { LabelChips } from "@/components/badges";
 import { ControlTabs } from "@/components/control-tabs";
 import { DataTable, type Column } from "@/components/data-table";
@@ -7,6 +8,7 @@ import { PageHeader } from "@/components/page-header";
 import { usePageParam } from "@/components/pagination";
 import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
+import { errorMessage } from "@/lib/api";
 import { pluralize, truncateMiddle } from "@/lib/format";
 
 import { useRoleList, type Role } from "../api";
@@ -94,6 +96,9 @@ function RolesList() {
           </Button>
         }
       />
+      {list.isError ? (
+        <ErrorAlert>Could not load roles: {errorMessage(list.error)}</ErrorAlert>
+      ) : (
       <DataTable
         caption="Roles"
         columns={columns}
@@ -107,6 +112,7 @@ function RolesList() {
             : undefined
         }
       />
+      )}
     </>
   );
 }

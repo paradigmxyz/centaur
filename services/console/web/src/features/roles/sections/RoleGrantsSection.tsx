@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { ErrorAlert } from "@/components/alerts";
 import { AppLink } from "@/components/app-link";
 import { ResourceBadge } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -14,7 +15,7 @@ import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
 import type { GrantableSummary } from "@/lib/secret-kinds";
 
-import { useRoleGrants, type RoleGrant } from "../api";
+import { useAssignableSecretCount, useRoleGrants, type RoleGrant } from "../api";
 import type { SectionProps } from "./types";
 
 function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
@@ -26,8 +27,10 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
   const [page, setPage] = usePageParam("grants_page");
   const grants = useRoleGrants(role.id, page);
   const [selected, setSelected] = useState<GrantableSummary | null>(null);
-  // Secrets already granted to the role are left out of the picker.
-  const granted = useMemo(() => new Set(grants.data?.data.map((grant) => grant.grantable.id)), [grants.data]);
+  // The server leaves secrets already granted to the role out of the picker;
+  // like the legacy page, the form is hidden once nothing is left to grant.
+  const assignable = useAssignableSecretCount(role.id);
+  const showGrantForm = assignable.data === undefined ? assignable.isError : assignable.data > 0;
 
   const grant = async () => {
     if (!selected) {
@@ -119,14 +122,18 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
     <section id="secrets">
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <SectionHeading>Secrets</SectionHeading>
-        <div className="flex flex-wrap items-center gap-3">
-          <SecretGrantPicker value={selected} onChange={setSelected} excludeIds={granted} />
-          <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
-            Grant secret
-          </Button>
-        </div>
+        {showGrantForm && (
+          <div className="flex flex-wrap items-center gap-3">
+            <SecretGrantPicker value={selected} onChange={setSelected} excludeGrantee={`role:${role.id}`} />
+            <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
+              Grant secret
+            </Button>
+          </div>
+        )}
       </div>
-      {grants.data && grants.data.meta.total === 0 ? (
+      {grants.isError ? (
+        <ErrorAlert>Could not load the role's secret grants: {errorMessage(grants.error)}</ErrorAlert>
+      ) : grants.data && grants.data.meta.total === 0 ? (
         <EmptyState>No secrets granted.</EmptyState>
       ) : (
         <DataTable

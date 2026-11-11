@@ -14,6 +14,11 @@ interface SecretGrantPickerProps {
   onChange: (secret: GrantableSummary | null) => void;
   /** Secret ids to leave out (e.g. already granted directly). */
   excludeIds?: ReadonlySet<string>;
+  /**
+   * `principal:<oid>` or `role:<oid>`: the server leaves out every secret
+   * granted directly to that grantee (all pages, not just loaded ones).
+   */
+  excludeGrantee?: string;
   placeholder?: string;
 }
 
@@ -26,15 +31,16 @@ export function SecretGrantPicker({
   value,
   onChange,
   excludeIds,
+  excludeGrantee,
   placeholder = "Pick a secret to grant",
 }: SecretGrantPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const deferred = useDeferredValue(query.trim());
+  const params = { q: deferred, limit: 200, exclude_grantee: excludeGrantee };
   const secrets = useQuery({
-    queryKey: sharedKeys.secrets({ q: deferred, limit: 200 }),
-    queryFn: ({ signal }) =>
-      api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", { q: deferred, limit: 200 }, signal),
+    queryKey: sharedKeys.secrets(params),
+    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", params, signal),
     enabled: open,
     select: (body) => body.data.filter((secret) => !excludeIds?.has(secret.id)),
   });

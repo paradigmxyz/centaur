@@ -1610,6 +1610,7 @@ metadata is returned, never sources or values.
 |---|---|
 | `q` | Matches `name` or `foreign_id` case-insensitively. |
 | `kind` | One of `static`, `gcp_auth`, `gcp_id_token`, `aws_auth`, `oauth_token`, `pg_dsn`, `hmac`, `ssh_key`; anything else returns `400`. |
+| `exclude_grantee` | `principal:<oid>` or `role:<oid>`; omits secrets granted directly to that grantee (a principal's role-inherited secrets stay listed). `404` for an unknown grantee; other values return `400`. |
 | `page`, `limit` | Standard pagination. |
 
 ```json

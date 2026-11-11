@@ -1,9 +1,11 @@
+import { ErrorAlert } from "@/components/alerts";
 import { AppLink } from "@/components/app-link";
 import { ResourceBadge } from "@/components/badges";
 import { DataTable, type Column } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
 import { SectionHeading } from "@/components/page-header";
 import { usePageParam } from "@/components/pagination";
+import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
 import { secretKindLabel } from "@/lib/secret-kinds";
 
@@ -88,7 +90,9 @@ export function EffectiveGrantsSection({ principal }: { principal: Principal }) 
       <p className="mb-4 text-sm text-muted-foreground">
         Every secret this principal resolves to: the direct grants above plus grants inherited from its roles. Read-only.
       </p>
-      {grants.data && grants.data.meta.total === 0 ? (
+      {grants.isError ? (
+        <ErrorAlert>Could not load effective grants: {errorMessage(grants.error)}</ErrorAlert>
+      ) : grants.data && grants.data.meta.total === 0 ? (
         <EmptyState className="py-10 text-center">This principal has no effective grants.</EmptyState>
       ) : (
         <DataTable

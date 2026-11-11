@@ -215,6 +215,20 @@ module Api
         assert_not Grant.exists?(grant.id)
       end
 
+      test "assignable secrets exclude every secret already granted to the role" do
+        role = roles(:acme_infra)
+        assert_admin_only_api :get, api_v1_secrets_path(exclude_grantee: "role:#{role.oid}")
+
+        get api_v1_secrets_path(exclude_grantee: "role:#{role.oid}", limit: 200)
+        assert_response :ok
+        ids = json_body["data"].map { |s| s["id"] }
+        assert_not_includes ids, static_secrets(:acme_prod_api_key).oid
+        assert_includes ids, static_secrets(:acme_staging_api_key).oid
+
+        get api_v1_secrets_path(exclude_grantee: "role:role_missing")
+        assert_response :not_found
+      end
+
       # -- Slack channel permissions -------------------------------------------
 
       test "replacing stores role permissions" do

@@ -1,7 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { ErrorAlert } from "@/components/alerts";
 import { AppLink } from "@/components/app-link";
 import { ResourceBadge } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -11,10 +11,10 @@ import { SectionHeading } from "@/components/page-header";
 import { usePageParam } from "@/components/pagination";
 import { SecretGrantPicker } from "@/components/secret-grant-picker";
 import { Button } from "@/components/ui/button";
-import { api, errorMessage, type ListEnvelope } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
 import { secretOptionLabel, type GrantableSummary } from "@/lib/secret-kinds";
 
-import { principalKeys, useDirectGrants, type DirectGrant } from "../api";
+import { useAssignableSecretCount, useDirectGrants, type DirectGrant } from "../api";
 import type { SectionProps } from "./types";
 
 export function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
@@ -27,14 +27,11 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
   const grants = useDirectGrants(principal.id, page);
   const [selected, setSelected] = useState<GrantableSummary | null>(null);
 
-  // Secrets already granted directly are left out of the picker; role-inherited
-  // ones stay offered so they can be promoted to a direct grant.
-  const granted = useQuery({
-    queryKey: principalKeys.sub(principal.id, "grants", { limit: 200 }),
-    queryFn: ({ signal }) =>
-      api.get<ListEnvelope<DirectGrant>>(`/api/v1/principals/${principal.id}/grants`, { limit: 200 }, signal),
-    select: (body) => new Set(body.data.map((grant) => grant.grantable.id)),
-  });
+  // The server leaves secrets already granted directly out of the picker;
+  // role-inherited ones stay offered so they can be promoted to a direct grant.
+  // The form is hidden once nothing is left to grant.
+  const assignable = useAssignableSecretCount(principal.id);
+  const showGrantForm = assignable.data === undefined ? assignable.isError : assignable.data > 0;
 
   const grant = async () => {
     if (!selected) {
@@ -128,7 +125,9 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
       <p className="mb-4 text-sm text-muted-foreground">
         Secrets granted to this principal directly. Grants inherited from roles are managed on the role, not here.
       </p>
-      {grants.data && grants.data.meta.total === 0 ? (
+      {grants.isError ? (
+        <ErrorAlert className="mb-4">Could not load direct grants: {errorMessage(grants.error)}</ErrorAlert>
+      ) : grants.data && grants.data.meta.total === 0 ? (
         <EmptyState className="mb-4 py-10 text-center">No direct grants. Use the form below to grant a secret.</EmptyState>
       ) : (
         <DataTable
@@ -143,12 +142,18 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
           pagination={grants.data ? { meta: grants.data.meta, unit: "direct grant", onPageChange: setPage } : undefined}
         />
       )}
-      <div className="flex flex-wrap items-center gap-3">
-        <SecretGrantPicker value={selected} onChange={setSelected} excludeIds={granted.data} />
-        <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
-          Grant secret
-        </Button>
-      </div>
+      {showGrantForm && (
+        <div className="flex flex-wrap items-center gap-3">
+          <SecretGrantPicker
+            value={selected}
+            onChange={setSelected}
+            excludeGrantee={`principal:${principal.id}`}
+          />
+          <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
+            Grant secret
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

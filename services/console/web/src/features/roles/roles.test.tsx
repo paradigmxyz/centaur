@@ -40,6 +40,19 @@ const role = {
 const prodKey = { kind: "static", kind_label: "Static", id: "ssr_prod", foreign_id: "prod-key", name: "Prod API key" };
 const bigQuery = { kind: "gcp_auth", kind_label: "GCP Auth", id: "gas_bq", foreign_id: null, name: "BigQuery" };
 
+/**
+ * GET /api/v1/secrets as the server answers it: `exclude_grantee` drops every
+ * secret in `granted` (the grantee's grants across all pages).
+ */
+function secretsHandler(all: { id: string }[], granted: Record<string, string[]>) {
+  return ({ url }: { url: URL }) => {
+    const excluded = new Set(granted[url.searchParams.get("exclude_grantee") ?? ""] ?? []);
+    const data = all.filter((secret) => !excluded.has(secret.id));
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    return { data: data.slice(0, limit), meta: meta(data.length, 1, limit) };
+  };
+}
+
 function detailApi(overrides: Record<string, unknown> = {}) {
   return mockApi({
     "GET /api/v1/roles/role_infra": { data: role },
@@ -48,7 +61,7 @@ function detailApi(overrides: Record<string, unknown> = {}) {
       meta: meta(1),
     },
     "GET /api/v1/slack_channels": { data: [{ channel_id: "C0123456789", name: "general" }], meta: { catalog_error: null } },
-    "GET /api/v1/secrets": { data: [prodKey, bigQuery], meta: meta(2) },
+    "GET /api/v1/secrets": secretsHandler([prodKey, bigQuery], { "role:role_infra": ["ssr_prod"] }),
     ...overrides,
   });
 }
@@ -84,6 +97,13 @@ describe("roles list", () => {
     renderRoute(<RolesListPage />, { path: "/console/roles" });
     expect(await screen.findByText("No roles yet.")).toBeInTheDocument();
     expect(screen.getByText("0 roles.")).toBeInTheDocument();
+  });
+
+  it("shows a load error instead of the empty state", async () => {
+    mockApi({ "GET /api/v1/roles": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderRoute(<RolesListPage />, { path: "/console/roles" });
+    expect(await screen.findByText("Could not load roles: database unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No roles yet.")).not.toBeInTheDocument();
   });
 
   it("sends non-admins to their landing page without fetching", async () => {
@@ -235,15 +255,58 @@ describe("role detail", () => {
     renderDetail();
     await screen.findByRole("table", { name: "Secret grants" });
 
-    await userEvent.click(screen.getByRole("combobox", { name: "Secret to grant" }));
+    await userEvent.click(await screen.findByRole("combobox", { name: "Secret to grant" }));
     expect(await screen.findByRole("option", { name: /BigQuery/ })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /Prod API key/ })).not.toBeInTheDocument();
+    const pickerCall = api.calls("GET /api/v1/secrets").find((call) => call.url.searchParams.get("limit") === "200");
+    expect(pickerCall?.url.searchParams.get("exclude_grantee")).toBe("role:role_infra");
     await userEvent.click(screen.getByRole("option", { name: /BigQuery/ }));
     await userEvent.click(screen.getByRole("button", { name: "Grant secret" }));
 
     await waitFor(() => expect(api.calls("POST /api/v1/grants")).toHaveLength(1));
     expect(api.calls("POST /api/v1/grants")[0]?.body).toEqual({ data: { role_id: "role_infra", gcp_auth_secret_id: "gas_bq" } });
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Granted BigQuery."));
+  });
+
+  it("excludes secrets granted on later grant pages from the picker", async () => {
+    // Page 1 of the grants only holds ssr_prod; gas_bq is granted on page 2.
+    detailApi({
+      "GET /api/v1/roles/role_infra/grants": {
+        data: [{ id: "grant_1", role_id: "role_infra", grantable: prodKey, created_at: "" }],
+        meta: meta(250),
+      },
+      "GET /api/v1/secrets": secretsHandler(
+        [prodKey, bigQuery, { kind: "hmac", kind_label: "HMAC", id: "hms_1", foreign_id: null, name: "Webhook" }],
+        { "role:role_infra": ["ssr_prod", "gas_bq"] },
+      ),
+    });
+    renderDetail();
+    await userEvent.click(await screen.findByRole("combobox", { name: "Secret to grant" }));
+    expect(await screen.findByRole("option", { name: /Webhook/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /BigQuery/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Prod API key/ })).not.toBeInTheDocument();
+  });
+
+  it("hides the grant form when every secret is already granted", async () => {
+    const api = detailApi({ "GET /api/v1/secrets": secretsHandler([prodKey], { "role:role_infra": ["ssr_prod"] }) });
+    renderDetail();
+    expect(await screen.findByRole("table", { name: "Secret grants" })).toBeInTheDocument();
+    // Let the assignable-count request settle before checking the form stays hidden.
+    await waitFor(() => expect(api.calls("GET /api/v1/secrets")).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("button", { name: "Grant secret" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Secret to grant" })).not.toBeInTheDocument();
+  });
+
+  it("shows a grants load error instead of the empty state", async () => {
+    detailApi({
+      "GET /api/v1/roles/role_infra/grants": apiResponse(500, { error: { message: "database unavailable" } }),
+    });
+    renderDetail();
+    expect(
+      await screen.findByText("Could not load the role's secret grants: database unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No secrets granted.")).not.toBeInTheDocument();
   });
 
   it("asks for a secret before granting", async () => {

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { ErrorAlert } from "@/components/alerts";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable, type Column } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
@@ -103,7 +104,9 @@ export function RolesSection({ principal, mutations }: SectionProps) {
           </div>
         )}
       </div>
-      {roles.isLoading ? (
+      {roles.isError ? (
+        <ErrorAlert>Could not load assigned roles: {errorMessage(roles.error)}</ErrorAlert>
+      ) : roles.isLoading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : assigned.length === 0 ? (
         <EmptyState>No roles assigned.</EmptyState>

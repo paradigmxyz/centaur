@@ -1,5 +1,6 @@
 import { Link, useSearchParams } from "react-router";
 
+import { ErrorAlert } from "@/components/alerts";
 import { RolePill, ResourceBadge } from "@/components/badges";
 import { ControlTabs } from "@/components/control-tabs";
 import { DataTable, type Column } from "@/components/data-table";
@@ -9,6 +10,7 @@ import { usePageParam } from "@/components/pagination";
 import { RequireAccess } from "@/components/require-access";
 import { SearchBox } from "@/components/search-box";
 import { Button } from "@/components/ui/button";
+import { errorMessage } from "@/lib/api";
 import { displayLabel, pluralize, truncateMiddle } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -102,6 +104,9 @@ function PrincipalsList() {
         }
       />
       <SearchBox placeholder="Search names or foreign IDs" label="Search principals" />
+      {list.isError ? (
+        <ErrorAlert>Could not load principals: {errorMessage(list.error)}</ErrorAlert>
+      ) : (
       <DataTable
         fixed
         caption="Principals"
@@ -112,6 +117,7 @@ function PrincipalsList() {
         empty={q ? `No principals match “${q}”.` : "No principals yet."}
         pagination={list.data ? { meta: list.data.meta, unit: "principal", onPageChange: setPage } : undefined}
       />
+      )}
     </>
   );
 }

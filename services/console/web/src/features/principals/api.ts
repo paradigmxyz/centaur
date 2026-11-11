@@ -4,10 +4,13 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQue
 
 import type { SlackChannelPermissionRow } from "@/components/slack-channel-permissions-editor";
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
-import { createQueryKeys } from "@/lib/query-keys";
+import { createQueryKeys, sharedKeys } from "@/lib/query-keys";
 import { grantKey, type GrantableSummary, type SecretKind } from "@/lib/secret-kinds";
 
 export const principalKeys = createQueryKeys("principals");
+
+/** Root of the shared secrets-list keys (grant picker, assignable count). */
+const SECRETS_ROOT = sharedKeys.secrets().slice(0, 1);
 
 export interface RoleSummary {
   id: string;
@@ -123,11 +126,27 @@ export function useEffectiveGrants(id: string, page: number) {
   });
 }
 
+/**
+ * How many secrets can still be granted directly (all kinds, excluding
+ * existing direct grants; role-inherited secrets stay grantable).
+ */
+export function useAssignableSecretCount(id: string) {
+  const params = { exclude_grantee: `principal:${id}`, limit: 1 };
+  return useQuery({
+    queryKey: sharedKeys.secrets(params),
+    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", params, signal),
+    select: (body) => body.meta.total,
+  });
+}
+
 /** Mutations for one principal; each refreshes that principal's queries. */
 export function usePrincipalMutations(id: string) {
   const queryClient = useQueryClient();
   const refresh = () => queryClient.invalidateQueries({ queryKey: principalKeys.detail(id) });
   const refreshAll = () => queryClient.invalidateQueries({ queryKey: principalKeys.all });
+  // Grant changes also change which secrets the picker may offer.
+  const refreshGrants = () =>
+    Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: SECRETS_ROOT })]);
 
   return {
     updateSandboxAccess: useMutation({
@@ -155,11 +174,11 @@ export function usePrincipalMutations(id: string) {
     grantSecret: useMutation({
       mutationFn: (secret: Pick<GrantableSummary, "kind" | "id">) =>
         api.post("/api/v1/grants", { data: { principal_id: id, [grantKey(secret.kind)]: secret.id } }),
-      onSuccess: refresh,
+      onSuccess: refreshGrants,
     }),
     revokeGrant: useMutation({
       mutationFn: (grantId: string) => api.delete(`/api/v1/grants/${grantId}`),
-      onSuccess: refresh,
+      onSuccess: refreshGrants,
     }),
     destroy: useMutation({
       mutationFn: () => api.delete(`${base}/${id}`),
