@@ -134,6 +134,16 @@ module Api
       render_error(status: :forbidden, message: message, details: { reason: "admin_required" })
     end
 
+    # One-shot handoff of the Rails flash set by a redirect-based flow (SSO or
+    # OAuth callback, legacy HTML action) to the SPA: returns and clears any
+    # pending notice/alert. The SPA shows them as toasts.
+    def consume_console_flash
+      flash = request.flash
+      payload = { notice: flash[:notice].presence, alert: flash[:alert].presence }.compact
+      flash.discard
+      payload
+    end
+
     # Records an active-user endpoint may expose: everything for an acting
     # admin, otherwise only rows whose +owner+ association/column is the caller.
     def owned_scope(scope, owner: :user)
@@ -230,7 +240,7 @@ module Api
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 
-    def paginated_label_search(scope, label_filter: nil)
+    def paginated_label_search(scope, label_filter: nil, order: { created_at: :asc, id: :asc })
       labels = label_filter_params
       filtered = if label_filter
         label_filter.call(scope, labels)
@@ -243,7 +253,7 @@ module Api
       limit = pagination_limit
       page = pagination_page
       total = filtered.count
-      records = filtered.order(created_at: :asc, id: :asc).limit(limit).offset((page - 1) * limit)
+      records = filtered.order(*Array.wrap(order)).limit(limit).offset((page - 1) * limit)
 
       total_pages = total.zero? ? 0 : ((total + limit - 1) / limit)
       meta = { page: page, limit: limit, total: total, total_pages: total_pages }

@@ -19,6 +19,8 @@
 - [Principals](#principals)
 - [Roles](#roles)
 - [Grants](#grants)
+- [Secrets (all kinds)](#secrets-all-kinds)
+- [Slack channels](#slack-channels)
 - [API keys](#api-keys)
 - [Skills](#skills)
 - [Proxies](#proxies)
@@ -89,6 +91,7 @@ unaffected.
     "descoped": false,
     "csrf_token": "…",
     "features": { "api_clients": false, "password_login": true },
+    "flash": { "notice": "Signed in as ops@example.com." },
     "nav": {
       "control": true, "principals": true, "roles": true, "secrets": true,
       "credentials": true, "oauth_apps": true, "users": true, "api_clients": false,
@@ -99,7 +102,9 @@ unaffected.
 }
 ```
 
-`csrf_token` is `null` for bearer callers. `POST`/`DELETE /api/v1/descope`
+`csrf_token` is `null` for bearer callers. `flash` hands off (once) any
+`notice`/`alert` left by a redirect-based flow such as SSO or an OAuth
+callback; it is `{}` when there is none. `POST`/`DELETE /api/v1/descope`
 return `{ "data": { "descoped": true|false } }`; bearer callers receive `422`.
 
 ### Proxy tokens
@@ -1370,6 +1375,40 @@ Returns `201`:
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
 | `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `foreign_id` applies only when creating. |
+| `DELETE` | `/api/v1/principals/:id` | Delete by OID. Removes direct grants, role assignments, Slack channel permissions, scheduled tasks, MCP OAuth codes and refresh tokens, and sync snapshots; assigned proxies are unassigned. Returns `204`. |
+| `GET`  | `/api/v1/principals/:id/effective_grants` | Paginated secrets the principal resolves to, directly or through roles. See below. |
+| `PUT`  | `/api/v1/principals/:id/slack_channel_permissions` | Replace the direct Slack channel permissions with `data.slack_channel_permissions`. DM rows (`D…`) are API-managed: stored DM rows are kept and submitted DM rows ignored. An unchanged submission writes nothing. Returns the stored rows. |
+| `DELETE` | `/api/v1/principals/:id/slack_channel_permissions/:channel_id` | Delete one direct Slack channel permission. `204`; `404` if absent. |
+
+Console-only list and fetch options (additive):
+
+- `GET /api/v1/principals?q=<text>` matches `name` or `foreign_id`
+  case-insensitively.
+- `GET /api/v1/principals?sort=name` orders by `name` (unnamed last), then
+  creation time. Any other `sort` value returns `400`.
+- `view=console` on the list and fetch endpoints adds `kind`,
+  `slack_user_id`, `roles` (`[{ id, foreign_id, name }]`), and
+  `inherited_slack_channel_permissions` (permissions merged from assigned
+  roles). The default payload omits them.
+
+`GET /api/v1/principals/:id/effective_grants` returns:
+
+```json
+{
+  "data": [
+    {
+      "id": "ssr_...",
+      "kind": "static",
+      "grant_key": "static_secret_id",
+      "foreign_id": "github-token",
+      "name": "GitHub token",
+      "direct": true,
+      "roles": [{ "id": "role_...", "foreign_id": "infra", "name": "Infra" }]
+    }
+  ],
+  "meta": { "page": 1, "limit": 50, "total": 1, "total_pages": 1 }
+}
+```
 
 Identity values must be sent through the first-class fields. Labels with the
 same names are ordinary metadata and do not change or mirror identity fields.
@@ -1532,6 +1571,7 @@ Returns `200`. Results use the standard [paginated](#conventions) envelope, and 
       "id": "grant_...",
       "principal_id": "prn_...",
       "static_secret_id": "ssr_...",
+      "grantable": { "kind": "static", "kind_label": "Static", "id": "ssr_...", "foreign_id": "github-token", "name": "GitHub token" },
       "created_at": "2026-06-01T10:00:00Z",
       "updated_at": "2026-06-01T10:00:00Z"
     }
@@ -1539,6 +1579,10 @@ Returns `200`. Results use the standard [paginated](#conventions) envelope, and 
   "meta": { "page": 1, "limit": 50, "total": 1, "total_pages": 1 }
 }
 ```
+
+Grant payloads (here and from `GET`/`POST /api/v1/grants`) include a
+`grantable` summary of the granted secret: its kind slug and label, OID,
+`foreign_id`, and `name`. It never includes sources or values.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -1553,6 +1597,58 @@ The principal endpoint lists only the principal's **direct** grants, not those i
 | -------- | ---- | ----- |
 | `GET`    | `/api/v1/grants/:id` | Fetch one. Response carries `principal_id` or `role_id` depending on the grantee. |
 | `DELETE` | `/api/v1/grants/:id` | Revoke. Returns `204`. |
+
+## Secrets (all kinds)
+
+`GET /api/v1/secrets` lists grantable secrets of every kind in one paginated
+list, ordered by name (case-insensitive) then creation time. Only identifying
+metadata is returned, never sources or values.
+
+| Param | Notes |
+|---|---|
+| `q` | Matches `name` or `foreign_id` case-insensitively. |
+| `kind` | One of `static`, `gcp_auth`, `gcp_id_token`, `aws_auth`, `oauth_token`, `pg_dsn`, `hmac`, `ssh_key`; anything else returns `400`. |
+| `page`, `limit` | Standard pagination. |
+
+```json
+{
+  "data": [
+    {
+      "kind": "static", "kind_label": "Static", "id": "ssr_...", "foreign_id": "github-token",
+      "name": "GitHub token", "grant_key": "static_secret_id", "description": null,
+      "labels": {}, "created_at": "...", "updated_at": "..."
+    }
+  ],
+  "meta": { "page": 1, "limit": 50, "total": 1, "total_pages": 1 }
+}
+```
+
+Use `grant_key` as the secret field when creating a [grant](#grants).
+
+## Slack channels
+
+`GET /api/v1/slack_channels` searches the Slack channel catalog for channel
+pickers (admin-only, `Cache-Control: no-store`). At most 20 active channels are
+returned.
+
+| Param | Notes |
+|---|---|
+| `q` | Name or channel ID fragment. |
+| `exclude_owner` | `principal:<oid>` or `role:<oid>`; omits channels that owner already has a permission row for. Other values return `400`. |
+| `ids[]` | Resolve these channel IDs (including archived channels) instead of searching. |
+
+```json
+{
+  "data": [
+    { "channel_id": "C0123456789", "name": "general", "private": false,
+      "label": "#general", "description": "C0123456789 · Public" }
+  ],
+  "meta": { "catalog_error": null }
+}
+```
+
+`meta.catalog_error` explains a missing bot token or a catalog that is still
+loading.
 
 ## API keys
 

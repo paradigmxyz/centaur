@@ -22,3 +22,17 @@ namespace :console do
   post   "principals/:id/grants",           to: "principals#grant_secret",  as: :principal_grant_secret
   delete "principals/:id/grants/:grant_id", to: "principals#revoke_grant",  as: :principal_revoke_grant
 end
+
+# /api/v1 additions used by the principals pages (see docs/API.md#principals).
+namespace :api do
+  namespace :v1 do
+    resources :principals, only: %i[destroy] do
+      member do
+        get "effective_grants"
+        put "slack_channel_permissions", action: :replace_slack_channel_permissions
+        delete "slack_channel_permissions/:channel_id", action: :destroy_slack_channel_permission,
+               as: :slack_channel_permission, constraints: { channel_id: /[^\/]+/ }
+      end
+    end
+  end
+end

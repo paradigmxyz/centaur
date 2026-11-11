@@ -1,15 +1,19 @@
-# Route constraint for the console SPA catch-all (config/routes/spa.rb): a
-# browser navigation (GET/HEAD that accepts HTML) to a path the SPA owns.
+# Route constraint for the console SPA fallback (config/routes/spa.rb): any
+# browser navigation (GET/HEAD that accepts HTML) that no Rails route claimed
+# serves the SPA, which renders its own not-found page. API, framework, and
+# protocol prefixes keep the JSON 404 so machine clients never get HTML.
 #
-# Add a prefix here when a slice moves pages to the SPA under a new top-level
-# path. Legacy Rails routes declared earlier still win for their paths.
+# Legacy Rails routes declared earlier still win for their paths.
 module SpaRequest
-  PATH_PREFIXES = %w[
-    /console
-    /login
-    /pending
-    /oauth
-    /mcp/oauth
+  EXCLUDED_PREFIXES = %w[
+    /api
+    /rails
+    /spa
+    /assets
+    /.well-known
+    /up
+    /mcp/oauth/token
+    /mcp/oauth/register
   ].freeze
 
   module_function
@@ -22,6 +26,6 @@ module SpaRequest
   end
 
   def spa_path?(path)
-    path == "/" || PATH_PREFIXES.any? { |prefix| path == prefix || path.start_with?("#{prefix}/") }
+    EXCLUDED_PREFIXES.none? { |prefix| path == prefix || path.start_with?("#{prefix}/") }
   end
 end

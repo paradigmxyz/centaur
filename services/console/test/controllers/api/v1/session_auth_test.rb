@@ -121,6 +121,22 @@ module Api
         assert_equal true, data.dig("nav", "integrations")
       end
 
+      test "me hands off a pending redirect flash exactly once" do
+        sign_in_console(users(:acme_admin))
+        get api_v1_me_path
+        assert_equal({ "notice" => "Signed in as admin@acme.example." }, json_body.dig("data", "flash"))
+
+        get api_v1_me_path
+        assert_equal({}, json_body.dig("data", "flash"))
+      end
+
+      test "a redirect flash survives the SPA shell request" do
+        sign_in_console(users(:acme_admin))
+        get "/console/spa-only-page", headers: { "Accept" => "text/html" }
+        get api_v1_me_path
+        assert_equal "Signed in as admin@acme.example.", json_body.dig("data", "flash", "notice")
+      end
+
       test "me shows the api clients section only when the feature is enabled" do
         with_env("CENTAUR_CONSOLE_API_CLIENTS_ENABLED" => "true") do
           sign_in_console(users(:acme_admin))

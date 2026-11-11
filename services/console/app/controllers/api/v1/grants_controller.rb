@@ -81,6 +81,7 @@ module Api
             id: grant.oid,
             GRANTEE_TYPES.key(grantee.class) => grantee.oid,
             GRANTABLE_TYPES.key(grantable.class) => grantable.oid,
+            grantable: GrantableSummary.call(grantable),
             created_at: grant.created_at,
             updated_at: grant.updated_at
           }

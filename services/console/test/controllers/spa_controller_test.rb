@@ -46,10 +46,16 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  test "HTML requests outside the SPA prefixes keep the JSON 404" do
-    [ "/api/v1/nope", "/elsewhere", "/consolex" ].each do |path|
+  test "unclaimed HTML navigations outside /console serve the SPA not-found page" do
+    get "/elsewhere", headers: HTML
+    assert_response :ok
+  end
+
+  test "HTML requests to API, framework, and protocol prefixes keep the JSON 404" do
+    [ "/api/v1/nope", "/api", "/rails/nope", "/spa/assets/missing.js", "/.well-known/nope", "/mcp/oauth/token" ].each do |path|
       get path, headers: HTML
       assert_response :not_found, path
+      assert_equal "not found", JSON.parse(response.body).dig("error", "message"), path
     end
   end
 

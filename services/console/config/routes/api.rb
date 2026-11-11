@@ -90,6 +90,10 @@ namespace :api do
       resources :grants, only: %i[index], controller: :grantee_grants
     end
     resources :grants, only: %i[show create destroy]
+  # Shared console building blocks: cross-kind grantable secret list and
+  # Slack channel catalog search.
+  resources :secrets, only: %i[index]
+  resources :slack_channels, only: %i[index]
     resources :api_keys, only: %i[index show create destroy]
     resources :proxies, only: %i[index show create update destroy]
     resources :scheduled_tasks, only: %i[show]
