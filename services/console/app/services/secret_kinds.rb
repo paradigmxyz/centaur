@@ -4,12 +4,6 @@
 # agree on the model class, label, eager-load association, and whether the
 # console offers a create/edit form for the kind.
 module SecretKinds
-  extend ActiveSupport::Concern
-
-  included do
-    helper ConsoleHelper
-  end
-
   # `form:` marks the kinds the console can create and edit (the "Add Secret"
   # menu; `editable` on GET /api/v1/secrets/:kind/:id). The remaining kinds are
   # read-only in the console and managed through their /api/v1 resources.
