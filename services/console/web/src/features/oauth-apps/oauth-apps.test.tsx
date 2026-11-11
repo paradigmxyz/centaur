@@ -325,6 +325,58 @@ describe("app form", () => {
     expect(body.data.labels).toEqual({ team: "comms" });
   });
 
+  // Secret-bearing mutations must not leave the client_secret in the MutationCache.
+  const cacheText = (client: { getMutationCache: () => { getAll: () => { state: unknown; options: unknown }[] } }) =>
+    JSON.stringify(client.getMutationCache().getAll().map((m) => ({ state: m.state, variables: (m.state as { variables?: unknown }).variables })));
+
+  it("drops the client secret from the mutation cache and form after a successful create", async () => {
+    const user = userEvent.setup();
+    mockApi({
+      "GET /api/v1/oauth_providers": { data: providers },
+      "POST /api/v1/oauth_apps": { data: { ...app, id: "oap_new" } },
+    });
+    const { queryClient, unmount } = renderRoute(<OauthAppNewPage />, {
+      path: "/console/oauth_apps/new",
+      routes: [{ path: "/console/oauth_apps/:id", element: <p>detail page</p> }],
+    });
+    await user.type(await screen.findByLabelText("Slug *"), "new-google");
+    await user.type(screen.getByLabelText("Client secret *"), "plaintext-create-secret");
+    await user.type(screen.getByLabelText("Allowed scopes *"), "openid");
+    await user.click(screen.getByRole("button", { name: "Create app" }));
+    expect(await screen.findByText("detail page")).toBeInTheDocument();
+
+    expect(cacheText(queryClient)).not.toContain("plaintext-create-secret");
+    unmount();
+    expect(cacheText(queryClient)).not.toContain("plaintext-create-secret");
+    expect(JSON.stringify(queryClient.getQueryCache().getAll().map((q) => [q.queryKey, q.state.data]))).not.toContain(
+      "plaintext-create-secret",
+    );
+  });
+
+  it("drops the client secret from the mutation cache and form after a failed edit", async () => {
+    const user = userEvent.setup();
+    mockApi({
+      "GET /api/v1/oauth_providers": { data: providers },
+      "GET /api/v1/oauth_apps/oap_google": { data: app },
+      "PATCH /api/v1/oauth_apps/oap_google": apiResponse(422, {
+        error: { message: "Validation failed", details: { client_id: ["can't be blank"] } },
+      }),
+    });
+    const { queryClient, unmount } = renderRoute(<OauthAppEditPage />, {
+      path: "/console/oauth_apps/:id/edit",
+      url: "/console/oauth_apps/oap_google/edit",
+    });
+    const secret = await screen.findByLabelText("Client secret");
+    await user.type(secret, "plaintext-edit-secret");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("1 error prevented this app from saving:")).toBeInTheDocument();
+    expect(secret).toHaveValue("");
+    expect(cacheText(queryClient)).not.toContain("plaintext-edit-secret");
+    unmount();
+    expect(cacheText(queryClient)).not.toContain("plaintext-edit-secret");
+  });
+
   it("blocks saving an edit with a cleared slug", async () => {
     const user = userEvent.setup();
     const api = mockApi({

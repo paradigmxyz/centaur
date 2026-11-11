@@ -138,6 +138,9 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
       await onSubmit(toPayload(values, isNew, customKeys));
     } catch (error) {
       applyApiErrors(form.setError, error, FIELDS);
+    } finally {
+      // Never keep the write-only secret in form state after a submit.
+      form.setValue("client_secret", "");
     }
   });
 

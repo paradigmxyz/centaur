@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -27,6 +28,7 @@ function OauthAppEdit() {
   const navigate = useNavigate();
   const providers = useOauthProviders();
   const update = useUpdateOauthApp(id);
+  const [saveError, setSaveError] = useState<unknown>(null);
 
   return (
     <>
@@ -37,7 +39,7 @@ function OauthAppEdit() {
           <ResourceBadge>OAuth</ResourceBadge>
         </div>
       </div>
-      <OauthAppErrors error={update.error} />
+      <OauthAppErrors error={saveError} />
       {providers.error ? (
         <ErrorAlert>{errorMessage(providers.error)}</ErrorAlert>
       ) : !providers.data ? (
@@ -49,9 +51,18 @@ function OauthAppEdit() {
           submitLabel="Save changes"
           cancelTo="/console/oauth_apps"
           onSubmit={async (payload) => {
-            await update.mutateAsync(payload);
-            toast.success("OAuth app updated.");
-            navigate(`/console/oauth_apps/${app.id}`);
+            setSaveError(null);
+            try {
+              await update.mutateAsync(payload);
+              toast.success("OAuth app updated.");
+              navigate(`/console/oauth_apps/${app.id}`);
+            } catch (error) {
+              setSaveError(error);
+              throw error;
+            } finally {
+              // Drop the payload (client_secret) from the MutationCache.
+              update.reset();
+            }
           }}
         />
       )}

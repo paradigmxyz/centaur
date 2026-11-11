@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -25,6 +26,7 @@ function OauthAppNew() {
   const navigate = useNavigate();
   const providers = useOauthProviders();
   const create = useCreateOauthApp();
+  const [saveError, setSaveError] = useState<unknown>(null);
 
   return (
     <>
@@ -35,7 +37,7 @@ function OauthAppNew() {
           <ResourceBadge>OAuth</ResourceBadge>
         </div>
       </div>
-      <OauthAppErrors error={create.error} />
+      <OauthAppErrors error={saveError} />
       {providers.error ? (
         <ErrorAlert>{errorMessage(providers.error)}</ErrorAlert>
       ) : !providers.data ? (
@@ -46,9 +48,18 @@ function OauthAppNew() {
           submitLabel="Create app"
           cancelTo="/console/oauth_apps"
           onSubmit={async (payload) => {
-            const body = await create.mutateAsync(payload);
-            toast.success("OAuth app created.");
-            navigate(`/console/oauth_apps/${body.data.id}`);
+            setSaveError(null);
+            try {
+              const body = await create.mutateAsync(payload);
+              toast.success("OAuth app created.");
+              navigate(`/console/oauth_apps/${body.data.id}`);
+            } catch (error) {
+              setSaveError(error);
+              throw error;
+            } finally {
+              // Drop the payload (client_secret) from the MutationCache.
+              create.reset();
+            }
           }}
         />
       )}

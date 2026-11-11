@@ -140,9 +140,14 @@ export function useOauthProviders() {
   });
 }
 
+// Create/update bodies may carry the client_secret. gcTime: 0 drops a settled
+// mutation (and its variables) from the MutationCache as soon as it has no
+// observer; callers also reset() after settle so the plaintext is not retained
+// while the page stays mounted.
 export function useCreateOauthApp() {
   const queryClient = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: (data: OauthAppInput) => api.post<DataEnvelope<OauthApp>>(base, { data }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: oauthAppKeys.lists() }),
   });
@@ -151,6 +156,7 @@ export function useCreateOauthApp() {
 export function useUpdateOauthApp(id: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: (data: Partial<OauthAppInput>) => api.patch<DataEnvelope<OauthApp>>(`${base}/${id}`, { data }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: oauthAppKeys.all }),
   });
