@@ -171,12 +171,11 @@ same brokered credentials as the agent. Its output becomes system prompt text:
 do not print content fetched from users or third parties, which would be
 prompt injection at system level.
 
-Hooks delay the first reply, so keep them fast. One time limit,
-`CENTAUR_SESSION_PROMPT_HOOKS_TIMEOUT_SECONDS` (default 10), covers every hook
-in the pass: hooks run in overlay order, a hook still running when the limit
-runs out is killed, and any hooks left are skipped. A hook that exits non-zero,
-is killed, or prints more than `CENTAUR_SESSION_PROMPT_HOOK_MAX_BYTES`
-(default 65536) is logged and contributes nothing, and the turn still runs. Its
+Hooks delay the first reply, so keep them fast. One 10-second limit covers
+every hook in the pass: hooks run in overlay order, a hook still running when
+the limit runs out is killed, and any hooks left are skipped. A hook that exits
+non-zero, is killed, or prints more than 64 KiB is logged and contributes
+nothing, and the turn still runs. Its
 standard error goes to the sandbox log. A hook path that resolves outside its
 repo is ignored.
 

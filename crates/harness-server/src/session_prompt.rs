@@ -27,11 +27,10 @@ use crate::otel::{PromptHookRun, PromptHooksRun, TraceContext, record_session_pr
 /// repos, so a private overlay listed here has no hook on disk.
 const OVERLAY_REPO_DIRS_ENV: &str = "CENTAUR_OVERLAY_REPO_DIRS";
 const HOOK_PATH: &str = "services/sandbox/hooks/session-prompt.sh";
-/// One time limit for every hook in the pass.
-const TIMEOUT_ENV: &str = "CENTAUR_SESSION_PROMPT_HOOKS_TIMEOUT_SECONDS";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_BYTES_ENV: &str = "CENTAUR_SESSION_PROMPT_HOOK_MAX_BYTES";
-const DEFAULT_MAX_BYTES: usize = 64 * 1024;
+/// One time limit for every hook in the pass, since hooks delay the reply.
+const HOOKS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Largest output one hook may add to the prompt.
+const HOOK_MAX_BYTES: usize = 64 * 1024;
 const COMPOSE_BIN_ENV: &str = "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN";
 const DEFAULT_COMPOSE_BIN: &str = "compose-system-prompt";
 /// Relative to the workspace, which is the harness-server working directory.
@@ -51,7 +50,7 @@ pub(crate) fn run_session_prompt_hooks(trace: Option<&TraceContext>, harness: &s
             return;
         }
         let started_at = SystemTime::now();
-        let hooks = run_hooks(&repos, timeout(), max_bytes());
+        let hooks = run_hooks(&repos, HOOKS_TIMEOUT, HOOK_MAX_BYTES);
         let outcome = compose(&hooks);
         let run = PromptHooksRun {
             started_at,
@@ -81,32 +80,6 @@ fn overlay_repo_dirs() -> Vec<PathBuf> {
         .filter(|dir| !dir.trim().is_empty())
         .map(PathBuf::from)
         .collect()
-}
-
-fn timeout() -> Duration {
-    positive_env(TIMEOUT_ENV, |raw| {
-        raw.parse::<f64>()
-            .ok()
-            .filter(|seconds| *seconds > 0.0)
-            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-    })
-    .unwrap_or(DEFAULT_TIMEOUT)
-}
-
-fn max_bytes() -> usize {
-    positive_env(MAX_BYTES_ENV, |raw| {
-        raw.parse::<usize>().ok().filter(|bytes| *bytes > 0)
-    })
-    .unwrap_or(DEFAULT_MAX_BYTES)
-}
-
-fn positive_env<T>(name: &str, parse: impl Fn(&str) -> Option<T>) -> Option<T> {
-    let raw = env::var(name).ok()?;
-    let parsed = parse(raw.trim());
-    if parsed.is_none() {
-        eprintln!("ignoring invalid {name}={raw:?}");
-    }
-    parsed
 }
 
 /// Runs each overlay's hook in order under one shared deadline. The hook running
@@ -331,7 +304,7 @@ mod tests {
         ];
 
         let started = Instant::now();
-        let hooks = run_hooks(&repos, Duration::from_millis(800), DEFAULT_MAX_BYTES);
+        let hooks = run_hooks(&repos, Duration::from_millis(800), HOOK_MAX_BYTES);
 
         assert!(started.elapsed() < Duration::from_secs(3));
         assert_eq!(statuses(&hooks), ["ok", "timeout", "skipped"]);
@@ -352,7 +325,7 @@ mod tests {
         )];
 
         let started = Instant::now();
-        let hooks = run_hooks(&repos, Duration::from_millis(300), DEFAULT_MAX_BYTES);
+        let hooks = run_hooks(&repos, Duration::from_millis(300), HOOK_MAX_BYTES);
         let elapsed = started.elapsed();
         if let Ok(pid) = fs::read_to_string(&pid_file) {
             // SAFETY: kill takes no pointers.
@@ -376,7 +349,7 @@ mod tests {
         fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&outside, &hook).unwrap();
 
-        let hooks = run_hooks(&[repo], Duration::from_secs(10), DEFAULT_MAX_BYTES);
+        let hooks = run_hooks(&[repo], Duration::from_secs(10), HOOK_MAX_BYTES);
 
         assert_eq!(statuses(&hooks), ["outside_repo"]);
         assert!(hooks[0].output.is_none());
