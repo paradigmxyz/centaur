@@ -13,6 +13,8 @@ module Api
     # Pending accounts may sign out too.
     class SessionsController < Api::BaseController
       include ConsoleSignIn
+      # Bodies use the {data: {...}} envelope; no params wrapping.
+      wrap_parameters false
 
       skip_before_action :authenticate_request!, :require_active_account!,
                          :verify_session_csrf_token!, :require_admin!, only: :create

@@ -7,7 +7,7 @@
 //   browsers must not be bounced by the shell's redirects.
 // - /mcp/oauth/consent reads and decides a server-issued consent ticket; the
 //   browser only ever navigates to the redirect_to the server returns.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import type { Me } from "@/app/session";
 import { ApiError, apiRequest, setCsrfToken, type DataEnvelope } from "@/lib/api";
@@ -117,11 +117,10 @@ export function usePendingSession() {
   });
 }
 
+/** DELETE /api/v1/session. The caller then does a full page load to /login. */
 export function useSignOut() {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => apiRequest<undefined>("/api/v1/session", { method: "DELETE", noRedirect: true }),
-    onSuccess: () => queryClient.clear(),
   });
 }
 

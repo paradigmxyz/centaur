@@ -91,7 +91,7 @@ export default function LoginPage() {
         )}
 
         {passwordLogin && (
-          <form onSubmit={onSubmit} aria-label="Sign in with email">
+          <form onSubmit={onSubmit}>
             <div className="space-y-5">
               <div>
                 <Label htmlFor="login-email" className={labelClass}>

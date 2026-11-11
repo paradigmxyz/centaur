@@ -19,6 +19,8 @@ module Api
         "This authorization request is invalid or has expired. Start again from your MCP client.".freeze
 
       allow_active_users only: %i[show decide]
+      # Bodies use the {data: {...}} envelope; no params wrapping.
+      wrap_parameters false
       before_action :require_console_session!
 
       def show
