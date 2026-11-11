@@ -3,23 +3,33 @@ module Api
     # GET /api/v1/secrets
     #
     # Grantable secrets of every kind in one list (for grant pickers and the
-    # console secrets table). Only identifying metadata is returned, never
-    # sources or values. Ordered by name (case-insensitive), then creation.
+    # console secrets table). Only identifying metadata is returned, plus the
+    # source backend labels and the managing OAuth integration -- never source
+    # references or values. Ordered by name (case-insensitive), then creation.
     #
     # Query params: q (name or foreign_id, case-insensitive), kind (one of the
     # secret kind slugs), exclude_grantee ("principal:<oid>" or "role:<oid>";
     # omits secrets granted directly to that grantee), page, limit.
+    #
+    # GET /api/v1/secrets/:kind/:id
+    #
+    # The console detail view of one secret of any kind: identity, the managing
+    # integration, source backends and references (an inline value is shown as
+    # "inline"), injection target, configuration rows, signed headers, and
+    # request rules. Unknown kinds and ids are 404s.
     class SecretsController < Api::BaseController
       def index
         kinds = selected_kinds
         query = params[:q].to_s.strip
         granted = granted_secret_ids
         rows = kinds.flat_map do |kind, config|
-          scope = config.fetch(:model).all
+          model = config.fetch(:model)
+          scope = model.includes(config.fetch(:includes))
+          scope = scope.includes(broker_credential: :oauth_app) if model == StaticSecret
           excluded = granted&.fetch(:"#{kind}_secret_id", nil)
           scope = scope.where.not(id: excluded) if excluded.present?
           if query.present?
-            pattern = "%#{config.fetch(:model).sanitize_sql_like(query)}%"
+            pattern = "%#{model.sanitize_sql_like(query)}%"
             scope = scope.where("name ILIKE :pattern OR foreign_id ILIKE :pattern", pattern: pattern)
           end
           scope.to_a
@@ -35,6 +45,11 @@ module Api
           data: page_rows.map { |secret| secret_payload(secret) },
           meta: { page: page, limit: limit, total: total, total_pages: total_pages }
         }
+      end
+
+      def show
+        secret = SecretKinds.find_secret!(params[:kind], params[:id])
+        render json: { data: detail_payload(secret) }
       end
 
       private
@@ -76,8 +91,22 @@ module Api
           grant_key: :"#{GrantableSummary.kind_for(secret)}_secret_id",
           description: secret.try(:description),
           labels: secret.labels,
+          source_types: SecretConsoleView.source_types(secret),
+          managed_by: SecretConsoleView.managed_by(secret),
           created_at: secret.created_at,
           updated_at: secret.updated_at
+        )
+      end
+
+      def detail_payload(secret)
+        kind = GrantableSummary.kind_for(secret)
+        secret_payload(secret).merge(
+          editable: SecretKinds::SECRET_KINDS.dig(kind, :form) == true,
+          injection: SecretConsoleView.injection(secret),
+          source_segments: SecretConsoleView.source_segments(secret),
+          configuration: SecretConsoleView.configuration(secret),
+          signed_headers: SecretConsoleView.signed_headers(secret),
+          rules: SecretConsoleView.rules(secret)
         )
       end
     end

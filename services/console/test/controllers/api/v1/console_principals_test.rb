@@ -435,7 +435,7 @@ module Api
         assert_includes kinds, "gcp_id_token"
         static = json_body["data"].find { |s| s["id"] == static_secrets(:github_token_inject).oid }
         assert_equal "static_secret_id", static["grant_key"]
-        assert_equal %w[created_at description foreign_id grant_key id kind kind_label labels name updated_at],
+        assert_equal %w[created_at description foreign_id grant_key id kind kind_label labels managed_by name source_types updated_at],
                      static.keys.sort
         names = json_body["data"].map { |s| s["name"].to_s.downcase }
         assert_equal names.sort, names

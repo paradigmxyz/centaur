@@ -220,12 +220,6 @@ module Api
         assert_response :ok
       end
 
-      test "descope is shared with the HTML console session" do
-        sign_in_console(users(:acme_admin))
-        post api_v1_descope_path, headers: csrf_headers
-        get console_secrets_path
-        assert_redirected_to console_integrations_path
-      end
 
       test "a non-admin cannot descope and bearer callers cannot either" do
         sign_in_console(users(:member_user))

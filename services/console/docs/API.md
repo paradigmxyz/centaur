@@ -218,6 +218,20 @@ Shape:
 
 The `secret` field is encrypted at rest, is write-only, and is never returned in any response. It is only permitted for `control_plane` sources; supplying it for any other type is a validation error, and omitting it for `control_plane` is also an error.
 
+For the static, PG DSN, GCP auth, and GCP ID token secret resources, a `PATCH` whose `control_plane` source omits `secret` (or sends it blank) keeps the value already stored, provided the stored source is also `control_plane`. Clients can therefore save other edits without ever reading the plaintext back. `PUT` keeps its full-replace contract and still requires `secret`, as does a write that switches a source to `control_plane`.
+
+On those same resources, an invalid nested source or rule is a `422` (it is never dropped silently or left half-written). `details` keeps the keys these responses have always used, and also adds a path-style key for every nested error: `source.config`, `dsn.secret`, `keyfile.source_type`, `rules[0].cidr` (0-based rule index), and so on.
+
+- Static secrets: when the secret itself is valid, `details` carries the first invalid nested record's own keys, checking the source first and then the rules in order. For example, `{ "cidr": [...], "rules[1].cidr": [...] }`. Errors on the secret itself take precedence and come back alone, as before.
+- PG DSN, GCP auth, and GCP ID token secrets: an invalid rule adds `"rules": ["is invalid"]`, and an invalid source adds `"dsn_source"` or `"keyfile_source"`: `["is invalid"]`. A create also reports the secret's own validation errors.
+
+```json
+{ "error": { "message": "validation failed", "details": {
+  "rules": ["is invalid"],
+  "rules[0].base": ["host and cidr are mutually exclusive"]
+} } }
+```
+
 `token_broker` is also resolved by iron-control rather than by the proxy. `credential_id` names a [broker credential](#broker-credentials), and at sync time iron-control substitutes that credential's current access token, delivered inline exactly like a `control_plane` value. The reference never reaches the proxy. If the credential has no current token (it is still bootstrapping, or it is dead), the owning secret is omitted from the proxy's config until the credential recovers.
 
 `credential_id` is either the credential's opaque id (`bcr_...`) or globally unique `foreign_id`. The reference is validated on write: it must resolve to an existing broker credential.
@@ -1670,7 +1684,8 @@ The principal endpoint lists only the principal's **direct** grants, not those i
 
 `GET /api/v1/secrets` lists grantable secrets of every kind in one paginated
 list, ordered by name (case-insensitive) then creation time. Only identifying
-metadata is returned, never sources or values.
+metadata, source backend labels, and the managing integration are returned,
+never source references or values.
 
 | Param | Notes |
 |---|---|
@@ -1685,14 +1700,67 @@ metadata is returned, never sources or values.
     {
       "kind": "static", "kind_label": "Static", "id": "ssr_...", "foreign_id": "github-token",
       "name": "GitHub token", "grant_key": "static_secret_id", "description": null,
-      "labels": {}, "created_at": "...", "updated_at": "..."
+      "labels": {}, "source_types": ["Env"], "managed_by": null,
+      "created_at": "...", "updated_at": "..."
     }
   ],
   "meta": { "page": 1, "limit": 50, "total": 1, "total_pages": 1 }
 }
 ```
 
+`source_types` lists the distinct source backends as display labels (`Env`,
+`AWS-SM`, `AWS-SSM`, `1Password`, `1Password-Connect`, `Inline`, `Token-Broker`,
+`Workload-Identity`); it never includes references. `managed_by` is set when a
+static secret wraps a broker credential minted by an OAuth flow, and is `null`
+otherwise:
+
+```json
+{ "broker_credential_id": "bcr_...", "oauth_app_id": "oap_...", "oauth_app_slug": "google" }
+```
+
 Use `grant_key` as the secret field when creating a [grant](#grants).
+
+### Secret detail (console view)
+
+`GET /api/v1/secrets/:kind/:id` returns one secret of any kind (`:kind` is a
+slug from the table above, `:id` its opaque id) as the console detail page shows
+it. It carries every field of the list item plus:
+
+| Field | Notes |
+|---|---|
+| `editable` | `true` for the kinds the console creates and edits (`static`, `gcp_auth`, `gcp_id_token`, `pg_dsn`). |
+| `injection` | Where the resolved value goes, e.g. `"Authorization"`, `"?api_key"`, `"x-serverless-authorization: Bearer"`; `null` for PG DSN secrets. |
+| `source_segments` | `[{ role, type, type_label, ref }]`: where the value is resolved from. `ref` is the reference within the backend (env var, secret id, 1Password ref, ...). An inline (`control_plane`) value is shown as the literal `"inline"`, never the value. `role` names the credential field for OAuth token, HMAC, and AWS secrets. |
+| `configuration` | `[{ label, value }]` display rows ("Injects into", "Credential profile", "Mode", "Scopes", "Session settings", ...). Multi-value fields are joined with newlines. |
+| `signed_headers` | HMAC secrets: `[{ name, value }]` header templates; `null` for other kinds. |
+| `rules` | The [request rules](#request-rules) for kinds that have them; `null` otherwise. |
+
+An unknown kind or id is a `404`.
+
+### Role grants of a secret
+
+The roles a secret is granted to, addressed from the secret. These are ordinary
+[grants](#grants); the routes only scope them to one secret, so a revoke cannot
+remove a grant of a different secret or a direct principal grant.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/v1/secrets/:kind/:secret_id/role_grants` | `{ data: [grant], assignable_roles: [role] }`. Grants are in creation order; `assignable_roles` are the roles not yet granted this secret. |
+| `POST` | `/api/v1/secrets/:kind/:secret_id/role_grants` | Body `{ "data": { "role_id": "role_..." } }`. Grants at the default role priority. Returns `201`, or `200` with the existing grant when the role already has it. An unknown role is a `404`. |
+| `DELETE` | `/api/v1/secrets/:kind/:secret_id/role_grants/:id` | Revoke. Returns `204`; `404` unless `:id` is a role grant of this secret. |
+
+A grant object:
+
+```json
+{
+  "id": "grant_...", "role_id": "role_...",
+  "role": { "id": "role_...", "foreign_id": "infra", "name": "Infra" },
+  "grantable": { "kind": "static", "kind_label": "Static", "id": "ssr_...", "foreign_id": "github-token", "name": "GitHub token" },
+  "priority": 0, "created_at": "...", "updated_at": "..."
+}
+```
+
+A role is `{ id, foreign_id, name }`.
 
 ## Slack channels
 

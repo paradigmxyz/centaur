@@ -1,6 +1,8 @@
 module Api
   module V1
     class PgDsnSecretsController < Api::BaseController
+      include SecretDocumentWrites
+
       def index
         records, meta = paginated_label_search(PgDsnSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }
@@ -55,11 +57,12 @@ module Api
         # { "name", "value_from" } hashes the model stores and serializes.
         base[:settings] = Array(base[:settings]).map { |s| s.to_h.slice("name", "value", "value_from") }
 
-        source_attrs = if attrs.key?(:dsn) && attrs[:dsn].present?
-          attrs.require(:dsn).permit(:source_type, :secret, config: {})
-        end
-
-        dsn_source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        # A PATCH that omits an inline DSN's `secret` keeps the stored value.
+        dsn_source = build_secret_source(attrs, :dsn, ref.dsn_source)
+        validate_nested_secret_records!(
+          ref, sources: { dsn: dsn_source }, source_associations: { dsn: :dsn_source }, legacy: :association,
+          prepare: -> { ref.assign_attributes(base); ref.dsn_source = dsn_source }
+        )
 
         # Build the whole graph in memory and save once so the cross-record
         # validation (dsn_source_present) sees the source. Assigning the has_one

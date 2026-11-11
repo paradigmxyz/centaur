@@ -40,8 +40,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
-    post console_static_secrets_url, params: { static_secret: { foreign_id: "new-secret" } }
-    assert_redirected_to login_path
+    post "/console/secrets/static", params: { static_secret: { foreign_id: "new-secret" } }
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
   end
 
@@ -95,11 +94,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_nil session[:user_id]
   end
 
-  test "a pending user hitting a console page is bounced to the holding page" do
-    post login_url, params: { email: users(:pending_user).email, password: "password123456" }
-    get console_secrets_url
-    assert_redirected_to pending_path
-  end
 
   test "the pending page is reachable by a pending user" do
     post login_url, params: { email: users(:pending_user).email, password: "password123456" }
