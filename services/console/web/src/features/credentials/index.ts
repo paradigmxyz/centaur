@@ -1,13 +1,18 @@
-// Credentials slice (broker credentials).
-//
-// Stub until this slice moves to the SPA. Nav entries and Control tabs below
-// point at the legacy Rails pages; once the slice registers SPA routes for the
-// same paths, the shell links to them client-side automatically.
+// Credentials slice (broker credentials): list, detail, and the create/edit
+// form over /api/v1/broker_credentials.
 import type { FeatureModule } from "@/app/types";
 
 const credentials: FeatureModule = {
   id: "credentials",
-  routes: [],
+  routes: [
+    { path: "/console/credentials", lazy: () => import("./pages/CredentialsList").then((m) => ({ Component: m.default })) },
+    { path: "/console/credentials/new", lazy: () => import("./pages/CredentialNew").then((m) => ({ Component: m.default })) },
+    { path: "/console/credentials/:id", lazy: () => import("./pages/CredentialDetail").then((m) => ({ Component: m.default })) },
+    {
+      path: "/console/credentials/:id/edit",
+      lazy: () => import("./pages/CredentialEdit").then((m) => ({ Component: m.default })),
+    },
+  ],
   controlTabs: [
     {
       id: "credentials",
