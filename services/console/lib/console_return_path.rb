@@ -10,15 +10,25 @@ require "uri"
 # MCP OAuth authorize endpoint, broker OAuth consent starts, and /launch.
 module ConsoleReturnPath
   MAX_LENGTH = 4096
-  ALLOWED_PATHS = [
-    %r{\A/\z},
-    %r{\A/console(?:/[A-Za-z0-9_\-./~%:@]*)?\z},
-    %r{\A/mcp/oauth/authorize\z},
-    %r{\A/oauth/[A-Za-z0-9_-]+/start\z},
-    %r{\A/launch\z}
-  ].freeze
 
   module_function
+
+  # The OAuth app slug format (OauthApp::URL_SAFE_FORMAT) without its anchors,
+  # so /oauth/<slug>/start accepts every slug an app can have (including "~").
+  # web/src/features/auth-pages/navigation.ts mirrors it (checked by a test).
+  def oauth_slug_source
+    OauthApp::URL_SAFE_FORMAT.source.delete_prefix("\\A").delete_suffix("\\z")
+  end
+
+  def allowed_paths
+    @allowed_paths ||= [
+      %r{\A/\z},
+      %r{\A/console(?:/[A-Za-z0-9_\-./~%:@]*)?\z},
+      %r{\A/mcp/oauth/authorize\z},
+      %r{\A/oauth/#{oauth_slug_source}/start\z},
+      %r{\A/launch\z}
+    ].freeze
+  end
 
   # The normalized path (with its query) when +raw+ is an allowed same-origin
   # return path, else nil.
@@ -35,7 +45,7 @@ module ConsoleReturnPath
 
     path = uri.path.to_s
     return nil if dot_segment?(path)
-    return nil unless ALLOWED_PATHS.any? { |pattern| pattern.match?(path) }
+    return nil unless allowed_paths.any? { |pattern| pattern.match?(path) }
 
     uri.fragment = nil
     uri.to_s

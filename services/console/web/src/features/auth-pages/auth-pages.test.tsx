@@ -344,6 +344,16 @@ describe("OAuth consent result page", () => {
     expect(screen.queryByRole("link", { name: "Try again" })).not.toBeInTheDocument();
   });
 
+  it("keeps the retry link for a slug with a tilde", async () => {
+    mockApi({
+      "GET /api/v1/auth/config": authConfig({
+        oauth_result: { kind: "denied", message: "Consent was not granted (access_denied).", retry_path: "/oauth/google~team/start" },
+      }),
+    });
+    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
+    expect(await screen.findByRole("link", { name: "Try again" })).toHaveAttribute("href", "/oauth/google~team/start");
+  });
+
   it("ignores a retry path that is not an OAuth start", async () => {
     mockApi({
       "GET /api/v1/auth/config": authConfig({
@@ -381,16 +391,29 @@ describe("MCP consent page", () => {
       resource: "https://mcp.example.test/mcp",
       scopes: ["mcp:tools"],
       user: { email: "ops@example.test" },
+      decision_path: "/mcp/oauth/consent",
+      csrf_token: "form-csrf",
     },
   };
 
-  it("shows the client, host, resource, scope, and account, then approves", async () => {
-    const api = mockApi({
-      "GET /api/v1/mcp/authorization": details,
-      "POST /api/v1/mcp/authorization/decision": {
-        data: { decision: "approve", redirect_to: "http://127.0.0.1:49152/callback?code=abc&state=s" },
-      },
-    });
+  // jsdom cannot navigate; record what a submitted form would have sent.
+  function captureSubmits() {
+    const submits: { action: string; method: string; fields: Record<string, string> }[] = [];
+    const onSubmit = (event: Event) => {
+      const form = event.target as HTMLFormElement;
+      const fields: Record<string, string> = {};
+      new FormData(form, (event as SubmitEvent).submitter).forEach((value, key) => {
+        fields[key] = String(value);
+      });
+      if (!event.defaultPrevented) submits.push({ action: form.getAttribute("action") ?? "", method: form.method, fields });
+      event.preventDefault();
+    };
+    document.addEventListener("submit", onSubmit);
+    return { submits, stop: () => document.removeEventListener("submit", onSubmit) };
+  }
+
+  it("shows the client, host, resource, scope, and account", async () => {
+    const api = mockApi({ "GET /api/v1/mcp/authorization": details });
     renderRoute(<McpConsentPage />, {
       path: "/mcp/oauth/consent",
       url: "/mcp/oauth/consent?request=ticket-1&redirect_uri=https%3A%2F%2Fevil.example",
@@ -403,28 +426,79 @@ describe("MCP consent page", () => {
     expect(screen.getByText("ops@example.test")).toBeInTheDocument();
     expect(screen.getByText("Authorize MCP access.")).toBeInTheDocument();
     expect(api.calls("GET /api/v1/mcp/authorization")[0]?.url.searchParams.get("request")).toBe("ticket-1");
-
-    await userEvent.click(screen.getByRole("button", { name: "Allow" }));
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("http://127.0.0.1:49152/callback?code=abc&state=s"));
-    const call = api.calls("POST /api/v1/mcp/authorization/decision")[0];
-    expect(call?.body).toEqual({ data: { request: "ticket-1", decision: "approve" } });
-    expect(call?.headers["X-CSRF-Token"]).toBe("csrf-test-token");
   });
 
-  it("denies", async () => {
-    const api = mockApi({
-      "GET /api/v1/mcp/authorization": details,
-      "POST /api/v1/mcp/authorization/decision": {
-        data: { decision: "deny", redirect_to: "http://127.0.0.1:49152/callback?error=access_denied" },
-      },
+  it("posts Allow as a same-origin form and never script-navigates or caches a code", async () => {
+    mockApi({ "GET /api/v1/mcp/authorization": details });
+    const capture = captureSubmits();
+    const { queryClient, unmount } = renderRoute(<McpConsentPage />, {
+      path: "/mcp/oauth/consent",
+      url: "/mcp/oauth/consent?request=ticket-1",
     });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Allow" }));
+    // A second click while the first post is in flight is ignored.
+    await userEvent.click(screen.getByRole("button", { name: "Allow" }));
+    capture.stop();
+
+    expect(capture.submits).toEqual([
+      {
+        action: "/mcp/oauth/consent",
+        method: "post",
+        fields: { authenticity_token: "form-csrf", request: "ticket-1", decision: "approve" },
+      },
+    ]);
+    expect(assign).not.toHaveBeenCalled();
+    const cached = () =>
+      JSON.stringify([
+        queryClient.getMutationCache().getAll().map((m) => m.state),
+        queryClient.getQueryCache().getAll().map((q) => q.state.data),
+      ]);
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+    expect(cached()).not.toMatch(/code=|redirect_to|127\.0\.0\.1:/);
+    unmount();
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+    expect(cached()).not.toMatch(/code=/);
+  });
+
+  it("posts Deny the same way", async () => {
+    mockApi({ "GET /api/v1/mcp/authorization": details });
+    const capture = captureSubmits();
     renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=ticket-1" });
 
     await userEvent.click(await screen.findByRole("button", { name: "Deny" }));
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("http://127.0.0.1:49152/callback?error=access_denied"));
-    expect(api.calls("POST /api/v1/mcp/authorization/decision")[0]?.body).toEqual({
-      data: { request: "ticket-1", decision: "deny" },
+    capture.stop();
+    expect(capture.submits[0]?.fields.decision).toBe("deny");
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("refuses a decision path that is not a same-origin path", async () => {
+    for (const decision_path of ["javascript:alert(1)", "//evil.example/x", "https://evil.example/x", "/x?y=1"]) {
+      mockApi({ "GET /api/v1/mcp/authorization": { data: { ...details.data, decision_path } } });
+      const { unmount } = renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
+      expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
+      expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+      expect(document.querySelector("form")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("maps a failed decision code to fixed text and ignores unknown codes", async () => {
+    const api = mockApi({});
+    const { unmount } = renderRoute(<McpConsentPage />, {
+      path: "/mcp/oauth/consent",
+      url: "/mcp/oauth/consent?error=csrf",
     });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Your session changed");
+    unmount();
+
+    renderRoute(<McpConsentPage />, {
+      path: "/mcp/oauth/consent",
+      url: "/mcp/oauth/consent?error=%3Cb%3Ehello%3C%2Fb%3E",
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
+    expect(screen.queryByText(/hello/)).not.toBeInTheDocument();
+    expect(api.calls()).toHaveLength(0);
   });
 
   it("refuses an invalid or expired ticket without offering a decision", async () => {
@@ -456,37 +530,16 @@ describe("MCP consent page", () => {
     expect(api.calls()).toHaveLength(0);
   });
 
-  it("offers the client's vouched-for error redirect when the request is no longer valid", async () => {
+  it("shows a request that is no longer valid without offering to continue", async () => {
     mockApi({
       "GET /api/v1/mcp/authorization": apiResponse(422, {
-        error: {
-          message: "Unsupported scope: admin.",
-          details: {
-            reason: "invalid_authorization_request",
-            redirect_to: "http://127.0.0.1:49152/callback?error=invalid_scope",
-          },
-        },
+        error: { message: "Unsupported scope: admin.", details: { reason: "invalid_authorization_request" } },
       }),
     });
     renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Unsupported scope: admin.");
-    await userEvent.click(screen.getByRole("button", { name: "Return to the application" }));
-    expect(assign).toHaveBeenCalledWith("http://127.0.0.1:49152/callback?error=invalid_scope");
-  });
-
-  it("shows a failed decision", async () => {
-    mockApi({
-      "GET /api/v1/mcp/authorization": details,
-      "POST /api/v1/mcp/authorization/decision": apiResponse(404, {
-        error: { message: "This authorization request is invalid or has expired.", details: { reason: "invalid_consent_request" } },
-      }),
-    });
-    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
-
-    await userEvent.click(await screen.findByRole("button", { name: "Allow" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
-    expect(assign).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });
 
@@ -498,8 +551,14 @@ describe("navigation guards", () => {
     }
   });
 
-  it("recognises OAuth start paths", () => {
+  it("recognises OAuth start paths for every URL-safe slug", () => {
     expect(isOauthStartPath("/oauth/google/start")).toBe(true);
+    expect(isOauthStartPath("/oauth/google~team/start")).toBe(true);
+    expect(isOauthStartPath("/oauth/a.b_c-d/start")).toBe(true);
+    expect(isOauthStartPath("/oauth/../start")).toBe(false);
+    expect(isOauthStartPath("/oauth/./start")).toBe(false);
+    expect(isOauthStartPath("/oauth/a%2fb/start")).toBe(false);
+    expect(isOauthStartPath("/oauth/a/b/start")).toBe(false);
     expect(isOauthStartPath("/oauth/google/callback")).toBe(false);
     expect(isOauthStartPath("//evil/oauth/x/start")).toBe(false);
   });

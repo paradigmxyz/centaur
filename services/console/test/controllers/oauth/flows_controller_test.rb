@@ -1119,5 +1119,28 @@ module Oauth
       get api_v1_me_path
       assert_equal "google connected as user@example.com.", json_body.dig("data", "flash", "notice")
     end
+
+    test "a slug with a tilde keeps its sign-in continuation and retry link" do
+      app = @app.dup
+      app.update!(slug: "google~team")
+      sign_out
+      get oauth_start_url(slug: app.slug)
+      assert_redirected_to login_path
+      assert_equal "/oauth/google~team/start", session[:return_to]
+
+      sign_in users(:member_user)
+      assert_redirected_to "/oauth/google~team/start"
+
+      state = start_flow(slug: app.slug)
+      get oauth_callback_url(slug: app.slug), params: { state: state, error: "access_denied" }
+      assert_oauth_result :unprocessable_content, kind: :denied
+      assert_equal "/oauth/google~team/start", oauth_result["retry_path"]
+    end
+
+    test "a slug with a dot routes to the consent flow" do
+      app = @app.dup
+      app.update!(slug: "google.team")
+      assert start_flow(slug: app.slug).present?
+    end
   end
 end
