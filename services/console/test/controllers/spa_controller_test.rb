@@ -17,7 +17,7 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "HTML navigations to SPA paths serve the built index" do
-    [ "/console/spa-only-page", "/console/spa-only/nested/prn_123", "/oauth/result" ].each do |path|
+    [ "/console/spa-only-page", "/console/spa-only/nested/prn_123", "/login", "/pending" ].each do |path|
       get path, headers: HTML
       assert_response :ok, path
       assert_includes response.body, "<div id=\"root\">"

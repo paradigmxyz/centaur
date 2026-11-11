@@ -1,8 +1,9 @@
 # Base class for the console's browser-facing Rails endpoints that are not
 # part of the JSON API: SSO login (/auth/:provider/*), the broker OAuth consent
 # flow (/oauth/:slug/*), the MCP OAuth authorization server, and the PWA
-# launch handler. They answer with redirects (into the SPA) or JSON; the
-# console UI itself is the SPA served by SpaController.
+# launch handler. They answer with redirects (into the SPA) or JSON, except
+# the OAuth consent and result pages, which are intentionally server-rendered
+# (layouts/oauth). The console UI itself is the SPA served by SpaController.
 class ApplicationController < ActionController::Base
   include ConsoleSession
   include ConsoleSignIn

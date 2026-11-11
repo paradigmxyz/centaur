@@ -1,7 +1,8 @@
-// Auth pages slice: login, pending, the broker OAuth consent result page, and
-// MCP OAuth consent. They render outside the app shell (publicRoutes) and never
-// call useSession(): the signed-out and pending browsers that use them would be
-// bounced by the shell. PWA registration lives here too (pwa.ts, run from
+// Auth pages slice: login and pending. They render outside the app shell
+// (publicRoutes) and never call useSession(): the signed-out and pending
+// browsers that use them would be bounced by the shell. The OAuth flows (MCP
+// OAuth consent, the broker OAuth result page) are intentionally
+// server-rendered by Rails, not routes here. PWA registration lives here too (pwa.ts, run from
 // main.tsx).
 import type { ComponentType } from "react";
 
@@ -21,8 +22,6 @@ const authPages: FeatureModule = {
       children: [
         { path: "/login", lazy: page(() => import("./pages/Login")) },
         { path: "/pending", lazy: page(() => import("./pages/Pending")) },
-        { path: "/oauth/result", lazy: page(() => import("./pages/OauthResult")) },
-        { path: "/mcp/oauth/consent", lazy: page(() => import("./pages/McpConsent")) },
       ],
     },
   ],

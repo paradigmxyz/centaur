@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # Lists server-rendered UI that remains in the console Rails app and exits
 # nonzero while any is left. The console UI lives in the SPA (web/); Rails
-# serves JSON under /api/v1, protocol redirects, and the built index.html.
+# serves JSON under /api/v1, protocol redirects, the built index.html, and the
+# intentionally server-rendered OAuth pages listed below.
 #
 # Usage: script/check-no-ruby-ui
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+
+# The one intentional exception: the OAuth flows stay server-rendered so
+# installed MCP clients and in-flight consents see exactly the protocol
+# behaviour they were built against (GET/POST /mcp/oauth/authorize with a Rails
+# form, and the /oauth/<slug>/{start,callback} result page rendered in the same
+# response). They use a standalone layout and plain CSS from public/oauth-page,
+# with no asset pipeline or JavaScript. Nothing else may render a template.
+OAUTH_VIEWS_RE='^app/views/(layouts/oauth\.html\.erb|mcp/oauth/authorize\.html\.erb|oauth/flows/result\.html\.erb)$'
+OAUTH_RENDERS_RE='^app/controllers/(mcp/oauth_controller\.rb:[0-9]+:\s*(layout "oauth"|render :authorize)|oauth/flows_controller\.rb:[0-9]+:\s*(layout "oauth"|render :result, status: status))$'
 
 offenders=0
 report() {
@@ -19,10 +29,11 @@ report() {
   fi
 }
 
-# 1. Templates under app/views, except mailer layouts/templates.
+# 1. Templates under app/views, except mailer layouts/templates and the OAuth
+# pages above.
 mapfile -t views < <(
   find app/views -type f \( -name '*.erb' -o -name '*.haml' -o -name '*.slim' \) 2>/dev/null |
-    grep -Ev '^app/views/(layouts/mailer\.|[a-z_]+_mailer/)' | sort
+    grep -Ev '^app/views/(layouts/mailer\.|[a-z_]+_mailer/)' | grep -Ev "${OAUTH_VIEWS_RE}" | sort
 )
 report "View templates (app/views)" "${views[@]}"
 
@@ -54,11 +65,12 @@ mapfile -t ui_wiring < <(
 )
 report "UI build wiring" "${ui_wiring[@]}"
 
-# 4. Controllers that render HTML templates or declare layouts. JSON, plain,
-# head, redirects, and send_file responses are fine.
+# 4. Controllers that render HTML templates or declare layouts, except the
+# OAuth pages above. JSON, plain, head, redirects, and send_file responses are
+# fine.
 mapfile -t renders < <(
   grep -rnE '^\s*layout\s+["a-z:]|render\s*\(?\s*(:[a-z_]+|"[^"]+"|template:|action:|partial:|html:|layout:)' \
-    app/controllers 2>/dev/null | sort
+    app/controllers 2>/dev/null | grep -Ev "${OAUTH_RENDERS_RE}" | sort
 )
 report "Controllers rendering HTML templates" "${renders[@]}"
 

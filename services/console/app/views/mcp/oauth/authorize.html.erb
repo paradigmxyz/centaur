@@ -1,0 +1,39 @@
+<% content_for :title, "Authorize MCP Client · Centaur Console" %>
+
+<div class="oauth-header">
+  <img src="<%= OauthPageAssets.path("centaur-lockup-white.svg") %>" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <p class="oauth-subtitle">Authorize MCP access.</p>
+</div>
+
+<section class="oauth-card" aria-labelledby="oauth-client-name">
+  <div>
+    <h1 id="oauth-client-name" class="oauth-client-name"><%= @client.name %></h1>
+    <p class="oauth-client-host"><%= @redirect_host %></p>
+  </div>
+
+  <dl class="oauth-details">
+    <div>
+      <dt>Resource</dt>
+      <dd><%= @resource %></dd>
+    </div>
+    <div>
+      <dt>Scope</dt>
+      <dd><%= @scopes.join(" ") %></dd>
+    </div>
+    <div>
+      <dt>Signed in as</dt>
+      <dd><%= @signed_in_email %></dd>
+    </div>
+  </dl>
+
+  <%= form_with url: "/mcp/oauth/authorize", method: :post, class: "oauth-form" do %>
+    <% @authorization_params.each do |key, value| %>
+      <%= hidden_field_tag key, value %>
+    <% end %>
+
+    <div class="oauth-actions">
+      <%= button_tag "Deny", type: "submit", name: "decision", value: "deny", class: "oauth-button oauth-button-outline" %>
+      <%= button_tag "Allow", type: "submit", name: "decision", value: "approve", class: "oauth-button oauth-button-primary" %>
+    </div>
+  <% end %>
+</section>

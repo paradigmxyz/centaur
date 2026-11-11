@@ -59,9 +59,9 @@ class LogFilteringTest < ActionDispatch::IntegrationTest
     )
     sign_in_console(users(:acme_admin))
     get "/mcp/oauth/authorize", params: authorize_params(client)
-    ticket = Rack::Utils.parse_nested_query(URI.parse(response.location).query).fetch("request")
+    assert_response :ok
 
-    post "/mcp/oauth/consent", params: { request: ticket, decision: "approve", authenticity_token: console_csrf_token }
+    post "/mcp/oauth/authorize", params: authorize_params(client).merge(decision: "approve")
     code = Rack::Utils.parse_nested_query(URI.parse(response.location).query).fetch("code")
 
     assert_match %r{Redirected to http://127\.0\.0\.1:49152/callback\?code=\[FILTERED\]}, log

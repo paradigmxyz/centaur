@@ -40,7 +40,6 @@ module Api
         assert_equal false, data["signed_in"]
         assert_nil data["redirect_to"]
         assert_equal({}, data["flash"])
-        assert_nil data["oauth_result"]
       end
 
       test "auth config lists a button for each configured provider only" do

@@ -1,14 +1,10 @@
-// Data access for the auth pages (login, pending, OAuth result, MCP consent).
+// Data access for the auth pages (login, pending).
 //
 // These pages render outside the app shell and never call useSession():
-// - /login and /oauth/result read the public GET /api/v1/auth/config, which
-//   also hands off (once) the flash left by a redirect-based flow.
+// - /login reads the public GET /api/v1/auth/config, which also hands off
+//   (once) the flash left by a redirect-based flow.
 // - /pending probes GET /api/v1/me itself, because pending and signed-out
 //   browsers must not be bounced by the shell's redirects.
-// - /mcp/oauth/consent reads a server-issued consent ticket and posts the
-//   decision as a classic form; the server answers with the redirect to the
-//   client, so no client URL or authorization code passes through JavaScript
-//   or the TanStack caches.
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import type { Me } from "@/app/session";
@@ -23,12 +19,6 @@ export interface AuthProvider {
   start_path: string;
 }
 
-export interface OauthResult {
-  kind: "error" | "denied";
-  message: string;
-  retry_path?: string;
-}
-
 export interface AuthConfig {
   providers: AuthProvider[];
   password_login: boolean;
@@ -36,23 +26,11 @@ export interface AuthConfig {
   signed_in: boolean;
   redirect_to: string | null;
   flash: { notice?: string; alert?: string };
-  oauth_result: OauthResult | null;
 }
 
 export interface SignInResult {
   status: "active" | "pending";
   redirect_to: string;
-}
-
-export interface McpAuthorization {
-  client: { id: string; name: string };
-  redirect_host: string;
-  resource: string;
-  scopes: string[];
-  user: { email: string };
-  /** Same-origin form action for the decision (POST /mcp/oauth/consent). */
-  decision_path: string;
-  csrf_token: string;
 }
 
 async function fetchAuthConfig(returnTo?: string | null): Promise<AuthConfig> {
@@ -65,8 +43,8 @@ async function fetchAuthConfig(returnTo?: string | null): Promise<AuthConfig> {
 }
 
 /**
- * The login bootstrap. Fetched once per page load: the flash and OAuth result
- * it carries are one-shot, so it is never refetched in the background.
+ * The login bootstrap. Fetched once per page load: the flash it carries is
+ * one-shot, so it is never refetched in the background.
  */
 export function useAuthConfig(returnTo?: string | null) {
   return useQuery({
@@ -130,18 +108,5 @@ export function usePendingSession() {
 export function useSignOut() {
   return useMutation({
     mutationFn: () => apiRequest<undefined>("/api/v1/session", { method: "DELETE", noRedirect: true }),
-  });
-}
-
-export function useMcpAuthorization(ticket: string) {
-  return useQuery({
-    queryKey: authKeys.sub(ticket, "mcp_authorization"),
-    queryFn: () =>
-      apiRequest<DataEnvelope<McpAuthorization>>("/api/v1/mcp/authorization", { query: { request: ticket } }).then(
-        (body) => body.data,
-      ),
-    enabled: ticket !== "",
-    retry: false,
-    staleTime: Infinity,
   });
 }

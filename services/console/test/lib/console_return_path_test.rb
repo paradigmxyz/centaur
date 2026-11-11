@@ -37,11 +37,4 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       assert_equal "/oauth/#{slug}/start", ConsoleReturnPath.safe("/oauth/#{slug}/start"), slug
     end
   end
-
-  test "the SPA's OAuth slug pattern matches the model's" do
-    source = Rails.root.join("web/src/features/auth-pages/navigation.ts").read
-    literal = source[/OAUTH_SLUG_SOURCE = "((?:[^"\\]|\\.)*)"/, 1]
-    assert literal, "OAUTH_SLUG_SOURCE not found in navigation.ts"
-    assert_equal ConsoleReturnPath.oauth_slug_source, literal.gsub("\\\\", "\\")
-  end
 end

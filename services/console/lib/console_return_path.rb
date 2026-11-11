@@ -15,7 +15,6 @@ module ConsoleReturnPath
 
   # The OAuth app slug format (OauthApp::URL_SAFE_FORMAT) without its anchors,
   # so /oauth/<slug>/start accepts every slug an app can have (including "~").
-  # web/src/features/auth-pages/navigation.ts mirrors it (checked by a test).
   def oauth_slug_source
     OauthApp::URL_SAFE_FORMAT.source.delete_prefix("\\A").delete_suffix("\\z")
   end

@@ -1,10 +1,11 @@
 # Auth pages slice: console login/logout, the pending holding page, SSO, the
 # broker OAuth consent flow, the MCP OAuth authorization server, and PWA/launch.
 #
-# The pages themselves (/login, /pending, /oauth/result, /mcp/oauth/consent)
-# live in the SPA (web/src/features/auth-pages) and are served by the SPA
-# fallback. Rails keeps the protocol endpoints (redirects and JSON) and the
-# path helpers those redirects use.
+# The login and pending pages live in the SPA (web/src/features/auth-pages) and
+# are served by the SPA fallback. The OAuth flows are intentionally
+# server-rendered (layouts/oauth): the MCP OAuth consent page and the broker
+# OAuth result page keep the exact behaviour installed clients rely on. Rails
+# also keeps the protocol endpoints and the path helpers their redirects use.
 direct(:login) { "/login" }
 direct(:pending) { "/pending" }
 
@@ -28,20 +29,19 @@ get "auth/:provider/callback", to: "session_oauth#callback", as: :auth_callback
 
 # MCP OAuth authorization server. MCP clients discover this from api-rs'
 # OAuth protected-resource metadata and register public PKCE clients here.
-# GET authorize validates the request and hands a signed consent ticket to the
-# SPA consent page (/mcp/oauth/consent), which posts the decision as a form to
-# POST /mcp/oauth/consent; that answers with a 303 to the registered
+# GET authorize validates the request and renders the consent page; POST
+# authorize (the consent form) issues the code and redirects to the registered
 # redirect_uri.
 get ".well-known/oauth-authorization-server", to: "mcp/oauth#metadata"
 get ".well-known/openid-configuration", to: "mcp/oauth#metadata"
 post "mcp/oauth/register", to: "mcp/oauth#register"
 get "mcp/oauth/authorize", to: "mcp/oauth#authorize"
-post "mcp/oauth/consent", to: "mcp/oauth#decide"
+post "mcp/oauth/authorize", to: "mcp/oauth#approve"
 post "mcp/oauth/token", to: "mcp/oauth#token"
 
 # OAuth consent flow, keyed by the app's well-known slug (/oauth/google/start).
 # Requires an active console session; the provider is derived from the app.
-# Failures land on the SPA result page (/oauth/result) with a flash.
+# Failures render a server-side result page.
 # Slugs may contain any OauthApp::URL_SAFE_FORMAT character, including "." and
 # "~"; the controller resolves (or 404s) the slug.
 get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start, constraints: { slug: %r{[^/]+} }
@@ -52,6 +52,5 @@ namespace :api do
   namespace :v1 do
     get "auth/config", to: "auth#show", as: :auth_config
     resource :session, only: :create
-    get "mcp/authorization", to: "mcp_authorizations#show", as: :mcp_authorization
   end
 end

@@ -7,10 +7,8 @@ import { navigation, setCsrfToken } from "@/lib/api";
 import { adminMe, apiResponse, mockApi, operatorMe, renderRoute } from "@/test/utils";
 
 import authPages from "./index";
-import { isOauthStartPath, safeLocalPath } from "./navigation";
+import { safeLocalPath } from "./navigation";
 import LoginPage from "./pages/Login";
-import McpConsentPage from "./pages/McpConsent";
-import OauthResultPage from "./pages/OauthResult";
 import PendingPage from "./pages/Pending";
 
 let assign: ReturnType<typeof vi.spyOn>;
@@ -34,7 +32,6 @@ function authConfig(overrides: Record<string, unknown> = {}) {
       signed_in: false,
       redirect_to: null,
       flash: {},
-      oauth_result: null,
       ...overrides,
     },
   };
@@ -43,7 +40,7 @@ function authConfig(overrides: Record<string, unknown> = {}) {
 describe("auth pages module", () => {
   it("registers the public routes outside the shell", () => {
     const paths = (authPages.publicRoutes ?? []).flatMap((route) => (route.children ?? []).map((child) => child.path));
-    expect(paths).toEqual(["/login", "/pending", "/oauth/result", "/mcp/oauth/consent"]);
+    expect(paths).toEqual(["/login", "/pending"]);
     expect(authPages.routes).toBeUndefined();
     // Public routes come before the shell in the router.
     expect(buildRoutes([authPages])[0]).toBe(authPages.publicRoutes?.[0]);
@@ -318,248 +315,11 @@ describe("pending page", () => {
   });
 });
 
-describe("OAuth consent result page", () => {
-  it("shows a denied consent with a retry link", async () => {
-    mockApi({
-      "GET /api/v1/auth/config": authConfig({
-        oauth_result: { kind: "denied", message: "Consent was not granted (access_denied).", retry_path: "/oauth/google/start" },
-      }),
-    });
-    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
-
-    expect(await screen.findByRole("heading", { name: "Not connected" })).toBeInTheDocument();
-    expect(screen.getByText("Consent was not granted (access_denied).")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Try again" })).toHaveAttribute("href", "/oauth/google/start");
-    expect(document.title).toBe("Not connected · Centaur Console");
-  });
-
-  it("shows an error without a retry link for unknown or disabled apps", async () => {
-    mockApi({
-      "GET /api/v1/auth/config": authConfig({ oauth_result: { kind: "error", message: "This integration is disabled." } }),
-    });
-    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
-
-    expect(await screen.findByRole("heading", { name: "Something went wrong" })).toBeInTheDocument();
-    expect(screen.getByText("This integration is disabled.")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Try again" })).not.toBeInTheDocument();
-  });
-
-  it("keeps the retry link for a slug with a tilde", async () => {
-    mockApi({
-      "GET /api/v1/auth/config": authConfig({
-        oauth_result: { kind: "denied", message: "Consent was not granted (access_denied).", retry_path: "/oauth/google~team/start" },
-      }),
-    });
-    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
-    expect(await screen.findByRole("link", { name: "Try again" })).toHaveAttribute("href", "/oauth/google~team/start");
-  });
-
-  it("ignores a retry path that is not an OAuth start", async () => {
-    mockApi({
-      "GET /api/v1/auth/config": authConfig({
-        oauth_result: { kind: "error", message: "Failed.", retry_path: "https://evil.example/oauth/x/start" },
-      }),
-    });
-    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
-    expect(await screen.findByText("Failed.")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Try again" })).not.toBeInTheDocument();
-  });
-
-  it("shows a failed request, not the already-shown message", async () => {
-    mockApi({ "GET /api/v1/auth/config": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
-    renderRoute(<OauthResultPage />, { path: "/oauth/result" });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
-    expect(screen.queryByText(/no longer available/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Try again" })).not.toBeInTheDocument();
-  });
-
-  it("explains a result that was already shown (reload)", async () => {
-    mockApi({ "GET /api/v1/auth/config": authConfig() });
-    renderRoute(<OauthResultPage />, { path: "/oauth/result", url: "/oauth/result?message=Injected" });
-
-    expect(await screen.findByText(/no longer available/)).toBeInTheDocument();
-    expect(screen.queryByText("Injected")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Go to Integrations" })).toHaveAttribute("href", "/console/integrations");
-  });
-});
-
-describe("MCP consent page", () => {
-  const details = {
-    data: {
-      client: { id: "moc_1", name: "Amp" },
-      redirect_host: "127.0.0.1",
-      resource: "https://mcp.example.test/mcp",
-      scopes: ["mcp:tools"],
-      user: { email: "ops@example.test" },
-      decision_path: "/mcp/oauth/consent",
-      csrf_token: "form-csrf",
-    },
-  };
-
-  // jsdom cannot navigate; record what a submitted form would have sent.
-  function captureSubmits() {
-    const submits: { action: string; method: string; fields: Record<string, string> }[] = [];
-    const onSubmit = (event: Event) => {
-      const form = event.target as HTMLFormElement;
-      const fields: Record<string, string> = {};
-      new FormData(form, (event as SubmitEvent).submitter).forEach((value, key) => {
-        fields[key] = String(value);
-      });
-      if (!event.defaultPrevented) submits.push({ action: form.getAttribute("action") ?? "", method: form.method, fields });
-      event.preventDefault();
-    };
-    document.addEventListener("submit", onSubmit);
-    return { submits, stop: () => document.removeEventListener("submit", onSubmit) };
-  }
-
-  it("shows the client, host, resource, scope, and account", async () => {
-    const api = mockApi({ "GET /api/v1/mcp/authorization": details });
-    renderRoute(<McpConsentPage />, {
-      path: "/mcp/oauth/consent",
-      url: "/mcp/oauth/consent?request=ticket-1&redirect_uri=https%3A%2F%2Fevil.example",
-    });
-
-    expect(await screen.findByText("Amp")).toBeInTheDocument();
-    expect(screen.getByText("127.0.0.1")).toBeInTheDocument();
-    expect(screen.getByText("https://mcp.example.test/mcp")).toBeInTheDocument();
-    expect(screen.getByText("mcp:tools")).toBeInTheDocument();
-    expect(screen.getByText("ops@example.test")).toBeInTheDocument();
-    expect(screen.getByText("Authorize MCP access.")).toBeInTheDocument();
-    expect(api.calls("GET /api/v1/mcp/authorization")[0]?.url.searchParams.get("request")).toBe("ticket-1");
-  });
-
-  it("posts Allow as a same-origin form and never script-navigates or caches a code", async () => {
-    mockApi({ "GET /api/v1/mcp/authorization": details });
-    const capture = captureSubmits();
-    const { queryClient, unmount } = renderRoute(<McpConsentPage />, {
-      path: "/mcp/oauth/consent",
-      url: "/mcp/oauth/consent?request=ticket-1",
-    });
-
-    await userEvent.click(await screen.findByRole("button", { name: "Allow" }));
-    // A second click while the first post is in flight is ignored.
-    await userEvent.click(screen.getByRole("button", { name: "Allow" }));
-    capture.stop();
-
-    expect(capture.submits).toEqual([
-      {
-        action: "/mcp/oauth/consent",
-        method: "post",
-        fields: { authenticity_token: "form-csrf", request: "ticket-1", decision: "approve" },
-      },
-    ]);
-    expect(assign).not.toHaveBeenCalled();
-    const cached = () =>
-      JSON.stringify([
-        queryClient.getMutationCache().getAll().map((m) => m.state),
-        queryClient.getQueryCache().getAll().map((q) => q.state.data),
-      ]);
-    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
-    expect(cached()).not.toMatch(/code=|redirect_to|127\.0\.0\.1:/);
-    unmount();
-    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
-    expect(cached()).not.toMatch(/code=/);
-  });
-
-  it("posts Deny the same way", async () => {
-    mockApi({ "GET /api/v1/mcp/authorization": details });
-    const capture = captureSubmits();
-    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=ticket-1" });
-
-    await userEvent.click(await screen.findByRole("button", { name: "Deny" }));
-    capture.stop();
-    expect(capture.submits[0]?.fields.decision).toBe("deny");
-    expect(assign).not.toHaveBeenCalled();
-  });
-
-  it("refuses a decision path that is not a same-origin path", async () => {
-    for (const decision_path of ["javascript:alert(1)", "//evil.example/x", "https://evil.example/x", "/x?y=1"]) {
-      mockApi({ "GET /api/v1/mcp/authorization": { data: { ...details.data, decision_path } } });
-      const { unmount } = renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
-      expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
-      expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-      expect(document.querySelector("form")).toBeNull();
-      unmount();
-    }
-  });
-
-  it("maps a failed decision code to fixed text and ignores unknown codes", async () => {
-    const api = mockApi({});
-    const { unmount } = renderRoute(<McpConsentPage />, {
-      path: "/mcp/oauth/consent",
-      url: "/mcp/oauth/consent?error=csrf",
-    });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Your session changed");
-    unmount();
-
-    renderRoute(<McpConsentPage />, {
-      path: "/mcp/oauth/consent",
-      url: "/mcp/oauth/consent?error=%3Cb%3Ehello%3C%2Fb%3E",
-    });
-    expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
-    expect(screen.queryByText(/hello/)).not.toBeInTheDocument();
-    expect(api.calls()).toHaveLength(0);
-  });
-
-  it("refuses an invalid or expired ticket without offering a decision", async () => {
-    mockApi({
-      "GET /api/v1/mcp/authorization": apiResponse(404, {
-        error: {
-          message: "This authorization request is invalid or has expired. Start again from your MCP client.",
-          details: { reason: "invalid_consent_request" },
-        },
-      }),
-    });
-    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=stale" });
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
-    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-  });
-
-  it("shows a failed details request (server error)", async () => {
-    mockApi({ "GET /api/v1/mcp/authorization": apiResponse(500, { error: { message: "Request failed with HTTP 500" } }) });
-    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Request failed with HTTP 500");
-    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-  });
-
-  it("needs a ticket", async () => {
-    const api = mockApi({});
-    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent" });
-    expect(await screen.findByRole("alert")).toHaveTextContent("invalid or has expired");
-    expect(api.calls()).toHaveLength(0);
-  });
-
-  it("shows a request that is no longer valid without offering to continue", async () => {
-    mockApi({
-      "GET /api/v1/mcp/authorization": apiResponse(422, {
-        error: { message: "Unsupported scope: admin.", details: { reason: "invalid_authorization_request" } },
-      }),
-    });
-    renderRoute(<McpConsentPage />, { path: "/mcp/oauth/consent", url: "/mcp/oauth/consent?request=t" });
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Unsupported scope: admin.");
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-  });
-});
-
 describe("navigation guards", () => {
   it("keeps only same-origin paths", () => {
     expect(safeLocalPath("/console/x?y=1")).toBe("/console/x?y=1");
     for (const bad of ["//evil.example", "/\\evil.example", "https://evil.example", "javascript:alert(1)", "/\tx", "", null]) {
       expect(safeLocalPath(bad)).toBe("/");
     }
-  });
-
-  it("recognises OAuth start paths for every URL-safe slug", () => {
-    expect(isOauthStartPath("/oauth/google/start")).toBe(true);
-    expect(isOauthStartPath("/oauth/google~team/start")).toBe(true);
-    expect(isOauthStartPath("/oauth/a.b_c-d/start")).toBe(true);
-    expect(isOauthStartPath("/oauth/../start")).toBe(false);
-    expect(isOauthStartPath("/oauth/./start")).toBe(false);
-    expect(isOauthStartPath("/oauth/a%2fb/start")).toBe(false);
-    expect(isOauthStartPath("/oauth/a/b/start")).toBe(false);
-    expect(isOauthStartPath("/oauth/google/callback")).toBe(false);
-    expect(isOauthStartPath("//evil/oauth/x/start")).toBe(false);
   });
 });

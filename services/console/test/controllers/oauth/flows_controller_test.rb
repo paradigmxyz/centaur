@@ -168,20 +168,6 @@ module Oauth
       console_password_login(user.email)
     end
 
-    # Failures redirect to the SPA result page and hand it the outcome in the
-    # one-shot flash (never the URL). +status+ is the status the condition
-    # used to render with.
-    def assert_oauth_result(status, kind: nil)
-      assert_redirected_to "/oauth/result"
-      @oauth_result = flash[:oauth_result]
-      assert_kind_of Hash, @oauth_result
-      assert_equal Rack::Utils.status_code(status), @oauth_result["status"]
-      assert_equal kind.to_s, @oauth_result["kind"] if kind
-      @oauth_result
-    end
-
-    attr_reader :oauth_result
-
     def sign_out
       console_sign_out
     end
@@ -230,7 +216,7 @@ module Oauth
       assert_no_difference("BrokerCredential.count") do
         get oauth_callback_url(slug: @app.slug), params: { state: state, code: "different" }
       end
-      assert_oauth_result :unprocessable_content
+      assert_response :unprocessable_content
       assert_equal "google-sub-1", credential.reload.provider_subject
     end
 
@@ -401,19 +387,19 @@ module Oauth
 
     test "start 404s an unknown slug" do
       get oauth_start_url(slug: "nope")
-      assert_oauth_result :not_found
-      assert_match "Unknown integration", oauth_result["message"]
+      assert_response :not_found
+      assert_match "Unknown integration", response.body
     end
 
     test "start renders a 422 result page for a disabled app" do
       get oauth_start_url(slug: "google-disabled")
-      assert_oauth_result :unprocessable_content
-      assert_match "disabled", oauth_result["message"]
+      assert_response :unprocessable_content
+      assert_match "disabled", response.body
     end
 
     test "start 422s a scope outside the allowlist" do
       get oauth_start_url(slug: "google"), params: { scopes: "https://www.googleapis.com/auth/drive" }
-      assert_oauth_result :unprocessable_content
+      assert_response :unprocessable_content
     end
 
     test "start honors an optional scopes subset" do
@@ -705,7 +691,7 @@ module Oauth
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: app.slug), params: { state: state, code: "auth-code" }
       end
-      assert_oauth_result :unprocessable_content
+      assert_response :unprocessable_content
     end
 
     test "callback happy path supports Zoom OAuth app tokens" do
@@ -883,8 +869,8 @@ module Oauth
         get oauth_callback_url(slug: "github"), params: { state: state, code: "auth-code" }
       end
 
-      assert_oauth_result :unprocessable_content
-      assert_match "identity_lookup_failed", oauth_result["message"]
+      assert_response :unprocessable_content
+      assert_match "identity_lookup_failed", response.body
     end
 
     test "callback wraps the minted credential in a grantable static secret" do
@@ -1015,17 +1001,17 @@ module Oauth
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, error: "access_denied" }
       end
-      assert_oauth_result :unprocessable_content
-      assert_equal "denied", oauth_result["kind"]
-      assert_match "access_denied", oauth_result["message"]
+      assert_response :unprocessable_content
+      assert_match "Not connected", response.body
+      assert_match "access_denied", response.body
     end
 
     test "callback with tampered state renders an error page and mints nothing" do
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: "tampered", code: "x" }
       end
-      assert_oauth_result :bad_request
-      assert_equal "error", oauth_result["kind"]
+      assert_response :bad_request
+      assert_match "Something went wrong", response.body
     end
 
     test "callback with a missing flow cookie renders an error page" do
@@ -1036,7 +1022,7 @@ module Oauth
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "x" }
       end
-      assert_oauth_result :bad_request
+      assert_response :bad_request
     end
 
     test "callback exchange failure renders an error page and mints nothing" do
@@ -1045,8 +1031,8 @@ module Oauth
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "bad-code" }
       end
-      assert_oauth_result :unprocessable_content
-      assert_match "invalid_grant", oauth_result["message"]
+      assert_response :unprocessable_content
+      assert_match "invalid_grant", response.body
     end
 
     test "callback with id_token aud mismatch is treated as an error" do
@@ -1055,49 +1041,50 @@ module Oauth
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "code" }
       end
-      assert_oauth_result :unprocessable_content
-      assert_match "id_token_aud_mismatch", oauth_result["message"]
+      assert_response :unprocessable_content
+      assert_match "id_token_aud_mismatch", response.body
     end
 
     test "callback 404s when the app slug no longer exists" do
       state = start_flow
       @app.destroy!
       get oauth_callback_url(slug: "google"), params: { state: state, code: "code" }
-      assert_oauth_result :not_found
+      assert_response :not_found
     end
-    test "the result page reads the outcome once through the auth config endpoint" do
+
+    test "the result page is a standalone server-rendered page" do
       state = start_flow
       get oauth_callback_url(slug: "google"), params: { state: state, error: "access_denied" }
-      assert_redirected_to "/oauth/result"
-      assert_not_includes response.location, "access_denied"
 
-      get api_v1_auth_config_path
-      assert_equal(
-        { "kind" => "denied", "message" => "Consent was not granted (access_denied).",
-          "retry_path" => oauth_start_path(slug: "google") },
-        json_body.dig("data", "oauth_result")
-      )
-      get api_v1_auth_config_path
-      assert_nil json_body.dig("data", "oauth_result")
+      assert_response :unprocessable_content
+      assert_match %r{text/html}, response.media_type
+      assert_select "title", "Not connected · Centaur Console"
+      assert_select "h1", "Not connected"
+      assert_select "p", "Consent was not granted (access_denied)."
+      assert_select "a[href=?]", oauth_start_path(slug: "google"), text: "Try again"
+      assert_select "script", count: 0
+      assert_select "link[rel=stylesheet][href^=?]", "/oauth-page/oauth.css?v="
     end
 
     test "the result page offers no retry for unknown or disabled apps" do
       get oauth_start_url(slug: "nope")
-      get api_v1_auth_config_path
-      assert_equal "Unknown integration.", json_body.dig("data", "oauth_result", "message")
-      assert_not json_body.dig("data", "oauth_result").key?("retry_path")
+      assert_response :not_found
+      assert_select "h1", "Something went wrong"
+      assert_select "p", "Unknown integration."
+      assert_select "a", count: 0
 
       get oauth_start_url(slug: "google-disabled")
-      get api_v1_auth_config_path
-      assert_equal "This integration is disabled.", json_body.dig("data", "oauth_result", "message")
-      assert_not json_body.dig("data", "oauth_result").key?("retry_path")
+      assert_response :unprocessable_content
+      assert_select "p", "This integration is disabled."
+      assert_select "a", count: 0
     end
 
-    test "a hostile provider error code is truncated in the result message" do
+    test "a hostile provider error code is escaped on the result page" do
       state = start_flow
-      get oauth_callback_url(slug: "google"), params: { state: state, error: "x" * 5000 }
-      assert_oauth_result :unprocessable_content, kind: :denied
-      assert_operator oauth_result["message"].length, :<, 100
+      get oauth_callback_url(slug: "google"), params: { state: state, error: "<img src=x onerror=alert(1)>" }
+      assert_response :unprocessable_content
+      assert_not_includes response.body, "<img src=x"
+      assert_includes response.body, "&lt;img src=x onerror=alert(1)&gt;"
     end
 
     test "a replayed callback fails once the flow cookie is used" do
@@ -1109,8 +1096,8 @@ module Oauth
       assert_no_difference -> { BrokerCredential.count } do
         get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
       end
-      assert_oauth_result :bad_request, kind: :error
-      assert_match "started in another browser", oauth_result["message"]
+      assert_response :bad_request
+      assert_match "started in another browser", response.body
     end
 
     test "success hands the connected notice to the console" do
@@ -1134,8 +1121,8 @@ module Oauth
 
       state = start_flow(slug: app.slug)
       get oauth_callback_url(slug: app.slug), params: { state: state, error: "access_denied" }
-      assert_oauth_result :unprocessable_content, kind: :denied
-      assert_equal "/oauth/google~team/start", oauth_result["retry_path"]
+      assert_response :unprocessable_content
+      assert_select "a[href=?]", "/oauth/google~team/start", text: "Try again"
     end
 
     test "a slug with a dot routes to the consent flow" do
