@@ -75,7 +75,8 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
 
   test "HTML requests to API, framework, and protocol prefixes keep the JSON 404" do
     [ "/api/v1/nope", "/api", "/rails/nope", "/spa/assets/missing.js", "/.well-known/nope", "/mcp/oauth/token",
-      "/login/nope", "/logout", "/pending/nope" ].each do |path|
+      "/mcp", "/mcp/nope", "/mcp/oauth/nope", "/mcp/oauth/consent", "/oauth", "/oauth/result", "/oauth/a/b/c",
+      "/auth", "/auth/nope", "/auth/google/start/extra", "/login/nope", "/logout", "/pending/nope" ].each do |path|
       get path, headers: HTML
       assert_response :not_found, path
       assert_equal "not found", JSON.parse(response.body).dig("error", "message"), path

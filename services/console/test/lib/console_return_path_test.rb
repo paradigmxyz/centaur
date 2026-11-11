@@ -8,6 +8,8 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "/console/credentials?kind=oauth" => "/console/credentials?kind=oauth",
       "/console/principals/prn_123#grants" => "/console/principals/prn_123",
       "/mcp/oauth/authorize?client_id=moc_1&state=x" => "/mcp/oauth/authorize?client_id=moc_1&state=x",
+      "/mcp/oauth/authorize.html?client_id=moc_1&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&scope=a+b" =>
+        "/mcp/oauth/authorize.html?client_id=moc_1&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&scope=a+b",
       "/oauth/google/start?scopes=a+b" => "/oauth/google/start?scopes=a+b",
       "/oauth/google~team/start" => "/oauth/google~team/start",
       "/oauth/acme.google_v2-x/start" => "/oauth/acme.google_v2-x/start",
@@ -24,6 +26,7 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "http:/console", "/console/../api/v1/me", "/console/./x/..", "/console/%2e%2e/api",
       "/console/%2E%2E/api", "/consolex", "/api/v1/me", "/logout", "/login", "/pending",
       "/oauth/google/callback?code=x", "/auth/google/callback", "/mcp/oauth/token",
+      "/mcp/oauth/authorize.json", "/mcp/oauth/authorizex", "/mcp/oauth/authorize/x",
       "/oauth/../console", "/oauth/../start", "/oauth/./start", "/oauth/%2e%2e/start",
       "/oauth/a%2Fb/start", "/oauth/a b/start", "/oauth/a@b/start", "/#{'a' * 5000}"
     ].each do |raw|

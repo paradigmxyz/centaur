@@ -185,7 +185,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
   test "login returns to the MCP authorize request with its full query" do
     query = "response_type=code&client_id=moc_x&redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback" \
             "&scope=mcp%3Atools&state=s%2B1&code_challenge=abc&code_challenge_method=S256"
-    [ "/mcp/oauth/authorize" ].each do |path|
+    [ "/mcp/oauth/authorize", "/mcp/oauth/authorize.html" ].each do |path|
       reset!
       get "#{path}?#{query}"
       assert_redirected_to login_path, path

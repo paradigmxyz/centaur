@@ -7,7 +7,9 @@ require "uri"
 #
 # Allowed: "/", the console SPA ("/console", "/console/..."), and the GET
 # entry points that require a session and remember where they were going: the
-# MCP OAuth authorize endpoint, broker OAuth consent starts, and /launch.
+# MCP OAuth authorize endpoint (also as /mcp/oauth/authorize.html, which the
+# route accepts too), broker OAuth consent starts, and /launch. The query is
+# kept verbatim.
 module ConsoleReturnPath
   MAX_LENGTH = 4096
 
@@ -23,7 +25,7 @@ module ConsoleReturnPath
     @allowed_paths ||= [
       %r{\A/\z},
       %r{\A/console(?:/[A-Za-z0-9_\-./~%:@]*)?\z},
-      %r{\A/mcp/oauth/authorize\z},
+      %r{\A/mcp/oauth/authorize(?:\.html)?\z},
       %r{\A/oauth/#{oauth_slug_source}/start\z},
       %r{\A/launch\z}
     ].freeze

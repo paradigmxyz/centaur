@@ -1,7 +1,8 @@
 # Route constraint for the console SPA fallback (config/routes/spa.rb): any
 # browser navigation (GET/HEAD that accepts HTML) that no Rails route claimed
 # serves the SPA, which renders its own not-found page. API, framework, and
-# protocol prefixes and the server-rendered login pages keep the JSON 404 so
+# protocol namespaces (MCP OAuth, broker OAuth, SSO) and the server-rendered
+# login pages keep the JSON 404 for unknown paths, as on origin/main, so
 # machine clients never get HTML.
 #
 # Legacy Rails routes declared earlier still win for their paths.
@@ -13,8 +14,9 @@ module SpaRequest
     /assets
     /.well-known
     /up
-    /mcp/oauth/token
-    /mcp/oauth/register
+    /mcp
+    /oauth
+    /auth
     /login
     /logout
     /pending
