@@ -7,12 +7,22 @@ module Mcp
   # the authorize entry point, and the token endpoint. The consent page lives
   # in the SPA (/mcp/oauth/consent); GET /mcp/oauth/authorize validates the
   # request server-side, then hands the SPA a signed single-use consent ticket
-  # (Mcp::ConsentTicket). The decision goes through
-  # POST /api/v1/mcp/authorization/decision, which revalidates the request.
+  # (Mcp::ConsentTicket). The consent page posts the decision as a classic
+  # form to POST /mcp/oauth/consent, which consumes the ticket, revalidates
+  # the request, and answers with a 303 to the client's registered
+  # redirect_uri: the authorization code never reaches page JavaScript and
+  # the browser never script-navigates to a client URL.
   class OauthController < ApplicationController
+    # Failure codes the SPA consent page maps to fixed messages.
+    CONSENT_ERRORS = %w[csrf invalid_decision invalid_consent_request invalid_authorization_request server_error].freeze
+    CONSENT_PATH = "/mcp/oauth/consent".freeze
+
     skip_before_action :require_login
     skip_before_action :require_active_account
     skip_forgery_protection only: %i[register token]
+    # decide verifies the token itself so a failure lands on the consent page
+    # (with a code) instead of raising.
+    skip_forgery_protection only: :decide
 
     ACCESS_TOKEN_TTL_SECONDS = 1.hour.to_i
 
@@ -81,7 +91,36 @@ module Mcp
       return authorization_error(authorization) unless authorization.valid?
 
       ticket = ConsentTicket.issue(session, user: current_user, request: authorization)
-      redirect_to "/mcp/oauth/consent?#{{ request: ticket }.to_query}"
+      redirect_to "#{CONSENT_PATH}?#{{ request: ticket }.to_query}"
+    end
+
+    # POST /mcp/oauth/consent  (form: request, decision, authenticity_token)
+    def decide
+      return redirect_to(login_path, status: :see_other) unless current_user
+      return redirect_to(pending_path, status: :see_other) if current_user.pending?
+      if current_user.disabled?
+        reset_session
+        return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE, status: :see_other
+      end
+      return consent_failure("csrf") unless valid_request_origin? && any_authenticity_token_valid?
+
+      decision = params[:decision].to_s
+      # Checked before consuming, so a malformed post does not burn the ticket.
+      return consent_failure("invalid_decision") unless %w[approve deny].include?(decision)
+
+      authorization = ConsentTicket.consume(session, params[:request], user: current_user)
+      return consent_failure("invalid_consent_request") unless authorization
+      unless authorization.valid?
+        url = authorization.error_redirect_url
+        return url ? redirect_to(url, allow_other_host: true, status: :see_other) : consent_failure("invalid_authorization_request")
+      end
+
+      url = decision == "approve" ? authorization.issue_code!(current_user) : authorization.denied_redirect_url
+      redirect_to url, allow_other_host: true, status: :see_other
+    rescue ActiveRecord::RecordInvalid => e
+      Rails.logger.error { "mcp authorization code issue failed: #{e.record.errors.full_messages.to_sentence}" }
+      url = authorization&.error_redirect_url(:server_error, "The authorization code could not be issued.")
+      url ? redirect_to(url, allow_other_host: true, status: :see_other) : consent_failure("server_error")
     end
 
     # POST /mcp/oauth/token
@@ -273,6 +312,10 @@ module Mcp
     def redirect_to_login
       remember_console_return_path(request.fullpath)
       redirect_to login_path
+    end
+
+    def consent_failure(code)
+      redirect_to "#{CONSENT_PATH}?#{{ error: code }.to_query}", status: :see_other
     end
 
     # Invalid requests go back to the client when its redirect_uri is trusted;

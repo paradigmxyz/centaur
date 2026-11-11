@@ -117,7 +117,6 @@ Endpoints behind the SPA's signed-out and consent pages (`/login`, `/pending`,
 | `GET` | `/api/v1/auth/config` | public (no session or key needed) | Login-page bootstrap: sign-in methods, CSRF token, one-shot flash |
 | `POST` | `/api/v1/session` | public, CSRF token required | Password sign-in |
 | `GET` | `/api/v1/mcp/authorization?request=` | active session (not bearer) | MCP consent ticket details |
-| `POST` | `/api/v1/mcp/authorization/decision` | active session (not bearer), CSRF | Approve or deny an MCP consent |
 
 `GET /api/v1/auth/config` (sent with `Cache-Control: no-store`; ignores any
 `Authorization` header):
@@ -170,15 +169,25 @@ page.
 
 #### MCP OAuth consent
 
+Dynamic client registration (`POST /mcp/oauth/register`) accepts `https`
+redirect URIs, loopback `http`, and native private-use schemes (`cursor://`,
+`vscode://`, `com.example.app:/…`). It rejects executable or browser-reserved
+schemes (`javascript`, `data`, `vbscript`, `file`, `blob`, `about`, …, in any
+case), and URIs containing whitespace, control characters, backslashes,
+fragments, or wildcards. The same check runs again at authorize and decision
+time, so stored registrations that predate it are refused.
+
 `GET /mcp/oauth/authorize` validates the request (client, `response_type=code`,
 registered `redirect_uri`, S256 PKCE, scopes, resource). Invalid requests go
 back to the client's registered `redirect_uri` with `error`/`state`, or render a
 plain `400` when the client or `redirect_uri` is not trusted. A valid request
 redirects to `/mcp/oauth/consent?request=<ticket>`. The ticket is signed,
 expires after 10 minutes, and is bound to the signed-in user and browser
-session; a decision consumes it.
+session. It is also backed by a server-side row (`mcp_oauth_consents`) that a
+decision consumes with one conditional `UPDATE`, so a ticket is decided at most
+once, even when the session cookie is replayed or decisions race.
 
-`GET /api/v1/mcp/authorization?request=<ticket>`:
+`GET /api/v1/mcp/authorization?request=<ticket>` (`Cache-Control: no-store`):
 
 ```json
 {
@@ -187,23 +196,29 @@ session; a decision consumes it.
     "redirect_host": "127.0.0.1",
     "resource": "https://mcp.example.com/mcp",
     "scopes": [ "mcp:tools" ],
-    "user": { "email": "ops@example.com" }
+    "user": { "email": "ops@example.com" },
+    "decision_path": "/mcp/oauth/consent",
+    "csrf_token": "…"
   }
 }
 ```
 
-`POST /api/v1/mcp/authorization/decision` body
-`{ "data": { "request": "<ticket>", "decision": "approve" | "deny" } }` revalidates
-the request and returns `{ "data": { "decision": "approve", "redirect_to": "<registered redirect_uri>?code=…&state=…" } }`
-(`error=access_denied` for `deny`). The browser should navigate to
-`redirect_to`; it is always the client's registered `redirect_uri`.
+Errors: `403` `session_required` for bearer callers, `404`
+`invalid_consent_request` for a tampered, expired, decided, foreign-user, or
+foreign-session ticket, and `422` `invalid_authorization_request` when the
+client or its registration changed since the ticket was issued.
 
-Errors for both: `403` `session_required` for bearer callers, `404`
-`invalid_consent_request` for a tampered, expired, replayed, foreign-user, or
-foreign-session ticket, `422` `invalid_authorization_request` when the client
-or its registration changed since the ticket was issued (`details.redirect_to`
-is the client's error redirect when still trusted, else `null`), and `422` for
-a `decision` other than `approve`/`deny` (the ticket is not consumed).
+The decision is a classic form post (not JSON), so neither the client URL nor
+the authorization code passes through page JavaScript:
+`POST /mcp/oauth/consent` with `request=<ticket>`, `decision=approve|deny`, and
+`authenticity_token`. The response is a `303` to the client's registered
+`redirect_uri`, with `code` and `state` (or `error=access_denied`). A signed-out
+browser goes to `/login` and a pending one to `/pending`. Failures redirect to
+`/mcp/oauth/consent?error=<code>`, where `code` is one of `csrf`,
+`invalid_decision` (the ticket is not consumed), `invalid_consent_request`,
+`invalid_authorization_request`, or `server_error`. If the client's
+redirect_uri is still trusted, a revalidation failure goes to the client
+instead.
 
 ### Proxy tokens
 

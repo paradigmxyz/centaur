@@ -104,6 +104,43 @@ module Mcp
       assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error")
     end
 
+    test "dynamic client registration rejects executable redirect URI schemes" do
+      [
+        "javascript://x/%0aalert(document.domain)//",
+        "JavaScript://x/%0aalert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript://x",
+        "file:///etc/passwd",
+        " javascript://x"
+      ].each do |uri|
+        assert_no_difference -> { McpOauthClient.count } do
+          post "/mcp/oauth/register", params: { client_name: "Attacker", redirect_uris: [ uri ] }, as: :json
+        end
+        assert_response :bad_request, uri
+        assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error")
+      end
+    end
+
+    test "dynamic client registration still accepts native custom-scheme callbacks" do
+      post "/mcp/oauth/register", params: { client_name: "VS Code", redirect_uris: [ "vscode://vscode.github-authentication/did-authenticate" ] },
+           as: :json
+      assert_response :created
+    end
+
+    test "an existing registration with a javascript redirect URI is refused at authorize, without a redirect" do
+      bad = "javascript://x/%0aalert(document.domain)//"
+      client = create_client
+      client.update_column(:redirect_uris, [ bad ])
+      post login_url, params: { email: @operator.email, password: "password123456" }
+
+      assert_no_difference [ -> { McpOauthAuthorizationCode.count }, -> { McpOauthConsent.count } ] do
+        get "/mcp/oauth/authorize", params: authorize_params(client).merge(redirect_uri: bad)
+      end
+      assert_response :bad_request
+      assert_nil response.location
+      assert_includes response.body, "redirect_uri is not registered"
+    end
+
     test "authorize rejects non-loopback plain HTTP redirect URIs even when already stored" do
       client = create_client
       client.update_column(:redirect_uris, [ "http://evil.example/callback" ])
@@ -145,8 +182,8 @@ module Mcp
       assert_equal "localhost", json_body.dig("data", "redirect_host")
 
       decide(ticket, "approve")
-      assert_response :ok
-      redirect = URI.parse(json_body.dig("data", "redirect_to"))
+      assert_response :see_other
+      redirect = URI.parse(response.location)
       assert_equal "localhost", redirect.host
       assert_equal 49153, redirect.port
       assert Rack::Utils.parse_nested_query(redirect.query).key?("code")
@@ -160,8 +197,8 @@ module Mcp
         decide(start_consent(authorize_params(client)), "deny")
       end
 
-      assert_response :ok
-      redirect = URI.parse(json_body.dig("data", "redirect_to"))
+      assert_response :see_other
+      redirect = URI.parse(response.location)
       query = Rack::Utils.parse_nested_query(redirect.query)
       assert_equal "access_denied", query.fetch("error")
       assert_equal "state-test", query.fetch("state")
@@ -226,6 +263,16 @@ module Mcp
       assert_redirected_to login_path
       assert_equal "Your account is disabled.", flash[:alert]
       assert_nil session[:user_id]
+    end
+
+    test "authorization codes are filtered from logs" do
+      filters = Rails.application.config.filter_redirect
+      assert(filters.any? { |f| f.is_a?(Regexp) ? f.match?("http://127.0.0.1:1/cb?code=mcpauth_x&state=s") : false })
+      filter = ActiveSupport::ParameterFilter.new(Rails.application.config.filter_parameters)
+      filtered = filter.filter("code" => "mcpauth_x", "code_verifier" => "v", "country_code" => "NZ")
+      assert_equal "[FILTERED]", filtered["code"]
+      assert_equal "[FILTERED]", filtered["code_verifier"]
+      assert_equal "NZ", filtered["country_code"]
     end
 
     test "the legacy form approval endpoint is gone" do
@@ -362,7 +409,7 @@ module Mcp
 
       decide(start_consent(authorize_params(client)), "approve")
 
-      assert_response :ok
+      assert_response :see_other
       assert_empty principal.reload.roles
     end
 
@@ -445,8 +492,8 @@ module Mcp
       end
 
       decide(ticket, "approve")
-      assert_response :ok
-      redirect = URI.parse(json_body.dig("data", "redirect_to"))
+      assert_response :see_other
+      redirect = URI.parse(response.location)
       Rack::Utils.parse_nested_query(redirect.query).fetch("code")
     end
 
@@ -459,11 +506,11 @@ module Mcp
       Rack::Utils.parse_nested_query(uri.query).fetch("request")
     end
 
+    # The SPA consent form's post: answered with a 303 to the client.
     def decide(ticket, decision)
       @console_csrf_token = nil
-      headers = csrf_headers
-      post api_v1_mcp_authorization_decision_path,
-           params: { data: { request: ticket, decision: decision } }, headers: headers, as: :json
+      token = console_csrf_token
+      post "/mcp/oauth/consent", params: { request: ticket, decision: decision, authenticity_token: token }
     end
 
     def exchange_authorization_code(client, code)

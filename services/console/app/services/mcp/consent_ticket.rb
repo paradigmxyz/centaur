@@ -5,11 +5,15 @@ module Mcp
   # to the console SPA consent page and back to the decision endpoint.
   #
   # The ticket is a signed (tamper-proof, 10-minute) message holding the request
-  # parameters, the user it was issued to, and a nonce. The nonce is also kept
-  # in the console session and removed when a decision is made, so a ticket is
-  # single-use, bound to the browser session that started it, and useless to a
-  # different user. Ticket contents are not secret (they come from the client's
-  # own authorize URL); the signature only stops the SPA from altering them.
+  # parameters, the user it was issued to, and a nonce. The nonce is bound
+  # twice:
+  # - to the browser session, through a short list of pending nonces in the
+  #   console session (a ticket from another session or user is useless);
+  # - to the server, through an McpOauthConsent row consumed by one atomic
+  #   conditional UPDATE, so a ticket is decided at most once even when the
+  #   original session cookie is replayed or decisions race.
+  # Ticket contents are not secret (they come from the client's own authorize
+  # URL); the signature only stops the browser from altering them.
   module ConsentTicket
     PURPOSE = :mcp_authorization_consent
     TTL = 10.minutes
@@ -21,7 +25,9 @@ module Mcp
     module_function
 
     def issue(session, user:, request:)
-      nonce = SecureRandom.urlsafe_base64(18)
+      nonce = SecureRandom.urlsafe_base64(24)
+      McpOauthConsent.prune!
+      McpOauthConsent.create!(nonce_digest: McpOauthConsent.digest(nonce), user: user, expires_at: TTL.from_now)
       pending = Array(session[SESSION_KEY]).last(MAX_PENDING - 1)
       session[SESSION_KEY] = pending + [ nonce ]
       verifier.generate(
@@ -31,17 +37,32 @@ module Mcp
     end
 
     # The authorization request for +ticket+ when it is authentic, unexpired,
-    # issued to +user+, and still pending in +session+; otherwise nil. With
-    # consume: true the nonce is removed first, so a replayed decision fails.
-    def load(session, ticket, user:, consume: false)
+    # issued to +user+, pending in +session+, and not yet decided; else nil.
+    def load(session, ticket, user:)
+      payload = pending_payload(session, ticket, user)
+      return nil unless payload && McpOauthConsent.pending_for?(payload["nonce"], user)
+
+      AuthorizationRequest.from_params(payload["params"] || {})
+    end
+
+    # Like load, but consumes the ticket: only the first caller for a ticket
+    # gets the request back.
+    def consume(session, ticket, user:)
+      payload = pending_payload(session, ticket, user)
+      return nil unless payload
+
+      session[SESSION_KEY] = Array(session[SESSION_KEY]) - [ payload["nonce"] ]
+      return nil unless McpOauthConsent.consume!(payload["nonce"], user)
+
+      AuthorizationRequest.from_params(payload["params"] || {})
+    end
+
+    def pending_payload(session, ticket, user)
       payload = verifier.verified(ticket.to_s, purpose: PURPOSE)
       return nil unless payload.is_a?(Hash) && user && payload["user"] == user.id
+      return nil unless Array(session[SESSION_KEY]).include?(payload["nonce"])
 
-      pending = Array(session[SESSION_KEY])
-      return nil unless pending.include?(payload["nonce"])
-
-      session[SESSION_KEY] = pending - [ payload["nonce"] ] if consume
-      AuthorizationRequest.from_params(payload["params"] || {})
+      payload
     rescue ActiveSupport::MessageVerifier::InvalidSignature
       nil
     end

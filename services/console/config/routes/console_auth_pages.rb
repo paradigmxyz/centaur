@@ -32,19 +32,23 @@ get "auth/:provider/callback", to: "session_oauth#callback", as: :auth_callback
 # MCP OAuth authorization server. MCP clients discover this from api-rs'
 # OAuth protected-resource metadata and register public PKCE clients here.
 # GET authorize validates the request and hands a signed consent ticket to the
-# SPA consent page (/mcp/oauth/consent); the decision goes through
-# POST /api/v1/mcp/authorization/decision.
+# SPA consent page (/mcp/oauth/consent), which posts the decision as a form to
+# POST /mcp/oauth/consent; that answers with a 303 to the registered
+# redirect_uri.
 get ".well-known/oauth-authorization-server", to: "mcp/oauth#metadata"
 get ".well-known/openid-configuration", to: "mcp/oauth#metadata"
 post "mcp/oauth/register", to: "mcp/oauth#register"
 get "mcp/oauth/authorize", to: "mcp/oauth#authorize"
+post "mcp/oauth/consent", to: "mcp/oauth#decide"
 post "mcp/oauth/token", to: "mcp/oauth#token"
 
 # OAuth consent flow, keyed by the app's well-known slug (/oauth/google/start).
 # Requires an active console session; the provider is derived from the app.
 # Failures land on the SPA result page (/oauth/result) with a flash.
-get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start
-get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback
+# Slugs may contain any OauthApp::URL_SAFE_FORMAT character, including "." and
+# "~"; the controller resolves (or 404s) the slug.
+get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start, constraints: { slug: %r{[^/]+} }
+get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback, constraints: { slug: %r{[^/]+} }
 
 # /api/v1 endpoints for the auth pages (see docs/API.md#console-auth-pages).
 namespace :api do
@@ -52,6 +56,5 @@ namespace :api do
     get "auth/config", to: "auth#show", as: :auth_config
     resource :session, only: :create
     get "mcp/authorization", to: "mcp_authorizations#show", as: :mcp_authorization
-    post "mcp/authorization/decision", to: "mcp_authorizations#decide", as: :mcp_authorization_decision
   end
 end

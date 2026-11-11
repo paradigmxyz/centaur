@@ -5,8 +5,10 @@
 //   also hands off (once) the flash left by a redirect-based flow.
 // - /pending probes GET /api/v1/me itself, because pending and signed-out
 //   browsers must not be bounced by the shell's redirects.
-// - /mcp/oauth/consent reads and decides a server-issued consent ticket; the
-//   browser only ever navigates to the redirect_to the server returns.
+// - /mcp/oauth/consent reads a server-issued consent ticket and posts the
+//   decision as a classic form; the server answers with the redirect to the
+//   client, so no client URL or authorization code passes through JavaScript
+//   or the TanStack caches.
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import type { Me } from "@/app/session";
@@ -48,11 +50,9 @@ export interface McpAuthorization {
   resource: string;
   scopes: string[];
   user: { email: string };
-}
-
-export interface McpDecisionResult {
-  decision: "approve" | "deny";
-  redirect_to: string;
+  /** Same-origin form action for the decision (POST /mcp/oauth/consent). */
+  decision_path: string;
+  csrf_token: string;
 }
 
 async function fetchAuthConfig(returnTo?: string | null): Promise<AuthConfig> {
@@ -143,15 +143,5 @@ export function useMcpAuthorization(ticket: string) {
     enabled: ticket !== "",
     retry: false,
     staleTime: Infinity,
-  });
-}
-
-export function useMcpDecision(ticket: string) {
-  return useMutation({
-    mutationFn: (decision: "approve" | "deny") =>
-      apiRequest<DataEnvelope<McpDecisionResult>>("/api/v1/mcp/authorization/decision", {
-        method: "POST",
-        body: { data: { request: ticket, decision } },
-      }).then((body) => body.data),
   });
 }

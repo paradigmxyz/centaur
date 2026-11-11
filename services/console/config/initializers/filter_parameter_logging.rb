@@ -6,3 +6,10 @@
 Rails.application.config.filter_parameters += [
   :passw, :email, :secret, :token, :_key, :crypt, :salt, :certificate, :otp, :ssn, :cvv, :cvc
 ]
+
+# OAuth authorization codes and PKCE verifiers (MCP token exchange, consent
+# callbacks). Anchored so unrelated "*_code" parameters stay readable.
+Rails.application.config.filter_parameters += [ /\Acode\z/i, :code_verifier ]
+# "Redirected to …" log lines: the MCP consent decision redirects to the
+# client with ?code=<authorization code>.
+Rails.application.config.filter_redirect += [ /[?&]code=/ ]
