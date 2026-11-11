@@ -25,6 +25,9 @@ struct CustomProviderConfig {
     default_model: Option<String>,
     #[serde(default)]
     models: BTreeMap<String, CustomProviderModel>,
+    /// Validated here; applied by the sandbox Codex harness per thread.
+    #[serde(rename = "webSearch")]
+    _web_search: Option<bool>,
 }
 
 #[derive(Deserialize)]
