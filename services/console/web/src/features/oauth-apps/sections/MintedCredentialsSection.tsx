@@ -51,9 +51,9 @@ export function MintedCredentialsSection({ appId }: { appId: string }) {
   return (
     <section className="mb-8">
       <SectionHeading className="mb-3">Minted Credentials</SectionHeading>
-      {list.error && !list.data ? (
-        <ErrorAlert>Could not load minted credentials: {errorMessage(list.error)}</ErrorAlert>
-      ) : list.data && list.data.meta.total === 0 ? (
+      {list.isError && <ErrorAlert>Could not load minted credentials: {errorMessage(list.error)}</ErrorAlert>}
+      {/* A failed request never shows the empty state; stale non-empty rows stay after a failed refetch. */}
+      {list.isError && (list.data?.data.length ?? 0) === 0 ? null : list.data && list.data.meta.total === 0 ? (
         <EmptyState>No credentials minted yet.</EmptyState>
       ) : (
         <DataTable

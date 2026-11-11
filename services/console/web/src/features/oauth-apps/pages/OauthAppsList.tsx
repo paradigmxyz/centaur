@@ -82,22 +82,22 @@ function OauthAppsList() {
           </Button>
         }
       />
-      {list.error && !list.data ? (
-        <ErrorAlert>{errorMessage(list.error)}</ErrorAlert>
-      ) : (
-      <DataTable
-        caption="OAuth apps"
-        columns={columns}
-        rows={list.data?.data}
-        loading={list.isLoading}
-        rowKey={(app) => app.id}
-        empty="No apps."
-        pagination={
-          list.data && list.data.meta.total_pages > 1
-            ? { meta: list.data.meta, unit: "app", onPageChange: setPage }
-            : undefined
-        }
-      />
+      {list.isError && <ErrorAlert>{errorMessage(list.error)}</ErrorAlert>}
+      {/* A failed request shows the alert, never the empty state; stale non-empty rows stay after a failed refetch. */}
+      {(!list.isError || (list.data?.data.length ?? 0) > 0) && (
+        <DataTable
+          caption="OAuth apps"
+          columns={columns}
+          rows={list.data?.data}
+          loading={list.isLoading}
+          rowKey={(app) => app.id}
+          empty="No apps."
+          pagination={
+            list.data && list.data.meta.total_pages > 1
+              ? { meta: list.data.meta, unit: "app", onPageChange: setPage }
+              : undefined
+          }
+        />
       )}
     </>
   );

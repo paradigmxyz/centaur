@@ -19,10 +19,17 @@ function hasPanel(provider: string): provider is keyof typeof PANELS {
 export function ProviderPanel({ app }: { app: OauthApp }) {
   const enabled = app.shared && hasPanel(app.provider);
   const query = useProviderDetails(app.id, enabled);
-  if (enabled && query.error && !query.data) {
-    return <ErrorAlert>Could not load provider details: {errorMessage(query.error)}</ErrorAlert>;
-  }
-  if (!enabled || !query.data?.credential || !hasPanel(app.provider)) return null;
+  if (!enabled || !hasPanel(app.provider)) return null;
+  const error = query.isError && (
+    <ErrorAlert>Could not load provider details: {errorMessage(query.error)}</ErrorAlert>
+  );
+  if (!query.data?.credential) return error || null;
   const Panel = PANELS[app.provider];
-  return <Panel credential={query.data.credential} details={query.data.details} />;
+  // A failed refetch is reported above the last details rather than hidden.
+  return (
+    <>
+      {error}
+      <Panel credential={query.data.credential} details={query.data.details} />
+    </>
+  );
 }

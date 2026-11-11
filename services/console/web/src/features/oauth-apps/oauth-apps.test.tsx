@@ -88,6 +88,28 @@ describe("apps list", () => {
     expect(screen.queryByText("No apps.")).not.toBeInTheDocument();
   });
 
+  it("reports a failed refetch after a successful empty list instead of the empty state", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/oauth_apps": () => (fail ? apiResponse(500, { error: { message: "boom" } }) : { data: [], meta: meta(0) }) });
+    const { queryClient } = renderRoute(<OauthAppsListPage />, { path: "/console/oauth_apps" });
+    expect(await screen.findByText("No apps.")).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(screen.queryByText("No apps.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the rows and reports a failed refetch", async () => {
+    let fail = false;
+    mockApi({ "GET /api/v1/oauth_apps": () => (fail ? apiResponse(500, { error: { message: "boom" } }) : { data: [app], meta: meta(1) }) });
+    const { queryClient } = renderRoute(<OauthAppsListPage />, { path: "/console/oauth_apps" });
+    expect(await screen.findByRole("link", { name: "google" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "google" })).toBeInTheDocument();
+  });
+
   it("sends operators to their landing page", async () => {
     const api = mockApi({});
     renderRoute(<OauthAppsListPage />, { path: "/console/oauth_apps", me: operatorMe() });
@@ -144,6 +166,28 @@ describe("app detail", () => {
     });
     renderRoute(<OauthAppDetailPage />, { path: "/console/oauth_apps/:id", url: "/console/oauth_apps/oap_mercator" });
 
+    expect(await screen.findByText("Could not load minted credentials: boom")).toBeInTheDocument();
+    expect(await screen.findByText("Could not load provider details: unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No credentials minted yet.")).not.toBeInTheDocument();
+  });
+
+  it("reports failed refetches after successful empty credentials and provider details", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/oauth_apps/oap_mercator": { data: { ...app, id: "oap_mercator", slug: "mercator", provider: "mercator", shared: true } },
+      "GET /api/v1/oauth_apps/oap_mercator/credentials": () => (fail ? apiResponse(500, { error: { message: "boom" } }) : { data: [], meta: meta(0) }),
+      "GET /api/v1/oauth_apps/oap_mercator/provider_details": () =>
+        fail
+          ? apiResponse(503, { error: { message: "unavailable" } })
+          : { data: { provider: "mercator", credential: null, details: {} } },
+    });
+    const { queryClient } = renderRoute(<OauthAppDetailPage />, {
+      path: "/console/oauth_apps/:id",
+      url: "/console/oauth_apps/oap_mercator",
+    });
+    expect(await screen.findByText("No credentials minted yet.")).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries({ predicate: (query) => query.queryKey.length > 3 });
     expect(await screen.findByText("Could not load minted credentials: boom")).toBeInTheDocument();
     expect(await screen.findByText("Could not load provider details: unavailable")).toBeInTheDocument();
     expect(screen.queryByText("No credentials minted yet.")).not.toBeInTheDocument();
@@ -211,6 +255,33 @@ describe("app detail", () => {
       "href",
       "/console/secrets/static/ssr_wallet#roles",
     );
+  });
+
+  it("keeps the wallet panel and reports a failed provider-details refetch", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/oauth_apps/oap_mercator": { data: mercator },
+      "GET /api/v1/oauth_apps/oap_mercator/credentials": { data: [], meta: meta(0) },
+      "GET /api/v1/oauth_apps/oap_mercator/provider_details": () =>
+        fail
+          ? apiResponse(503, { error: { message: "unavailable" } })
+          : {
+              data: {
+                provider: "mercator",
+                credential: { id: "bcr_w", provider_subject: wallet, static_secret_id: "ssr_wallet" },
+                details: { claimed: false },
+              },
+            },
+    });
+    const { queryClient } = renderRoute(<OauthAppDetailPage />, {
+      path: "/console/oauth_apps/:id",
+      url: "/console/oauth_apps/oap_mercator",
+    });
+    expect(await screen.findByRole("region", { name: "Mercator wallet" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries({ predicate: (query) => query.queryKey.length > 3 });
+    expect(await screen.findByText("Could not load provider details: unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Mercator wallet" })).toBeInTheDocument();
   });
 
   it("disables the claim once MACH is claimed and keeps the link when details fail", async () => {
@@ -512,6 +583,20 @@ describe("integrations", () => {
     renderRoute(<IntegrationsPage />, { path: "/console/integrations" });
     expect(await screen.findByText("boom")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "SSH key" })).not.toBeInTheDocument();
+  });
+
+  it("reports a failed refetch and keeps the last cards", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/integrations": () =>
+        fail ? apiResponse(500, { error: { message: "boom" } }) : { data: { apps: [], presets: [], ssh_key: { configured: false } } },
+    });
+    const { queryClient } = renderRoute(<IntegrationsPage />, { path: "/console/integrations", me: adminMe() });
+    expect(await screen.findByRole("region", { name: "SSH key" })).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries();
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "SSH key" })).toBeInTheDocument();
   });
 
   it("links a configured SSH key to its page", async () => {
