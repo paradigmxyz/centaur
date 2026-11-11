@@ -31,7 +31,7 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
   // role-inherited ones stay offered so they can be promoted to a direct grant.
   // The form is hidden once nothing is left to grant.
   const assignable = useAssignableSecretCount(principal.id);
-  const showGrantForm = assignable.data === undefined ? assignable.isError : assignable.data > 0;
+  const showGrantForm = assignable.isError || (assignable.data ?? 0) > 0;
 
   const grant = async () => {
     if (!selected) {

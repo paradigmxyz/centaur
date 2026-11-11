@@ -309,6 +309,12 @@ describe("role detail", () => {
     expect(screen.queryByText("No secrets granted.")).not.toBeInTheDocument();
   });
 
+  it("reports a failed Slack channel-name request", async () => {
+    detailApi({ "GET /api/v1/slack_channels": apiResponse(500, { error: { message: "database unavailable" } }) });
+    renderDetail();
+    expect(await screen.findByText("Could not load Slack channel names: database unavailable")).toBeInTheDocument();
+  });
+
   it("asks for a secret before granting", async () => {
     const api = detailApi();
     renderDetail();

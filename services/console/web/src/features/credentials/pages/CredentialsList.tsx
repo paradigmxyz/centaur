@@ -103,7 +103,7 @@ function CredentialsList() {
       {/* A failed load (or refetch) is an error, never "No managed credentials.";
           rows from an earlier successful load stay visible below the alert. */}
       {list.isError && <ErrorAlert>Could not load credentials: {errorMessage(list.error)}</ErrorAlert>}
-      {(!list.isError || list.data) && (
+      {(!list.isError || (list.data?.data.length ?? 0) > 0) && (
         <DataTable
           caption="Managed credentials"
           columns={columns}

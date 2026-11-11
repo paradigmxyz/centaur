@@ -5,7 +5,7 @@ import { useDeferredValue, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { api, type ListEnvelope } from "@/lib/api";
+import { api, errorMessage, type ListEnvelope } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
 import { SECRET_KIND_SLUGS, secretKindLabel, secretOptionLabel, type GrantableSummary } from "@/lib/secret-kinds";
 
@@ -69,8 +69,14 @@ export function SecretGrantPicker({
         <Command shouldFilter={false}>
           <CommandInput placeholder="Search secrets" value={query} onValueChange={setQuery} />
           <CommandList>
-            <CommandEmpty>{secrets.isLoading ? "Loading…" : "No secrets found."}</CommandEmpty>
-            {groups.map((group) => (
+            {secrets.isError ? (
+              <p role="alert" className="px-3 py-4 text-sm text-red-300 light:text-red-700">
+                Could not load secrets: {errorMessage(secrets.error)}
+              </p>
+            ) : (
+              <CommandEmpty>{secrets.isLoading ? "Loading…" : "No secrets found."}</CommandEmpty>
+            )}
+            {!secrets.isError && groups.map((group) => (
               <CommandGroup key={group.kind} heading={secretKindLabel(group.kind)}>
                 {group.items.map((secret) => (
                   <CommandItem

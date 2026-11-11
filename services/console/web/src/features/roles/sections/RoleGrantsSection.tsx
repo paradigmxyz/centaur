@@ -30,7 +30,7 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
   // The server leaves secrets already granted to the role out of the picker;
   // like the legacy page, the form is hidden once nothing is left to grant.
   const assignable = useAssignableSecretCount(role.id);
-  const showGrantForm = assignable.data === undefined ? assignable.isError : assignable.data > 0;
+  const showGrantForm = assignable.isError || (assignable.data ?? 0) > 0;
 
   const grant = async () => {
     if (!selected) {

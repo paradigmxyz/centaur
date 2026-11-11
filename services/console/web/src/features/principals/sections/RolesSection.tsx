@@ -22,7 +22,7 @@ export function RolesSection({ principal, mutations }: SectionProps) {
   // The server leaves assigned roles out (across all pages); the form is
   // hidden once nothing is left to assign, and stays usable if the count fails.
   const assignable = useAssignableRoleSummary(principal.id);
-  const showAssignForm = assignable.data === undefined ? assignable.isError : assignable.data.total > 0;
+  const showAssignForm = assignable.isError || (assignable.data?.total ?? 0) > 0;
   const [page, setPage] = usePageParam("roles_page");
   const [selected, setSelected] = useState<RoleSummary | null>(null);
 

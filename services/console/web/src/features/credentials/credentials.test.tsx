@@ -120,6 +120,21 @@ describe("credentials list", () => {
     expect(screen.queryByText("No managed credentials.")).not.toBeInTheDocument();
   });
 
+  it("shows an error, not the empty state, when a refetch after an empty list fails", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/broker_credentials": () =>
+        fail ? apiResponse(503, { error: { message: "upstream timeout" } }) : { data: [], meta: meta(0) },
+    });
+    const { queryClient } = renderRoute(<CredentialsListPage />, { path: "/console/credentials" });
+    expect(await screen.findByText("No managed credentials.")).toBeInTheDocument();
+
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["credentials"] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load credentials: upstream timeout");
+    expect(screen.queryByText("No managed credentials.")).not.toBeInTheDocument();
+  });
+
   it("shows an error but keeps the loaded rows when a refetch fails", async () => {
     let fail = false;
     mockApi({

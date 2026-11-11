@@ -104,6 +104,9 @@ function PrincipalsList() {
         }
       />
       <SearchBox placeholder="Search names or foreign IDs" label="Search principals" />
+      {!list.isError && total.isError && (
+        <ErrorAlert>Could not load the principal count: {errorMessage(total.error)}</ErrorAlert>
+      )}
       {list.isError ? (
         <ErrorAlert>Could not load principals: {errorMessage(list.error)}</ErrorAlert>
       ) : (

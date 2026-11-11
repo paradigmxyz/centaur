@@ -23,7 +23,11 @@ export function SlackPermissionsSection({ principal, mutations }: SectionProps) 
       permissions={principal.slack_channel_permissions}
       inherited={principal.inherited_slack_channel_permissions}
       channelNames={catalog.data?.names}
-      catalogError={catalog.data?.catalogError}
+      catalogError={
+        catalog.isError
+          ? `Could not load Slack channel names: ${errorMessage(catalog.error)}`
+          : catalog.data?.catalogError
+      }
       directMessageOwnerName={principal.name || principal.slack_user_id || ""}
       loadOptions={loadOptions}
       onSave={async (rows) => {

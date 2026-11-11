@@ -17,7 +17,11 @@ export function RoleSlackPermissionsSection({ role, mutations }: SectionProps) {
     <SlackChannelPermissionsEditor
       permissions={role.slack_channel_permissions}
       channelNames={catalog.data?.names}
-      catalogError={catalog.data?.catalogError}
+      catalogError={
+        catalog.isError
+          ? `Could not load Slack channel names: ${errorMessage(catalog.error)}`
+          : catalog.data?.catalogError
+      }
       loadOptions={loadOptions}
       onSave={async (rows) => {
         try {

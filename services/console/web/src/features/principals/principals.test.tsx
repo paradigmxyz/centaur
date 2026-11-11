@@ -134,6 +134,24 @@ describe("principals list", () => {
     expect(screen.queryByText("No principals yet.")).not.toBeInTheDocument();
   });
 
+  it("reports a failed principal count instead of a stale total", async () => {
+    let fail = false;
+    mockApi({
+      "GET /api/v1/principals": ({ url }: { url: URL }) =>
+        url.searchParams.get("limit") === "1"
+          ? fail
+            ? apiResponse(500, { error: { message: "database unavailable" } })
+            : { data: [], meta: meta(3) }
+          : { data: [principal], meta: meta(1) },
+    });
+    const { queryClient } = renderRoute(<PrincipalsListPage />, { path: "/console/principals" });
+    expect(await screen.findByText("3 principals total.")).toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries({ queryKey: ["principals"] });
+    expect(await screen.findByText("Could not load the principal count: database unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Bob" })).toBeInTheDocument();
+  });
+
   it("sends non-admins to their landing page without fetching", async () => {
     const api = mockApi({});
     renderRoute(<PrincipalsListPage />, {
@@ -355,6 +373,40 @@ describe("principal detail failures and limits", () => {
     await userEvent.click(screen.getByRole("button", { name: "Assign role" }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(api.calls("POST /api/v1/principals/prn_bob/roles")).toHaveLength(0);
+  });
+
+  it("reports failed Slack channel-name and secret-picker requests instead of hiding them", async () => {
+    const failure = apiResponse(500, { error: { message: "database unavailable" } });
+    detailApi({
+      "GET /api/v1/slack_channels": failure,
+      "GET /api/v1/secrets": ({ url }: { url: URL }) =>
+        url.searchParams.get("limit") === "1" ? { data: [], meta: meta(5) } : failure,
+    });
+    renderDetail();
+    expect(await screen.findByText("Could not load Slack channel names: database unavailable")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("combobox", { name: "Secret to grant" }));
+    expect(await screen.findByText("Could not load secrets: database unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("No secrets found.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the assign forms when a count refetch fails after an empty result", async () => {
+    let fail = false;
+    const failure = apiResponse(500, { error: { message: "database unavailable" } });
+    detailApi({
+      "GET /api/v1/roles": (call: { url: URL }) =>
+        fail ? failure : rolesHandler(principal.roles, { prn_bob: ["role_infra"] })(call),
+      "GET /api/v1/secrets": (call: { url: URL }) =>
+        fail ? failure : secretsHandler([staticSecret], { "principal:prn_bob": ["ssr_gh"] })(call),
+    });
+    const { queryClient } = renderDetail();
+    expect(await screen.findByRole("table", { name: "Direct grants" })).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("button", { name: "Assign role" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Grant secret" })).not.toBeInTheDocument();
+    fail = true;
+    await queryClient.refetchQueries({ predicate: (query) => query.queryKey[0] !== "principals" });
+    expect(await screen.findByRole("button", { name: "Assign role" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Grant secret" })).toBeInTheDocument();
   });
 
   it("shows load errors instead of empty states for grants and roles", async () => {
