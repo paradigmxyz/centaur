@@ -3,12 +3,32 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 from pathlib import Path
 
 
 SEPARATOR = "\n\n---\n\n"
 OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
 PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
+
+
+def _write_atomically(target: Path, text: str) -> None:
+    """Replace `target` only once `text` is fully written.
+
+    harness-server recomposes the prompt while a session is live, so a failed
+    write must leave the previous prompt intact rather than a truncated one.
+    """
+    mode = target.stat().st_mode & 0o777 if target.is_file() else 0o644
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as tmp_file:
+            tmp_file.write(text)
+        tmp.chmod(mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _append_file_fragment(fragments: list[str], source: Path) -> bool:
@@ -67,7 +87,7 @@ def compose_system_prompt(
         fragments.append(persona_prompt_path.read_text())
 
     effective_prompt = SEPARATOR.join(fragments)
-    target_prompt.write_text(effective_prompt)
+    _write_atomically(target_prompt, effective_prompt)
 
 
 def main() -> int:

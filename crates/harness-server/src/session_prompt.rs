@@ -148,26 +148,38 @@ fn run_hook(repo: &Path, hook: &Path, deadline: Instant, max_bytes: usize) -> Ho
         }
     };
     let (output_tx, output_rx) = mpsc::channel();
-    if let Some(mut stdout) = child.stdout.take() {
+    if let Some(stdout) = child.stdout.take() {
+        // Read one byte past the cap, so an oversized hook is caught without
+        // buffering everything it prints. Dropping stdout then closes the pipe.
+        let limit = u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
         thread::spawn(move || {
             let mut output = Vec::new();
-            let _ = stdout.read_to_end(&mut output);
+            let _ = stdout.take(limit).read_to_end(&mut output);
             let _ = output_tx.send(output);
         });
     }
     // A child that left the group (setsid) can hold stdout open past the hook,
     // so the output read is bounded by the deadline too.
-    let output = output_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
-    let status = wait_until(&mut child, deadline);
-    let (Ok(output), Some(status)) = (output, status) else {
-        kill_group(&mut child);
+    let output = match output_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(output) => output,
+        Err(_) => {
+            kill_hook(&mut child);
+            return finish("timeout", None, None);
+        }
+    };
+    if output.len() > max_bytes {
+        kill_hook(&mut child);
+        return finish("oversized", Some(output), None);
+    }
+    let Some(status) = wait_until(&mut child, deadline) else {
+        kill_hook(&mut child);
         return finish("timeout", None, None);
     };
     let exit_code = status.code();
     if !status.success() {
         finish("failed", Some(output), exit_code)
-    } else if output.len() > max_bytes {
-        finish("oversized", Some(output), exit_code)
     } else if String::from_utf8_lossy(&output).trim().is_empty() {
         finish("empty", Some(output), exit_code)
     } else {
@@ -187,7 +199,9 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     }
 }
 
-fn kill_group(child: &mut Child) {
+/// Kills the hook's process group and the hook itself, which may have left the
+/// group. Background processes that left it are the hook author's to clean up.
+fn kill_hook(child: &mut Child) {
     if let Ok(pid) = libc::pid_t::try_from(child.id()) {
         // SAFETY: killpg takes no pointers. The hook is not yet reaped, so its
         // pid still names its process group.
@@ -195,6 +209,8 @@ fn kill_group(child: &mut Child) {
             libc::killpg(pid, libc::SIGKILL);
         }
     }
+    // SIGKILL to the hook itself, so the wait below returns promptly.
+    let _ = child.kill();
     let _ = child.wait();
 }
 
@@ -335,6 +351,42 @@ mod tests {
         }
 
         assert!(elapsed < Duration::from_secs(3), "waited {elapsed:?}");
+        assert_eq!(statuses(&hooks), ["timeout"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stops_reading_an_oversized_hook_at_the_cap() {
+        let root = temp_root();
+        let repos = vec![overlay(&root, "noisy", "yes\n")];
+
+        let started = Instant::now();
+        let hooks = run_hooks(&repos, Duration::from_secs(10), 1024);
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(statuses(&hooks), ["oversized"]);
+        assert_eq!(hooks[0].run.output_bytes, 1025);
+        assert!(hooks[0].output.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timeout_kills_a_hook_that_left_its_process_group() {
+        let root = temp_root();
+        let repos = vec![overlay(
+            &root,
+            "leader",
+            "exec python3 -c 'import os, time; os.setpgid(0, os.getpgid(os.getppid())); time.sleep(30)'\n",
+        )];
+
+        let started = Instant::now();
+        let hooks = run_hooks(&repos, Duration::from_millis(300), HOOK_MAX_BYTES);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited {:?}",
+            started.elapsed()
+        );
         assert_eq!(statuses(&hooks), ["timeout"]);
         let _ = fs::remove_dir_all(root);
     }
