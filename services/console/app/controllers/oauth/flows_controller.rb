@@ -7,7 +7,8 @@ module Oauth
   # /oauth/:slug/start sends a team member to the IdP's consent screen, and
   # /oauth/:slug/callback turns the returned authorization code into a managed
   # BrokerCredential linked to the OauthApp, then sends the user back to the
-  # console Integrations page (or renders a result page on failure).
+  # console Integrations page (or to the SPA result page, /oauth/result, on
+  # failure).
   #
   # Authenticated console consent flow. A team member connects an integration by
   # clicking a console link; a credential is only minted after an active console
@@ -19,14 +20,16 @@ module Oauth
   # SECURITY: never logs the code, tokens, client_secret, or response bodies --
   # only oids and error codes, like the rest of the Broker/Oauth subsystem.
   class FlowsController < ApplicationController
-    layout "auth"
-
     # The message_verifier purpose binding the signed state to this flow, the
     # state/cookie lifetime, and the encrypted cookie that ties a callback back to
     # the browser that started it.
     STATE_PURPOSE = :oauth_consent_flow
     FLOW_TTL = 10.minutes
     FLOW_COOKIE = :oauth_flow
+    RESULT_PATH = "/oauth/result".freeze
+    # Provider error codes and exchange reasons are echoed in the message; cap
+    # them so a hostile value cannot bloat the session cookie.
+    RESULT_MESSAGE_LIMIT = 300
 
     # Tests replace the token-exchange and identity-lookup clients with HTTP
     # doubles.
@@ -38,11 +41,11 @@ module Oauth
 
     # GET /oauth/:slug/start?scopes=
     def start
-      return render_result(:error, status: :unprocessable_entity, message: "This integration is disabled.") unless @app.enabled?
+      return redirect_to_result(:error, status: :unprocessable_content, message: "This integration is disabled.") unless @app.enabled?
 
       requested_scopes = parse_scopes(params[:scopes]) || Array(@app.allowed_scopes)
       unless @app.scopes_allowed?(requested_scopes)
-        return render_result(:error, status: :unprocessable_entity, message: "One or more requested scopes are not allowed for this integration.")
+        return redirect_to_result(:error, status: :unprocessable_content, message: "One or more requested scopes are not allowed for this integration.")
       end
       consent_scopes = requested_scopes | provider_required_scopes
 
@@ -67,22 +70,22 @@ module Oauth
     # GET /oauth/:slug/callback?code=&state=  (or ?error=)
     def callback
       state = Rails.application.message_verifier(STATE_PURPOSE).verified(params[:state], purpose: STATE_PURPOSE)
-      return render_result(:error, status: :bad_request, message: "This consent link is invalid or has expired. Start again.") if state.nil?
+      return redirect_to_result(:error, status: :bad_request, message: "This consent link is invalid or has expired. Start again.") if state.nil?
 
       # The signed state must belong to this slug's app and the app must still be
       # active.
       if state["app"] != @app.oid || !@app.enabled?
-        return render_result(:error, status: :bad_request, message: "This integration is no longer available.")
+        return redirect_to_result(:error, status: :bad_request, message: "This integration is no longer available.")
       end
 
       flow = read_and_clear_flow_cookie
       if flow.nil? || flow["nonce"] != state["nonce"]
-        return render_result(:error, status: :bad_request, message: "This flow expired or was started in another browser. Start again.")
+        return redirect_to_result(:error, status: :bad_request, message: "This flow expired or was started in another browser. Start again.")
       end
 
       # The user declined (or another IdP-side error).
       if params[:error].present?
-        return render_result(:denied, message: "Consent was not granted (#{params[:error]}).")
+        return redirect_to_result(:denied, message: "Consent was not granted (#{params[:error].to_s.truncate(64)}).")
       end
 
       result = exchange_code(params[:code], flow["code_verifier"])
@@ -96,21 +99,21 @@ module Oauth
       enqueue_post_connect_enrichment(@credential)
 
       # Back to the Integrations page the user started from; failures below
-      # still render the standalone result page, which offers a retry link.
+      # go to the standalone result page, which offers a retry link.
       connected_as = " as #{identity[:email]}" if identity[:email].present?
       redirect_to(@app.shared? ? console_oauth_app_path(@app.oid) : console_integrations_path, notice: "#{@app.slug} connected#{connected_as}.")
     rescue Broker::ExchangeError => e
-      render_result(:error, message: "Connecting the integration failed (#{e.reason}).")
+      redirect_to_result(:error, message: "Connecting the integration failed (#{e.reason}).")
     rescue ActiveRecord::RecordInvalid => e
       # Most likely the deterministic foreign_id collides with an unrelated
       # credential. Log the messages only -- never token values.
       Rails.logger.error { "oauth flow credential save failed: #{e.record.errors.full_messages.to_sentence}" }
-      render_result(:error, message: "Connecting the integration failed while saving the credential.")
+      redirect_to_result(:error, message: "Connecting the integration failed while saving the credential.")
     rescue ActiveRecord::RecordNotUnique
       # A concurrent consent for the same account won the unique index on the
       # credential or its wrapping secret. The winner's record is already saved, so
       # the user just needs to retry; the next consent upserts cleanly.
-      render_result(:error, message: "Another consent for this account is in progress. Try again.")
+      redirect_to_result(:error, message: "Another consent for this account is in progress. Try again.")
     end
 
     private
@@ -118,9 +121,9 @@ module Oauth
     # Resolves the app from the well-known slug and derives its provider strategy.
     def set_app
       @app = OauthApp.find_by(slug: params[:slug])
-      return render_result(:error, status: :not_found, message: "Unknown integration.") if @app.nil?
+      return redirect_to_result(:error, status: :not_found, message: "Unknown integration.") if @app.nil?
       @provider = @app.provider_strategy
-      render_result(:error, status: :not_found, message: "Unknown integration.") if @provider.nil?
+      redirect_to_result(:error, status: :not_found, message: "Unknown integration.") if @provider.nil?
     end
 
     # Accepts space- or comma-separated scope lists; nil when none were given
@@ -336,14 +339,19 @@ module Oauth
       nil
     end
 
-    # Renders the team-facing failure page. +kind+ is :denied or :error; the
-    # status defaults to 422 but callers override it for the 4xx pre-consent
-    # rejections. Success does not come through here -- the happy path
-    # redirects back to the console Integrations page.
-    def render_result(kind, status: :unprocessable_entity, message: nil)
-      @kind = kind
-      @message = message
-      render :result, status: status
+    # Sends the team member to the SPA failure page (/oauth/result). +kind+ is
+    # :denied or :error; +status+ records the HTTP status the condition used to
+    # carry. The message travels in the one-shot flash (never the URL), and the
+    # page reads it through GET /api/v1/auth/config. Success does not come
+    # through here -- the happy path redirects back to the console.
+    def redirect_to_result(kind, status: :unprocessable_content, message: nil)
+      flash[:oauth_result] = {
+        "kind" => kind.to_s,
+        "status" => Rack::Utils.status_code(status),
+        "message" => message.to_s.truncate(RESULT_MESSAGE_LIMIT),
+        "retry_path" => (oauth_start_path(slug: @app.slug) if @app&.enabled?)
+      }.compact
+      redirect_to RESULT_PATH
     end
   end
 end

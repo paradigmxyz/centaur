@@ -3,12 +3,14 @@
 # with the full custom-scheme URL in ?target=; we map it onto an in-app path
 # and redirect. web+centaur://console/workflows lands on /console/workflows.
 #
-# Only strictly path-shaped targets survive the mapping (no dots, queries, or
-# protocol-relative tricks), so a crafted link can never bounce the operator
-# off-origin. Anything that doesn't parse falls back to the console root.
+# Only strictly path-shaped targets inside the console SPA (/console/...)
+# survive the mapping (no dots, queries, or protocol-relative tricks), so a
+# crafted link can never bounce the operator off-origin or onto a Rails
+# endpoint (an OAuth start, sign-out, the API). Anything else falls back to
+# the console root.
 class LaunchController < ApplicationController
   SCHEME_PREFIX = "web+centaur://".freeze
-  SAFE_PATH = %r{\A[A-Za-z0-9_/-]+\z}
+  SAFE_PATH = %r{\Aconsole(?:/[A-Za-z0-9_/-]*)?\z}
 
   def show
     redirect_to launch_path_for(params[:target].to_s)

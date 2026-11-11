@@ -1,12 +1,13 @@
 // Service worker for the installed Centaur Console PWA.
 //
-// Deliberately conservative: console pages are session-authenticated and
-// server-rendered, so HTML is never cached. Navigations go straight to the
-// network and only fall back to the offline page when the network itself is
-// unreachable. Digested assets under /assets/ (propshaft) and the static PWA
-// icons are safe to cache forever.
+// Deliberately conservative: the console is session-authenticated, so neither
+// the SPA shell (index.html) nor API responses are ever cached. Navigations go
+// straight to the network and only fall back to the offline page when the
+// network itself is unreachable. Content-hashed assets (the SPA build under
+// /spa/assets/, legacy /assets/) and the static PWA icons are safe to cache
+// forever.
 
-const CACHE_VERSION = "centaur-console-v1";
+const CACHE_VERSION = "centaur-console-v2";
 const OFFLINE_URL = "/offline.html";
 const PRECACHE_URLS = [OFFLINE_URL, "/pwa-icon.svg", "/pwa-icon-192.png", "/pwa-icon-512.png"];
 
@@ -53,7 +54,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   // Navigations: network first, offline page as the last resort. Never served
-  // from cache, so login state and Turbo behavior are unchanged when online.
+  // from cache, so login state is unchanged when online.
   if (request.mode === "navigate") {
     event.respondWith(
       fetch(request).catch(() => caches.match(OFFLINE_URL, { cacheName: CACHE_VERSION }))
@@ -62,7 +63,10 @@ self.addEventListener("fetch", (event) => {
   }
 
   // Digested assets and static icons: cache first, populate on miss.
-  const cacheable = url.pathname.startsWith("/assets/") || PRECACHE_URLS.includes(url.pathname);
+  const cacheable =
+    url.pathname.startsWith("/spa/assets/") ||
+    url.pathname.startsWith("/assets/") ||
+    PRECACHE_URLS.includes(url.pathname);
   if (!cacheable) return;
 
   event.respondWith(

@@ -3,11 +3,15 @@ require "digest"
 require "uri"
 
 module Mcp
+  # MCP OAuth authorization server: metadata, dynamic client registration,
+  # the authorize entry point, and the token endpoint. The consent page lives
+  # in the SPA (/mcp/oauth/consent); GET /mcp/oauth/authorize validates the
+  # request server-side, then hands the SPA a signed single-use consent ticket
+  # (Mcp::ConsentTicket). The decision goes through
+  # POST /api/v1/mcp/authorization/decision, which revalidates the request.
   class OauthController < ApplicationController
-    layout "auth"
-
-    skip_before_action :require_login, only: %i[metadata register authorize token]
-    skip_before_action :require_active_account, only: %i[metadata register authorize token]
+    skip_before_action :require_login
+    skip_before_action :require_active_account
     skip_forgery_protection only: %i[register token]
 
     ACCESS_TOKEN_TTL_SECONDS = 1.hour.to_i
@@ -68,31 +72,16 @@ module Mcp
     def authorize
       return redirect_to_login unless current_user
       return redirect_to pending_path if current_user.pending?
-      return redirect_to login_path, alert: "Your account is disabled." if current_user.disabled?
-
-      authorization = validated_authorization_request
-      return unless authorization
-
-      assign_authorization_view(authorization)
-      render :authorize
-    end
-
-    # POST /mcp/oauth/authorize
-    def approve
-      authorization = validated_authorization_request
-      return unless authorization
-
-      unless params[:decision] == "approve"
-        return authorization_error(
-          authorization[:client],
-          :access_denied,
-          "The user denied the authorization request."
-        )
+      if current_user.disabled?
+        reset_session
+        return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE
       end
 
-      issue_authorization_code(authorization)
-    rescue ActiveRecord::RecordInvalid => e
-      authorization_error(nil, :server_error, e.record.errors.full_messages.to_sentence)
+      authorization = AuthorizationRequest.from_params(params)
+      return authorization_error(authorization) unless authorization.valid?
+
+      ticket = ConsentTicket.issue(session, user: current_user, request: authorization)
+      redirect_to "/mcp/oauth/consent?#{{ request: ticket }.to_query}"
     end
 
     # POST /mcp/oauth/token
@@ -108,106 +97,6 @@ module Mcp
     end
 
     private
-
-    def validated_authorization_request
-      client = resolve_client(params[:client_id])
-      return authorization_request_error(nil, :invalid_request, "Unknown client.") unless client
-
-      unless params[:response_type] == "code"
-        return authorization_request_error(
-          client,
-          :unsupported_response_type,
-          "Only response_type=code is supported."
-        )
-      end
-      unless client.redirect_uri_allowed?(params[:redirect_uri])
-        return authorization_request_error(
-          client,
-          :invalid_request,
-          "redirect_uri is not registered for this client."
-        )
-      end
-      unless params[:code_challenge_method] == "S256"
-        return authorization_request_error(
-          client,
-          :invalid_request,
-          "code_challenge_method must be S256."
-        )
-      end
-      if params[:code_challenge].blank?
-        return authorization_request_error(client, :invalid_request, "code_challenge is required.")
-      end
-
-      scopes = normalize_scope_param(params[:scope], McpOauthClient::DEFAULT_SCOPES)
-      unsupported = scopes - McpOauthClient::DEFAULT_SCOPES
-      if unsupported.any?
-        return authorization_request_error(
-          client,
-          :invalid_scope,
-          "Unsupported scope: #{unsupported.join(' ')}."
-        )
-      end
-
-      resource = resolve_requested_resource
-      return authorization_request_error(client, :invalid_target, "resource is required.") if resource.blank?
-
-      { client: client, scopes: scopes, resource: resource }
-    end
-
-    def authorization_request_error(client, error, description)
-      authorization_error(client, error, description)
-      nil
-    end
-
-    def assign_authorization_view(authorization)
-      @client = authorization[:client]
-      @scopes = authorization[:scopes]
-      @resource = authorization[:resource]
-      @redirect_uri = params[:redirect_uri].to_s
-      @redirect_host = redirect_uri_host(@redirect_uri)
-      @authorization_params = authorization_form_params(authorization)
-    end
-
-    def issue_authorization_code(authorization)
-      client = authorization[:client]
-      principal = principal_for_current_user
-      code = McpOauthAuthorizationCode.create!(
-        mcp_oauth_client: client,
-        user: current_user,
-        principal: principal,
-        redirect_uri: params[:redirect_uri].to_s,
-        code_challenge: params[:code_challenge].to_s,
-        resource: authorization[:resource],
-        scopes: authorization[:scopes]
-      )
-      client.touch(:last_used_at)
-
-      uri = URI.parse(params[:redirect_uri])
-      query = Rack::Utils.parse_nested_query(uri.query)
-      query["code"] = code.plaintext_code
-      query["state"] = params[:state] if params[:state].present?
-      uri.query = query.to_query
-      redirect_to uri.to_s, allow_other_host: true
-    end
-
-    def authorization_form_params(authorization)
-      {
-        response_type: params[:response_type].to_s,
-        client_id: authorization[:client].public_client_id,
-        redirect_uri: params[:redirect_uri].to_s,
-        scope: authorization[:scopes].join(" "),
-        state: params[:state].to_s,
-        resource: authorization[:resource],
-        code_challenge: params[:code_challenge].to_s,
-        code_challenge_method: params[:code_challenge_method].to_s
-      }
-    end
-
-    def redirect_uri_host(value)
-      URI.parse(value).host
-    rescue URI::InvalidURIError
-      value
-    end
 
     def exchange_authorization_code
       client = resolve_client(params[:client_id])
@@ -382,22 +271,17 @@ module Mcp
     end
 
     def redirect_to_login
-      session[:return_to] = request.fullpath if request.request_method == "GET"
+      remember_console_return_path(request.fullpath)
       redirect_to login_path
     end
 
-    def authorization_error(client, error, description)
-      if client&.redirect_uri_allowed?(params[:redirect_uri])
-        uri = URI.parse(params[:redirect_uri])
-        query = Rack::Utils.parse_nested_query(uri.query)
-        query["error"] = error.to_s
-        query["error_description"] = description
-        query["state"] = params[:state] if params[:state].present?
-        uri.query = query.to_query
-        redirect_to uri.to_s, allow_other_host: true
-      else
-        render plain: description, status: :bad_request
-      end
+    # Invalid requests go back to the client when its redirect_uri is trusted;
+    # otherwise the user sees the error (never an untrusted redirect).
+    def authorization_error(authorization)
+      url = authorization.error_redirect_url
+      return redirect_to(url, allow_other_host: true) if url
+
+      render plain: authorization.error_description, status: :bad_request
     end
 
     def oauth_error(error, description, status:)
@@ -406,41 +290,6 @@ module Mcp
 
     def resolve_client(client_id)
       McpOauthClient.find_by_oid(client_id)
-    end
-
-    def resolve_requested_resource
-      # Fail closed: without a configured canonical resource URL we would
-      # otherwise mint tokens bound to any caller-supplied audience.
-      configured = normalize_mcp_resource_url(configured_mcp_resource_url)
-      return nil if configured.blank?
-      requested = params[:resource].presence
-      return nil if requested.present? && normalize_mcp_resource_url(requested) != configured
-      configured
-    end
-
-    def configured_mcp_resource_url
-      ENV["CENTAUR_MCP_PUBLIC_URL"].presence || ConsoleEnv["MCP_PUBLIC_URL"].presence
-    end
-
-    def normalize_mcp_resource_url(value)
-      uri = URI.parse(value.to_s.strip)
-      return nil unless %w[http https].include?(uri.scheme) && uri.host.present?
-      uri.fragment = nil
-      path = uri.path.to_s.sub(%r{/+\z}, "")
-      uri.path = path.end_with?("/mcp") ? path : "#{path}/mcp"
-      uri.to_s.sub(/\?\z/, "")
-    rescue URI::InvalidURIError
-      nil
-    end
-
-    # Principal creation and role seeding share a transaction: seeding is
-    # create-only, so a principal that committed without its role would stay
-    # unseeded forever. The RecordNotUnique retry sits outside the transaction
-    # because a unique violation aborts the enclosing Postgres transaction;
-    # every violation source (principal, role, or assignment race) converges
-    # to the find path on the next pass.
-    def principal_for_current_user
-      ConsoleUserPrincipalProvisioner.call(current_user)
     end
 
     def access_token_ttl_seconds
@@ -464,8 +313,7 @@ module Mcp
     end
 
     def normalize_scope_param(value, default)
-      return default if value.blank?
-      value.to_s.split(/[,\s]+/).map(&:strip).reject(&:blank?)
+      AuthorizationRequest.normalize_scope_param(value, default)
     end
 
     def pkce_valid?(challenge, verifier)
