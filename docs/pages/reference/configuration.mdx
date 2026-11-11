@@ -224,11 +224,21 @@ API-set variables:
 | --- | --- | --- |
 | `AGENT_IMAGE` | `sandbox.image.*`. | Sandbox image used by the Kubernetes backend. |
 | `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
-| `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY` | API sandbox creation. | API callback and thread key. |
+| `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY` | API sandbox creation. | API callback and thread key. Warm-pool sandboxes boot without `CENTAUR_THREAD_KEY`; read the sandbox context file instead. |
+| `CENTAUR_SANDBOX_CONTEXT_FILE` | Optional override. | Path of the sandbox context file; defaults to `~/.centaur/sandbox.json`. |
 | `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
 | `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
 | `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
 | `PG_PROXY_PASSWORD_<SECRET_NAME>`, `<PG_DSN_SECRET_NAME>` | API per-sandbox proxy creation. | Proxied Postgres credentials for tools that declare `pg_dsn` secrets. |
+
+Sandbox context file: before a sandbox's first turn, `harness-server` writes
+`~/.centaur/sandbox.json` with the session's `thread_key`, the harness, the
+persona, and under `sandbox` the Console principal, capabilities, and redacted
+grants from `GET /api/v1/sandbox/permissions`. If Console cannot be reached,
+`sandbox` is `null` and `sandbox_error` says why. Tools read it through
+`centaur_sdk.sandbox_context()` and `centaur_sdk.sandbox_thread_key()`. The file
+is informational and agent-writable; never base an authorization decision on
+it.
 
 Kubernetes backend:
 

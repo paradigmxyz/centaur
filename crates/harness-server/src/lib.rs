@@ -10,6 +10,7 @@ pub mod omp;
 mod otel;
 pub mod pi;
 pub mod protocol;
+mod sandbox_context;
 mod server;
 mod session_prompt;
 mod traits;

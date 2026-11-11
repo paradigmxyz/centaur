@@ -41,10 +41,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// their timing on that turn's trace. A failure keeps the boot-time prompt and never
 /// fails the turn.
 ///
+/// The sandbox context file is written first, so hooks can read it.
+///
 /// `harness` names the harness in span names, as in `<harness>.session_task.turn`.
 pub(crate) fn run_session_prompt_hooks(trace: Option<&TraceContext>, harness: &str) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        crate::sandbox_context::write_sandbox_context(trace, harness);
         let repos = overlay_repo_dirs();
         if repos.is_empty() {
             return;

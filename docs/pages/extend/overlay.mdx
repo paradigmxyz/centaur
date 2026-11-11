@@ -167,7 +167,9 @@ my-tool describe-for-agents
 ```
 
 By then the sandbox is bound to its session, so a hook runs with the
-same brokered credentials as the agent. Its output becomes system prompt text:
+same brokered credentials as the agent. The [sandbox context
+file](/reference/configuration#sandbox) is written before hooks run, so a hook
+can read the session's thread key, principal, and grants from it. Its output becomes system prompt text:
 do not print content fetched from users or third parties, which would be
 prompt injection at system level.
 
