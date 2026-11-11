@@ -140,6 +140,7 @@ codex:
       baseUrl: https://inference.example.com/v1
       apiKeyEnv: PRIVATE_RESPONSES_API_KEY
       defaultModel: example-model
+      webSearch: false
       models:
         example-model:
           displayName: Example Model
@@ -159,6 +160,12 @@ Console. api-rs registers a bearer-token replacement restricted to the
 the provider with `--provider private_responses`; `--model` overrides its
 configured default for that turn. If `defaultModel` is omitted, callers must
 pass `--model`.
+
+`webSearch` (default `true`) controls whether Codex sends its hosted
+`web_search` tool on threads using that provider. Set it to `false` for
+self-hosted or modified models whose endpoint rejects hosted Responses tools. Agents can still use the `websearch` tool CLI. To disable the
+hosted tool for every provider, set `CODEX_CONFIG_OVERLAY` to
+`web_search = "disabled"` through `sandbox.extraEnv`.
 
 The optional `models` catalog supplies readable names, natural-language aliases,
 and supported reasoning settings without adding a harness or model-query tool.

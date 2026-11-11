@@ -574,11 +574,28 @@ fn start_or_resume_thread<W: Write>(
     if let Some(model) = model {
         params["model"] = Value::String(model.to_owned());
     }
+    // A custom provider can opt out of Codex's hosted `web_search` tool (e.g. a
+    // self-hosted model whose endpoint rejects hosted tools). A provider switch
+    // always resumes in a fresh app-server, so the override tracks the provider.
+    if custom_provider_disables_web_search(
+        env::var("CODEX_CUSTOM_PROVIDERS").ok().as_deref(),
+        model_provider,
+    ) {
+        params["config"] = json!({ "web_search": "disabled" });
+    }
 
     let id = next_request_id(request_id);
     codex.send_request(id, method, params, traceparent)?;
     let result = codex.read_response_or_forward(id, stdout, None)?;
     started_codex_thread_from_response(&result, method)
+}
+
+/// Whether a custom provider in `CODEX_CUSTOM_PROVIDERS` sets
+/// `webSearch: false`. Absent, `true`, or malformed config keeps Codex's default.
+fn custom_provider_disables_web_search(raw: Option<&str>, provider: &str) -> bool {
+    raw.and_then(|raw| serde_json::from_str::<Value>(raw.trim()).ok())
+        .and_then(|providers| providers.get(provider)?.get("webSearch")?.as_bool())
+        == Some(false)
 }
 
 fn started_codex_thread_from_response(result: &Value, method: &str) -> Result<StartedCodexThread> {
@@ -1190,6 +1207,20 @@ mod tests {
             codex.model_provider_for(Some("amazon-bedrock"), Some("anthropic/claude-fable-5")),
             "amazon-bedrock"
         );
+    }
+
+    #[test]
+    fn custom_provider_web_search_reads_provider_catalog() {
+        let raw = r#"{"off":{"webSearch":false},"on":{"webSearch":true},"unset":{"name":"U"},"bad":{"webSearch":"false"}}"#;
+        assert!(custom_provider_disables_web_search(Some(raw), "off"));
+        for provider in ["on", "unset", "bad", "openai"] {
+            assert!(
+                !custom_provider_disables_web_search(Some(raw), provider),
+                "{provider}"
+            );
+        }
+        assert!(!custom_provider_disables_web_search(Some("{"), "off"));
+        assert!(!custom_provider_disables_web_search(None, "off"));
     }
 
     #[test]
