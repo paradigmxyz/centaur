@@ -160,7 +160,9 @@ class ComposeSystemPromptTest(unittest.TestCase):
             sandbox_dir = repo_mount / repo / "services" / "sandbox"
             sandbox_dir.mkdir(parents=True)
             for name, text in files.items():
-                (sandbox_dir / name).write_text(text)
+                path = sandbox_dir / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
 
         target = workspace / "AGENTS.md"
         compose_system_prompt.compose_system_prompt(
@@ -177,7 +179,7 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 {
                     "acme/first": {
                         "SYSTEM_PROMPT.md": "first overlay\n",
-                        "SYSTEM_PROMPT.sh": 'echo "hook in $(basename "$PWD")"\n',
+                        "hooks/system-prompt.sh": 'echo "hook in $(basename "$PWD")"\n',
                     },
                     "acme/second": {"SYSTEM_PROMPT.md": "second overlay\n"},
                 },
@@ -193,7 +195,7 @@ class ComposeSystemPromptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             prompt = self._compose_with_overlays(
                 Path(tmp),
-                {"acme/overlay": {"SYSTEM_PROMPT.sh": "printf 'generated\\n'\n"}},
+                {"acme/overlay": {"hooks/system-prompt.sh": "printf 'generated\\n'\n"}},
             )
 
             self.assertEqual(prompt, "base\n\n\n---\n\ngenerated\n")
@@ -204,10 +206,10 @@ class ComposeSystemPromptTest(unittest.TestCase):
                 prompt = self._compose_with_overlays(
                     Path(tmp),
                     {
-                        "acme/empty": {"SYSTEM_PROMPT.sh": "echo '   '\n"},
+                        "acme/empty": {"hooks/system-prompt.sh": "echo '   '\n"},
                         "acme/failing": {
                             "SYSTEM_PROMPT.md": "failing overlay\n",
-                            "SYSTEM_PROMPT.sh": "echo partial\nexit 3\n",
+                            "hooks/system-prompt.sh": "echo partial\nexit 3\n",
                         },
                     },
                 )
@@ -225,7 +227,7 @@ class ComposeSystemPromptTest(unittest.TestCase):
             ):
                 prompt = self._compose_with_overlays(
                     Path(tmp),
-                    {"acme/slow": {"SYSTEM_PROMPT.sh": "echo late\nsleep 30 & wait\n"}},
+                    {"acme/slow": {"hooks/system-prompt.sh": "echo late\nsleep 30 & wait\n"}},
                 )
 
             self.assertEqual(prompt, "base\n")

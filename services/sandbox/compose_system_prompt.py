@@ -11,7 +11,9 @@ from pathlib import Path
 
 SEPARATOR = "\n\n---\n\n"
 OVERLAY_PROMPT = Path("services/sandbox/SYSTEM_PROMPT.md")
-OVERLAY_PROMPT_HOOK = Path("services/sandbox/SYSTEM_PROMPT.sh")
+# Overlay hooks are named bash scripts under this repo-relative directory.
+OVERLAY_HOOKS_DIR = Path("services/sandbox/hooks")
+SYSTEM_PROMPT_HOOK = "system-prompt.sh"
 HOOK_TIMEOUT_ENV = "CENTAUR_SYSTEM_PROMPT_HOOK_TIMEOUT_SECONDS"
 DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
 PERSONA_PROMPT = Path("AGENTS_PERSONA.md")
@@ -84,7 +86,7 @@ def _mounted_overlay_fragments(
     """Return (source, text) fragments from mounted repos in repo order.
 
     Each repo contributes its static SYSTEM_PROMPT.md, then the stdout of its
-    SYSTEM_PROMPT.sh hook.
+    hooks/system-prompt.sh.
     """
     if not repo_mount.is_dir():
         return []
@@ -97,7 +99,7 @@ def _mounted_overlay_fragments(
             text = prompt.read_text()
             if text != root_text:
                 fragments.append((prompt, text))
-        hook = repo_dir / OVERLAY_PROMPT_HOOK
+        hook = repo_dir / OVERLAY_HOOKS_DIR / SYSTEM_PROMPT_HOOK
         if hook.is_file():
             output = _run_prompt_hook(hook, repo_dir, timeout)
             if output is not None:
