@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Outlet, useLocation } from "react-router";
+import { Navigate, Outlet, useLocation } from "react-router";
 import { toast } from "sonner";
 
 import { features } from "@/app/registry";
@@ -52,6 +52,10 @@ function ShellFrame() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [navOpen]);
+
+  // An account awaiting approval may only see the holding page; send it there
+  // instead of rendering pages whose API calls would all be refused.
+  if (me.user.status === "pending") return <Navigate to="/pending" replace />;
 
   return (
     <ShellContext.Provider value={shell}>

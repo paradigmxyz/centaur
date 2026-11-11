@@ -42,7 +42,7 @@ export function DataTable<Row>({
 }: DataTableProps<Row>) {
   return (
     <div className={cn("overflow-hidden rounded-sm border border-border bg-card", className)}>
-      <div className="overflow-x-auto">
+      <div className="relative overflow-x-auto">
         <table className={cn("min-w-full text-sm", fixed && "w-full table-fixed")}>
           {caption && <caption className="sr-only">{caption}</caption>}
           <thead className="border-b border-border bg-table-head text-left text-xs tracking-wider text-muted-foreground uppercase">

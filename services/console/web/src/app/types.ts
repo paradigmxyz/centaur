@@ -32,9 +32,7 @@ export interface ControlTab {
  * - routes: rendered inside the authenticated app shell. Use absolute paths
  *   (e.g. "/console/roles/:id").
  * - publicRoutes: rendered without the shell or session (auth pages).
- * - nav / controlTabs: sidebar entries and Control tabs. An entry whose path
- *   has no SPA route yet is rendered as a full-page link to the legacy Rails
- *   page, so slices can register navigation before they are ported.
+ * - nav / controlTabs: sidebar entries and Control tabs.
  */
 export interface FeatureModule {
   id: string;

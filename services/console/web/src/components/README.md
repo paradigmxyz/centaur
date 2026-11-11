@@ -8,7 +8,7 @@ palette); regenerate or add primitives with
 
 | Component | File | Use |
 |---|---|---|
-| `AppLink` | `app-link.tsx` | Link to any console path. Client-side for SPA routes, full page load for legacy Rails pages and Rails protocol routes. Use it for cross-slice links. |
+| `AppLink` | `app-link.tsx` | Link to any console path. Client-side for SPA routes, full page load for Rails protocol routes (`/oauth/:slug/start`, `/auth/:provider/start`). Use it for cross-slice links. |
 | `PageHeader`, `SectionHeading`, `useDocumentTitle` | `page-header.tsx` | Page title/subtitle/actions (legacy `_page_header`); sets `<title>` to "X · Centaur Console". Section headings are the small uppercase labels. |
 | `BackLink` | `back-link.tsx` | "← back to …" link. |
 | `ControlTabs` | `control-tabs.tsx` | The Control tab strip. Render at the top of Control index pages; tabs come from feature `controlTabs`. |

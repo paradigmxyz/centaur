@@ -14,15 +14,13 @@ const railsPaths = [
   "/oauth",
   "/mcp",
   "/.well-known",
-  "/login",
-  "/logout",
   "/launch",
   "/manifest",
   "/service-worker",
   "/up",
 ];
 // SPA pages under the proxied prefixes: their HTML navigations stay in Vite.
-const spaPagesUnderRails = new Set(["/login", "/oauth/result", "/mcp/oauth/consent"]);
+const spaPagesUnderRails = new Set(["/oauth/result", "/mcp/oauth/consent"]);
 
 export default defineConfig(({ command }) => ({
   base: command === "build" ? "/spa/" : "/",
@@ -42,8 +40,8 @@ export default defineConfig(({ command }) => ({
           target: railsUrl,
           changeOrigin: false,
           // A few SPA pages live under these prefixes: their HTML navigations
-          // stay in Vite; everything else (form posts, fetches, OAuth
-          // redirects) goes to Rails.
+          // stay in Vite; everything else (the MCP consent form post, fetches,
+          // OAuth redirects) goes to Rails.
           bypass: (req: { method?: string; url?: string; headers: { accept?: string } }) =>
             req.method === "GET" &&
             req.headers.accept?.includes("text/html") &&

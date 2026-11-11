@@ -1,3 +1,5 @@
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { isRouteErrorResponse, useRouteError } from "react-router";
 
 import { ApiError, errorMessage } from "@/lib/api";
@@ -7,6 +9,8 @@ import { PageHeader } from "@/components/page-header";
 
 export function RouteError() {
   const error = useRouteError();
+  useForgetFailedQueries(error);
+
   if (error instanceof ApiError && error.status === 404) return <NotFound />;
   if (isRouteErrorResponse(error) && error.status === 404) return <NotFound />;
   // Lost admin access (descoped elsewhere, demoted): back to the landing page.
@@ -23,4 +27,22 @@ export function RouteError() {
       </div>
     </div>
   );
+}
+
+/**
+ * A page whose suspense query failed lands here. TanStack keeps that failed
+ * query in the cache and, by design, rethrows its error (without refetching)
+ * whenever a page reading it mounts again, so revisiting the page would show
+ * this error until a hard reload. Once the failing page has unmounted, drop
+ * every failed query nobody is observing; the next visit fetches afresh.
+ * Queries still on screen (the shell's session, a section's ErrorAlert) keep
+ * their state.
+ */
+function useForgetFailedQueries(error: unknown) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    queryClient.removeQueries({
+      predicate: (query) => query.state.status === "error" && query.getObserversCount() === 0,
+    });
+  }, [error, queryClient]);
 }

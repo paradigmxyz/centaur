@@ -158,7 +158,7 @@ function UsersPage() {
             {/* Fixed label, as on the legacy page. */}
             {pending.length} pending approval
           </h2>
-          <div className="overflow-hidden rounded-sm border border-amber-500/30 bg-amber-500/[0.04]">
+          <div className="relative overflow-x-auto rounded-sm border border-amber-500/30 bg-amber-500/[0.04]">
             <table className="min-w-full text-sm">
               <caption className="sr-only">Pending users</caption>
               <tbody className="divide-y divide-border/70">

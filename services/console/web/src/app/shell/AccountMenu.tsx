@@ -5,7 +5,6 @@ import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { defaultLandingPath, type Me } from "@/app/session";
-import { useShell } from "@/app/shell-context";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,7 +30,6 @@ interface InstallPromptEvent extends Event {
 export function AccountMenu({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { isSpaPath } = useShell();
   const { preference, setPreference } = useTheme();
   const installPrompt = useInstallPrompt();
 
@@ -41,9 +39,7 @@ export function AccountMenu({ me }: { me: Me }) {
       // Drop admin data cached under the old permissions.
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== sharedKeys.me[0] });
       const fresh = await queryClient.fetchQuery({ queryKey: sharedKeys.me, queryFn: () => api.get<{ data: Me }>("/api/v1/me").then((b) => b.data) });
-      const target = defaultLandingPath(fresh);
-      if (isSpaPath(target)) navigate(target);
-      else navigation.assign(target);
+      navigate(defaultLandingPath(fresh));
     },
     onError: (error) => toast.error(errorMessage(error)),
   });

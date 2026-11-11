@@ -126,7 +126,7 @@ export function SlackChannelPermissionsEditor({
       <div className="rounded-sm border border-border bg-card">
         {catalogError && <WarningAlert className="m-4">{catalogError}</WarningAlert>}
         {draft.length > 0 ? (
-          <div className="overflow-x-auto">
+          <div className="relative overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="border-b border-border bg-table-head text-left text-xs tracking-wider text-muted-foreground uppercase">
                 <tr>
@@ -243,7 +243,7 @@ export function SlackChannelPermissionsEditor({
           <div className="mt-6 mb-3">
             <h3 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">Inherited From Roles</h3>
           </div>
-          <div className="overflow-x-auto rounded-sm border border-border bg-card">
+          <div className="relative overflow-x-auto rounded-sm border border-border bg-card">
             <table className="min-w-full text-sm">
               <thead className="border-b border-border bg-table-head text-left text-xs tracking-wider text-muted-foreground uppercase">
                 <tr>

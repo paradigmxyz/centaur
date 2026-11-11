@@ -99,6 +99,7 @@ function WorkflowsList() {
 
   return (
     <>
+      <h1 className="sr-only">Workflows</h1>
       <h2 className="mb-3 text-sm font-semibold text-heading">Workflow Runs</h2>
       {unavailable && <WarningAlert className="mb-4 px-4 py-3">{WORKFLOW_DB_UNAVAILABLE}</WarningAlert>}
       {list.isError && !unavailable ? (
