@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -288,6 +291,58 @@ class FirstTurnPromptHookTest(unittest.TestCase):
 
             self.assertEqual(prompt, "base\n\n\n---\n\npersona\n")
 
+
+    def test_reports_each_hook_run_as_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            home.mkdir()
+            (home / "AGENTS.md").write_text("base\n")
+            overlays = {"acme/ok": "echo ok\n", "acme/failing": "exit 4\n"}
+            for repo, script in overlays.items():
+                hook = home / "github" / repo / "services/sandbox/hooks"
+                hook.mkdir(parents=True)
+                (hook / "first-turn-prompt.sh").write_text(script)
+            env = {
+                **os.environ,
+                compose_system_prompt.OVERLAY_REPO_DIRS_ENV: ":".join(
+                    str(home / "github" / repo) for repo in overlays
+                ),
+            }
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    compose_system_prompt.__file__,
+                    "--home-dir",
+                    str(home),
+                    "--target-prompt",
+                    str(workspace / "AGENTS.md"),
+                    "--first-turn-prompt-hooks",
+                    "--report-json",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            hooks = json.loads(completed.stdout)["hooks"]
+            self.assertEqual(
+                [
+                    (h["repo"].rsplit("/", 1)[1], h["status"], h["exit_code"])
+                    for h in hooks
+                ],
+                [("ok", "ok", 0), ("failing", "failed", 4)],
+            )
+            self.assertEqual(hooks[0]["output_bytes"], 3)
+            for hook in hooks:
+                self.assertLessEqual(hook["started_at"], hook["ended_at"])
+            self.assertEqual(
+                (workspace / "AGENTS.md").read_text(), "base\n\n\n---\n\nok\n"
+            )
 
 if __name__ == "__main__":
     unittest.main()

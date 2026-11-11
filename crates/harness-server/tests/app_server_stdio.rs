@@ -676,7 +676,7 @@ fn blocks_mode_runs_first_turn_prompt_hooks_once_before_the_harness_starts() {
     assert_completed_turn(&second);
     assert_eq!(
         std::fs::read_to_string(&runs).expect("composer runs"),
-        "--target-prompt AGENTS.md --first-turn-prompt-hooks\n"
+        "--target-prompt AGENTS.md --first-turn-prompt-hooks --report-json\n"
     );
     for path in [&prompt, &runs, &composer] {
         let _ = std::fs::remove_file(path);

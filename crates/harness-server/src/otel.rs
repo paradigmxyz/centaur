@@ -469,31 +469,138 @@ impl TurnTelemetry {
     }
 
     fn common_attributes(&self) -> Vec<KeyValue> {
-        let mut attributes = Vec::new();
-        if let Some(thread_key) = self.trace.thread_key.as_deref() {
-            attributes.push(KeyValue::new("centaur.thread_key", thread_key.to_owned()));
-            attributes.push(KeyValue::new(
-                "lmnr.association.properties.session_id",
-                thread_key.to_owned(),
-            ));
-        }
-        if let Some(execution_id) = self
-            .trace
-            .metadata
-            .get("execution_id")
-            .and_then(Value::as_str)
-        {
-            attributes.push(KeyValue::new(
-                "centaur.execution_id",
-                execution_id.to_owned(),
-            ));
-            attributes.push(KeyValue::new(
-                format!("{LAMINAR_METADATA_PREFIX}execution_id"),
-                execution_id.to_owned(),
-            ));
-        }
-        attributes
+        trace_attributes(&self.trace)
     }
+}
+
+fn trace_attributes(trace: &TraceContext) -> Vec<KeyValue> {
+    let mut attributes = Vec::new();
+    if let Some(thread_key) = trace.thread_key.as_deref() {
+        attributes.push(KeyValue::new("centaur.thread_key", thread_key.to_owned()));
+        attributes.push(KeyValue::new(
+            "lmnr.association.properties.session_id",
+            thread_key.to_owned(),
+        ));
+    }
+    if let Some(execution_id) = trace.metadata.get("execution_id").and_then(Value::as_str) {
+        attributes.push(KeyValue::new(
+            "centaur.execution_id",
+            execution_id.to_owned(),
+        ));
+        attributes.push(KeyValue::new(
+            format!("{LAMINAR_METADATA_PREFIX}execution_id"),
+            execution_id.to_owned(),
+        ));
+    }
+    attributes
+}
+
+/// One overlay prompt hook run, as reported by `compose-system-prompt`.
+#[derive(Debug, Clone)]
+pub(crate) struct PromptHookRun {
+    pub(crate) repo: String,
+    pub(crate) hook: String,
+    /// `ok`, `empty`, `failed`, `timeout`, `oversized`, `start_failed`, or
+    /// `outside_repo`; only `ok` contributes prompt text.
+    pub(crate) status: String,
+    pub(crate) started_at: SystemTime,
+    pub(crate) ended_at: SystemTime,
+    pub(crate) output_bytes: u64,
+    pub(crate) exit_code: Option<i64>,
+}
+
+/// The whole first-turn hook pass: the composer process and each hook it ran.
+#[derive(Debug)]
+pub(crate) struct PromptHooksRun {
+    pub(crate) started_at: SystemTime,
+    pub(crate) ended_at: SystemTime,
+    /// `composed`, `failed` (composer exited non-zero or its report was
+    /// unreadable), or `not_run` (composer could not start).
+    pub(crate) outcome: &'static str,
+    pub(crate) hooks: Vec<PromptHookRun>,
+}
+
+/// Records a span for the first-turn hook pass, parented to the first turn's
+/// trace, with a child span per hook, so hook latency on the first reply can be
+/// measured. No-op without a trace parent or configured exporter.
+pub(crate) fn record_first_turn_prompt_hooks(
+    trace: Option<&TraceContext>,
+    harness: &str,
+    run: &PromptHooksRun,
+) {
+    let Some(trace) = trace else {
+        return;
+    };
+    let Some(parent) = trace.parent_context() else {
+        return;
+    };
+    let Some(tracer) = telemetry_tracer() else {
+        return;
+    };
+    record_first_turn_prompt_hooks_with_tracer(&tracer, &parent, trace, harness, run);
+}
+
+fn record_first_turn_prompt_hooks_with_tracer(
+    tracer: &SdkTracer,
+    parent: &Context,
+    trace: &TraceContext,
+    harness: &str,
+    run: &PromptHooksRun,
+) {
+    let failed_hooks = run
+        .hooks
+        .iter()
+        .filter(|hook| hook.status != "ok" && hook.status != "empty");
+    let mut attributes = trace_attributes(trace);
+    attributes.extend([
+        KeyValue::new("centaur.hooks.name", "first-turn-prompt"),
+        KeyValue::new("centaur.hooks.outcome", run.outcome),
+        KeyValue::new("centaur.hooks.count", run.hooks.len() as i64),
+        KeyValue::new("centaur.hooks.failed_count", failed_hooks.count() as i64),
+        KeyValue::new(
+            "centaur.hooks.output_bytes",
+            run.hooks
+                .iter()
+                .filter(|hook| hook.status == "ok")
+                .map(|hook| hook.output_bytes as i64)
+                .sum::<i64>(),
+        ),
+    ]);
+    let mut span = SpanBuilder::from_name(format!("{harness}.first_turn_prompt_hooks"))
+        .with_kind(SpanKind::Internal)
+        .with_start_time(run.started_at)
+        .with_attributes(attributes)
+        .start_with_context(tracer, parent);
+    span.set_status(if run.outcome == "composed" {
+        Status::Ok
+    } else {
+        Status::error(format!("first-turn prompt hooks {}", run.outcome))
+    });
+    let hooks_context = parent.with_remote_span_context(span.span_context().clone());
+    for hook in &run.hooks {
+        let mut attributes = trace_attributes(trace);
+        attributes.extend([
+            KeyValue::new("centaur.hook.name", "first-turn-prompt"),
+            KeyValue::new("centaur.hook.repo", hook.repo.clone()),
+            KeyValue::new("centaur.hook.path", hook.hook.clone()),
+            KeyValue::new("centaur.hook.status", hook.status.clone()),
+            KeyValue::new("centaur.hook.output_bytes", hook.output_bytes as i64),
+        ]);
+        if let Some(exit_code) = hook.exit_code {
+            attributes.push(KeyValue::new("centaur.hook.exit_code", exit_code));
+        }
+        let mut hook_span = SpanBuilder::from_name(format!("{harness}.first_turn_prompt_hook"))
+            .with_kind(SpanKind::Internal)
+            .with_start_time(hook.started_at)
+            .with_attributes(attributes)
+            .start_with_context(tracer, &hooks_context);
+        hook_span.set_status(match hook.status.as_str() {
+            "ok" | "empty" => Status::Ok,
+            status => Status::error(format!("hook {status}")),
+        });
+        hook_span.end_with_timestamp(hook.ended_at);
+    }
+    span.end_with_timestamp(run.ended_at);
 }
 
 impl Drop for TurnTelemetry {
@@ -1051,7 +1158,7 @@ impl SpanOutput {
     }
 }
 
-fn harness_name(kind: HarnessKind) -> &'static str {
+pub(crate) fn harness_name(kind: HarnessKind) -> &'static str {
     match kind {
         HarnessKind::Codex => "codex",
         HarnessKind::ClaudeCode => "claude",
@@ -2108,5 +2215,102 @@ mod tests {
         assert!(bounded.ends_with(TRUNCATION_SUFFIX));
         assert!(bounded.len() <= MAX_SPAN_IO_BYTES);
         assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
+    #[test]
+    fn first_turn_prompt_hooks_record_a_parent_span_with_a_child_per_hook() {
+        let (exporter, _provider, tracer) = test_telemetry();
+        let trace = trace_context();
+        let parent = trace.parent_context().expect("parent context");
+        let at = |millis: u64| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(millis);
+        let hook = |repo: &str, status: &str, start: u64, end: u64, exit_code| PromptHookRun {
+            repo: format!("/home/agent/github/acme/{repo}"),
+            hook: format!(
+                "/home/agent/github/acme/{repo}/services/sandbox/hooks/first-turn-prompt.sh"
+            ),
+            status: status.to_owned(),
+            started_at: at(start),
+            ended_at: at(end),
+            output_bytes: 4096,
+            exit_code,
+        };
+        let run = PromptHooksRun {
+            started_at: at(1_000),
+            ended_at: at(1_500),
+            outcome: "composed",
+            hooks: vec![
+                hook("first", "ok", 1_010, 1_200, Some(0)),
+                hook("second", "timeout", 1_200, 1_490, None),
+            ],
+        };
+
+        record_first_turn_prompt_hooks_with_tracer(&tracer, &parent, &trace, "claude", &run);
+
+        let spans = exporter.get_finished_spans().expect("spans");
+        let hooks_span = spans
+            .iter()
+            .find(|span| span.name == "claude.first_turn_prompt_hooks")
+            .expect("hooks span");
+        assert_eq!(hooks_span.parent_span_id.to_string(), "1111111111111111");
+        assert_eq!(hooks_span.start_time, at(1_000));
+        assert_eq!(hooks_span.end_time, at(1_500));
+        assert_eq!(hooks_span.status, Status::Ok);
+        assert_eq!(
+            attribute(hooks_span, "centaur.hooks.outcome").as_deref(),
+            Some("composed")
+        );
+        assert_eq!(
+            attribute(hooks_span, "centaur.hooks.count").as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            attribute(hooks_span, "centaur.hooks.failed_count").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            attribute(hooks_span, "centaur.hooks.output_bytes").as_deref(),
+            Some("4096")
+        );
+        assert_eq!(
+            attribute(hooks_span, "centaur.thread_key").as_deref(),
+            Some("slack:T:C:1.0")
+        );
+        assert_eq!(
+            attribute(hooks_span, "centaur.execution_id").as_deref(),
+            Some("exe-1")
+        );
+
+        let hook_spans: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "claude.first_turn_prompt_hook")
+            .collect();
+        assert_eq!(hook_spans.len(), 2);
+        for span in &hook_spans {
+            assert_eq!(span.parent_span_id, hooks_span.span_context.span_id());
+            assert_eq!(
+                span.span_context.trace_id(),
+                hooks_span.span_context.trace_id()
+            );
+        }
+        let first = hook_spans
+            .iter()
+            .find(|span| attribute(span, "centaur.hook.status").as_deref() == Some("ok"))
+            .expect("ok hook span");
+        assert_eq!(first.start_time, at(1_010));
+        assert_eq!(first.end_time, at(1_200));
+        assert_eq!(
+            attribute(first, "centaur.hook.exit_code").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            attribute(first, "centaur.hook.repo").as_deref(),
+            Some("/home/agent/github/acme/first")
+        );
+        let timed_out = hook_spans
+            .iter()
+            .find(|span| attribute(span, "centaur.hook.status").as_deref() == Some("timeout"))
+            .expect("timed-out hook span");
+        assert_eq!(timed_out.status, Status::error("hook timeout"));
+        assert_eq!(attribute(timed_out, "centaur.hook.exit_code"), None);
     }
 }

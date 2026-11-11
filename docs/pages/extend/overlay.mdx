@@ -176,6 +176,13 @@ or prints more than `CENTAUR_FIRST_TURN_PROMPT_HOOK_MAX_BYTES` (default 65536)
 is logged and skipped, so it never fails the turn. Its standard error goes to
 the sandbox log. A hook path that resolves outside its repo is ignored.
 
+Each hook pass is traced on the first turn's trace as
+`<harness>.first_turn_prompt_hooks`, with a `<harness>.first_turn_prompt_hook`
+child per hook. The child spans carry `centaur.hook.repo`, `centaur.hook.status`
+(`ok`, `empty`, `failed`, `timeout`, `oversized`, `start_failed`, or
+`outside_repo`), `centaur.hook.output_bytes`, and `centaur.hook.exit_code`, so
+hook latency on the first reply can be measured per overlay.
+
 ## Verify the overlay
 
 Verify the API pod sees the ordered API-side paths:

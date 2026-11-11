@@ -225,7 +225,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 reasoning,
                 trace_context,
             }) => {
-                crate::first_turn::run_first_turn_prompt_hooks();
+                crate::first_turn::run_first_turn_prompt_hooks(Some(&trace_context), "codex");
                 let traceparent = trace_context.effective_traceparent();
                 let requested_provider = provider
                     .as_deref()
