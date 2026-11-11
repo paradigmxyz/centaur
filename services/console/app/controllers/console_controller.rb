@@ -1,5 +1,5 @@
-# Operator console: a lightweight, server-rendered HTML view over secrets,
-# credentials, and OAuth apps (principals moved to the SPA). Read-only; gated behind a console session
+# Operator console: a lightweight, server-rendered HTML view over secrets and
+# OAuth apps (principals and credentials moved to the SPA). Read-only; gated behind a console session
 # (ApplicationController#require_login) and restricted to admins (require_admin),
 # like every Control page. Distinct from the JSON API.
 class ConsoleController < ApplicationController
@@ -57,21 +57,8 @@ class ConsoleController < ApplicationController
     @assignable_roles = Role.where.not(id: granted_role_ids).order(:id)
   end
 
-  # Managed broker credentials and their refresh-loop status. Distinct from
-  # SECRET_KINDS because a broker credential is not grantable -- it is referenced
-  # by a token_broker source rather than granted directly.
-  def credentials
-    @credentials = BrokerCredential.includes(:oauth_app).order(created_at: :asc, id: :asc)
-  end
-
-  def credential
-    @credential = BrokerCredential.find_by_oid!(params[:id])
-    # The grantable static secret wrapping this credential, for the cross-link.
-    @wrapping_secret = @credential.static_secret
-  end
-
-  # Registered OAuth apps and the consent flows they drive. Like credentials,
-  # an app is not grantable -- it is the durable config behind the public
+  # Registered OAuth apps and the consent flows they drive. Like broker
+  # credentials, an app is not grantable -- it is the durable config behind the public
   # /oauth/:provider/start flow.
   def oauth_apps
     @oauth_apps = OauthApp.order(created_at: :asc, id: :asc)

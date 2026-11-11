@@ -222,8 +222,8 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "callback redirects to the protected console URL the user first requested" do
-    get console_credentials_url(kind: "oauth")
-    assert_redirected_to login_path
+    # A signed-out SPA deep link remembers itself (SpaController).
+    get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
     run_callback(sub: "returning-sub", email: "returning@example.com")
