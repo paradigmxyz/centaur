@@ -1131,6 +1131,16 @@ The `provider` field is validated against the [supported providers](#supported-p
 | `allowed_scopes`       | required    | Non-empty array of scope strings the start endpoint requests. A flow's optional `scopes` param must be a subset; omitting it requests all of these. |
 | `enabled`              | optional    | Defaults to `true`. A disabled app rejects new consent flows; existing credentials keep refreshing. |
 | `shared`               | optional    | Defaults to `false`. One admin-connected account with role-granted access. Create-only; changes return `422`. Incompatible with `always_available`. |
+| `always_available`     | optional    | Defaults to `false`. Use the connecting user's credential automatically whenever they ask the bot, not only in their DMs. |
+
+Responses also include these read-only fields:
+
+| Field               | Notes |
+| ------------------- | ----- |
+| `client_secret_set` | `true` when a client secret is stored. The secret itself is never returned. |
+| `redirect_uri`      | The callback URI to register with the provider: `<public URL>/oauth/<slug>/callback`. The public URL is `CENTAUR_CONSOLE_PUBLIC_URL` when set, otherwise the request's base URL. |
+| `start_url`         | The well-known consent link: `<public URL>/oauth/<slug>/start`. |
+| `credentials_count` | How many broker credentials the app has minted. |
 
 The `client_secret` is required and write-only: it is accepted on writes but never returned in any response.
 
@@ -1179,6 +1189,53 @@ Returns `201`. The `client_secret` is never echoed back:
 | `GET`  | `/api/v1/oauth_apps/lookup/:slug` | Fetch by slug. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/oauth_apps/:id` | [Upsert](#upsert-put--patch) by OID or slug. Omitted fields are preserved; `client_secret` is only changed when supplied. |
 | `DELETE` | `/api/v1/oauth_apps/:id` | Delete. Returns `204`; `404` if missing. Returns `409` while the app still has minted credentials (delete or unlink them first). |
+| `GET`  | `/api/v1/oauth_apps/:id/credentials` | The broker credentials the app minted, oldest first. `labels[k]=v` and pagination optional. Each row has `id`, `foreign_id`, `name`, `status`, `provider_email`, `external_user_key`, and `created_at`; token material is never included. `404` if the app is missing. |
+| `GET`  | `/api/v1/oauth_apps/:id/provider_details` | Provider-specific details for a shared app's connected account (its oldest credential). Returns `data: { provider, credential, details }`, where `credential` is `null` for personal apps or when nothing is connected, else `{ id, provider_subject, static_secret_id }` (`static_secret_id` is the wrapping static secret, or `null`). `details` is fetched live from the provider with 2-second timeouts, only while the credential is live with an unexpired access token (it is never refreshed). Today only `mercator` returns details (`{ claimed, ... }`). Any provider failure yields `{}`. |
+| `POST` | `/api/v1/oauth_apps/presets/:provider` | Set up a provider preset. If the preset's app (keyed by its slug) does not exist yet, iron-control registers an OAuth client with the provider (RFC 7591 dynamic registration) and creates the app. Returns `200` with `data: { id, slug, start_url }`; send the admin to `start_url` to connect the account. `404` for providers without a preset, `409` when an existing app with the preset's slug has a different provider, shared mode, or is disabled, and `502` when registration fails (no app is created). |
+
+### OAuth providers
+
+`GET /api/v1/oauth_providers` (admin) lists the [supported providers](#supported-providers) in registry order. The first one is the console form's default.
+
+```json
+{
+  "data": [
+    { "key": "google", "display_name": "Google", "presettable": false, "config_keys": [], "optional_config_keys": [] },
+    { "key": "custom", "display_name": "Custom", "presettable": false,
+      "config_keys": ["authorization_endpoint", "token_endpoint", "userinfo_endpoint", "resource"],
+      "optional_config_keys": ["userinfo_endpoint"] }
+  ]
+}
+```
+
+`config_keys` lists the `provider_config` keys the provider takes. `presettable` is `true` when the provider can be set up with `POST /api/v1/oauth_apps/presets/:provider`.
+
+### Integrations
+
+`GET /api/v1/integrations` serves the console Integrations page. Unlike the rest of this section, any active console user may call it, with a session cookie or an API key. It returns the OAuth apps the caller can connect and their connection state:
+
+```json
+{
+  "data": {
+    "apps": [
+      {
+        "id": "oap_...", "slug": "google", "provider": "google", "description": "Gmail",
+        "shared": false, "always_available": false, "usage": "direct_messages",
+        "start_url": "https://<iron-control>/oauth/google/start",
+        "connection": { "status": "connected" }
+      }
+    ],
+    "presets": [{ "provider": "mercator", "display_name": "Mercator", "description": "Shared with your agents." }],
+    "ssh_key": { "configured": false }
+  }
+}
+```
+
+- `apps` lists enabled apps ordered by slug. Shared apps appear only for acting admins (a descoped admin sees what an operator sees). The client id, client secret, scopes, and labels are never included.
+- `usage` is `shared`, `always_available`, or `direct_messages` (the app is used only in the user's DMs with the bot).
+- `connection` is `null` when the caller has no credential for the app. Otherwise `status` is `connected` or `needs_reconnect` (the credential is dead or is missing a scope the app requires). The caller's credentials are the ones they minted while signed in, plus any whose provider email matches their console email. For a shared app, any credential counts. When several match, the most recently updated one wins.
+- `presets` lists providers with a preset that have no app yet. It is empty unless the caller is an acting admin.
+- `ssh_key.configured` reports whether the caller saved a personal SSH key.
 
 ### Sandbox Start URLs
 

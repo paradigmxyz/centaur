@@ -9,8 +9,8 @@ class Console::SshKeysControllerTest < ActionDispatch::IntegrationTest
   test "a member saves, views, edits, and deletes only their own key" do
     console = Principal.create!(foreign_id: "ssh-console-member", kind: "console_user",
                                 console_user: users(:member_user), created_by: users(:acme_admin))
-    get console_integrations_url
-    assert_select "a[href=?]", edit_console_ssh_key_path, text: "Connect"
+    get api_v1_integrations_path
+    assert_equal false, JSON.parse(response.body).dig("data", "ssh_key", "configured")
 
     patch console_ssh_key_url, params: { ssh_key: { name: "My SSH key", private_key: @private_key, owner_id: users(:acme_admin).id } }
     assert_redirected_to console_ssh_key_path
