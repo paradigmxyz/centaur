@@ -1,0 +1,88 @@
+import { useQuery } from "@tanstack/react-query";
+import { ChevronsUpDown } from "lucide-react";
+import { useDeferredValue, useState } from "react";
+
+import { Button } from "@/components/ui/button";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { api, type ListEnvelope } from "@/lib/api";
+import { sharedKeys } from "@/lib/query-keys";
+import { SECRET_KIND_SLUGS, secretKindLabel, secretOptionLabel, type GrantableSummary } from "@/lib/secret-kinds";
+
+interface SecretGrantPickerProps {
+  value: GrantableSummary | null;
+  onChange: (secret: GrantableSummary | null) => void;
+  /** Secret ids to leave out (e.g. already granted directly). */
+  excludeIds?: ReadonlySet<string>;
+  placeholder?: string;
+}
+
+/**
+ * Searchable, kind-grouped secret picker backed by GET /api/v1/secrets (the
+ * "grant secret" select on principal and role pages). Shows identifying
+ * metadata only.
+ */
+export function SecretGrantPicker({
+  value,
+  onChange,
+  excludeIds,
+  placeholder = "Pick a secret to grant",
+}: SecretGrantPickerProps) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const deferred = useDeferredValue(query.trim());
+  const secrets = useQuery({
+    queryKey: sharedKeys.secrets({ q: deferred, limit: 200 }),
+    queryFn: ({ signal }) =>
+      api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", { q: deferred, limit: 200 }, signal),
+    enabled: open,
+    select: (body) => body.data.filter((secret) => !excludeIds?.has(secret.id)),
+  });
+
+  const groups = SECRET_KIND_SLUGS.map((kind) => ({
+    kind,
+    items: (secrets.data ?? []).filter((secret) => secret.kind === kind),
+  })).filter((group) => group.items.length > 0);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="secondary"
+          role="combobox"
+          aria-expanded={open}
+          aria-label="Secret to grant"
+          className="w-full max-w-md justify-between py-2 font-normal"
+        >
+          <span className="truncate">{value ? `${value.kind_label}: ${secretOptionLabel(value)}` : placeholder}</span>
+          <ChevronsUpDown className="opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[min(28rem,90vw)] p-0" align="start">
+        <Command shouldFilter={false}>
+          <CommandInput placeholder="Search secrets" value={query} onValueChange={setQuery} />
+          <CommandList>
+            <CommandEmpty>{secrets.isLoading ? "Loading…" : "No secrets found."}</CommandEmpty>
+            {groups.map((group) => (
+              <CommandGroup key={group.kind} heading={secretKindLabel(group.kind)}>
+                {group.items.map((secret) => (
+                  <CommandItem
+                    key={secret.id}
+                    value={`${secret.kind}:${secret.id}`}
+                    onSelect={() => {
+                      onChange(secret);
+                      setOpen(false);
+                    }}
+                  >
+                    {secretOptionLabel(secret)}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            ))}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
