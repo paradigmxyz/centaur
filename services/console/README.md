@@ -2,7 +2,7 @@
 
 `iron-control` is the control plane for [`iron-proxy`](https://github.com/ironsh/iron-proxy), a forwarding proxy that adds credentials to outbound HTTP requests. Applications route their traffic through `iron-proxy` and never hold the secrets themselves. `iron-control` stores the credentials, decides which proxy may use which credential on which requests, and hands each proxy its configuration.
 
-It is a Rails application backed by Postgres. It provides a JSON API, an operator console, and encryption at rest for the secrets it stores. The console is a TypeScript React single-page app in [`web/`](web/) that talks to the same JSON API; Rails serves its built `index.html` for browser navigations and keeps only JSON endpoints and the OAuth/SSO protocol redirects.
+It is a Rails application backed by Postgres. It provides a JSON API, an operator console, and encryption at rest for the secrets it stores.
 
 ## What It Does
 
@@ -30,48 +30,44 @@ Operators manage credentials, principals, roles, and grants through the API or t
 
 ## Console UI
 
-The operator console lives in [`web/`](web/): Vite, React, TypeScript,
-shadcn/ui on Tailwind CSS, React Router, and TanStack Query. It covers every
-console page after sign-in. Sign-in and the OAuth flows are the one
-intentional exception: the login and pending-approval pages, the MCP OAuth
-consent page, and the broker OAuth result page stay server-rendered by Rails
-(see below), so installed MCP clients keep exactly the behaviour they were
-built against, sign-in works without JavaScript, and pods on either side of a
-rolling deploy accept each other's forms.
+The operator console is a React SPA in [`web/`](web/) (Vite, TypeScript,
+shadcn/ui on Tailwind CSS, React Router, TanStack Query) that uses the same
+JSON API. The login, pending-approval, MCP OAuth consent, and broker OAuth
+result pages stay server-rendered by Rails, so installed MCP clients keep the
+behaviour they were built against, sign-in works without JavaScript, and pods
+on either side of a rolling deploy accept each other's forms.
 
 - **Serving.** `pnpm -C web build` writes content-hashed assets to
-  `public/spa` (URLs under `/spa/`) and the HTML shell to `spa-shell/index.html`,
-  outside `public/`, so the static file server never serves it without the
-  Content-Security-Policy. Any browser `GET`/`HEAD` navigation that no Rails
-  route claims gets that shell from `SpaController`, served `no-cache`;
-  React Router renders the page, including its own not-found page. API,
-  framework, and protocol prefixes (`/api`, `/rails`, `/spa`, `/assets`,
-  `/.well-known`, `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`,
-  `/pending`) never get the SPA: unknown paths there return the JSON 404. See `lib/spa_request.rb` and `config/routes/spa.rb`.
-- **Data.** The SPA only uses `/api/v1`, authenticated by the console session
-  cookie. It reads the session, CSRF token, nav flags, and one-shot flash from
-  `GET /api/v1/me`, and sends `X-CSRF-Token` on every write. A `401` sends the
-  browser to `/login?return_to=<current page>` (a full page load) and a pending
-  account to `/pending`; sign-out is `DELETE /api/v1/session`. See
+  `public/spa` (URLs under `/spa/`) and the HTML shell to
+  `spa-shell/index.html`. The shell is kept outside `public/` because the
+  static file server would serve it without the Content-Security-Policy.
+  `SpaController` returns it (`no-cache`) for any browser `GET`/`HEAD`
+  navigation no Rails route claims, and React Router renders the page,
+  including not-found. `/api`, `/rails`, `/spa`, `/assets`, `/.well-known`,
+  `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`, and `/pending` never
+  get the shell; unknown paths there return the JSON 404. See
+  `lib/spa_request.rb` and `config/routes/spa.rb`.
+- **Data.** The SPA uses only `/api/v1` with the console session cookie. It
+  reads the session, CSRF token, nav flags, and one-shot flash from
+  `GET /api/v1/me` and sends `X-CSRF-Token` on every write. A `401` sends the
+  browser to `/login?return_to=<current page>` and a pending account to
+  `/pending` (full page loads); sign-out is `DELETE /api/v1/session`. See
   [docs/API.md](docs/API.md#authentication).
-- **Rails-owned browser routes.** `/auth/:provider/{start,callback}` (SSO),
-  `/oauth/:slug/{start,callback}` (broker OAuth consent),
-  `/mcp/oauth/{authorize,token,register}` and the
+- **Rails-owned browser routes**, answering with redirects or JSON:
+  `/auth/:provider/{start,callback}` (SSO), `/oauth/:slug/{start,callback}`
+  (broker OAuth consent), `/mcp/oauth/{authorize,token,register}` and the
   `/.well-known` metadata (MCP OAuth), `/launch` (PWA protocol handler), and
-  `/manifest` / `/service-worker` (PWA files from `config/pwa`). They answer
-  with redirects or JSON.
-- **Server-rendered sign-in and OAuth pages.** `GET /login` renders the login
-  page (SSO buttons and the password form), `POST /login` and
-  `DELETE /logout` are standard Rails forms with an authenticity token, and
-  `GET /pending` is the holding page for accounts awaiting approval (see
-  [docs/API.md](docs/API.md#console-auth-pages)). `GET /mcp/oauth/authorize`
-  renders the MCP consent page and `POST /mcp/oauth/authorize` issues the
-  code; `/oauth/:slug/{start,callback}` render their failure page in the same
-  response. After sign-in `/login` returns to the remembered page, such as the
-  authorize URL with its query. These pages use the
-  standalone `layouts/oauth.html.erb` and plain CSS from `public/oauth-page`
-  (the SPA's colours, dark by default and light under
-  `prefers-color-scheme: light`), with no asset pipeline and no JavaScript.
+  `/manifest` / `/service-worker` (PWA files from `config/pwa`).
+- **Server-rendered pages.** `GET /login` (SSO buttons and the password form),
+  `POST /login`, and `DELETE /logout` (standard Rails forms with an
+  authenticity token), `GET /pending`, the MCP consent page
+  (`GET`/`POST /mcp/oauth/authorize`), and the failure page of
+  `/oauth/:slug/{start,callback}`. After sign-in `/login` returns to the
+  remembered page, such as the authorize URL with its query. See
+  [docs/API.md](docs/API.md#console-auth-pages). They use
+  `layouts/oauth.html.erb` and plain CSS from `public/oauth-page` (the SPA's
+  colours, dark by default, light under `prefers-color-scheme: light`), with no
+  asset pipeline or JavaScript.
 
 ## Local Development
 
@@ -86,17 +82,17 @@ just dev
 
 This installs the gem and SPA dependencies, starts a persistent `postgres:16`
 container named `centaur-console-postgres`, exposes it on `127.0.0.1:55432`,
-prepares the Rails database, and starts the Rails server (`:3000`) and the Vite
-dev server (`:5173`). Browse the console at `http://localhost:5173`; Vite
-proxies the API and the Rails-owned browser routes to Rails. Database files are
+prepares the Rails database, and starts Rails (`:3000`) and the Vite dev server
+(`:5173`). Browse `http://localhost:5173`; Vite proxies the API and the
+Rails-owned browser routes to Rails. Database files are
 retained in the `centaur-console-postgres-data` Docker volume between runs.
 
-To check the SPA served by Rails itself, as in production, build it with
-`just web-build` and browse `http://localhost:3000`.
+To test the SPA as Rails serves it in production, run `just web-build` and
+browse `http://localhost:3000`.
 
-`just ci` (or `bin/ci`) runs the full local CI sequence: RuboCop, the
-gem audit, Brakeman, the SPA's
-typecheck, lint, tests, and build, the Rails tests, and seed validation.
+`just ci` (or `bin/ci`) runs the full local CI sequence: RuboCop, the gem
+audit, Brakeman, the SPA's typecheck, lint, tests, and build, the Rails tests,
+and seed validation.
 
 To use an existing PostgreSQL server instead, set
 `CENTAUR_CONSOLE_DB_HOST`, `CENTAUR_CONSOLE_DB_PORT`,
@@ -197,6 +193,6 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts a declared credential type: an API key sent as a bearer token (`Authorization: Bearer iak_...`), the console session cookie (the SPA), or either one (see [docs/API.md](docs/API.md#credential-types-by-endpoint)). API keys and proxies are bearer-only; endpoints added for the SPA are session-only; cookie-authenticated writes also need the session's CSRF token. A bearer key works only while its owner is an active admin. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts an API key sent as a bearer token (`Authorization: Bearer iak_...`), the console session cookie, or either, as listed in [docs/API.md](docs/API.md#credential-types-by-endpoint). API keys and proxies are bearer-only. Cookie-authenticated writes also need the session's CSRF token. A bearer key works only while its owner is an active admin. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
