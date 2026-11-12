@@ -515,7 +515,7 @@ pub(crate) struct PromptHookRun {
 pub(crate) struct PromptHooksRun {
     pub(crate) started_at: SystemTime,
     pub(crate) ended_at: SystemTime,
-    /// `composed`, `no_output` (no hook printed prompt text), or
+    /// `composed` (the prompt was rewritten, with or without hook output) or
     /// `compose_failed` (the prompt could not be rewritten).
     pub(crate) outcome: &'static str,
     pub(crate) hooks: Vec<PromptHookRun>,

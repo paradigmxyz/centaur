@@ -198,11 +198,7 @@ fn title_source_has_signal(text: &str) -> bool {
     }
 
     let words = normalized.split_whitespace().collect::<Vec<_>>();
-    if words.iter().all(|word| is_low_signal_word(word)) {
-        return false;
-    }
-
-    true
+    !words.iter().all(|word| is_low_signal_word(word))
 }
 
 fn normalize_low_signal_text(text: &str) -> String {
