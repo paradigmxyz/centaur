@@ -213,7 +213,7 @@ export async function slackStreamRecipientUserId(
  */
 async function allowedExternalTeamIds(
   options: SlackbotV2Options,
-  logger: Logger
+  logger: Pick<Logger, 'warn'>
 ): Promise<ReadonlySet<string>> {
   if (options.allowedExternalTeamIds) return new Set(options.allowedExternalTeamIds)
   const cache = externalTeamIdsCaches.get(options) ?? { expiresAtMs: 0 }
@@ -232,6 +232,34 @@ async function allowedExternalTeamIds(
   )
   cache.lookup = lookup
   return lookup
+}
+
+/**
+ * Thread context admits a message from another Slack workspace (Slack Connect)
+ * only when that workspace is on the Console allowlist that already gates
+ * triggering. Otherwise someone who could never start a turn would still write
+ * into one, with every tool the turn has. Messages from the home workspace, or
+ * with no team, stay. Without a loaded allowlist, foreign messages are left out;
+ * without a known home workspace nothing can be told apart, so all stay.
+ */
+export async function foreignTeamContextFilter(
+  options: SlackbotV2Options,
+  logger: Pick<Logger, 'warn'>
+): Promise<(raw: unknown) => boolean> {
+  const homeTeamId = options.slackHomeTeamId
+  if (!homeTeamId) return () => true
+  let allowed: ReadonlySet<string>
+  try {
+    allowed = await allowedExternalTeamIds(options, logger)
+  } catch (error) {
+    if (!(error instanceof SlackExternalTeamIdsUnavailableError)) throw error
+    allowed = new Set()
+  }
+  return raw => {
+    if (!isJsonObject(raw)) return true
+    const externalTeamId = externalSlackTeamIdForHome(homeTeamId, raw as RawSlackEvent)
+    return !externalTeamId || allowed.has(externalTeamId)
+  }
 }
 
 function externalSlackTeamId(event: RawSlackEvent): string | undefined {

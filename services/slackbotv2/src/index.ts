@@ -101,6 +101,7 @@ import {
 } from './overrides'
 import { createFlagMessageOverridesStrategy } from './message-overrides-strategy'
 import {
+  foreignTeamContextFilter,
   isAllowedSlackMessage,
   isAllowedSlackWebhookBody,
   SlackExternalTeamIdsUnavailableError,
@@ -1080,7 +1081,7 @@ async function handleProactiveMessage(
     // A top-level message starts its thread, so it has no earlier messages.
     const earlier = isSlackThreadReply(message)
       ? await withSlackApiTimeout(options, 'collect proactive thread history', () =>
-          proactiveThreadHistory(thread, message)
+          proactiveThreadHistory(thread, message, options)
         )
       : []
     const history = earlier.filter(item => !burstIds.has(item.id)).map(proactiveThreadMessage)
@@ -1260,11 +1261,14 @@ async function waitForBurstEnd(
 
 async function proactiveThreadHistory(
   thread: Thread<SlackbotV2ThreadState>,
-  current: ChatMessage
+  current: ChatMessage,
+  options: SlackbotV2Options
 ): Promise<ChatMessage[]> {
+  const keep = await contextFilter(options)
   const history: ChatMessage[] = []
   for await (const item of thread.messages) {
     if (item.id === current.id || compareSlackTs(item.id, current.id) > 0) continue
+    if (!keep(item.raw)) continue
     history.push(item)
     if (history.length >= PROACTIVE_HISTORY_MESSAGES) break
   }
@@ -1964,8 +1968,8 @@ async function syncThreadMessageToSession(
         ? await withSlackApiTimeout(input.options, 'collect Slack thread context', () =>
             collectSlackThreadContext(input.options, message)
           )
-        : await withSlackApiTimeout(input.options, 'collect initial thread context', () =>
-            collectInitialContext(thread, message, input.options)
+        : await withSlackApiTimeout(input.options, 'collect initial thread context', async () =>
+            collectInitialContext(thread, message, input.options, await contextFilter(input.options))
           )
     } catch (error) {
       contextDegraded = true
@@ -2060,7 +2064,7 @@ async function syncThreadMessageToSession(
         history = await withSlackApiTimeout(
           input.options,
           'collect restart thread context',
-          () => collectInitialContext(thread, message, input.options)
+          async () => collectInitialContext(thread, message, input.options, await contextFilter(input.options))
         )
       } catch (error) {
         restartContextDegraded = true
@@ -4465,6 +4469,14 @@ function isSlackThreadReply(message: ChatMessage): boolean {
   return Boolean(threadTs && ts && threadTs !== ts)
 }
 
+/** foreignTeamContextFilter with this module's trace logging. */
+function contextFilter(options: SlackbotV2Options): Promise<(raw: unknown) => boolean> {
+  return foreignTeamContextFilter(options, {
+    warn: (event: string, fields?: Record<string, unknown>) =>
+      traceWarn(options, event, undefined, (fields ?? {}) as JsonObject)
+  })
+}
+
 async function collectSlackThreadContext(
   options: SlackbotV2Options,
   currentMessage: ChatMessage
@@ -4475,6 +4487,7 @@ async function collectSlackThreadContext(
   const currentTs = stringField(raw.ts) || currentMessage.id
   if (!channel || !threadTs) return [await serializeMessage(currentMessage, options)]
 
+  const keep = await contextFilter(options)
   const messages: SlackbotV2ApiMessage[] = []
   let cursor: string | undefined
   do {
@@ -4494,6 +4507,7 @@ async function collectSlackThreadContext(
       const messageTs = stringField(message.ts)
       if (!messageTs || compareSlackTs(messageTs, currentTs) > 0) continue
       if (isSelfSlackBotMessage(options, message)) continue
+      if (messageTs !== currentTs && !keep(message)) continue
       messages.push(await slackApiMessageFromSlack(options, message, currentMessage))
     }
     cursor = response.nextCursor

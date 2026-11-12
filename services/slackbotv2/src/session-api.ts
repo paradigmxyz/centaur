@@ -196,11 +196,14 @@ type ForwardSessionApiCallbacks = {
 export async function collectInitialContext(
   thread: { allMessages: AsyncIterable<Message> },
   currentMessage: Message,
-  options?: SlackbotV2Options
+  options?: SlackbotV2Options,
+  /** Whether a raw Slack message may be context (see foreignTeamContextFilter). */
+  keep: (raw: unknown) => boolean = () => true
 ): Promise<SlackbotV2ApiMessage[]> {
   const messages: Message[] = []
   try {
     for await (const message of thread.allMessages) {
+      if (message.id !== currentMessage.id && !keep(message.raw)) continue
       messages.push(message)
     }
   } catch (error) {
