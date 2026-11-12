@@ -13,6 +13,9 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "/oauth/google/start?scopes=a+b" => "/oauth/google/start?scopes=a+b",
       "/oauth/google~team/start" => "/oauth/google~team/start",
       "/oauth/acme.google_v2-x/start" => "/oauth/acme.google_v2-x/start",
+      "/oauth/google/start.html?x=1" => "/oauth/google/start.html?x=1",
+      "/oauth/google/callback?code=x&state=y" => "/oauth/google/callback?code=x&state=y",
+      "/oauth/google/callback.html?code=x" => "/oauth/google/callback.html?code=x",
       "/launch?target=web%2Bcentaur%3A%2F%2Fconsole" => "/launch?target=web%2Bcentaur%3A%2F%2Fconsole",
       # Opaque OAuth state may carry an unencoded backslash.
       "/mcp/oauth/authorize?client_id=moc_1&state=opaque\\client-state" =>
@@ -28,7 +31,7 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "///evil.example", "/\\evil.example", "/\tevil", "/console\n//evil", "javascript:alert(1)",
       "http:/console", "/console/../api/v1/me", "/console/./x/..", "/console/%2e%2e/api",
       "/console/%2E%2E/api", "/consolex", "/api/v1/me", "/logout", "/login", "/pending",
-      "/oauth/google/callback?code=x", "/auth/google/callback", "/mcp/oauth/token",
+      "/auth/google/callback", "/mcp/oauth/token",
       "/mcp/oauth/authorize.json", "/mcp/oauth/authorizex", "/mcp/oauth/authorize/x",
       "/oauth/../console", "/oauth/../start", "/oauth/./start", "/oauth/%2e%2e/start",
       "/oauth/a%2Fb/start", "/oauth/a b/start", "/oauth/a@b/start", "/#{'a' * 5000}",

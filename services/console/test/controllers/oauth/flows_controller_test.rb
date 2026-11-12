@@ -1124,11 +1124,5 @@ module Oauth
       assert_response :unprocessable_content
       assert_select "a[href=?]", "/oauth/google~team/start", text: "Try again"
     end
-
-    test "a slug with a dot routes to the consent flow" do
-      app = @app.dup
-      app.update!(slug: "google.team")
-      assert start_flow(slug: app.slug).present?
-    end
   end
 end

@@ -38,5 +38,5 @@ post "mcp/oauth/token", to: "mcp/oauth#token"
 # Requires an active console session; the provider is derived from the app.
 # Slugs may contain any OauthApp::URL_SAFE_FORMAT character, including "." and
 # "~"; the controller resolves (or 404s) the slug.
-get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start, constraints: { slug: %r{[^/]+} }
-get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback, constraints: { slug: %r{[^/]+} }
+get "oauth/:slug/start", to: "oauth/flows#start", as: :oauth_start
+get "oauth/:slug/callback", to: "oauth/flows#callback", as: :oauth_callback
