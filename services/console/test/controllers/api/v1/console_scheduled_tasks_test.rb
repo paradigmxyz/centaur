@@ -191,6 +191,17 @@ module Api
         assert_equal "U0123456789", row["delivery_channel"]
       end
 
+      test "the task list resolves the author's Slack DM once, not per task" do
+        create_task(name: "First").update!(delivery_channel: "U0123456789")
+
+        assert_queries_do_not_grow(-> { get api_v1_console_scheduled_tasks_path }) do
+          3.times { |i| create_task(name: "Task #{i}") }
+          create_task(name: "DM task").update!(delivery_channel: "U0123456789")
+        end
+        assert_equal 5, json_body["data"].size
+        assert_equal [ "U0123456789" ], json_body["data"].map { |row| row["direct_message_user_id"] }.uniq
+      end
+
       test "updates a task and keeps fields that are not sent" do
         task = create_task
 

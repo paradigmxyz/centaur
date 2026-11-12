@@ -99,7 +99,7 @@ module Api
         end
 
         def console_payload(task, names = slack_channel_names([ task ]))
-          dm_user_id = task.author && SlackDeliveryPolicy.new(task.author).direct_message_user_id
+          dm_user_id = task.author && direct_message_user_id_for(task.author)
           delivers_to_dm = task.delivery_channel.present? && task.delivery_channel == dm_user_id
           {
             id: task.oid,
@@ -126,6 +126,15 @@ module Api
             created_at: task.created_at,
             updated_at: task.updated_at
           }
+        end
+
+        # The author's linked Slack DM, resolved once per author per request
+        # (the index renders every task of the same author).
+        def direct_message_user_id_for(author)
+          @direct_message_user_ids ||= {}
+          return @direct_message_user_ids[author.id] if @direct_message_user_ids.key?(author.id)
+
+          @direct_message_user_ids[author.id] = SlackDeliveryPolicy.new(author).direct_message_user_id
         end
 
         # A user id destination is a DM, any other destination

@@ -59,6 +59,7 @@ end
 
 class ActionDispatch::IntegrationTest
   include ConsoleApiAuthHelper
+  include QueryCountHelper
 end
 
 module ActiveSupport
