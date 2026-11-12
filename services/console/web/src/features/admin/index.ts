@@ -1,6 +1,4 @@
-// Admin slice: Users, API Clients, and Settings (Control tabs, acting admins
-// only). Descope ("view as operator") lives in the shell's account menu and
-// banner.
+// Admin slice: Users, API Clients, and Settings (Control tabs, admins only).
 import { redirect } from "react-router";
 
 import type { FeatureModule } from "@/app/types";

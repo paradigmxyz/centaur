@@ -47,12 +47,6 @@ module Api
         assert_equal "http://www.example.com/oauth/shared-google/start", shared["start_url"]
         assert_equal [ { "provider" => "mercator", "display_name" => "Mercator", "description" => "Shared with your agents." } ],
                      json_body.dig("data", "presets")
-
-        # A descoped admin gets the operator view.
-        post api_v1_descope_path, headers: csrf_headers
-        get api_v1_integrations_path
-        assert_nil app_entry("shared-google")
-        assert_equal [], json_body.dig("data", "presets")
       end
 
       test "a non-admin sees enabled apps with their start links and providers, and no disabled apps" do

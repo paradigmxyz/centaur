@@ -1,10 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { ChevronsUpDown, LogOut, Monitor, Moon, Sun, UserCircle } from "lucide-react";
+import { ChevronsUpDown, LogOut, Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
-import { defaultLandingPath, descope, signOut, type Me } from "@/app/session";
+import { signOut, type Me } from "@/app/session";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,19 +28,8 @@ interface InstallPromptEvent extends Event {
 
 export function AccountMenu({ me }: { me: Me }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const { preference, setPreference } = useTheme();
   const installPrompt = useInstallPrompt();
-
-  const viewAsOperator = async () => {
-    try {
-      // Drops admin data cached under the old permissions.
-      const fresh = await descope(queryClient);
-      navigate(defaultLandingPath(fresh));
-    } catch (error) {
-      toast.error(errorMessage(error));
-    }
-  };
 
   const leave = async () => {
     try {
@@ -99,11 +87,6 @@ export function AccountMenu({ me }: { me: Me }) {
             >
               <ThemeIcon /> {THEME_LABELS[preference]}
             </DropdownMenuItem>
-            {me.acting_admin && me.auth_method === "session" && (
-              <DropdownMenuItem title="Temporarily pause your admin permissions" onSelect={() => void viewAsOperator()}>
-                <UserCircle /> View as operator
-              </DropdownMenuItem>
-            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void leave()}>
               <LogOut /> Sign out

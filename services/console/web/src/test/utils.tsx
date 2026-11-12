@@ -19,7 +19,6 @@ export function adminMe(overrides: Partial<Me> = {}): Me {
     user: { id: "usr_admin", email: "admin@example.test", name: null, status: "active", admin: true },
     auth_method: "session",
     acting_admin: true,
-    descoped: false,
     csrf_token: "csrf-test-token",
     features: { api_clients: false, password_login: true },
     nav: {

@@ -3,8 +3,7 @@ require "test_helper"
 module Api
   module V1
     # The /api/v1 authentication matrix: bearer API keys and console session
-    # cookies (with CSRF), account status, admin-by-default authorization, and
-    # the session-only descope flag.
+    # cookies (with CSRF), account status, and admin-by-default authorization.
     class SessionAuthTest < ActionDispatch::IntegrationTest
       test "anonymous requests are rejected with the API key message" do
         get api_v1_principals_path
@@ -113,7 +112,6 @@ module Api
         assert_equal true, data.dig("user", "admin")
         assert_equal "session", data["auth_method"]
         assert_equal true, data["acting_admin"]
-        assert_equal false, data["descoped"]
         assert data["csrf_token"].present?
         assert_equal true, data.dig("nav", "control")
         assert_equal true, data.dig("nav", "workflows")
@@ -184,67 +182,6 @@ module Api
           assert_equal "session_required", json_body.dig("error", "details", "reason")
           assert_nil json_body["data"]
         end
-      end
-
-      test "descope pauses admin access for the session and restore brings it back" do
-        sign_in_console(users(:acme_admin))
-        token = console_csrf_token
-
-        post api_v1_descope_path
-        assert_response :forbidden, "descope without CSRF must fail"
-
-        post api_v1_descope_path, headers: csrf_headers(token)
-        assert_response :ok
-        assert_equal true, json_body.dig("data", "descoped")
-
-        get api_v1_me_path
-        assert_equal true, json_body.dig("data", "descoped")
-        assert_equal false, json_body.dig("data", "acting_admin")
-        assert_equal true, json_body.dig("data", "user", "admin")
-        assert_equal false, json_body.dig("data", "nav", "control")
-
-        get api_v1_principals_path
-        assert_response :forbidden
-        assert_equal "admin access required", json_body.dig("error", "message")
-
-        # Bearer requests are unaffected by the session's descope flag.
-        get api_v1_principals_path, headers: bearer_headers
-        assert_response :ok
-
-        delete api_v1_descope_path, headers: csrf_headers(token)
-        assert_response :ok
-        get api_v1_principals_path
-        assert_response :ok
-      end
-
-
-      test "a non-admin cannot descope and bearer callers cannot either" do
-        sign_in_console(users(:member_user))
-        post api_v1_descope_path, headers: csrf_headers
-        assert_response :forbidden
-
-        post api_v1_descope_path, headers: bearer_headers
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-      end
-
-      test "a descoped flag is dropped once the user is no longer an admin" do
-        user = create_console_user(admin: true)
-        sign_in_console(user)
-        post api_v1_descope_path, headers: csrf_headers
-        user.update!(admin: false)
-
-        get api_v1_me_path
-        assert_equal false, json_body.dig("data", "descoped")
-      end
-
-      test "restoring when not descoped is a no-op" do
-        sign_in_console(users(:acme_admin))
-        delete api_v1_descope_path, headers: csrf_headers
-        assert_response :ok
-        assert_equal false, json_body.dig("data", "descoped")
-        get api_v1_principals_path
-        assert_response :ok
       end
 
       test "session destroy signs the cookie session out" do

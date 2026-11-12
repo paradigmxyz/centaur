@@ -7,7 +7,6 @@ import { features } from "@/app/registry";
 import { useSession } from "@/app/session";
 import { ShellContext } from "@/app/shell-context";
 import { AccountMenu } from "@/app/shell/AccountMenu";
-import { DescopeBanner } from "@/app/shell/DescopeBanner";
 import { visibleControlTabs, visibleNav } from "@/app/shell/nav";
 import { ConsoleSidebar } from "@/app/shell/Sidebar";
 import { isSpaPath } from "@/app/spa-paths";
@@ -73,7 +72,6 @@ function ShellFrame() {
         <ConsoleSidebar nav={nav} pathname={location.pathname} footer={<AccountMenu me={me} />} />
         <CloseDrawerOnNavigate pathname={location.pathname} />
         <SidebarInset className="min-w-0">
-          {me.descoped && <DescopeBanner />}
           <MobileTopBar />
           <div className="mx-auto w-full max-w-[80rem] px-4 pt-5 pb-10 md:px-8 md:pt-8">
             <Suspense fallback={<PageLoading />}>

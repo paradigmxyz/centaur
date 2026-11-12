@@ -39,8 +39,7 @@ module ConsoleSignIn
     session[:return_to] = safe if safe
   end
 
-  # A freshly signed-in session is never descoped, so this is the user's own
-  # admin flag. Mirrors defaultLandingPath in web/src/app/session.ts.
+  # Mirrors defaultLandingPath in web/src/app/session.ts.
   def console_landing_path_for(user)
     user.admin? ? "/console/principals" : "/console/integrations"
   end

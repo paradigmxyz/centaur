@@ -33,16 +33,8 @@ class ApplicationController < ActionController::Base
     console_session_user
   end
 
-  # See ConsoleSession#console_session_descoped?.
-  def descoped?
-    console_session_descoped?
-  end
-
-  # The permission check console gates use instead of current_user.admin?: a
-  # real admin who is not currently descoped. Keeping current_user untouched
-  # means audit trails and data displays still see the true account.
   def acting_admin?
-    current_user&.admin? && !descoped?
+    current_user&.admin? || false
   end
 
   # before_action gate: bounce anonymous requests to the login page,

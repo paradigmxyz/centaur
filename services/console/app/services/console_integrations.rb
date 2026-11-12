@@ -1,6 +1,6 @@
 # What the Integrations page shows one console user: every enabled OAuth app
-# they may connect (shared apps only for acting admins), their newest
-# connection to each, the provider presets an acting admin can still set up,
+# they may connect (shared apps only for admins), their newest
+# connection to each, the provider presets an admin can still set up,
 # and whether they saved a personal SSH key.
 #
 # A user's connections are the credentials they minted while signed in

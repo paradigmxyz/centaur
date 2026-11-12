@@ -47,7 +47,6 @@ module Api
         "secrets" => %w[index show].index_with(S),
         "secret_role_grants" => %w[index create destroy].index_with(S),
         "slack_channels" => { "index" => S },
-        "descopes" => %w[create destroy].index_with(S),
         "sessions" => { "destroy" => S }
       }.freeze
 
@@ -304,15 +303,6 @@ module Api
             assert_equal users(:acme_admin).email, json_body["data"]
           end
         end
-      end
-
-      test "descope does not affect bearer keys" do
-        sign_in_console(users(:acme_admin))
-        post api_v1_descope_path, headers: csrf_headers
-        get api_v1_principals_path
-        assert_response :forbidden
-        get api_v1_principals_path, headers: bearer_headers
-        assert_response :ok
       end
 
       # -- bearer or session -----------------------------------------------------

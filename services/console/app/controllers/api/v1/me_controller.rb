@@ -31,7 +31,6 @@ module Api
           },
           auth_method: auth_method.to_s,
           acting_admin: acting_admin?,
-          descoped: descoped?,
           csrf_token: form_authenticity_token,
           features: {
             api_clients: ApiClientsFeature.enabled?,

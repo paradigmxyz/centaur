@@ -131,7 +131,7 @@ module Api
         assert_equal skill.lock_version, data["lock_version"]
       end
 
-      test "an acting admin may unshare any shared skill, but not while descoped" do
+      test "an admin may unshare any shared skill" do
         skill = skills(:admin_shared)
         skill.update!(user: users(:globex_admin))
         sign_in_console(users(:acme_admin))
@@ -140,14 +140,6 @@ module Api
         assert json_body.dig("data", "viewer", "can_unshare")
         assert_not json_body.dig("data", "viewer", "can_manage")
 
-        post api_v1_descope_path, headers: csrf_headers
-        get api_v1_skill_path(skill.oid)
-        assert_not json_body.dig("data", "viewer", "can_unshare")
-        post unshare_api_v1_skill_path(skill.oid), headers: csrf_headers
-        assert_response :not_found
-        assert skill.reload.shared?
-
-        delete api_v1_descope_path, headers: csrf_headers
         post unshare_api_v1_skill_path(skill.oid), headers: csrf_headers
         assert_response :ok
         assert_equal "private", json_body.dig("data", "visibility")

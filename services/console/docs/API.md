@@ -72,7 +72,7 @@ tokens.
 |---|---|
 | Bearer only | `/api/v1/api_keys` (all), `/api/v1/proxies` (all) |
 | Bearer or session | every `/api/v1/<kind>_secrets` resource (static, gcp_auth, gcp_id_token, aws_auth, oauth_token, pg_dsn, hmac, ssh_key) including lookups; `/api/v1/broker_credentials` (CRUD, lookup); `/api/v1/oauth_apps` (CRUD, `lookup/:slug`); `/api/v1/principals` index/show/create/update, lookups, `effective_config`, and `POST …/slack_channel_permissions`; `/api/v1/principals/:id/roles`; `/api/v1/principals/:id/grants` and `/api/v1/roles/:id/grants`; `/api/v1/grants`; `/api/v1/roles` CRUD, lookups, and `POST …/slack_channel_permissions`; `GET /api/v1/scheduled_tasks/:id` (without `?view=console`) |
-| Session only | `/api/v1/me`, `/api/v1/me/ssh_key`, `/api/v1/descope`, `/api/v1/session`, `/api/v1/users`, `/api/v1/api_clients`, `/api/v1/system_settings` (incl. `slack_external_teams`), `/api/v1/workflows` (incl. runs and force start), `/api/v1/scheduled_tasks` (index, new, create, update, destroy, run, `slack_channel_options`, and `GET /:id?view=console`), `/api/v1/skills`, `/api/v1/integrations`, `/api/v1/oauth_providers`, `/api/v1/oauth_apps/presets/:provider`, `/api/v1/oauth_apps/:id/credentials`, `/api/v1/oauth_apps/:id/provider_details`, `/api/v1/secrets` (index, `:kind/:id` detail, role grants), `/api/v1/slack_channels`, `DELETE /api/v1/principals/:id`, `GET /api/v1/principals/:id/effective_grants`, and `PUT`/`DELETE …/slack_channel_permissions` on principals and roles |
+| Session only | `/api/v1/me`, `/api/v1/me/ssh_key`, `/api/v1/session`, `/api/v1/users`, `/api/v1/api_clients`, `/api/v1/system_settings` (incl. `slack_external_teams`), `/api/v1/workflows` (incl. runs and force start), `/api/v1/scheduled_tasks` (index, new, create, update, destroy, run, `slack_channel_options`, and `GET /:id?view=console`), `/api/v1/skills`, `/api/v1/integrations`, `/api/v1/oauth_providers`, `/api/v1/oauth_apps/presets/:provider`, `/api/v1/oauth_apps/:id/credentials`, `/api/v1/oauth_apps/:id/provider_details`, `/api/v1/secrets` (index, `:kind/:id` detail, role grants), `/api/v1/slack_channels`, `DELETE /api/v1/principals/:id`, `GET /api/v1/principals/:id/effective_grants`, and `PUT`/`DELETE …/slack_channel_permissions` on principals and roles |
 
 A request with the wrong credential type is refused before anything else runs,
 whatever its validity, and never falls back to the other credential:
@@ -112,20 +112,14 @@ receives `403` with `details.reason = "admin_required"` (message
 `"API key owner is not an admin"` for bearer keys, `"admin access required"`
 for sessions). Endpoints documented as open to active users admit any active
 console **session** and scope their records to the caller unless the caller is
-an acting admin. A bearer key is accepted only when its owner is an active
+an admin. A bearer key is accepted only when its owner is an active
 admin, on every endpoint.
-
-An admin session may pause its admin permissions ("view as operator"); while
-descoped, admin-only endpoints return `403` for that session. Bearer keys are
-unaffected.
 
 ### Session endpoints
 
 | Method | Path | Access | Description |
 |---|---|---|---|
 | `GET` | `/api/v1/me` | session, including pending sessions | Caller identity and SPA navigation flags |
-| `POST` | `/api/v1/descope` | admin session | Pause admin permissions for this session |
-| `DELETE` | `/api/v1/descope` | active session | Restore admin permissions |
 | `DELETE` | `/api/v1/session` | session, including pending sessions | Sign the console session out (`204`) |
 
 `GET /api/v1/me` response (sent with `Cache-Control: no-store`):
@@ -136,7 +130,6 @@ unaffected.
     "user": { "id": "usr_…", "email": "ops@example.com", "name": null, "status": "active", "admin": true },
     "auth_method": "session",
     "acting_admin": true,
-    "descoped": false,
     "csrf_token": "…",
     "features": { "api_clients": false, "password_login": true },
     "flash": { "notice": "Signed in as ops@example.com." },
@@ -152,9 +145,8 @@ unaffected.
 
 `auth_method` is always `"session"`. `flash` hands off (once) any
 `notice`/`alert` left by a redirect-based flow such as SSO or an OAuth
-callback; it is `{}` when there is none. `POST`/`DELETE /api/v1/descope`
-return `{ "data": { "descoped": true|false } }`. Bearer callers receive `403`
-`session_required` on all three endpoints.
+callback; it is `{}` when there is none. Bearer callers receive `403`
+`session_required` on both endpoints.
 
 ### Console auth pages
 
@@ -1379,10 +1371,10 @@ The three endpoints below back the console pages and are console session only (A
 }
 ```
 
-- `apps` lists enabled apps ordered by slug. Shared apps appear only for acting admins (a descoped admin sees what an operator sees). The client id, client secret, scopes, and labels are never included.
+- `apps` lists enabled apps ordered by slug. Shared apps appear only for admins. The client id, client secret, scopes, and labels are never included.
 - `usage` is `shared`, `always_available`, or `direct_messages` (the app is used only in the user's DMs with the bot).
 - `connection` is `null` when the caller has no credential for the app. Otherwise `status` is `connected` or `needs_reconnect` (the credential is dead or is missing a scope the app requires). The caller's credentials are the ones they minted while signed in, plus any whose provider email matches their console email. For a shared app, any credential counts. When several match, the most recently updated one wins.
-- `presets` lists providers with a preset that have no app yet. It is empty unless the caller is an acting admin.
+- `presets` lists providers with a preset that have no app yet. It is empty unless the caller is an admin.
 - `ssh_key.configured` reports whether the caller saved a personal SSH key.
 
 ### Sandbox Start URLs
@@ -2197,7 +2189,7 @@ Editor responses include each editor's OID, email, name, and account status, plu
 
 ### Console skills
 
-The Console Skills pages use these endpoints. They accept only the Console session cookie (writes need `X-CSRF-Token`; API keys get `403 session_required`) and are open to every **active** user, not only admins. Visibility matches the agent catalog: every public skill, plus the caller's own skills and the skills the caller edits. Requests for any other skill return `404`. Owners and editors can update content. Only the owner can manage editors, share, or archive. An acting admin (not descoped) can additionally make any public skill private, for moderation.
+The Console Skills pages use these endpoints. They accept only the Console session cookie (writes need `X-CSRF-Token`; API keys get `403 session_required`) and are open to every **active** user, not only admins. Visibility matches the agent catalog: every public skill, plus the caller's own skills and the skills the caller edits. Requests for any other skill return `404`. Owners and editors can update content. Only the owner can manage editors, share, or archive. An admin can additionally make any public skill private, for moderation.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -2207,7 +2199,7 @@ The Console Skills pages use these endpoints. They accept only the Console sessi
 | `PUT`/`PATCH` | `/api/v1/skills/:id` | Update an owned or editable skill. Send `data.lock_version` from the last read. A stale version returns `409` with `details.reason = "stale"`. `data.editor_ids` replaces the editor list for owners; editors' values are ignored, and omitting it keeps the current editors. |
 | `DELETE` | `/api/v1/skills/:id` | Archive an owned skill. Returns `204`. The name becomes reusable. |
 | `POST` | `/api/v1/skills/:id/share` | Make an owned skill public. |
-| `POST` | `/api/v1/skills/:id/unshare` | Make an owned skill private. An acting admin can do this to any public skill. |
+| `POST` | `/api/v1/skills/:id/unshare` | Make an owned skill private. An admin can do this to any public skill. |
 | `GET` | `/api/v1/skills/editor_candidates` | Active users other than the caller, ordered by email: `{id, name, email}`. Optional `q` filters by name or email. |
 
 List rows contain `id`, `name`, `description`, `visibility` (`private` or `shared`), `author`, `owner` (`{id, name, email}`), `updated_at`, and `viewer.owner`. A single skill adds the following fields:

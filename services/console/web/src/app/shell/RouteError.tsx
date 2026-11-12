@@ -14,7 +14,7 @@ export function RouteError() {
 
   if (error instanceof ApiError && error.status === 404) return <NotFound />;
   if (isRouteErrorResponse(error) && error.status === 404) return <NotFound />;
-  // Lost admin access (descoped elsewhere, demoted): back to the landing page.
+  // Lost admin access (demoted): back to the landing page.
   if (error instanceof ApiError && error.reason === "admin_required") return <Landing />;
   if (error instanceof ApiError && (error.status === 401 || error.reason === "account_pending")) {
     return <p className="text-sm text-muted-foreground">Redirecting…</p>;

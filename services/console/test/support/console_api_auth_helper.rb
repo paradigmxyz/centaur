@@ -85,7 +85,7 @@ module ConsoleApiAuthHelper
   # - bearer accepted: bad and disabled bearer 401, non-admin bearer 403;
   #   otherwise any bearer (even an admin's) 403 session_required;
   # - session accepted: disabled cookie 401, pending cookie 403, non-admin
-  #   cookie 403, descoped admin 403, and (for writes) admin cookie without
+  #   cookie 403, and (for writes) admin cookie without
   #   CSRF 403; otherwise an admin cookie 403 bearer_required.
   #
   # Success paths are left to the caller because they have side effects.
@@ -101,8 +101,6 @@ module ConsoleApiAuthHelper
 
     assert_api_status(:forbidden, method, path, params: params, reason: "admin_required",
                       sign_in: create_console_user, csrf: true)
-    assert_api_status(:forbidden, method, path, params: params, reason: "admin_required",
-                      sign_in: create_console_user(admin: true), csrf: true, descope: true)
     unless %w[get head].include?(method.to_s)
       assert_api_status(:forbidden, method, path, params: params, reason: "csrf",
                         sign_in: create_console_user(admin: true), csrf: false)
@@ -162,13 +160,12 @@ module ConsoleApiAuthHelper
   end
 
   def assert_api_status(status, method, path, params: nil, headers: {}, sign_in: nil, csrf: false,
-                        descope: false, disable: false, reason: nil)
+                        disable: false, reason: nil)
     session = open_session
     session.extend(ConsoleApiAuthHelper)
     if sign_in
       session.sign_in_console(sign_in)
       headers = headers.merge(session.csrf_headers) if csrf
-      session.post(api_v1_descope_path, headers: session.csrf_headers) if descope
       sign_in.update!(status: :disabled) if disable
     end
     session.public_send(method, path, params: params, headers: headers, as: (:json if params))

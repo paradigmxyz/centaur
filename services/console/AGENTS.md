@@ -66,14 +66,14 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   credential (an `Authorization` header always counts as bearer).
   Cookie-authenticated writes require the session CSRF token
   (`X-CSRF-Token`) and a same-origin `Origin`; bearer requests skip CSRF.
-  Every endpoint is admin-only and descope-aware unless it opts in with
+  Every endpoint is admin-only unless it opts in with
   `allow_active_users` (scope records with `owned_scope` /
   `require_owner_or_admin!`, which 404s for non-owners) or
   `allow_pending_users`. Test new endpoints with `assert_admin_only_api` or
   `assert_active_user_api` (they check the declared credential type) plus
   ownership cases. A bearer key is accepted only while its owner is an
   active admin, on every endpoint (`allow_active_users` widens session
-  access only; descope never applies to keys). Keep proxy sync authentication, sandbox JWTs
+  access only). Keep proxy sync authentication, sandbox JWTs
   (including sandbox admin), and OAuth/MCP tokens as separate trust
   boundaries.
 - In the SPA, reads use TanStack Query and a failed query renders an error

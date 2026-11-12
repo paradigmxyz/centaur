@@ -4,7 +4,7 @@ module Api
     #
     # The Integrations page for the caller: enabled OAuth apps with their
     # public consent start links and the caller's connection state, plus (for
-    # acting admins) shared apps and the provider presets still to set up.
+    # admins) shared apps and the provider presets still to set up.
     # Open to any active account. Only non-sensitive app fields are returned --
     # never the client id/secret or other users' credentials.
     class IntegrationsController < Api::BaseController

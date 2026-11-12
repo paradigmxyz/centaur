@@ -5,7 +5,7 @@ module Api
     # Visibility follows the catalog: shared skills, the caller's own skills,
     # and skills the caller edits. Anything else is a 404. Owners and editors
     # update content; only the owner manages editors, visibility, and
-    # archiving. An acting admin may additionally make any shared skill
+    # archiving. An admin may additionally make any shared skill
     # private (moderation). Admins otherwise get no extra access here.
     class SkillsController < Api::BaseController
       accepts_credentials :session

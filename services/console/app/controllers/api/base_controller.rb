@@ -24,8 +24,7 @@ module Api
   # Authorization is per endpoint. Every action is admin-only unless the
   # controller opts in with `allow_active_users` (any active session; scope
   # records with `owned_scope` / `require_owner_or_admin!`) or
-  # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me). For
-  # session requests the admin check honours the "view as operator" descope.
+  # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me).
   class BaseController < ActionController::API
     include ApiRequestSupport
     include ConsoleSession
@@ -123,16 +122,10 @@ module Api
       auth_method == :session
     end
 
-    # Admin check for authorization decisions. Bearer callers act with their
-    # owner's admin flag; session callers lose it while descoped.
+    # Admin check for authorization decisions (a bearer caller acts with its
+    # key owner's admin flag).
     def acting_admin?
-      return false unless current_user&.admin?
-
-      !descoped?
-    end
-
-    def descoped?
-      session_authenticated? && console_session_descoped?
+      current_user&.admin? || false
     end
 
     # Enforces the action's credential policy before anything else, then
@@ -212,7 +205,7 @@ module Api
       end
       # As on main, a bearer key acts only for an active admin, on every
       # endpoint: allow_active_users widens session access, never bearer
-      # access (and descope never applies to keys).
+      # access.
       unless current_api_key.user.admin?
         return render_error(status: :forbidden, message: "API key owner is not an admin",
                             details: { reason: "admin_required" })

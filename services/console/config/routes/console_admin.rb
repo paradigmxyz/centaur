@@ -1,5 +1,5 @@
 # Admin slice: users, API clients, and system settings. The pages live in the
-# SPA (web/src/features/admin); descope is POST/DELETE /api/v1/descope (api.rb).
+# SPA (web/src/features/admin).
 
 # /api/v1 additions used by the admin pages (see docs/API.md#users,
 # #api-clients, and #system-settings). All admin-only.
