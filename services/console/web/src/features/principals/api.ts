@@ -63,13 +63,13 @@ export type SandboxAccess = Pick<
   | "sandbox_workflows_write_enabled"
 >;
 
-const base = "/api/v1/principals";
+const base = "/api/v1/console/principals";
 
 export function usePrincipalList(params: { q: string; page: number }) {
   return useQuery({
     queryKey: principalKeys.list(params),
     queryFn: ({ signal }) =>
-      api.get<ListEnvelope<Principal>>(`${base}/console`, { sort: "name", q: params.q, page: params.page }, signal),
+      api.get<ListEnvelope<Principal>>(base, { sort: "name", q: params.q, page: params.page }, signal),
     placeholderData: keepPreviousData,
   });
 }
@@ -77,7 +77,7 @@ export function usePrincipalList(params: { q: string; page: number }) {
 export function usePrincipalTotal() {
   return useQuery({
     queryKey: principalKeys.list({ total: true }),
-    queryFn: ({ signal }) => api.get<ListEnvelope<Principal>>(`${base}/console`, { limit: 1 }, signal),
+    queryFn: ({ signal }) => api.get<ListEnvelope<Principal>>(base, { limit: 1 }, signal),
     select: (body) => body.meta.total,
   });
 }
@@ -85,7 +85,7 @@ export function usePrincipalTotal() {
 export function usePrincipal(id: string) {
   return useSuspenseQuery({
     queryKey: principalKeys.detail(id),
-    queryFn: ({ signal }) => api.get<DataEnvelope<Principal>>(`${base}/${encodeURIComponent(id)}/console`, undefined, signal),
+    queryFn: ({ signal }) => api.get<DataEnvelope<Principal>>(`${base}/${encodeURIComponent(id)}`, undefined, signal),
     select: (body) => body.data,
   });
 }
@@ -109,7 +109,7 @@ function assignableRolesQuery(id: string, params: { q?: string; limit: number })
   return {
     queryKey: [...ROLE_LISTS, query] as const,
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      api.get<ListEnvelope<RoleSummary>>("/api/v1/roles", query, signal),
+      api.get<ListEnvelope<RoleSummary>>("/api/v1/console/roles", query, signal),
   };
 }
 
@@ -153,7 +153,7 @@ export function useAssignableSecretCount(id: string) {
   const params = { exclude_grantee: `principal:${id}`, limit: 1 };
   return useQuery({
     queryKey: sharedKeys.secrets(params),
-    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", params, signal),
+    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/console/secrets", params, signal),
     select: (body) => body.meta.total,
   });
 }
@@ -210,12 +210,12 @@ export async function unassignPrincipalRole(queryClient: QueryClient, id: string
 }
 
 export async function grantPrincipalSecret(queryClient: QueryClient, id: string, secret: Pick<GrantableSummary, "kind" | "id">) {
-  await api.post("/api/v1/grants", { data: { principal_id: id, [grantKey(secret.kind)]: secret.id } });
+  await api.post("/api/v1/console/grants", { data: { principal_id: id, [grantKey(secret.kind)]: secret.id } });
   await refreshPrincipalGrants(queryClient, id);
 }
 
 export async function revokePrincipalGrant(queryClient: QueryClient, id: string, grantId: string) {
-  await api.delete(`/api/v1/grants/${grantId}`);
+  await api.delete(`/api/v1/console/grants/${grantId}`);
   await refreshPrincipalGrants(queryClient, id);
 }
 

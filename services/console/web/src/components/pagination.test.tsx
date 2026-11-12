@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { DataTable } from "@/components/data-table";
 import { usePageParam } from "@/components/pagination";
 
-// A list backed by an unclamped server page, like the /api/v1 list endpoints:
+// A list backed by an unclamped server page, like the /api/v1/console list endpoints:
 // a page past the end answers `data: []` with the real total.
 function List({ rows, limit, hideSinglePage }: { rows: string[]; limit: number; hideSinglePage?: boolean }) {
   const [page, setPage] = usePageParam();

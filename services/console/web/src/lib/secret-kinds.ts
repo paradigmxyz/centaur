@@ -19,7 +19,7 @@ export function secretKindLabel(kind: string): string {
   return (SECRET_KINDS as Record<string, { label: string }>)[kind]?.label ?? kind;
 }
 
-/** Field name on POST /api/v1/grants for a kind, e.g. "static_secret_id". */
+/** Field name on POST /api/v1/console/grants for a kind, e.g. "static_secret_id". */
 export function grantKey(kind: SecretKind): `${SecretKind}_secret_id` {
   return `${kind}_secret_id`;
 }
@@ -36,7 +36,7 @@ export const SOURCE_TYPE_LABELS: Record<string, string> = {
   workload_identity: "Workload-Identity",
 };
 
-/** Summary of a secret attached to grant payloads and GET /api/v1/secrets. */
+/** Summary of a secret attached to grant payloads and GET /api/v1/console/secrets. */
 export interface GrantableSummary {
   kind: SecretKind;
   kind_label: string;

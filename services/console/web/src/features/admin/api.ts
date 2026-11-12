@@ -31,7 +31,7 @@ export interface ConsoleUser {
 
 export type UserAction = "approve" | "disable" | "promote" | "demote";
 
-const usersBase = "/api/v1/users";
+const usersBase = "/api/v1/console/users";
 
 export function useUsers() {
   return useQuery({
@@ -78,7 +78,7 @@ export interface ApiClientInput {
   principal?: string;
 }
 
-const clientsBase = "/api/v1/api_clients";
+const clientsBase = "/api/v1/console/api_clients";
 const clientsListKey = adminKeys.list({ resource: "api_clients" });
 const clientKey = (id: string) => adminKeys.detail(`api_client:${id}`);
 
@@ -176,7 +176,7 @@ export interface SystemSettings {
 
 export type SystemSettingsInput = Omit<SystemSettings, "roles" | "updated_at">;
 
-const settingsBase = "/api/v1/system_settings";
+const settingsBase = "/api/v1/console/system_settings";
 const settingsKey = adminKeys.detail("system_settings");
 const slackTeamsKey = adminKeys.sub("system_settings", "slack_external_teams");
 

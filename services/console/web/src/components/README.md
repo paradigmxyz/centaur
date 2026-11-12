@@ -41,21 +41,23 @@ Sidebar, Tooltip, Skeleton, Sonner) and keep the stock focus ring.
 | `applyApiErrors`, `FormErrorSummary` | `form/form-errors.tsx` | Map a 422 `details` hash onto fields; "X could not be saved." summary. |
 | `SecretField`, `omitBlankSecrets` | `form/secret-field.tsx` | Write-only secret input: never prefilled; with `hasStoredValue` it reads "•••••••• (unchanged)" and a blank value is omitted from the request so the stored value is kept. |
 | `UserTypeahead` | `user-typeahead.tsx` | Multi-user picker with a filterable listbox; values are user ids. |
-| `SlackChannelPicker`, `adminSlackChannelLoader`, `useSlackChannelNames` | `slack-channel-picker.tsx` | Debounced Slack channel combobox with manual ID entry. `adminSlackChannelLoader("principal:<oid>")` searches `GET /api/v1/slack_channels`; pass your own loader for other policies (scheduled tasks). `useSlackChannelNames(ids)` resolves catalog names and the catalog warning. Remount with a new `key` to clear. |
+| `SlackChannelPicker`, `adminSlackChannelLoader`, `useSlackChannelNames` | `slack-channel-picker.tsx` | Debounced Slack channel combobox with manual ID entry. `adminSlackChannelLoader("principal:<oid>")` searches `GET /api/v1/console/slack_channels`; pass your own loader for other policies (scheduled tasks). `useSlackChannelNames(ids)` resolves catalog names and the catalog warning. Remount with a new `key` to clear. |
 | `SlackChannelPermissionsEditor` | `slack-channel-permissions-editor.tsx` | The Slack channel permissions section (rows with Upload/Download/History, delete, add row, inherited table). Props: `permissions`, `inherited`, `channelNames`, `catalogError`, `directMessageOwnerName` (principals: DM rows read-only), `loadOptions`, `onSave(rows)` (full replacement), `onDelete(channelId)`. |
-| `SecretGrantPicker` | `secret-grant-picker.tsx` | Searchable, kind-grouped secret picker over `GET /api/v1/secrets`, with `excludeIds`. |
+| `SecretGrantPicker` | `secret-grant-picker.tsx` | Searchable, kind-grouped secret picker over `GET /api/v1/console/secrets`, with `excludeIds`. |
 
 Related modules outside this folder:
 
 - `@/lib/api` — `api.get/post/put/patch/delete`, `ApiError` (`status`,
-  `reason`, `fieldErrors`), `errorMessage`. Sends `X-CSRF-Token` on writes,
+  `reason`, `fieldErrors`), `errorMessage`. Only accepts paths under
+  `/api/v1/console/` (`CONSOLE_API_PREFIX`, the session-only console API;
+  the rest of `/api/v1` is the bearer API). Sends `X-CSRF-Token` on writes,
   redirects to `/login` on 401 and `/pending` for pending accounts, retries
   once on a stale CSRF token.
 - `@/lib/query-keys` — `createQueryKeys("<slice>")` and `sharedKeys`.
 - `@/lib/format` — `truncateMiddle`, `pluralize`, `displayLabel`, time formats.
 - `@/lib/secret-kinds` — secret kind registry, `grantKey`, `secretOptionLabel`,
   `SOURCE_TYPE_LABELS`.
-- `@/app/session` — `useSession()` (`Me` from `GET /api/v1/me`),
+- `@/app/session` — `useSession()` (`Me` from `GET /api/v1/console/me`),
   `defaultLandingPath`.
 - `@/lib/use-submit` — `useSubmit(fn)`: `run`, `pending`, `error` for one
   write, held in component state.

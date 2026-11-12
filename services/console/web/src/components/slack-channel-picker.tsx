@@ -28,13 +28,13 @@ interface SlackChannelsResponse {
 }
 
 /**
- * Loader for admin pickers backed by GET /api/v1/slack_channels. Pass
+ * Loader for admin pickers backed by GET /api/v1/console/slack_channels. Pass
  * "principal:<oid>" / "role:<oid>" to hide channels the owner already has.
  */
 export function adminSlackChannelLoader(excludeOwner?: string): SlackChannelLoader {
   return async (query, signal) => {
     const body = await api.get<SlackChannelsResponse>(
-      "/api/v1/slack_channels",
+      "/api/v1/console/slack_channels",
       { q: query, exclude_owner: excludeOwner },
       signal,
     );
@@ -47,7 +47,7 @@ export function useSlackChannelNames(channelIds: string[]) {
   return useQuery({
     queryKey: sharedKeys.slackChannels({ ids }),
     queryFn: async ({ signal }) => {
-      const body = await api.get<SlackChannelsResponse>("/api/v1/slack_channels", { ids: ids.length ? ids : ["-"] }, signal);
+      const body = await api.get<SlackChannelsResponse>("/api/v1/console/slack_channels", { ids: ids.length ? ids : ["-"] }, signal);
       return {
         names: Object.fromEntries(body.data.map((channel) => [channel.channel_id, channel.name ?? channel.label])),
         catalogError: body.meta.catalog_error,

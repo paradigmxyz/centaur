@@ -50,7 +50,7 @@ export function userLabel(user: SkillUser): string {
   return user.name ? `${user.name} (${user.email})` : user.email;
 }
 
-const base = "/api/v1/skills";
+const base = "/api/v1/console/skills";
 
 export function useSkillList(params: { tab: SkillTab; q: string }) {
   return useQuery({
@@ -136,7 +136,7 @@ export interface SshKeyValidation {
   fingerprint: string;
 }
 
-const sshKeyPath = "/api/v1/me/ssh_key";
+const sshKeyPath = "/api/v1/console/me/ssh_key";
 
 export function usePersonalSshKey() {
   return useSuspenseQuery({

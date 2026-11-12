@@ -14,7 +14,7 @@ import { adminMe, apiResponse, mockApi, operatorMe } from "@/test/utils";
 function FlakyPage() {
   const { data } = useSuspenseQuery({
     queryKey: ["flaky"],
-    queryFn: () => api.get<{ data: string }>("/api/v1/flaky"),
+    queryFn: () => api.get<{ data: string }>("/api/v1/console/flaky"),
   });
   return <p>{data.data}</p>;
 }
@@ -49,7 +49,7 @@ describe("app shell", () => {
   it("refetches a page's failed suspense query when the page is visited again", async () => {
     let calls = 0;
     mockApi({
-      "GET /api/v1/flaky": () => {
+      "GET /api/v1/console/flaky": () => {
         calls += 1;
         return calls === 1 ? apiResponse(500, { error: { message: "upstream exploded" } }) : { data: "flaky ok" };
       },
@@ -67,7 +67,7 @@ describe("app shell", () => {
   });
 
   it("keeps the session query when a page fails", async () => {
-    mockApi({ "GET /api/v1/flaky": apiResponse(500, { error: { message: "upstream exploded" } }) });
+    mockApi({ "GET /api/v1/console/flaky": apiResponse(500, { error: { message: "upstream exploded" } }) });
     const { queryClient } = renderShell("/console/flaky", adminMe());
 
     expect(await screen.findByText("upstream exploded")).toBeInTheDocument();

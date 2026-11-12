@@ -79,7 +79,7 @@ export type CredentialPayload = {
   labels: Record<string, string>;
 };
 
-const base = "/api/v1/broker_credentials";
+const base = "/api/v1/console/broker_credentials";
 
 export function credentialTitle(credential: Pick<BrokerCredential, "id" | "name" | "foreign_id">): string {
   return credential.name || credential.foreign_id || credential.id;

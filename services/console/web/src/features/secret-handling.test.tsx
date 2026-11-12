@@ -55,7 +55,7 @@ const PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nssh-private-body\n----
 const forms: SecretForm[] = [
   {
     name: "secret inline value",
-    write: "POST /api/v1/pg_dsn_secrets",
+    write: "POST /api/v1/console/pg_dsn_secrets",
     accepted: { data: { id: "pgd_new" } },
     plaintexts: ["postgres://u:inline-pw@db.example/shop"],
     render: () =>
@@ -77,7 +77,7 @@ const forms: SecretForm[] = [
   },
   {
     name: "credential secrets and header values",
-    write: "POST /api/v1/broker_credentials",
+    write: "POST /api/v1/console/broker_credentials",
     accepted: { data: { id: "bcr_new" } },
     plaintexts: ["cred-client-secret", "Basic cred-header", "cred-refresh-token"],
     render: () =>
@@ -102,9 +102,9 @@ const forms: SecretForm[] = [
   },
   {
     name: "OAuth app client_secret",
-    write: "POST /api/v1/oauth_apps",
+    write: "POST /api/v1/console/oauth_apps",
     reads: {
-      "GET /api/v1/oauth_providers": {
+      "GET /api/v1/console/oauth_providers": {
         data: [{ key: "google", display_name: "Google", presettable: false, config_keys: [], optional_config_keys: [] }],
       },
     },
@@ -126,12 +126,12 @@ const forms: SecretForm[] = [
   },
   {
     name: "SSH private key",
-    write: "PUT /api/v1/me/ssh_key",
+    write: "PUT /api/v1/console/me/ssh_key",
     reads: {
-      "GET /api/v1/me/ssh_key": {
+      "GET /api/v1/console/me/ssh_key": {
         data: { id: null, saved: false, name: "My SSH key", has_private_key: false, fingerprint: null, public_key: null, created_at: null, updated_at: null, grants: [] },
       },
-      "POST /api/v1/me/ssh_key/validate": { data: { valid: true, message: "Valid private key.", fingerprint: "SHA256:abc" } },
+      "POST /api/v1/console/me/ssh_key/validate": { data: { valid: true, message: "Valid private key.", fingerprint: "SHA256:abc" } },
     },
     accepted: { data: { id: "ssk_1", saved: true, name: "My SSH key", has_private_key: true, fingerprint: "SHA256:abc", public_key: "ssh-ed25519 AAAA", created_at: null, updated_at: null, grants: [] } },
     plaintexts: ["ssh-private-body"],
@@ -198,10 +198,10 @@ describe("issued API client secret", () => {
 
   function renderApiClients(url: string) {
     mockApi({
-      "GET /api/v1/api_clients": { data: [client], meta: { total: 1 } },
-      "GET /api/v1/api_clients/apc_eval": { data: client },
-      "POST /api/v1/api_clients": { data: { ...client, secret: "issued-on-create" } },
-      "POST /api/v1/api_clients/apc_eval/rotate_secret": { data: { ...client, secret: "issued-on-rotate" } },
+      "GET /api/v1/console/api_clients": { data: [client], meta: { total: 1 } },
+      "GET /api/v1/console/api_clients/apc_eval": { data: client },
+      "POST /api/v1/console/api_clients": { data: { ...client, secret: "issued-on-create" } },
+      "POST /api/v1/console/api_clients/apc_eval/rotate_secret": { data: { ...client, secret: "issued-on-rotate" } },
     });
     return renderRoute(
       <IssuedSecretScope>

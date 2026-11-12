@@ -36,7 +36,7 @@ export function SecretGrantPicker({
   const params = { q: deferred, limit: 200, exclude_grantee: excludeGrantee };
   const secrets = useQuery({
     queryKey: sharedKeys.secrets(params),
-    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", params, signal),
+    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/console/secrets", params, signal),
     enabled: open,
     select: (body) => body.data.filter((secret) => !excludeIds?.has(secret.id)),
   });

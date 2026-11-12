@@ -38,7 +38,7 @@ export interface RoleFormData {
   labels: Record<string, string>;
 }
 
-const base = "/api/v1/roles";
+const base = "/api/v1/console/roles";
 
 /** Roles are few: one page of the API maximum. */
 export const ROLE_PAGE_LIMIT = 200;
@@ -73,7 +73,7 @@ export function useAssignableSecretCount(id: string) {
   const params = { exclude_grantee: `role:${id}`, limit: 1 };
   return useQuery({
     queryKey: sharedKeys.secrets(params),
-    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/secrets", params, signal),
+    queryFn: ({ signal }) => api.get<ListEnvelope<GrantableSummary>>("/api/v1/console/secrets", params, signal),
     select: (body) => body.meta.total,
   });
 }
@@ -114,11 +114,11 @@ export async function deleteRoleSlackPermission(queryClient: QueryClient, id: st
 }
 
 export async function grantRoleSecret(queryClient: QueryClient, id: string, secret: Pick<GrantableSummary, "kind" | "id">) {
-  await api.post("/api/v1/grants", { data: { role_id: id, [grantKey(secret.kind)]: secret.id } });
+  await api.post("/api/v1/console/grants", { data: { role_id: id, [grantKey(secret.kind)]: secret.id } });
   await refreshRoleGrants(queryClient, id);
 }
 
 export async function revokeRoleGrant(queryClient: QueryClient, id: string, grantId: string) {
-  await api.delete(`/api/v1/grants/${grantId}`);
+  await api.delete(`/api/v1/console/grants/${grantId}`);
   await refreshRoleGrants(queryClient, id);
 }

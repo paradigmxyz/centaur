@@ -1,4 +1,4 @@
-// The shell loads GET /api/v1/me once; read it through useSession().
+// The shell loads GET /api/v1/console/me once; read it through useSession().
 import { useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, setCsrfToken, type DataEnvelope } from "@/lib/api";
@@ -30,7 +30,7 @@ export interface Me {
 }
 
 export async function fetchMe(): Promise<Me> {
-  const body = await api.get<DataEnvelope<Me>>("/api/v1/me");
+  const body = await api.get<DataEnvelope<Me>>("/api/v1/console/me");
   setCsrfToken(body.data.csrf_token);
   return body.data;
 }
@@ -46,9 +46,9 @@ export function useSession(): Me {
   return useSuspenseQuery(meQueryOptions).data;
 }
 
-/** DELETE /api/v1/session; the caller then leaves the SPA. */
+/** DELETE /api/v1/console/session; the caller then leaves the SPA. */
 export async function signOut(queryClient: QueryClient) {
-  await api.delete("/api/v1/session");
+  await api.delete("/api/v1/console/session");
   queryClient.clear();
 }
 

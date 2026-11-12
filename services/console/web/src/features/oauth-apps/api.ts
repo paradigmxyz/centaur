@@ -5,7 +5,7 @@ import { createQueryKeys } from "@/lib/query-keys";
 
 export const oauthAppKeys = createQueryKeys("oauth_apps");
 
-/** GET /api/v1/oauth_apps[/:id]. The client secret is never returned; see client_secret_set. */
+/** GET /api/v1/console/oauth_apps[/:id]. The client secret is never returned; see client_secret_set. */
 export interface OauthApp {
   id: string;
   slug: string;
@@ -90,7 +90,7 @@ export interface OauthAppInput {
   labels: Record<string, string>;
 }
 
-const base = "/api/v1/oauth_apps";
+const base = "/api/v1/console/oauth_apps";
 
 /** Apps, oldest first, in pages of the API max (200). */
 export function useOauthAppList(page: number) {
@@ -130,7 +130,7 @@ export function useProviderDetails(id: string, enabled: boolean) {
 export function useOauthProviders() {
   return useQuery({
     queryKey: ["oauth_apps", "providers"],
-    queryFn: ({ signal }) => api.get<DataEnvelope<OauthProvider[]>>("/api/v1/oauth_providers", undefined, signal),
+    queryFn: ({ signal }) => api.get<DataEnvelope<OauthProvider[]>>("/api/v1/console/oauth_providers", undefined, signal),
     select: (body) => body.data,
     staleTime: Infinity,
   });
@@ -155,12 +155,12 @@ export const integrationKeys = createQueryKeys("integrations");
 export function useIntegrations() {
   return useQuery({
     queryKey: integrationKeys.all,
-    queryFn: ({ signal }) => api.get<DataEnvelope<Integrations>>("/api/v1/integrations", undefined, signal),
+    queryFn: ({ signal }) => api.get<DataEnvelope<Integrations>>("/api/v1/console/integrations", undefined, signal),
     select: (body) => body.data,
   });
 }
 
-/** POST /api/v1/oauth_apps/presets/:provider -> the consent start URL. */
+/** POST /api/v1/console/oauth_apps/presets/:provider -> the consent start URL. */
 export async function setupPreset(queryClient: QueryClient, provider: string) {
   try {
     return await api.post<DataEnvelope<{ id: string; slug: string; start_url: string }>>(

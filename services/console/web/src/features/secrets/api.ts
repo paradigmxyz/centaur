@@ -18,10 +18,10 @@ export function isFormKind(kind: string): kind is FormKind {
 }
 
 export const KIND_RESOURCE: Record<FormKind, string> = {
-  static: "/api/v1/static_secrets",
-  pg_dsn: "/api/v1/pg_dsn_secrets",
-  gcp_auth: "/api/v1/gcp_auth_secrets",
-  gcp_id_token: "/api/v1/gcp_id_token_secrets",
+  static: "/api/v1/console/static_secrets",
+  pg_dsn: "/api/v1/console/pg_dsn_secrets",
+  gcp_auth: "/api/v1/console/gcp_auth_secrets",
+  gcp_id_token: "/api/v1/console/gcp_id_token_secrets",
 };
 
 export interface ManagedBy {
@@ -128,7 +128,7 @@ export function useSecretList(params: { q: string; kind: string; page: number })
     queryKey: secretKeys.list(params),
     queryFn: ({ signal }) =>
       api.get<ListEnvelope<SecretListItem>>(
-        "/api/v1/secrets",
+        "/api/v1/console/secrets",
         { q: params.q, kind: params.kind, page: params.page, limit: SECRETS_PER_PAGE },
         signal,
       ),
@@ -139,13 +139,13 @@ export function useSecretList(params: { q: string; kind: string; page: number })
 export function useSecretTotal() {
   return useQuery({
     queryKey: secretKeys.list({ total: true }),
-    queryFn: ({ signal }) => api.get<ListEnvelope<SecretListItem>>("/api/v1/secrets", { limit: 1 }, signal),
+    queryFn: ({ signal }) => api.get<ListEnvelope<SecretListItem>>("/api/v1/console/secrets", { limit: 1 }, signal),
     select: (body) => body.meta.total,
   });
 }
 
 const detailPath = (kind: string, id: string) =>
-  `/api/v1/secrets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`;
+  `/api/v1/console/secrets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`;
 
 export function useSecretDetail(kind: string, id: string) {
   return useSuspenseQuery({

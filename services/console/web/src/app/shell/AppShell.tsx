@@ -119,7 +119,7 @@ function MobileTopBar() {
   );
 }
 
-/** Shows a redirect flash handed off through GET /api/v1/me exactly once. */
+/** Shows a redirect flash handed off through GET /api/v1/console/me exactly once. */
 function useFlashToasts(flash: { notice?: string; alert?: string }) {
   const shown = useRef<object | null>(null);
   useEffect(() => {

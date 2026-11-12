@@ -44,7 +44,7 @@ export interface ScheduledTaskInput {
   enabled: boolean;
 }
 
-const tasksBase = "/api/v1/scheduled_tasks";
+const tasksBase = "/api/v1/console/scheduled_tasks";
 
 export function useScheduledTasks() {
   return useQuery({
@@ -177,7 +177,7 @@ export interface WorkflowDetail extends WorkflowTiming {
   debug: WorkflowDebugRow[];
 }
 
-const workflowsBase = "/api/v1/workflows";
+const workflowsBase = "/api/v1/console/workflows";
 const workflowPath = (key: string) => `${workflowsBase}/${encodeURIComponent(key)}`;
 
 export function useWorkflows(page: number) {

@@ -1,5 +1,8 @@
-// Writes send the CSRF token from GET /api/v1/me. A 403 "csrf" (stale token
-// after sign-in elsewhere) refreshes the token and retries once.
+// The SPA talks only to the session-only console API under /api/v1/console
+// (CONSOLE_API_PREFIX); apiRequest refuses any other path, so it never calls
+// the bearer API. Writes send the CSRF token from GET /api/v1/console/me. A
+// 403 "csrf" (stale token after sign-in elsewhere) refreshes the token and
+// retries once.
 
 export type ErrorDetails = Record<string, unknown> & { reason?: string };
 
@@ -54,6 +57,9 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/** Every SPA request goes here; /api/v1 outside it is the bearer API. */
+export const CONSOLE_API_PREFIX = "/api/v1/console/";
+
 let csrfToken: string | null = null;
 
 export function setCsrfToken(token: string | null | undefined) {
@@ -88,7 +94,7 @@ export function buildUrl(path: string, query?: Record<string, QueryValue>): stri
 }
 
 async function refreshCsrfToken(): Promise<void> {
-  const response = await fetch("/api/v1/me", {
+  const response = await fetch(`${CONSOLE_API_PREFIX}me`, {
     credentials: "same-origin",
     headers: { Accept: "application/json" },
   });
@@ -98,6 +104,9 @@ async function refreshCsrfToken(): Promise<void> {
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}, retried = false): Promise<T> {
+  if (!path.startsWith(CONSOLE_API_PREFIX)) {
+    throw new Error(`The console SPA only calls ${CONSOLE_API_PREFIX}*; refused ${path}`);
+  }
   const method = options.method ?? "GET";
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
