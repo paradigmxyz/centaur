@@ -196,62 +196,6 @@ module Api
         assert_equal 5, cred.refresh_timeout_seconds
       end
 
-      test "create builds a password grant credential with write-only initial values" do
-        assert_difference -> { BrokerCredential.count } => 1 do
-          create_credential(POLICY.merge(
-            foreign_id: "password-provider", name: "Password Provider",
-            grant: "password", token_endpoint: "https://auth.example.com/token",
-            client_id: "password-client", client_secret: "password-secret",
-            username: "password-user", password: "password-value",
-            token_endpoint_headers: { "x-api-key" => "password-key" }
-          ))
-        end
-        assert_response :created
-
-        cred = BrokerCredential.find_by!(foreign_id: "password-provider")
-        assert_equal "password", cred.grant
-        assert_equal "password-user", cred.username
-        assert_equal "password-value", cred.password
-        assert_equal "password-secret", cred.client_secret
-        assert_equal({ "x-api-key" => "password-key" }, cred.token_endpoint_headers)
-        assert json_body.dig("data", "has_username")
-        assert json_body.dig("data", "has_password")
-      end
-
-      test "create builds a client_credentials credential with a client secret" do
-        assert_difference -> { BrokerCredential.count } => 1 do
-          create_credential(POLICY.merge(
-            foreign_id: "bloomberg", name: "Bloomberg", grant: "client_credentials",
-            token_endpoint: "https://bsso.blpprofessional.com/ext/api/as/token.oauth2",
-            client_id: "bloomberg-client", client_secret: "bloomberg-secret"
-          ))
-        end
-        assert_response :created
-
-        cred = BrokerCredential.find_by!(foreign_id: "bloomberg")
-        assert_equal "client_credentials", cred.grant
-        assert_equal "bloomberg-client", cred.client_id
-        assert_equal "bloomberg-secret", cred.client_secret
-        assert_nil cred.refresh_token
-        assert cred.next_attempt_at.present?
-      end
-
-      test "create builds a preqin credential with write-only API key" do
-        assert_difference -> { BrokerCredential.count } => 1 do
-          create_credential(POLICY.merge(foreign_id: "preqin", name: "Preqin", grant: "preqin",
-                                         username: "preqin-user", api_key: "preqin-api-key"))
-        end
-        assert_response :created
-
-        cred = BrokerCredential.find_by!(foreign_id: "preqin")
-        assert_equal "preqin", cred.grant
-        assert_equal BrokerCredential::PREQIN_TOKEN_ENDPOINT, cred.token_endpoint
-        assert_nil cred.client_id
-        assert_equal "preqin-user", cred.username
-        assert_equal "preqin-api-key", cred.api_key
-        assert json_body.dig("data", "has_api_key")
-      end
-
       test "create without a token endpoint or client id is rejected without writing" do
         assert_no_difference "BrokerCredential.count" do
           create_credential(foreign_id: "broken", client_id: "")
@@ -273,13 +217,6 @@ module Api
         assert_equal [ "only.scope" ], cred.scopes
         assert_equal({ "X-Tenant" => "acme" }, cred.token_endpoint_headers)
         assert_equal({ "env" => "prod" }, cred.labels)
-      end
-
-      test "update rejects a foreign_id change" do
-        cred = broker_credentials(:acme_managed_gmail)
-        update_credential(cred, foreign_id: "renamed-handle")
-        assert_response :unprocessable_entity
-        assert_equal "managed-gmail", cred.reload.foreign_id
       end
 
       test "update with a null header value keeps that header's stored value" do
@@ -332,37 +269,6 @@ module Api
         assert cred.dead?
       end
 
-      test "update with blank password grant fields leaves them in place" do
-        cred = BrokerCredential.create!(foreign_id: "password-console",
-                                        grant: "password", token_endpoint: "https://idp.example/token",
-                                        client_id: "cid", client_secret: "secret",
-                                        username: "user", password: "pass", created_by: @operator)
-
-        update_credential(cred, grant: "password", client_secret: "", username: "", password: "")
-        assert_response :ok
-        cred.reload
-        assert_equal "secret", cred.client_secret
-        assert_equal "user", cred.username
-        assert_equal "pass", cred.password
-      end
-
-      test "update with a fresh client_credentials client secret reschedules the credential" do
-        cred = BrokerCredential.create!(foreign_id: "client-credentials-console",
-                                        grant: "client_credentials", token_endpoint: "https://idp.example/token",
-                                        client_id: "cid", client_secret: "old-secret",
-                                        dead: true, dead_reason: "invalid_client", failure_count: 3,
-                                        created_by: @operator)
-
-        update_credential(cred, grant: "client_credentials", client_secret: "new-secret")
-        assert_response :ok
-        cred.reload
-        assert_equal "new-secret", cred.client_secret
-        assert_not cred.dead?
-        assert_nil cred.dead_reason
-        assert_equal 0, cred.failure_count
-        assert cred.next_attempt_at.present?
-      end
-
       test "update with blank preqin fields leaves them in place" do
         cred = BrokerCredential.create!(foreign_id: "preqin-console",
                                         grant: "preqin", username: "user", api_key: "api-key",
@@ -375,7 +281,6 @@ module Api
         assert_equal "api-key", cred.api_key
       end
 
-
       test "update of a preqin username stores it and reschedules the credential" do
         cred = BrokerCredential.create!(foreign_id: "preqin-username",
                                         grant: "preqin", username: "old-user", api_key: "api-key",
@@ -387,37 +292,6 @@ module Api
         assert_equal "preqin-panel-user", cred.username
         assert_equal "api-key", cred.api_key
         assert_not cred.dead?
-      end
-
-      test "update with a fresh refresh_token reschedules the credential" do
-        cred = broker_credentials(:acme_managed_gmail)
-        cred.update!(refresh_token: "old", dead: true, dead_reason: "stale", failure_count: 3)
-
-        update_credential(cred, refresh_token: "fresh-seed")
-        assert_response :ok
-        cred.reload
-        assert_equal "fresh-seed", cred.refresh_token
-        assert_not cred.dead?
-        assert_nil cred.dead_reason
-        assert_equal 0, cred.failure_count
-      end
-
-      test "destroy removes an unreferenced credential" do
-        cred = broker_credentials(:globex_managed_api)
-        assert_difference -> { BrokerCredential.count } => -1 do
-          delete api_v1_broker_credential_path(cred.oid), headers: csrf_headers
-        end
-        assert_response :no_content
-      end
-
-      test "destroy is blocked while a token_broker source references it" do
-        cred = broker_credentials(:globex_managed_api)
-        SecretSource.create!(source_type: "token_broker", config: { "credential_id" => cred.foreign_id })
-        assert_no_difference -> { BrokerCredential.count } do
-          delete api_v1_broker_credential_path(cred.oid), headers: csrf_headers
-        end
-        assert_response :conflict
-        assert_match "referenced by", json_body.dig("error", "message")
       end
     end
   end

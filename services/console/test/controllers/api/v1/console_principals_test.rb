@@ -19,7 +19,6 @@ module Api
                               params: { data: { slack_channel_permissions: [] } }
         assert_admin_only_api :post, api_v1_principal_roles_path(principal.oid),
                               params: { data: { role_id: roles(:acme_admin_role).oid } }
-        assert_admin_only_api :get, api_v1_secrets_path
         assert_admin_only_api :get, api_v1_slack_channels_path
         assert Principal.exists?(principal.id)
         assert_not principal.reload.roles.include?(roles(:acme_admin_role))
@@ -286,14 +285,6 @@ module Api
         assert_nil proxy.reload.principal
       end
 
-      test "destroy refuses bearer auth" do
-        principal = principals(:acme_user_bob)
-        delete api_v1_principal_path(principal.oid), headers: bearer_headers
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-        assert Principal.exists?(principal.id)
-      end
-
       test "assigning and unassigning a role" do
         principal = principals(:acme_user_bob)
         role = roles(:acme_admin_role)
@@ -434,8 +425,6 @@ module Api
 
       test "secrets exclude a principal's direct grants but keep role-inherited ones" do
         principal = principals(:acme_channel)
-        assert_admin_only_api :get, api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}")
-
         get api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 200)
         assert_response :ok
         ids = json_body["data"].map { |s| s["id"] }

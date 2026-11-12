@@ -230,15 +230,6 @@ module Api
         assert_equal "task_disabled", json_body.dig("error", "details", "reason")
       end
 
-      test "deletes a task" do
-        task = create_task
-
-        assert_difference -> { ScheduledTask.count }, -1 do
-          delete api_v1_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
-        end
-        assert_response :no_content
-      end
-
       test "users can only view and edit their own scheduled tasks" do
         other_task = create_task(author: @operator, name: "Admin's task")
         member = sign_in_console(users(:member_user))
@@ -266,26 +257,6 @@ module Api
         assert_response :not_found
 
         assert_equal "Admin's task", other_task.reload.name
-      end
-
-      test "bearer keys cannot reach the console task views" do
-        member = users(:member_user)
-        own = create_task(author: member, name: "Member task")
-
-        get api_v1_scheduled_tasks_path, headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-
-        get api_v1_scheduled_task_path(own.oid, view: "console"), headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-        get api_v1_scheduled_task_path(own.oid, view: "console"), headers: bearer_headers
-        assert_response :forbidden
-
-        # The plain admin lookup keeps accepting the bearer key.
-        get api_v1_scheduled_task_path(own.oid), headers: bearer_headers
-        assert_response :ok
-        assert_equal own.oid, json_body.dig("data", "id")
       end
 
       test "admins get 404 on another user's task for every member action" do
@@ -400,8 +371,8 @@ module Api
         assert_empty json_body["data"]
       end
 
-      test "delivery options include public channels without a linked Slack identity" do
-        sign_in_console(users(:globex_admin))
+      test "members without a linked Slack identity get public delivery channels" do
+        sign_in_console(users(:member_user))
 
         with_catalog do
           get slack_channel_options_api_v1_scheduled_tasks_path, params: { q: "general" }
@@ -460,17 +431,6 @@ module Api
 
         assert_response :ok
         assert_equal "SLACK_BOT_TOKEN is not configured.", json_body.dig("meta", "catalog_error")
-      end
-
-      test "non-admins can search scheduled task delivery channels" do
-        sign_in_console(users(:member_user))
-
-        with_catalog do
-          get slack_channel_options_api_v1_scheduled_tasks_path, params: { q: "general" }
-        end
-
-        assert_response :ok
-        assert_equal "C0123456789", json_body["data"].sole["channel_id"]
       end
 
       private

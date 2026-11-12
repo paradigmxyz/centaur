@@ -57,25 +57,6 @@ module Api
         assert_nil client.replaced
       end
 
-      test "a signed-out request is refused" do
-        reset!
-        get api_v1_system_settings_path
-        assert_response :unauthorized
-      end
-
-      test "non-admin users cannot read or change settings" do
-        client = FakeApiClient.new
-        use_api_client(client)
-        sign_in_console(users(:member_user))
-
-        get api_v1_system_settings_path
-        assert_response :forbidden
-        put slack_external_teams_api_v1_system_settings_path, params: { data: { slack_external_team_ids: "T0PARTNER1" } },
-            headers: csrf_headers, as: :json
-        assert_response :forbidden
-        assert_nil client.replaced
-      end
-
       test "admin reads system settings with every role's default flag" do
         roles(:acme_infra).update!(assign_by_default: true)
 

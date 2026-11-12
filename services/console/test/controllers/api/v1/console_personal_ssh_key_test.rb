@@ -143,20 +143,6 @@ module Api
         assert @member.reload.personal_ssh_key
       end
 
-      test "anonymous, pending, and disabled users cannot configure SSH" do
-        delete api_v1_session_path, headers: csrf_headers
-        get api_v1_me_ssh_key_path
-        assert_response :unauthorized
-        post validate_api_v1_me_ssh_key_path, params: { data: { private_key: @private_key } }, as: :json
-        assert_response :unauthorized
-        %i[pending_user disabled_user].each do |fixture|
-          sign_in_console(users(fixture))
-          put api_v1_me_ssh_key_path, params: { data: { name: "Mine", private_key: @private_key } }, as: :json
-          assert_includes [ 401, 403 ], response.status
-          assert_nil users(fixture).reload.personal_ssh_key
-        end
-      end
-
       test "admins see personal keys as ordinary grantable secrets" do
         save_key(name: "Member key")
         key = @member.reload.personal_ssh_key

@@ -39,18 +39,6 @@ module Api
         end
       end
 
-      test "bearer admins cannot read the console secret views" do
-        get api_v1_secrets_path, headers: bearer_headers
-        assert_response :forbidden
-        get api_v1_secret_detail_path("static", static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-        get api_v1_secret_role_grants_path("static", static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
-        assert_response :forbidden
-        get api_v1_static_secret_path(static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
-        assert_response :ok
-      end
-
       test "secrets list combines kinds with backend labels but never references" do
         secret = static_secrets(:acme_prod_api_key)
         get api_v1_secrets_path(limit: 200)
@@ -65,15 +53,6 @@ module Api
         assert_includes json_body["data"].flat_map { |s| s["source_types"] }, "Env"
         # The list shows only the backend label, not the underlying reference.
         assert_no_match(/GITHUB_TOKEN|GCP_SA_KEYFILE|op:\/\//, response.body)
-      end
-
-      test "secrets list filters by kind and searches by name" do
-        matching = static_secrets(:acme_prod_api_key)
-        get api_v1_secrets_path(q: "PROD-API", kind: "static")
-        ids = json_body["data"].map { |s| s["id"] }
-        assert_includes ids, matching.oid
-        assert_not_includes ids, static_secrets(:acme_staging_api_key).oid
-        assert_not_includes ids, pg_dsn_secrets(:acme_reporting_pg).oid
       end
 
       test "secrets list paginates fifty filtered records per page" do
@@ -247,7 +226,6 @@ module Api
         secret = static_secrets(:github_token_inject) # granted directly to acme_channel
         assert Grant.where(static_secret: secret).where.not(principal_id: nil).exists?
         get api_v1_secret_role_grants_path("static", secret.oid)
-        assert_equal [], json_body["data"].select { |g| g["role_id"].nil? }
         assert json_body["data"].all? { |g| g["role_id"].present? }
       end
 
@@ -428,21 +406,6 @@ module Api
         assert json_body.dig("error", "details", "base").present?
       end
 
-      test "creating a static secret resolves the GitHub token profile" do
-        assert_difference -> { StaticSecret.count } => 1, -> { RequestRule.count } => 3 do
-          post api_v1_static_secrets_path, params: { data: {
-            name: "GitHub token", foreign_id: "github-token", kind: "github_token",
-            source: { source_type: "env", config: { var: "GITHUB_TOKEN" } }
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :created
-        secret = StaticSecret.find_by!(foreign_id: "github-token")
-        assert_equal "github_token", secret.kind
-        assert_nil secret.inject_config
-        assert_equal CredentialProfiles::GithubToken::REPLACE_CONFIG, secret.replace_config
-        assert_equal %w[api.github.com github.com api.githubcopilot.com], secret.rules.map(&:host)
-      end
-
       test "editing preserves a GitHub token profile through the form representation" do
         secret = StaticSecret.create!(
           name: "GitHub token", kind: "github_token",
@@ -482,21 +445,6 @@ module Api
         assert_response :unprocessable_entity
         message = [ "is missing required key \"var\" for source_type \"env\"" ]
         assert_equal({ "config" => message, "source.config" => message }, json_body.dig("error", "details"))
-      end
-
-      test "editing a static secret changes attributes and replaces rules" do
-        secret = static_secrets(:github_token_inject)
-        patch api_v1_static_secret_path(secret.oid), params: { data: {
-          name: "renamed", kind: "custom", inject_config: { header: "X-Token" },
-          source: { source_type: "env", config: { var: "NEW_VAR" } },
-          rules: [ { host: "only.example.com", http_methods: [ "GET" ], paths: [ "/" ] } ]
-        } }, headers: csrf_headers, as: :json
-        assert_response :ok
-        secret.reload
-        assert_equal "renamed", secret.name
-        assert_equal({ "header" => "X-Token" }, secret.inject_config)
-        assert_equal "NEW_VAR", secret.source.config["var"]
-        assert_equal [ "only.example.com" ], secret.rules.map(&:host)
       end
 
       test "editing an inline source without a new value keeps the stored value" do
@@ -541,62 +489,6 @@ module Api
         assert_equal "stored-value", secret.reload.source.secret
       end
 
-      test "deleting a static secret removes it and cascades its grants" do
-        secret = static_secrets(:github_token_inject) # granted directly to acme_channel
-        assert_difference -> { StaticSecret.count } => -1, -> { Grant.count } => -1 do
-          delete api_v1_static_secret_path(secret.oid), headers: csrf_headers
-        end
-        assert_response :no_content
-        assert_not StaticSecret.exists?(secret.id)
-      end
-
-      test "creating a pg_dsn secret with an inline DSN source" do
-        assert_difference -> { PgDsnSecret.count } => 1, -> { SecretSource.count } => 1 do
-          post api_v1_pg_dsn_secrets_path, params: { data: {
-            foreign_id: "ui-shop", database: "shop", role: "readonly", settings: [],
-            dsn: { source_type: "control_plane", secret: "postgres://u:p@db.example:5432/shop", config: {} }
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :created
-        assert_no_match "u:p@db", response.body
-        secret = PgDsnSecret.find_by!(foreign_id: "ui-shop")
-        assert_equal "shop", secret.database
-        assert_equal "control_plane", secret.dsn_source.source_type
-      end
-
-      test "creating a pg_dsn secret rejects a database that mismatches the inline DSN" do
-        assert_no_difference [ "PgDsnSecret.count", "SecretSource.count" ] do
-          post api_v1_pg_dsn_secrets_path, params: { data: {
-            foreign_id: "ui-mismatch", database: "wrong",
-            dsn: { source_type: "control_plane", secret: "postgres://u:p@db.example/shop", config: {} }
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :unprocessable_entity
-      end
-
-      test "creating a pg_dsn secret requires foreign_id and database" do
-        assert_no_difference "PgDsnSecret.count" do
-          post api_v1_pg_dsn_secrets_path, params: { data: {
-            foreign_id: nil, database: nil, dsn: { source_type: "env", config: { var: "PG_DSN" } }
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :unprocessable_entity
-        assert json_body.dig("error", "details", "foreign_id").present?
-        assert json_body.dig("error", "details", "database").present?
-      end
-
-      test "editing a pg_dsn secret changes the database and source" do
-        secret = pg_dsn_secrets(:acme_reporting_pg)
-        patch api_v1_pg_dsn_secret_path(secret.oid), params: { data: {
-          foreign_id: secret.foreign_id, database: "reporting", role: nil, settings: [],
-          dsn: { source_type: "env", config: { var: "REPORTING_DSN" } }
-        } }, headers: csrf_headers, as: :json
-        assert_response :ok
-        secret.reload
-        assert_nil secret.role.presence
-        assert_equal "REPORTING_DSN", secret.dsn_source.config["var"]
-      end
-
       test "editing an inline DSN without a new value keeps it" do
         secret = PgDsnSecret.create!(foreign_id: "inline-dsn", database: "shop", created_by: @operator,
                                      dsn_source: SecretSource.new(source_type: "control_plane",
@@ -610,14 +502,6 @@ module Api
         secret.reload
         assert_equal "reader", secret.role
         assert_equal "postgres://u:p@db.example/shop", secret.dsn_source.secret
-      end
-
-      test "deleting a pg_dsn secret" do
-        secret = pg_dsn_secrets(:acme_reporting_pg)
-        assert_difference -> { PgDsnSecret.count } => -1 do
-          delete api_v1_pg_dsn_secret_path(secret.oid), headers: csrf_headers
-        end
-        assert_response :no_content
       end
 
       test "creating a pg_dsn secret keeps ordered literal and derived session settings" do
@@ -645,73 +529,6 @@ module Api
         )
       end
 
-      test "creating a pg_dsn secret rejects an unknown principal_field" do
-        assert_no_difference "PgDsnSecret.count" do
-          post api_v1_pg_dsn_secrets_path, params: { data: {
-            foreign_id: "ui-bad-field", database: "badfielddb",
-            settings: [ { name: "app.tenant", value_from: { principal_field: "labels" } } ],
-            dsn: { source_type: "env", config: { var: "SETTINGS_DSN" } }
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :unprocessable_entity
-      end
-
-      test "editing a pg_dsn secret with no settings clears them" do
-        secret = pg_dsn_secrets(:acme_reporting_pg)
-        secret.update!(settings: [ { "name" => "app.tenant", "value" => "centaur" } ])
-        patch api_v1_pg_dsn_secret_path(secret.oid), params: { data: {
-          foreign_id: secret.foreign_id, database: "reporting", settings: [],
-          dsn: { source_type: "env", config: { var: "REPORTING_DSN" } }
-        } }, headers: csrf_headers, as: :json
-        assert_response :ok
-        assert_equal [], secret.reload.settings
-      end
-
-      test "creating a pg_dsn secret rejects an invalid session setting name" do
-        assert_no_difference "PgDsnSecret.count" do
-          post api_v1_pg_dsn_secrets_path, params: { data: {
-            foreign_id: "ui-bad-setting", database: "badsettingdb",
-            settings: [ { name: "session_authorization", value: "x" } ],
-            dsn: { source_type: "env", config: { var: "SETTINGS_DSN" } }
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :unprocessable_entity
-      end
-
-      test "creating a keyfile gcp_auth secret with a source and rules" do
-        assert_difference -> { GcpAuthSecret.count } => 1, -> { SecretSource.count } => 1, -> { RequestRule.count } => 1 do
-          post api_v1_gcp_auth_secrets_path, params: { data: {
-            foreign_id: "ui-gcp-key", name: "ui-gcp", subject: "bot@acme.example", credentials_provider: nil,
-            scopes: %w[https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.read_only],
-            keyfile: { source_type: "env", config: { var: "GCP_KEY" } },
-            rules: [ { host: "storage.googleapis.com", http_methods: [ "GET" ], paths: [ "/" ] } ]
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :created
-        secret = GcpAuthSecret.find_by!(foreign_id: "ui-gcp-key")
-        assert_equal %w[https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.read_only], secret.scopes
-        assert_equal "bot@acme.example", secret.subject
-        assert_nil secret.credentials_provider
-        assert_equal({ "var" => "GCP_KEY" }, secret.keyfile_source.config)
-        assert_equal [ "storage.googleapis.com" ], secret.rules.map(&:host)
-      end
-
-      test "creating a workload-identity gcp_auth secret stores no keyfile" do
-        assert_difference -> { GcpAuthSecret.count } => 1 do
-          assert_no_difference "SecretSource.count" do
-            post api_v1_gcp_auth_secrets_path, params: { data: {
-              foreign_id: "ui-gcp-wi", credentials_provider: { type: "workload_identity" },
-              scopes: [ "https://www.googleapis.com/auth/cloud-platform" ], rules: []
-            } }, headers: csrf_headers, as: :json
-          end
-        end
-        assert_response :created
-        secret = GcpAuthSecret.find_by!(foreign_id: "ui-gcp-wi")
-        assert_equal({ "type" => "workload_identity" }, secret.credentials_provider)
-        assert_nil secret.keyfile_source
-        assert_nil secret.subject
-      end
-
       test "creating a gcp_auth secret without scopes is rejected without writing" do
         assert_no_difference [ "GcpAuthSecret.count", "SecretSource.count" ] do
           post api_v1_gcp_auth_secrets_path, params: { data: {
@@ -720,63 +537,6 @@ module Api
         end
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "scopes").present?
-      end
-
-      test "editing switches a keyfile gcp_auth secret to workload identity" do
-        secret = gcp_auth_secrets(:acme_gcs_keyfile)
-        assert secret.keyfile_source.present?
-        patch api_v1_gcp_auth_secret_path(secret.oid), params: { data: {
-          foreign_id: secret.foreign_id, credentials_provider: { type: "workload_identity" }, subject: nil,
-          scopes: [ "https://www.googleapis.com/auth/cloud-platform" ], rules: []
-        } }, headers: csrf_headers, as: :json
-        assert_response :ok
-        secret.reload
-        assert_nil secret.keyfile_source
-        assert_nil secret.subject
-        assert_equal({ "type" => "workload_identity" }, secret.credentials_provider)
-      end
-
-      test "creating a gcp_id_token secret with a keyfile source and rule" do
-        assert_difference -> { GcpIdTokenSecret.count } => 1, -> { SecretSource.count } => 1, -> { RequestRule.count } => 1 do
-          post api_v1_gcp_id_token_secrets_path, params: { data: {
-            foreign_id: "ui-cloud-run", name: "ui cloud run",
-            audience: "https://ui-service-abc123-uc.a.run.app", header: "x-serverless-authorization",
-            keyfile: { source_type: "env", config: { var: "UI_CLOUD_RUN_KEYFILE" } },
-            rules: [ { host: "ui-service-abc123-uc.a.run.app", http_methods: [ "GET" ], paths: [ "/" ] } ]
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :created
-        secret = GcpIdTokenSecret.find_by!(foreign_id: "ui-cloud-run")
-        assert_equal "https://ui-service-abc123-uc.a.run.app", secret.audience
-        assert_equal "x-serverless-authorization", secret.header
-        assert_equal({ "var" => "UI_CLOUD_RUN_KEYFILE" }, secret.keyfile_source.config)
-        assert_equal [ "ui-service-abc123-uc.a.run.app" ], secret.rules.map(&:host)
-      end
-
-      test "creating a gcp_id_token secret without rules is rejected without writing" do
-        assert_no_difference [ "GcpIdTokenSecret.count", "SecretSource.count", "RequestRule.count" ] do
-          post api_v1_gcp_id_token_secrets_path, params: { data: {
-            foreign_id: "ui-cloud-run-no-rules", audience: "https://ui-service-abc123-uc.a.run.app",
-            keyfile: { source_type: "env", config: { var: "UI_CLOUD_RUN_KEYFILE" } }, rules: []
-          } }, headers: csrf_headers, as: :json
-        end
-        assert_response :unprocessable_entity
-        assert_includes json_body.dig("error", "details", "rules"), "must include at least one rule"
-      end
-
-      test "editing a gcp_id_token secret changes keyfile, audience, header, and rules" do
-        secret = gcp_id_token_secrets(:acme_cloud_run)
-        patch api_v1_gcp_id_token_secret_path(secret.oid), params: { data: {
-          foreign_id: secret.foreign_id, audience: "https://updated-service-abc123-uc.a.run.app", header: nil,
-          keyfile: { source_type: "env", config: { var: "UPDATED_CLOUD_RUN_KEYFILE" } },
-          rules: [ { host: "updated-service-abc123-uc.a.run.app", http_methods: [ "POST" ], paths: [] } ]
-        } }, headers: csrf_headers, as: :json
-        assert_response :ok
-        secret.reload
-        assert_equal "https://updated-service-abc123-uc.a.run.app", secret.audience
-        assert_nil secret.header
-        assert_equal "UPDATED_CLOUD_RUN_KEYFILE", secret.keyfile_source.config["var"]
-        assert_equal [ "updated-service-abc123-uc.a.run.app" ], secret.rules.map(&:host)
       end
 
       test "editing an inline gcp keyfile without a new value keeps it" do

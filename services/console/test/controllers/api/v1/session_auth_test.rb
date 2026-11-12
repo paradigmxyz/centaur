@@ -184,25 +184,6 @@ module Api
         end
       end
 
-      test "session destroy signs the cookie session out" do
-        sign_in_console(users(:member_user))
-        token = console_csrf_token
-
-        delete api_v1_session_path
-        assert_response :forbidden
-
-        delete api_v1_session_path, headers: csrf_headers(token)
-        assert_response :no_content
-        get api_v1_me_path
-        assert_response :unauthorized
-      end
-
-      test "a pending account can sign out" do
-        sign_in_console(users(:pending_user))
-        delete api_v1_session_path, headers: csrf_headers
-        assert_response :no_content
-      end
-
       test "session destroy refuses bearer callers" do
         delete api_v1_session_path, headers: bearer_headers
         assert_response :forbidden

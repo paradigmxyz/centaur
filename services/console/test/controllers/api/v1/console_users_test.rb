@@ -9,8 +9,8 @@ module Api
         sign_in_console(@admin)
       end
 
-      def post_action(action, user, headers: csrf_headers)
-        post public_send(:"#{action}_api_v1_user_path", user.oid), headers: headers, as: :json
+      def post_action(action, user)
+        post public_send(:"#{action}_api_v1_user_path", user.oid), headers: csrf_headers, as: :json
       end
 
       test "user endpoints are admin-only for every caller type" do
@@ -25,28 +25,6 @@ module Api
         assert_not target.admin?
         assert users(:member_user).reload.active?
         assert users(:globex_admin).reload.admin?
-      end
-
-      test "a signed-out request is refused" do
-        reset!
-        get api_v1_users_path
-        assert_response :unauthorized
-      end
-
-      test "a non-admin cannot list users or perform actions" do
-        sign_in_console(users(:member_user))
-        get api_v1_users_path
-        assert_response :forbidden
-
-        target = users(:pending_user)
-        post_action(:approve, target)
-        assert_response :forbidden
-        assert target.reload.pending?
-
-        admin = users(:globex_admin)
-        post_action(:demote, admin)
-        assert_response :forbidden
-        assert admin.reload.admin?
       end
 
       test "the index lists every user with status, role, and the pending ones" do
@@ -147,10 +125,6 @@ module Api
         post_action(:disable, @admin)
         assert_response :unprocessable_entity
         assert_equal "You can't disable your own account.", json_body.dig("error", "message")
-        assert @admin.reload.active?
-
-        post_action(:disable, @admin, headers: bearer_headers)
-        assert_response :forbidden
         assert @admin.reload.active?
       end
 

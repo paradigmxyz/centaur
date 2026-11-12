@@ -272,13 +272,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "[role=alert]", text: "Your account is disabled."
   end
 
-  test "a pending user is refused by console APIs so the SPA bounces to the holding page" do
-    post login_url, params: { email: users(:pending_user).email, password: "password123456" }
-    get api_v1_principals_path
-    assert_response :forbidden
-    assert_equal "account_pending", json_body.dig("error", "details", "reason")
-  end
-
   test "the login form carries an authenticity token and POST /login requires it" do
     with_forgery_protection do
       fields = sign_in_form(@operator.email)

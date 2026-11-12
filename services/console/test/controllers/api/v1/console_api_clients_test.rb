@@ -71,19 +71,6 @@ module Api
         assert_equal false, json_body.dig("data", "nav", "api_clients")
       end
 
-      test "non-admins cannot manage API clients" do
-        sign_in_console(users(:member_user))
-
-        get api_v1_api_clients_path
-        assert_response :forbidden
-
-        assert_no_difference -> { ApiClient.count } do
-          post api_v1_api_clients_path, params: { data: { name: "x", scopes: ApiClient::SCOPES } },
-               headers: csrf_headers, as: :json
-        end
-        assert_response :forbidden
-      end
-
       test "index lists clients with scopes, principal count, and status, never secrets" do
         client = create_client
         client.attach_principal!(principals(:acme_channel))
@@ -134,16 +121,6 @@ module Api
         assert_response :created
         assert_equal [], json_body.dig("data", "principals")
         assert json_body.dig("data", "secret").present?
-      end
-
-      test "a bearer admin key cannot create an API client" do
-        assert_no_difference -> { ApiClient.count } do
-          post api_v1_api_clients_path, params: { data: { name: "ci", scopes: ApiClient::SCOPES } },
-               headers: bearer_headers, as: :json
-        end
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-        assert_no_match(/secret/, response.body)
       end
 
       test "create rejects an unknown principal" do

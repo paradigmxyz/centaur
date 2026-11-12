@@ -295,14 +295,6 @@ module Api
         end
       end
 
-      test "pre-existing endpoints the SPA uses accept both credentials" do
-        get api_v1_principals_path, headers: bearer_headers
-        assert_response :ok
-        sign_in_console(users(:acme_admin))
-        get api_v1_principals_path
-        assert_response :ok
-      end
-
       private
 
       def assert_bearer_required

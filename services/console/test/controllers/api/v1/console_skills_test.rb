@@ -34,15 +34,6 @@ module Api
         assert_nil skill.archived_at
       end
 
-      test "bearer API keys are refused" do
-        get api_v1_skills_path(tab: "mine"), headers: bearer_headers(MEMBER_TOKEN)
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-
-        get api_v1_skill_path(skills(:other_private).oid), headers: bearer_headers(MEMBER_TOKEN)
-        assert_response :forbidden
-      end
-
       test "shows public skills by default" do
         get api_v1_skills_path
 

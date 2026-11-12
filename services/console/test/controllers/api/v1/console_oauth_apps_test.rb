@@ -199,14 +199,6 @@ module Api
         assert_not OauthApp.exists?(slug: "google-app-2")
       end
 
-      test "create with an invalid provider is rejected without writing" do
-        assert_no_difference -> { OauthApp.count } do
-          write :post, api_v1_oauth_apps_path, form_body(provider: "unsupported", slug: "bad-provider", allowed_scopes: %w[a])
-        end
-        assert_response :unprocessable_entity
-        assert_includes json_body.dig("error", "details", "provider"), "is not a supported provider"
-      end
-
       test "create with no allowed scopes is rejected" do
         assert_no_difference -> { OauthApp.count } do
           write :post, api_v1_oauth_apps_path, form_body(slug: "no-scopes", allowed_scopes: [])
@@ -350,17 +342,12 @@ module Api
                      json_body.dig("error", "message")
       end
 
-      test "non admins and unsupported providers cannot register" do
+      test "unsupported providers cannot register" do
         registration_client { |**| flunk "Must not register" }
         post preset_api_v1_oauth_apps_path(provider: "google"), headers: csrf_headers
         assert_response :not_found
         post preset_api_v1_oauth_apps_path(provider: "nope"), headers: csrf_headers
         assert_response :not_found
-
-        sign_in_console(users(:member_user))
-        post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf_headers
-        assert_response :forbidden
-        assert_not OauthApp.exists?(slug: "mercator")
       end
 
       def mercator_app

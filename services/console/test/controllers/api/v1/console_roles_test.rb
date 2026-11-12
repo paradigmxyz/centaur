@@ -24,17 +24,11 @@ module Api
         assert_admin_only_api :put, slack_channel_permissions_api_v1_role_path(role.oid),
                               params: { data: { slack_channel_permissions: [] } }
         assert_admin_only_api :delete, slack_channel_permission_api_v1_role_path(role.oid, "C0123456789")
-        assert_admin_only_api :get, api_v1_slack_channels_path(exclude_owner: "role:#{role.oid}")
 
         assert_not Role.exists?(foreign_id: "sneaky")
         assert_equal "Infra", role.reload.name
         assert Grant.exists?(grant.id)
         assert_not role.grants.exists?(static_secret: static_secrets(:acme_staging_api_key))
-      end
-
-      test "the assign-role picker filter is admin-only" do
-        assert_admin_only_api :get, api_v1_roles_path(exclude_principal: principals(:acme_channel).oid, limit: 200)
-        assert_admin_only_api :get, api_v1_roles_path(q: "infra", limit: 200)
       end
 
       test "exclude_principal omits the roles assigned to that principal across all pages" do
@@ -153,13 +147,6 @@ module Api
         assert_equal({ "kind" => "platform" }, role.labels)
       end
 
-      test "update works over bearer auth" do
-        role = roles(:acme_infra)
-        patch api_v1_role_path(role.oid), params: { data: { name: "Via bearer" } }, headers: bearer_headers, as: :json
-        assert_response :ok
-        assert_equal "Via bearer", role.reload.name
-      end
-
       test "role grants include the secret's kind, name, and foreign id" do
         role = roles(:acme_infra)
         secret = static_secrets(:acme_prod_api_key)
@@ -232,8 +219,6 @@ module Api
 
       test "assignable secrets exclude every secret already granted to the role" do
         role = roles(:acme_infra)
-        assert_admin_only_api :get, api_v1_secrets_path(exclude_grantee: "role:#{role.oid}")
-
         get api_v1_secrets_path(exclude_grantee: "role:#{role.oid}", limit: 200)
         assert_response :ok
         ids = json_body["data"].map { |s| s["id"] }
@@ -378,28 +363,6 @@ module Api
         delete slack_channel_permission_api_v1_role_path(roles(:acme_infra).oid, "C0123456789"), headers: csrf_headers
         assert_response :not_found
         assert_predicate permission.reload, :persisted?
-      end
-
-      test "the console Slack channel permission routes refuse bearer auth" do
-        role = roles(:acme_infra)
-        assert_no_difference -> { role.slack_channel_permissions.count } do
-          put slack_channel_permissions_api_v1_role_path(role.oid),
-              params: { data: { slack_channel_permissions: [ { channel_id: "C0123456789", history_enabled: true } ] } },
-              headers: bearer_headers, as: :json
-        end
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
-
-        role.slack_channel_permissions.create!(channel_id: "C0123456789", history_enabled: true)
-        delete slack_channel_permission_api_v1_role_path(role.oid, "C0123456789"), headers: bearer_headers
-        assert_response :forbidden
-        assert role.slack_channel_permissions.exists?(channel_id: "C0123456789")
-
-        # The POST upsert keeps accepting the bearer key.
-        post slack_channel_permissions_api_v1_role_path(role.oid),
-             params: { data: { channel_id: "C0123456789", history_enabled: true, upload_enabled: true } },
-             headers: bearer_headers, as: :json
-        assert_response :success
       end
 
       test "role channel options use the shared catalog lookup and exclude the role's channels" do

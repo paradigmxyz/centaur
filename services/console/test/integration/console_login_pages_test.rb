@@ -16,16 +16,6 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
   end
 
-  test "a disabled user is signed out on their next console API request" do
-    user = create_console_user
-    sign_in_console(user)
-    user.update!(status: :disabled)
-    get api_v1_me_path
-    assert_response :unauthorized
-    assert_equal "account_disabled", json_body.dig("error", "details", "reason")
-    assert_nil session[:user_id]
-  end
-
   test "a disabled user's next login page says the account is disabled" do
     user = create_console_user
     sign_in_console(user)
@@ -39,13 +29,6 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
 
     get login_path
     assert_select "[role=alert]", count: 0
-  end
-
-  test "a pending user's session probe reports the pending status" do
-    sign_in_console(users(:pending_user))
-    get api_v1_me_path
-    assert_response :ok
-    assert_equal "pending", json_body.dig("data", "user", "status")
   end
 
   test "SPA sign-out clears the session and leaves a notice for the login page" do

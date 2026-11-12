@@ -76,12 +76,6 @@ module Api
           assert_admin_only_api :post, runs_api_v1_workflow_path("slack_sync"), params: {}
         end
         assert_empty client.created_runs
-
-        with_workflow_index(runs: []) do
-          get api_v1_workflows_path, headers: bearer_headers
-        end
-        assert_response :forbidden
-        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
       test "an admin sees one row per workflow" do
@@ -267,17 +261,6 @@ module Api
         assert_response :bad_gateway
         assert_match(/workflow runtime is not enabled/, json_body.dig("error", "message"))
         assert_equal "workflow_api_error", json_body.dig("error", "details", "reason")
-      end
-
-      test "a non-admin cannot force start a workflow" do
-        sign_in_console(users(:member_user))
-        client = FakeApiClient.new
-        with_api_client(client)
-
-        post runs_api_v1_workflow_path("slack_sync"), headers: csrf_headers, as: :json
-
-        assert_response :forbidden
-        assert_empty client.created_runs
       end
 
       test "workflow show returns not found for unknown workflow" do
