@@ -1,11 +1,6 @@
 // One-shot handoff of a freshly issued API client secret from the create page
 // to that client's detail page, scoped to the /console/api_clients route
 // subtree. Nothing is written to history state, storage, or the query cache.
-//
-// Cleanup does not depend on the detail page rendering: the scope drops the
-// handoff as soon as the location is anywhere but the target detail path, and
-// the whole scope (and the secret with it) unmounts when the user leaves the
-// subtree or a route error replaces it.
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Outlet, useLocation } from "react-router";
 

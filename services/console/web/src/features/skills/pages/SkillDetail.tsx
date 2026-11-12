@@ -131,7 +131,6 @@ function SkillActions({ skill }: { skill: Skill }) {
             className="group inline-flex h-9 cursor-pointer items-center gap-2.5 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs transition-[color,box-shadow] outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30 dark:hover:bg-input/50"
           >
             <span className={shared ? "text-muted-foreground" : "font-medium"}>Private</span>
-            {/* The track and thumb of the shadcn Switch. */}
             <span
               aria-hidden="true"
               className={cn(

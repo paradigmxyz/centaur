@@ -24,7 +24,6 @@ function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
   return `/console/secrets/${secret.kind}/${secret.id}`;
 }
 
-/** The role's secret grants (legacy "Secrets" section): grant picker + table. */
 export function RoleGrantsSection({ role }: SectionProps) {
   const queryClient = useQueryClient();
   const grantSecret = useSubmit((secret: GrantableSummary) => grantRoleSecret(queryClient, role.id, secret));
@@ -32,7 +31,7 @@ export function RoleGrantsSection({ role }: SectionProps) {
   const grants = useRoleGrants(role.id, page);
   const [selected, setSelected] = useState<GrantableSummary | null>(null);
   // The server leaves secrets already granted to the role out of the picker;
-  // like the legacy page, the form is hidden once nothing is left to grant.
+  // the form is hidden once nothing is left to grant.
   const assignable = useAssignableSecretCount(role.id);
   const showGrantForm = assignable.isError || (assignable.data ?? 0) > 0;
 

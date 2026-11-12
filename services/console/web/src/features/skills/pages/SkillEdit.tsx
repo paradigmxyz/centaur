@@ -50,7 +50,6 @@ function SkillEdit() {
             await updateSkill(queryClient, id, input);
           } catch (error) {
             if (error instanceof ApiError && error.status === 409) {
-              // Like the legacy redirect back to edit: show the latest content.
               toast.error(error.message);
               await refetch();
             }

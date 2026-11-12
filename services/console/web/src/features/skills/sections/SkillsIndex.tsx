@@ -1,4 +1,3 @@
-// The Public Skills / My Skills list (legacy skills/index), shared by both tabs.
 import { Link, useSearchParams } from "react-router";
 
 import { useSession } from "@/app/session";

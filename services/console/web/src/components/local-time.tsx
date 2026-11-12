@@ -10,11 +10,6 @@ interface LocalTimeProps {
   className?: string;
 }
 
-/**
- * A timestamp in the viewer's time zone (port of the localtime Stimulus
- * controller). Relative formats re-render every 30s and show the absolute time
- * on hover. Renders an em dash for null.
- */
 export function LocalTime({ value, format = "absolute", className }: LocalTimeProps) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {

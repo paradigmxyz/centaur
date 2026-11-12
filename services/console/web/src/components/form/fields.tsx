@@ -1,9 +1,3 @@
-// Form field patterns for react-hook-form (+ zod via @hookform/resolvers).
-//
-//   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues });
-//   <TextField control={form.control} name="name" label="Display name" />
-//
-// Server validation errors (422 details) map onto fields with applyApiErrors.
 import type { ReactNode } from "react";
 import { useController, type Control, type FieldPath, type FieldValues } from "react-hook-form";
 
@@ -27,7 +21,6 @@ export function fieldId(name: string) {
   return `field-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-/** Label + control + hint + inline error (legacy form-label/form-hint/field-error). */
 export function FieldShell({
   id,
   label,
@@ -151,7 +144,6 @@ export function SelectField<T extends FieldValues>({
   );
 }
 
-/** Checkbox with a bold label and a muted description underneath. */
 export function CheckboxField<T extends FieldValues>({
   control,
   name,
@@ -187,7 +179,6 @@ export function CheckboxField<T extends FieldValues>({
   );
 }
 
-/** A bordered card grouping related fields (legacy .form-section). */
 export function FormSection({
   title,
   actions,

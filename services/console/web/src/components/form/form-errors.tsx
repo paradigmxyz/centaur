@@ -28,7 +28,6 @@ export function applyApiErrors<T extends FieldValues>(
   return unmatched;
 }
 
-/** "<Thing> could not be saved." summary box with every server message. */
 export function FormErrorSummary({ error, subject, className = "max-w-4xl" }: { error: unknown; subject: string; className?: string }) {
   if (!error) return null;
   const messages =

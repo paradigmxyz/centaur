@@ -160,7 +160,6 @@ function UsersPage() {
             id="pending-users-heading"
             className="mb-3 flex items-center gap-2 text-sm font-semibold text-warning"
           >
-            {/* Fixed label, as on the legacy page. */}
             {pending.length} pending approval
           </h2>
           <div className="overflow-hidden rounded-xl border border-warning/30 bg-warning/5">

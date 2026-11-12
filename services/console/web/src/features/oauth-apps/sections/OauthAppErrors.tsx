@@ -2,7 +2,6 @@ import { ErrorAlert } from "@/components/alerts";
 import { ApiError, errorMessage, humanize } from "@/lib/api";
 import { pluralize } from "@/lib/format";
 
-/** Legacy console/oauth_apps/_errors: "N errors prevented this app from saving:". */
 export function OauthAppErrors({ error }: { error: unknown }) {
   if (!error) return null;
   const messages =

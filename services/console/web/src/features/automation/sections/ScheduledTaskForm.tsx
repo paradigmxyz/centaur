@@ -76,7 +76,6 @@ interface ScheduledTaskFormProps {
   onSubmit: (data: ScheduledTaskInput) => Promise<unknown>;
 }
 
-/** The new/edit scheduled task form (legacy scheduled_tasks/_form). */
 export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTaskFormProps) {
   const dmUserId = task.direct_message_user_id;
   const form = useForm<Values>({
@@ -299,7 +298,6 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
   );
 }
 
-/** Every server message as a full sentence ("Delivery channel is not available to the author"). */
 function saveErrorMessages(error: unknown): string[] {
   if (!error) return [];
   if (error instanceof ApiError && error.status === 422 && Object.keys(error.fieldErrors).length > 0) {

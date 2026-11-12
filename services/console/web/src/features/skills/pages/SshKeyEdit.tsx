@@ -32,12 +32,10 @@ interface Feedback {
 }
 
 /**
- * Live check of a pasted key (port of the ssh-key Stimulus controller): 500ms
- * debounce, stale requests aborted, nothing saved. The key is only ever sent
- * to the validate endpoint, whose responses never echo it. The check is a
- * plain request, not a TanStack query, so the plaintext never enters the
- * query cache; results are matched to the input by an edit counter
- * (`version`) rather than by storing the key.
+ * Live check of a pasted key: 500ms debounce, stale requests aborted, nothing
+ * saved. The key is only sent to the validate endpoint, whose responses never
+ * echo it, and never enters the query cache; results are matched to the input
+ * by an edit counter (`version`) rather than by storing the key.
  */
 function useKeyFeedback(privateKey: string, version: number, saved: boolean): Feedback {
   const [result, setResult] = useState<{ version: number; feedback: Feedback } | null>(null);

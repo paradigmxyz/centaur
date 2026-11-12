@@ -16,7 +16,6 @@ export interface NavEntry {
   match?: string[];
 }
 
-/** A tab in the Control section strip (Principals, Roles, ...). */
 export interface ControlTab {
   id: string;
   label: string;
@@ -26,14 +25,7 @@ export interface ControlTab {
   match?: string;
 }
 
-/**
- * What every web/src/features/<slice>/index.ts exports as default.
- *
- * - routes: rendered inside the authenticated app shell. Use absolute paths
- *   (e.g. "/console/roles/:id").
- * - publicRoutes: rendered without the shell or session (auth pages).
- * - nav / controlTabs: sidebar entries and Control tabs.
- */
+/** `routes` render inside the authenticated shell; `publicRoutes` without shell or session. */
 export interface FeatureModule {
   id: string;
   routes?: RouteObject[];

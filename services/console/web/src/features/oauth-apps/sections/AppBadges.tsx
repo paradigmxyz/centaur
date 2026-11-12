@@ -1,7 +1,6 @@
 import { StatusBadge } from "@/components/badges";
 import { Badge } from "@/components/ui/badge";
 
-/** Provider pill. */
 export function ProviderPill({ provider }: { provider: string }) {
   return (
     <Badge variant="outline" className="rounded-md bg-muted/50 font-mono text-[11px] font-normal text-muted-foreground">

@@ -4,7 +4,6 @@ import { useShell } from "@/app/shell-context";
 import { AppLink } from "@/components/app-link";
 import { cn } from "@/lib/utils";
 
-/** The Control section tab strip. Render it at the top of Control index pages. */
 export function ControlTabs() {
   const { controlTabs } = useShell();
   const { pathname } = useLocation();

@@ -1,9 +1,5 @@
-// Applies the stored theme before first paint, so the page never flashes the
-// wrong theme. index.html loads it as a classic, render-blocking script ahead
-// of the module bundle; vite.config.ts emits it as a content-hashed file under
-// /spa/assets/ so the Content-Security-Policy needs no inline script. Keep the
-// keys and logic in step with src/lib/theme.ts (same keys as the legacy
-// console).
+// Applies the stored theme before first paint. Keep the keys and logic in step
+// with src/lib/theme.ts.
 (() => {
   let theme = null;
   try {

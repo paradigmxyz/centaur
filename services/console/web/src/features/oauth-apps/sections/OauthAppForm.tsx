@@ -1,6 +1,5 @@
-// The OAuth app create/edit form (legacy console/oauth_apps/_form). The
-// client secret is write-only: never prefilled, and a blank value on edit is
-// omitted so the stored secret is kept. `shared` is create-only.
+// The client secret is write-only: never prefilled, and a blank value on edit
+// is omitted so the stored secret is kept. `shared` is create-only.
 import { zodResolver } from "@hookform/resolvers/zod";
 import { FormProvider, useForm, type FieldError } from "react-hook-form";
 import { Link } from "react-router";
@@ -16,7 +15,6 @@ import type { OauthApp, OauthAppInput, OauthProvider } from "../api";
 
 export const CUSTOM_PROVIDER = "custom";
 
-/** Labels for the custom provider's config fields, in form order. */
 const CONFIG_LABELS: Record<string, string> = {
   authorization_endpoint: "Authorization endpoint",
   token_endpoint: "Token endpoint",
@@ -110,7 +108,7 @@ export function toPayload(values: OauthAppFormValues, isNew: boolean, configKeys
   return payload;
 }
 
-/** Rails `"github".capitalize` -> "Github" (the legacy select labels). */
+/** Rails `"github".capitalize` -> "Github". */
 function capitalize(key: string) {
   return key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
 }

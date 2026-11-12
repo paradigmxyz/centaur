@@ -1,6 +1,5 @@
-// Data access for the secrets pages. Query keys live under "secrets" (shared
-// with the grant pickers' sharedKeys.secrets lists, so invalidating the lists
-// refreshes them too); writes invalidate the narrowest prefix.
+// Query keys live under "secrets", shared with the grant pickers' lists, so
+// invalidating the lists refreshes them too.
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
@@ -18,7 +17,6 @@ export function isFormKind(kind: string): kind is FormKind {
   return (FORM_KINDS as readonly string[]).includes(kind);
 }
 
-/** The per-kind /api/v1 resource behind each form kind. */
 export const KIND_RESOURCE: Record<FormKind, string> = {
   static: "/api/v1/static_secrets",
   pg_dsn: "/api/v1/pg_dsn_secrets",
@@ -32,7 +30,6 @@ export interface ManagedBy {
   oauth_app_slug: string | null;
 }
 
-/** A row of GET /api/v1/secrets. */
 export interface SecretListItem extends GrantableSummary {
   grant_key: string;
   description: string | null;
@@ -58,7 +55,6 @@ export interface RequestRule {
   paths: string[];
 }
 
-/** GET /api/v1/secrets/:kind/:id. */
 export interface SecretDetail extends SecretListItem {
   editable: boolean;
   injection: string | null;
@@ -93,7 +89,6 @@ export interface SourcePayload {
   config: Record<string, unknown>;
 }
 
-/** The per-kind record (GET /api/v1/<kind>_secrets/:id), as the edit form needs it. */
 export interface KindRecord {
   id: string;
   foreign_id: string | null;
@@ -124,7 +119,6 @@ export interface KindRecord {
 
 export const SECRETS_PER_PAGE = 50;
 
-/** Page title of a secret: name, else foreign_id, else oid. */
 export function secretTitle(secret: { name: string | null; foreign_id: string | null; id: string }) {
   return secret.name || secret.foreign_id || secret.id;
 }
@@ -142,7 +136,6 @@ export function useSecretList(params: { q: string; kind: string; page: number })
   });
 }
 
-/** Unfiltered count of every kind for the "N secrets total." subtitle. */
 export function useSecretTotal() {
   return useQuery({
     queryKey: secretKeys.list({ total: true }),

@@ -1,5 +1,3 @@
-// Automation slice: scheduled tasks (any active user, own tasks) and the
-// admin workflow dashboard.
 import { Clock, Workflow } from "lucide-react";
 
 import type { FeatureModule } from "@/app/types";

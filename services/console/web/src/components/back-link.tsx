@@ -2,7 +2,6 @@ import { ArrowLeft } from "lucide-react";
 
 import { AppLink } from "@/components/app-link";
 
-/** "← back to principals" */
 export function BackLink({ to, children }: { to: string; children: string }) {
   return (
     <AppLink

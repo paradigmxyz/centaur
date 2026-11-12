@@ -1,4 +1,3 @@
-// The skill form (legacy skills/_form + _editor_picker), used by New and Edit.
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMemo } from "react";
 import { Controller, useForm } from "react-hook-form";
@@ -161,7 +160,6 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
   );
 }
 
-/** Owner-only editor picker over the active users (editor_candidates). */
 function EditorPicker({
   value,
   onChange,

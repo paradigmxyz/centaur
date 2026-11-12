@@ -1,8 +1,3 @@
-// Test helpers for the SPA tests.
-//
-//   const fetchMock = mockApi({ "PUT /api/v1/me/ssh_key": { data: key } });
-//   const { queryClient } = renderRoute(<SshKeyEditPage />, { path: "/console/ssh_key/edit" });
-//   expect(fetchMock.calls("PUT /api/v1/me/ssh_key")[0]?.body).toEqual({...});
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";

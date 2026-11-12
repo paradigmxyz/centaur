@@ -12,7 +12,6 @@ interface SearchBoxProps {
   param?: string;
 }
 
-/** GET-style search form bound to `?q=`, with Search and Clear. */
 export function SearchBox({ placeholder, label, param = "q" }: SearchBoxProps) {
   const [params, setParams] = useSearchParams();
   const current = params.get(param) ?? "";

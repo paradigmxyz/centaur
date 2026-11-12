@@ -1,4 +1,3 @@
-// The broker credential create/edit form (legacy broker_credentials/_form).
 // Every write-only value (client secret, refresh token, username, password,
 // API key, header values) starts blank and is omitted from the request when
 // left blank, so the stored value is kept. Header values are never prefilled:

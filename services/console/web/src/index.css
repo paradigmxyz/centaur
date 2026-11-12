@@ -3,12 +3,9 @@
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 
-/* Theme selection: <html data-console-theme="dark|light" class="dark">, resolved
-   before first paint by the inline script in index.html and kept in sync by
-   lib/theme.ts. Dark is the default and primary look. */
+/* <html data-console-theme="dark|light" class="dark">, set by theme-boot.js and lib/theme.ts. */
 @custom-variant dark (&:is(.dark *));
 
-/* Light theme: white and zinc surfaces, a deeper green for text and primary. */
 :root {
   --radius: 0.5rem;
 
@@ -51,7 +48,6 @@
   --sidebar-ring: oklch(0.627 0.17 149.214);
 }
 
-/* Dark theme (default): near-black zinc, lifted surfaces, brand green. */
 .dark {
   --background: oklch(0.135 0.004 285.9);
   --foreground: oklch(0.967 0.001 286.375);

@@ -22,11 +22,7 @@ interface SecretGrantPickerProps {
   placeholder?: string;
 }
 
-/**
- * Searchable, kind-grouped secret picker backed by GET /api/v1/secrets (the
- * "grant secret" select on principal and role pages). Shows identifying
- * metadata only.
- */
+/** Shows identifying metadata only. */
 export function SecretGrantPicker({
   value,
   onChange,

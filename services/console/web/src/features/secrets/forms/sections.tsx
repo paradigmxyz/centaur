@@ -1,5 +1,3 @@
-// Form sections shared by the secret kinds: identity, labels, source, request
-// rules, and pg_dsn session settings. All read the form from FormProvider.
 import { Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Controller, useFieldArray, useFormContext, useWatch } from "react-hook-form";
@@ -21,7 +19,6 @@ import {
 } from "../form-model";
 import { MethodChips, PathChips } from "./chips";
 
-/** Inline field error under a section (legacy .field-error). */
 export function SectionError({ messages }: { messages: string[] | undefined }) {
   if (!messages || messages.length === 0) return null;
   return <p className="mb-3 text-xs text-destructive">{messages.join(", ")}</p>;
@@ -250,7 +247,6 @@ export function SettingsSection({ errors }: { errors?: string[] }) {
   );
 }
 
-/** A pair of radio panels (legacy toggle controller). */
 export function RadioChoice<V extends string>({
   name,
   value,

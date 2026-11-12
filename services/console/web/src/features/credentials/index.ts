@@ -1,5 +1,3 @@
-// Credentials slice (broker credentials): list, detail, and the create/edit
-// form over /api/v1/broker_credentials.
 import type { FeatureModule } from "@/app/types";
 
 const credentials: FeatureModule = {

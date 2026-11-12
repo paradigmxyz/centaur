@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 
 import { SectionHeading } from "@/components/page-header";
 
-/** Legacy def_section: a heading over a panel of label/value rows. */
 export function DefinitionSection({
   title,
   rows,

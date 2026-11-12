@@ -1,6 +1,4 @@
-// Theme preference, compatible with the legacy console's localStorage keys and
-// web/theme-boot.js (loaded from index.html's <head>; applies the theme before
-// first paint). Preference cycles system -> light -> dark.
+// Keep keys in step with web/theme-boot.js.
 import { useSyncExternalStore } from "react";
 
 export type ThemePreference = "system" | "light" | "dark";

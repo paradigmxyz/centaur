@@ -19,7 +19,6 @@ interface DataTableProps<Row> {
   columns: Column<Row>[];
   rows: Row[] | undefined;
   rowKey: (row: Row) => string;
-  /** Shown in a full-width row when `rows` is empty. */
   empty: ReactNode;
   loading?: boolean;
   /**
@@ -27,17 +26,8 @@ interface DataTableProps<Row> {
    * page shows the loading rows while the footer moves to the last page.
    */
   pagination?: PaginationProps & { meta: PageMeta };
-  /**
-   * Fixed layout with colgroup widths from column classNames. Fixed tables keep
-   * a minimum width and scroll horizontally inside the panel on narrow screens
-   * instead of squeezing their columns.
-   */
+  /** Fixed layout with colgroup widths from column classNames. */
   fixed?: boolean;
-  /**
-   * Minimum table width class. Defaults to `min-w-[44rem]` for fixed tables and
-   * `min-w-[40rem]` for tables with four or more columns, so narrow screens
-   * scroll the table instead of squeezing it.
-   */
   minWidth?: string;
   className?: string;
   caption?: string;
@@ -48,7 +38,6 @@ function defaultMinWidth(fixed: boolean | undefined, columnCount: number) {
   return columnCount >= 4 ? "min-w-[40rem]" : undefined;
 }
 
-/** The console table panel: header row, hover rows, empty state, pager. */
 export function DataTable<Row>({
   columns,
   rows,

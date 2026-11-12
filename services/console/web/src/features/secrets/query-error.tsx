@@ -2,10 +2,7 @@ import { ErrorAlert } from "@/components/alerts";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 
-/**
- * A failed query (initial load or background refetch). Pages show this
- * instead of an empty state, so a failed request never reads as "No X yet."
- */
+/** Shown instead of an empty state, so a failed request never reads as "No X yet." */
 export function QueryErrorAlert({ what, error, onRetry }: { what: string; error: unknown; onRetry?: () => void }) {
   return (
     <ErrorAlert className="flex flex-wrap items-center justify-between gap-3">

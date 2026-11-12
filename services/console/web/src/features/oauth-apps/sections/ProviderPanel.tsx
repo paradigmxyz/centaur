@@ -4,7 +4,6 @@ import { errorMessage } from "@/lib/api";
 import { useProviderDetails, type OauthApp } from "../api";
 import { MercatorPanel } from "./MercatorPanel";
 
-/** Providers with a detail-page panel (legacy oauth_apps/providers/_<provider>). */
 const PANELS = { mercator: MercatorPanel } as const;
 
 function hasPanel(provider: string): provider is keyof typeof PANELS {

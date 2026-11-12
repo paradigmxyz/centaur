@@ -5,11 +5,7 @@ import { useShell } from "@/app/shell-context";
 
 type AppLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> & { to: string };
 
-/**
- * Link to any console path. SPA paths navigate client-side; Rails protocol
- * routes (such as /oauth/:slug/start or /auth/:provider/start) do a full page
- * load. Use this whenever the target may belong to another feature.
- */
+/** SPA paths navigate client-side; Rails routes (e.g. /oauth/:slug/start) do a full page load. */
 export function AppLink({ to, ...props }: AppLinkProps) {
   const { isSpaPath } = useShell();
   if (isSpaPath(to)) return <Link to={to} {...props} />;

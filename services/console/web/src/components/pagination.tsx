@@ -12,11 +12,7 @@ export interface PageChangeOptions {
 
 export type PageChangeHandler = (page: number, options?: PageChangeOptions) => void;
 
-/**
- * The page number in the URL query (`?page=2`, or a custom name such as
- * `roles_page` so several paginators on one page stay independent). Setting a
- * page keeps every other query param.
- */
+/** `?page=`, or a custom name so several paginators on one page stay independent. */
 export function usePageParam(name = "page"): [number, PageChangeHandler] {
   const [params, setParams] = useSearchParams();
   const raw = Number.parseInt(params.get(name) ?? "1", 10);
@@ -34,19 +30,11 @@ export function usePageParam(name = "page"): [number, PageChangeHandler] {
   return [page, setPage];
 }
 
-/**
- * True when the server answered a page past the last one: a stale link, or
- * rows deleted since the page was opened. The API returns an empty page with
- * the real total rather than clamping, so the client moves to the last page.
- */
+/** The API answers a page past the last with an empty page and the real total, not a clamp. */
 export function isPastLastPage(meta: Pick<PageMeta, "page" | "total_pages">) {
   return meta.total_pages > 0 && meta.page > meta.total_pages;
 }
 
-/**
- * Replaces the URL's page with the last page (keeping every other param) when
- * the response is past it, once per stale response.
- */
 function useClampToLastPage(meta: Pick<PageMeta, "page" | "total_pages">, onPageChange: PageChangeHandler) {
   const clamped = useRef<string | null>(null);
   const stale = isPastLastPage(meta);
@@ -67,11 +55,6 @@ export interface PaginationProps {
   hideSinglePage?: boolean;
 }
 
-/**
- * Footer: "51 principals · page 1 of 2" with Previous/Next. A response past
- * the last page sends the URL to the last page instead of showing a false
- * empty list.
- */
 export function Pagination({ meta, unit, onPageChange, hideSinglePage }: PaginationProps) {
   useClampToLastPage(meta, onPageChange);
   const totalPages = Math.max(meta.total_pages, 1);

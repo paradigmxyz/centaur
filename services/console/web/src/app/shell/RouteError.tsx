@@ -29,13 +29,8 @@ export function RouteError() {
 }
 
 /**
- * A page whose suspense query failed lands here. TanStack keeps that failed
- * query in the cache and, by design, rethrows its error (without refetching)
- * whenever a page reading it mounts again, so revisiting the page would show
- * this error until a hard reload. Once the failing page has unmounted, drop
- * every failed query nobody is observing; the next visit fetches afresh.
- * Queries still on screen (the shell's session, a section's ErrorAlert) keep
- * their state.
+ * TanStack rethrows a cached failed suspense query on remount without
+ * refetching, so once the failing page unmounts, drop unobserved failed queries.
  */
 function useForgetFailedQueries(error: unknown) {
   const queryClient = useQueryClient();

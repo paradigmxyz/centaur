@@ -1,6 +1,3 @@
-// Data access for the admin pages (users, API clients, system settings).
-// Query keys live under "admin" (see lib/query-keys.ts).
-//
 // API client secrets are never cached: the create/rotate responses go straight
 // to the caller (which keeps the secret in route-scoped component state);
 // detail queries are refreshed by invalidation, never seeded from them.
@@ -15,8 +12,6 @@ interface CountedList<T> {
   data: T[];
   meta: { total: number };
 }
-
-// -- users -------------------------------------------------------------------
 
 export type UserStatus = "active" | "pending" | "disabled";
 
@@ -53,8 +48,6 @@ export async function runUserAction(queryClient: QueryClient, user: ConsoleUser,
     await queryClient.invalidateQueries({ queryKey: adminKeys.list({ resource: "users" }) });
   }
 }
-
-// -- API clients ---------------------------------------------------------------
 
 export const API_CLIENT_SCOPES = ["sessions:read", "sessions:write"] as const;
 
@@ -121,7 +114,6 @@ export async function updateApiClient(queryClient: QueryClient, id: string, data
 
 const clientPath = (id: string) => `${clientsBase}/${id}`;
 
-/** Refreshes one client and the list. */
 const refreshApiClient = (queryClient: QueryClient, id: string) =>
   Promise.all([
     queryClient.invalidateQueries({ queryKey: clientKey(id) }),
@@ -161,8 +153,6 @@ export async function makeApiClientPrincipalDefault(queryClient: QueryClient, id
   await api.post(`${clientPath(id)}/principals/${linkId}/default`);
   await refreshApiClient(queryClient, id);
 }
-
-// -- system settings -------------------------------------------------------------
 
 export type SandboxRepoCache = "none" | "public" | "all";
 

@@ -1,5 +1,4 @@
-// The signed-in caller, from GET /api/v1/me. The shell loads it once; every
-// component reads it through useSession() (never fetch /me directly).
+// The shell loads GET /api/v1/me once; read it through useSession().
 import { useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, setCsrfToken, type DataEnvelope } from "@/lib/api";

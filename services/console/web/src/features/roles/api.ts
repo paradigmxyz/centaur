@@ -1,7 +1,5 @@
-// Data access for the role pages. Query keys live under "roles" (see
-// lib/query-keys.ts); writes invalidate the narrowest prefix. Role changes
-// also refresh cached principal pages, which show role names, inherited Slack
-// permissions, and effective grants.
+// Role changes also refresh cached principal pages, which show role names,
+// inherited Slack permissions, and effective grants.
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { SlackChannelPermissionRow } from "@/components/slack-channel-permissions-editor";
@@ -42,7 +40,7 @@ export interface RoleFormData {
 
 const base = "/api/v1/roles";
 
-/** Roles are few and the legacy page was unpaginated: one page of the API maximum. */
+/** Roles are few: one page of the API maximum. */
 export const ROLE_PAGE_LIMIT = 200;
 
 export function useRoleList(page: number) {
@@ -70,10 +68,7 @@ export function useRoleGrants(id: string, page: number) {
   });
 }
 
-/**
- * How many secrets can still be granted to the role (all kinds, excluding
- * existing grants). The legacy page hid the grant form when this was zero.
- */
+/** How many secrets can still be granted to the role (all kinds, excluding existing grants). */
 export function useAssignableSecretCount(id: string) {
   const params = { exclude_grantee: `role:${id}`, limit: 1 };
   return useQuery({

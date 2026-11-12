@@ -1,5 +1,3 @@
-// Request-rule chip inputs: the HTTP method toggles (method-chips) and the
-// path token input (path-chips) of the legacy rule rows.
 import { X } from "lucide-react";
 import { useState, type KeyboardEvent } from "react";
 
@@ -51,7 +49,6 @@ export function MethodChips({
   );
 }
 
-/** Path tokens: type a path, then comma, Enter, or blur to add it. */
 export function PathChips({
   value,
   onChange,
