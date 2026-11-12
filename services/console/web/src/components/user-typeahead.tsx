@@ -2,6 +2,7 @@ import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
 export interface UserOption {
@@ -76,31 +77,39 @@ export function UserTypeahead({
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
       }}
     >
-      <div className="relative">
-        <Input
-          ref={inputRef}
-          role="combobox"
-          aria-label={label}
-          aria-expanded={open}
-          aria-controls={listId}
-          aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
-          autoComplete="off"
-          placeholder={placeholder}
-          value={query}
-          onFocus={() => setOpen(true)}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            setOpen(true);
-            setActive(-1);
+      <Popover open={open && visible.length > 0} onOpenChange={(next) => !next && setOpen(false)}>
+        <PopoverAnchor asChild>
+          <Input
+            ref={inputRef}
+            role="combobox"
+            aria-label={label}
+            aria-expanded={open}
+            aria-controls={listId}
+            aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+            autoComplete="off"
+            placeholder={placeholder}
+            value={query}
+            onFocus={() => setOpen(true)}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setOpen(true);
+              setActive(-1);
+            }}
+            onKeyDown={onKeyDown}
+          />
+        </PopoverAnchor>
+        {/* Rendered in a portal so a card's overflow never clips the list. */}
+        <PopoverContent
+          asChild
+          align="start"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            if (inputRef.current?.contains(event.target as Node)) event.preventDefault();
           }}
-          onKeyDown={onKeyDown}
-        />
-        {open && visible.length > 0 && (
-          <ul
-            id={listId}
-            role="listbox"
-            className="absolute z-20 mt-1 max-h-60 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-          >
+          className="max-h-60 w-(--radix-popover-trigger-width) overflow-y-auto p-1"
+        >
+          <ul id={listId} role="listbox">
             {visible.map((option, index) => (
               <li key={option.id}>
                 <button
@@ -121,8 +130,8 @@ export function UserTypeahead({
               </li>
             ))}
           </ul>
-        )}
-      </div>
+        </PopoverContent>
+      </Popover>
       {value.length === 0 ? (
         <p className="text-xs text-muted-foreground">{emptyText}</p>
       ) : (

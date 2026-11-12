@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { api } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -110,6 +111,7 @@ export function SlackChannelPicker({
   const [status, setStatus] = useState<{ message: string; error: boolean }>({ message: "", error: false });
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
 
   useEffect(
@@ -178,55 +180,66 @@ export function SlackChannelPicker({
 
   const visible = open && options.length > 0;
   return (
-    <div className="relative">
-      <Input
-        id={inputId}
-        role="combobox"
-        aria-label={ariaLabel}
-        aria-autocomplete="list"
-        aria-controls={listId}
-        aria-expanded={visible}
-        aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
-        autoComplete="off"
-        placeholder={placeholder}
-        disabled={disabled}
-        value={text}
-        onFocus={(event) => {
-          setOpen(true);
-          const preserving = text === selectedDisplay && selectedDisplay !== null;
-          if (preserving) event.currentTarget.select();
-          void search(preserving ? "" : text.trim(), preserving);
-        }}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-        onChange={(event) => onInput(event.target.value)}
-        onKeyDown={onKeyDown}
-      />
-      <div
-        id={listId}
-        role="listbox"
-        hidden={!visible}
-        className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-      >
-        {options.map((option, index) => (
-          <button
-            key={option.channel_id}
-            type="button"
-            id={`${listId}-${index}`}
-            role="option"
-            aria-selected={index === active}
-            tabIndex={-1}
-            onPointerDown={(event) => event.preventDefault()}
-            onClick={() => select(option)}
-            className={cn(
-              "block min-h-11 w-full cursor-pointer rounded-sm px-2.5 py-2 text-left transition-colors hover:bg-accent focus:outline-none",
-              index === active && "bg-accent",
-            )}
-          >
-            <div className="text-sm">{option.label}</div>
-            <div className="mt-0.5 text-xs text-muted-foreground">{option.description}</div>
-          </button>
-        ))}
-      </div>
+    <div>
+      <Popover open={visible} onOpenChange={(next) => !next && setOpen(false)}>
+        <PopoverAnchor asChild>
+          <Input
+            ref={inputRef}
+            id={inputId}
+            role="combobox"
+            aria-label={ariaLabel}
+            aria-autocomplete="list"
+            aria-controls={listId}
+            aria-expanded={visible}
+            aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+            autoComplete="off"
+            placeholder={placeholder}
+            disabled={disabled}
+            value={text}
+            onFocus={(event) => {
+              setOpen(true);
+              const preserving = text === selectedDisplay && selectedDisplay !== null;
+              if (preserving) event.currentTarget.select();
+              void search(preserving ? "" : text.trim(), preserving);
+            }}
+            onBlur={() => setTimeout(() => setOpen(false), 150)}
+            onChange={(event) => onInput(event.target.value)}
+            onKeyDown={onKeyDown}
+          />
+        </PopoverAnchor>
+        {/* Rendered in a portal so a card's overflow never clips the list. */}
+        <PopoverContent
+          id={listId}
+          role="listbox"
+          align="start"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => event.preventDefault()}
+          onInteractOutside={(event) => {
+            if (inputRef.current?.contains(event.target as Node)) event.preventDefault();
+          }}
+          className="max-h-72 w-(--radix-popover-trigger-width) overflow-y-auto p-1"
+        >
+          {options.map((option, index) => (
+            <button
+              key={option.channel_id}
+              type="button"
+              id={`${listId}-${index}`}
+              role="option"
+              aria-selected={index === active}
+              tabIndex={-1}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => select(option)}
+              className={cn(
+                "block min-h-11 w-full cursor-pointer rounded-sm px-2.5 py-2 text-left transition-colors hover:bg-accent focus:outline-none",
+                index === active && "bg-accent",
+              )}
+            >
+              <div className="text-sm">{option.label}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{option.description}</div>
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
       <div
         role="status"
         aria-live="polite"
