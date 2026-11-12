@@ -5,6 +5,10 @@ module Api
     # `PUT` upserts by slug. client_secret is required and write-only: it is
     # accepted on writes but NEVER serialized back.
     class OauthAppsController < Api::BaseController
+      credential_policy :bearer_or_session
+      # Added for the console SPA; not part of the bearer API.
+      credential_policy :session, only: %i[preset credentials provider_details]
+
       include OauthAppUrls
 
       # Builds the RFC 7591 client used by #preset (tests swap it).

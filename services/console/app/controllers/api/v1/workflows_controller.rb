@@ -12,6 +12,8 @@ module Api
     # A missing or unreadable workflow database is a 503 with
     # details.reason=workflow_database_unavailable.
     class WorkflowsController < Api::BaseController
+      credential_policy :session
+
       class_attribute :client_factory, default: -> { CentaurApiClient.new }
 
       rescue_from WorkflowDashboard::Unavailable do |e|

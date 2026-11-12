@@ -4,12 +4,18 @@ module Api
     #
     # GET /api/v1/scheduled_tasks/:id (no ?view) is the admin-only execution
     # state lookup used by the workflow host: id, enabled, delivery_channel, and
-    # never the prompt.
+    # never the prompt. It accepts a bearer key or the session; everything
+    # else (including ?view=console) is console-session only.
     #
     # Everything else backs the console Scheduled Tasks pages and is open to
     # any active user, scoped to the tasks they authored. Any other task is a
     # 404 for everyone, admins included (the legacy console's authority).
     class ScheduledTasksController < Api::BaseController
+      credential_policy :bearer_or_session
+      # Added for the console SPA; not part of the bearer API.
+      credential_policy :session, only: %i[index new create update destroy run slack_channel_options]
+      credential_policy :session, only: :show, if: :console_view?
+
       MAX_CHANNEL_OPTIONS = 20
 
       allow_active_users only: %i[index new show create update destroy run slack_channel_options]

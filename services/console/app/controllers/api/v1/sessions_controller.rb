@@ -4,16 +4,16 @@ module Api
     # button). Password sign-in is the server-rendered POST /login form
     # (SessionsController).
     #
-    # Bearer callers have no session to end, so DELETE is a no-op for them.
-    # Pending accounts may sign out too.
+    # Session only (a bearer key gets 403 session_required). Pending accounts
+    # may sign out too.
     class SessionsController < Api::BaseController
+      credential_policy :session
+
       allow_pending_users only: :destroy
 
       def destroy
-        if session_authenticated?
-          reset_session
-          request.flash[:notice] = "Signed out."
-        end
+        reset_session
+        request.flash[:notice] = "Signed out."
         head :no_content
       end
     end

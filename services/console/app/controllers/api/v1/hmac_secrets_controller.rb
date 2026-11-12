@@ -1,6 +1,8 @@
 module Api
   module V1
     class HmacSecretsController < Api::BaseController
+      credential_policy :bearer_or_session
+
       def index
         records, meta = paginated_label_search(HmacSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }

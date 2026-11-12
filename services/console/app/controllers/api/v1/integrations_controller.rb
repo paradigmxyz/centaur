@@ -8,6 +8,8 @@ module Api
     # Open to any active account. Only non-sensitive app fields are returned --
     # never the client id/secret or other users' credentials.
     class IntegrationsController < Api::BaseController
+      credential_policy :session
+
       include OauthAppUrls
 
       allow_active_users only: :index

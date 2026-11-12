@@ -1,24 +1,42 @@
 module Api
   # Base for the operator JSON API under /api/v1.
   #
-  # A request authenticates with EITHER a bearer ApiKey (machine callers, CLIs)
-  # OR the console session cookie (the browser SPA). An Authorization header,
-  # when present, is authoritative: a bad bearer token never falls back to the
-  # cookie. Cookie-authenticated requests that are not GET/HEAD must carry the
-  # session's CSRF token in X-CSRF-Token (fetch it from GET /api/v1/me); bearer
-  # requests skip CSRF because browsers never attach them ambiently.
+  # Credentials. Every controller declares which credential each action
+  # accepts (`credential_policy`):
+  #
+  #   :bearer             a bearer ApiKey only (machine callers, CLIs)
+  #   :session            the console session cookie only (the browser SPA)
+  #   :bearer_or_session  either one
+  #
+  # Endpoints keep the credential type they accepted before the SPA existed
+  # (bearer); only the ones the SPA needs also accept the session, and
+  # endpoints added for the SPA accept only the session. A request carrying
+  # the wrong type is refused before anything else runs (403
+  # details.reason=session_required / bearer_required); it never falls back
+  # to the other credential. An action without a declaration fails closed.
+  # Cookie-authenticated requests that are not GET/HEAD must carry the
+  # session's CSRF token in X-CSRF-Token (fetch it from GET /api/v1/me);
+  # bearer requests skip CSRF because browsers never attach them ambiently.
   #
   # Authorization is per endpoint. Every action is admin-only unless the
   # controller opts in with `allow_active_users` (any active account; scope
   # records with `owned_scope` / `require_owner_or_admin!`) or
   # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me). For
   # session requests the admin check honours the "view as operator" descope.
+  #
+  # Every non-GET request emits one `console_api_audit` log line (actor, auth
+  # method, target ids, status), including refused ones.
   class BaseController < ActionController::API
     include ApiRequestSupport
     include ConsoleSession
     include ActionController::RequestForgeryProtection
 
     CSRF_SAFE_METHODS = %w[GET HEAD].freeze
+    CREDENTIAL_POLICIES = %i[bearer session bearer_or_session].freeze
+
+    # Raised (in development and test) for an action with no credential
+    # policy, so a new endpoint cannot ship without choosing one.
+    class MissingCredentialPolicy < StandardError; end
 
     # The railtie only applies forgery-protection defaults to
     # ActionController::Base; share its Origin-header check with the API.
@@ -32,6 +50,44 @@ module Api
     rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
     attr_reader :current_api_key
+
+    # Ordered [policy, only, except, if] declarations; the last one matching
+    # an action wins, so a controller can declare a default and then override
+    # single actions. Subclasses inherit their parent's declarations.
+    class_attribute :credential_policy_rules, instance_writer: false, default: [].freeze
+
+    # Declares the credential type +policy+ (see CREDENTIAL_POLICIES) for the
+    # controller's actions, or only:/except: some of them. +if:+ names a
+    # predicate method for a request-dependent override (it must not depend
+    # on the caller's identity, which is not known yet).
+    def self.credential_policy(policy, only: nil, except: nil, if: nil)
+      unless CREDENTIAL_POLICIES.include?(policy)
+        raise ArgumentError, "unknown credential policy #{policy.inspect}"
+      end
+
+      rule = [ policy, only && Array(only).map(&:to_s), except && Array(except).map(&:to_s), binding.local_variable_get(:if) ]
+      self.credential_policy_rules = (credential_policy_rules + [ rule.freeze ]).freeze
+    end
+
+    # The unconditional policy declared for +action+, or nil when none
+    # applies. Conditional (if:) overrides are listed by
+    # conditional_credential_policies_for.
+    def self.credential_policy_for(action)
+      matching_credential_policy_rules(action).reverse.find { |rule| rule[3].nil? }&.first
+    end
+
+    # [[policy, predicate], ...] for the conditional overrides of +action+.
+    def self.conditional_credential_policies_for(action)
+      matching_credential_policy_rules(action).select { |rule| rule[3] }.map { |rule| [ rule[0], rule[3] ] }
+    end
+
+    def self.matching_credential_policy_rules(action)
+      action = action.to_s
+      credential_policy_rules.select do |_policy, only, except, _condition|
+        (only.nil? || only.include?(action)) && (except.nil? || !except.include?(action))
+      end
+    end
+    private_class_method :matching_credential_policy_rules
 
     # Opts actions into any active (approved, not disabled) account instead of
     # the admin-only default. The action must scope what it loads to the
@@ -54,6 +110,67 @@ module Api
     end
 
     private
+
+    AUDIT_SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
+
+    # Wraps every action, including ones a before_action refused, so each
+    # non-GET request leaves exactly one audit line. An exception that
+    # escapes rescue_from is logged with the status Rails will answer with.
+    def process_action(*)
+      super
+    rescue Exception => e # rubocop:disable Lint/RescueException -- re-raised
+      @audit_status = ActionDispatch::ExceptionWrapper.status_code_for_exception(e.class.name)
+      raise
+    ensure
+      emit_console_api_audit
+    end
+
+    # One structured line per write: who (user, auth method, API key oid),
+    # what (controller, action, method, path-parameter ids), and the outcome.
+    # Never request bodies or tokens; target ids go through the app's
+    # parameter filter (ConsoleLogFilter).
+    def emit_console_api_audit
+      return if AUDIT_SAFE_METHODS.include?(request.request_method)
+      # Sandbox admin requests authenticate with a sandbox JWT and log their
+      # own sandbox_admin_request line.
+      return if is_a?(SandboxAdminAuthentication)
+
+      Rails.logger.info(console_api_audit_entry)
+    rescue StandardError => e
+      Rails.logger.error("console_api_audit failed: #{e.class}")
+    end
+
+    def console_api_audit_entry
+      user = current_user || audit_presented_user
+      method = auth_method || presented_credential
+      api_key = current_api_key || @presented_api_key
+      {
+        event: "console_api_audit",
+        user_id: user&.oid,
+        user_email: user&.email,
+        auth_method: method == :none ? nil : method.to_s,
+        api_key_id: (api_key&.oid if method == :api_key),
+        authenticated: auth_method.present?,
+        controller: controller_path,
+        action: action_name,
+        http_method: request.request_method,
+        target: audit_target,
+        status: @audit_status || response.status
+      }
+    end
+
+    # The identity behind a refused credential, for the audit line only.
+    def audit_presented_user
+      case presented_credential
+      when :api_key then @presented_api_key&.user
+      when :session then console_session_user
+      end
+    end
+
+    def audit_target
+      keys = request.path_parameters.keys.map(&:to_s) - %w[controller action format]
+      request.filtered_parameters.slice(*keys)
+    end
 
     # :api_key, :session, or nil before authentication.
     attr_reader :auth_method
@@ -78,14 +195,75 @@ module Api
       session_authenticated? && console_session_descoped?
     end
 
+    # Enforces the action's credential policy before anything else, then
+    # authenticates with the one credential type the request presented. An
+    # Authorization header always counts as a bearer credential, even when a
+    # session cookie is also present.
     def authenticate_request!
-      if request.headers["Authorization"].present?
+      presented = presented_credential
+      policy = credential_policy_for_request
+      return refuse_missing_credential_policy! if policy.nil?
+
+      if presented == :api_key
+        return refuse_credential(:session) if policy == :session
+
         authenticate_api_key!
-      elsif console_session_user
+      elsif presented == :session && policy != :bearer
         authenticate_session!
+      elsif presented == :session
+        refuse_credential(:bearer)
+      elsif policy == :session
+        render_error(status: :unauthorized, message: "console session required",
+                     details: { reason: "session_required" })
       else
         render_error(status: :unauthorized, message: "invalid or missing API key")
       end
+    end
+
+    # :api_key when an Authorization header is present, :session when the
+    # cookie names a user, otherwise nil. Identity is resolved here only for
+    # the audit line; authentication proper happens afterwards.
+    def presented_credential
+      @presented_credential ||= if request.headers["Authorization"].present?
+        token = bearer_token
+        @presented_api_key = ApiKey.find_by_token(token) if token.present?
+        :api_key
+      elsif console_session_user
+        :session
+      else
+        :none
+      end
+    end
+
+    def refuse_credential(required)
+      if required == :session
+        render_error(status: :forbidden, message: "this endpoint requires a console session; API keys are not accepted",
+                     details: { reason: "session_required" })
+      else
+        render_error(status: :forbidden, message: "this endpoint requires a bearer API key; the console session is not accepted",
+                     details: { reason: "bearer_required" })
+      end
+    end
+
+    def refuse_missing_credential_policy!
+      message = "#{self.class.name}##{action_name} declares no credential_policy"
+      raise MissingCredentialPolicy, message if Rails.env.local?
+
+      Rails.logger.error(message)
+      render_error(status: :unauthorized, message: "endpoint has no credential policy",
+                   details: { reason: "credential_policy_missing" })
+    end
+
+    # The last declaration matching this action whose if: predicate (if any)
+    # holds for this request.
+    def credential_policy_for_request
+      self.class.credential_policy_rules.reverse.each do |policy, only, except, condition|
+        next unless (only.nil? || only.include?(action_name)) && (except.nil? || !except.include?(action_name))
+        next if condition && !send(condition)
+
+        return policy
+      end
+      nil
     end
 
     def authenticate_api_key!

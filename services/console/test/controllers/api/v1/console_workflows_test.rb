@@ -81,7 +81,8 @@ module Api
         with_workflow_index(runs: []) do
           get api_v1_workflows_path, headers: bearer_headers
         end
-        assert_response :ok
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
       test "an admin sees one row per workflow" do

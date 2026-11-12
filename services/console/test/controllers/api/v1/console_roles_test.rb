@@ -413,14 +413,26 @@ module Api
         assert_predicate permission.reload, :persisted?
       end
 
-      test "Slack channel permission routes work over bearer auth" do
+      test "the console Slack channel permission routes refuse bearer auth" do
         role = roles(:acme_infra)
-        put slack_channel_permissions_api_v1_role_path(role.oid),
-            params: { data: { slack_channel_permissions: [ { channel_id: "C0123456789", history_enabled: true } ] } },
-            headers: bearer_headers, as: :json
-        assert_response :ok
+        assert_no_difference -> { role.slack_channel_permissions.count } do
+          put slack_channel_permissions_api_v1_role_path(role.oid),
+              params: { data: { slack_channel_permissions: [ { channel_id: "C0123456789", history_enabled: true } ] } },
+              headers: bearer_headers, as: :json
+        end
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
+
+        role.slack_channel_permissions.create!(channel_id: "C0123456789", history_enabled: true)
         delete slack_channel_permission_api_v1_role_path(role.oid, "C0123456789"), headers: bearer_headers
-        assert_response :no_content
+        assert_response :forbidden
+        assert role.slack_channel_permissions.exists?(channel_id: "C0123456789")
+
+        # The origin/main POST upsert keeps accepting the bearer key.
+        post slack_channel_permissions_api_v1_role_path(role.oid),
+             params: { data: { channel_id: "C0123456789", history_enabled: true, upload_enabled: true } },
+             headers: bearer_headers, as: :json
+        assert_response :success
       end
 
       # -- Slack channel catalog (role owner) ------------------------------------

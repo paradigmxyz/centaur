@@ -5,6 +5,8 @@ module Api
     #   POST   /api/v1/principals/:principal_id/roles      (body: data: { role_id })
     #   DELETE /api/v1/principals/:principal_id/roles/:id  (:id is the role oid)
     class PrincipalRolesController < Api::BaseController
+      credential_policy :bearer_or_session
+
       def index
         principal = Principal.find_by_oid!(params[:principal_id])
         roles = principal.roles.includes(:slack_channel_permissions).order(:id)

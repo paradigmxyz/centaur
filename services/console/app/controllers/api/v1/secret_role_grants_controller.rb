@@ -8,6 +8,8 @@ module Api
     #   POST   /api/v1/secrets/:kind/:secret_id/role_grants      { data: { role_id } }
     #   DELETE /api/v1/secrets/:kind/:secret_id/role_grants/:id
     class SecretRoleGrantsController < Api::BaseController
+      credential_policy :session
+
       before_action :set_secret
 
       # Role grants of the secret (by grant creation) plus the roles it is not

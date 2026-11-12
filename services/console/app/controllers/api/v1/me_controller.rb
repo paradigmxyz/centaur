@@ -3,11 +3,13 @@ module Api
     # GET /api/v1/me
     #
     # Who the caller is and what the console SPA should show them. Reachable by
-    # pending accounts (session only) so the SPA can render the holding page.
-    # The CSRF token is returned only for session-authenticated requests; send
-    # it back as X-CSRF-Token on every cookie-authenticated write. `flash`
+    # pending accounts so the SPA can render the holding page. Session only
+    # (bearer keys get 403 session_required), so auth_method is always
+    # "session". Send csrf_token back as X-CSRF-Token on every write. `flash`
     # carries (once) any notice/alert left by a redirect-based flow.
     class MeController < Api::BaseController
+      credential_policy :session
+
       allow_pending_users only: :show
 
       def show
@@ -30,7 +32,7 @@ module Api
           auth_method: auth_method.to_s,
           acting_admin: acting_admin?,
           descoped: descoped?,
-          csrf_token: (form_authenticity_token if session_authenticated?),
+          csrf_token: form_authenticity_token,
           features: {
             api_clients: ApiClientsFeature.enabled?,
             password_login: ConsoleAuth.password_login_enabled?

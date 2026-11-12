@@ -11,6 +11,8 @@ module Api
     # Admin-only. Disabling also revokes the user's MCP OAuth refresh tokens
     # (User callback), and their console session is reset on its next request.
     class UsersController < Api::BaseController
+      credential_policy :session
+
       STATUSES = User.statuses.keys.freeze
 
       before_action :set_user, except: :index

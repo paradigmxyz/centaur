@@ -130,12 +130,22 @@ module Api
         assert_not_includes response.body, secret
       end
 
-      test "create works over bearer and without a principal" do
+      test "create works without a principal" do
         post api_v1_api_clients_path, params: { data: { name: "ci", scopes: ApiClient::SCOPES } },
-             headers: bearer_headers, as: :json
+             headers: csrf_headers, as: :json
         assert_response :created
         assert_equal [], json_body.dig("data", "principals")
         assert json_body.dig("data", "secret").present?
+      end
+
+      test "a bearer admin key cannot create an API client" do
+        assert_no_difference -> { ApiClient.count } do
+          post api_v1_api_clients_path, params: { data: { name: "ci", scopes: ApiClient::SCOPES } },
+               headers: bearer_headers, as: :json
+        end
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
+        assert_no_match(/secret/, response.body)
       end
 
       test "create rejects an unknown principal" do

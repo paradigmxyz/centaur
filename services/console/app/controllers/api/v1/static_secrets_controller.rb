@@ -1,6 +1,8 @@
 module Api
   module V1
     class StaticSecretsController < Api::BaseController
+      credential_policy :bearer_or_session
+
       include SecretDocumentWrites
 
       def index

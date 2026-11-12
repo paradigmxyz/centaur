@@ -302,9 +302,12 @@ module Api
         assert_nil proxy.reload.principal
       end
 
-      test "destroy works over bearer auth" do
-        delete api_v1_principal_path(principals(:acme_user_bob).oid), headers: bearer_headers
-        assert_response :no_content
+      test "destroy refuses bearer auth" do
+        principal = principals(:acme_user_bob)
+        delete api_v1_principal_path(principal.oid), headers: bearer_headers
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
+        assert Principal.exists?(principal.id)
       end
 
       # -- roles -----------------------------------------------------------------

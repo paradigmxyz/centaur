@@ -85,7 +85,7 @@ module Api
       end
 
       test "the index flags the caller so the page can hide self-demotion" do
-        get api_v1_users_path, headers: bearer_headers
+        get api_v1_users_path
         rows = json_body["data"].index_by { |user| user["email"] }
         assert_equal true, rows.dig(users(:acme_admin).email, "current")
         assert_equal false, rows.dig(users(:globex_admin).email, "current")
@@ -152,7 +152,7 @@ module Api
         assert @admin.reload.active?
 
         post_action(:disable, @admin, headers: bearer_headers)
-        assert_response :unprocessable_entity
+        assert_response :forbidden
         assert @admin.reload.active?
       end
 

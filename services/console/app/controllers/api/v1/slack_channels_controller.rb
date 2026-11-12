@@ -14,6 +14,8 @@ module Api
     #
     # meta.catalog_error explains an empty or loading catalog.
     class SlackChannelsController < Api::BaseController
+      credential_policy :session
+
       MAX_RESULTS = 20
 
       def index

@@ -1,6 +1,12 @@
 module Api
   module V1
     class PrincipalsController < Api::BaseController
+      credential_policy :bearer_or_session
+      # Added for the console SPA; not part of the bearer API.
+      credential_policy :session,
+                        only: %i[destroy effective_grants replace_slack_channel_permissions
+                                 destroy_slack_channel_permission]
+
       include SlackChannelPermissionApi
 
       # Optional (additive) query params used by the console: `q` matches name

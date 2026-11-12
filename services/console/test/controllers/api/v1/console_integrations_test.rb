@@ -22,7 +22,8 @@ module Api
         get api_v1_integrations_path
         assert_response :ok
         get api_v1_integrations_path, headers: bearer_headers(MEMBER_TOKEN)
-        assert_response :ok
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
       test "shared apps coexist with personal apps and only admins see their shared connection" do

@@ -1,6 +1,8 @@
 module Api
   module V1
     class ProxiesController < Api::BaseController
+      credential_policy :bearer
+
       def index
         scope = ::Proxy.all
         scope = scope.where(principal: principal_filter) if params[:principal_id].present?

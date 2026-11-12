@@ -98,7 +98,7 @@ module Api
         user.update!(status: :active)
         get api_v1_me_path
         assert_response :unauthorized
-        assert_equal "invalid or missing API key", json_body.dig("error", "message")
+        assert_equal "console session required", json_body.dig("error", "message")
       end
 
       test "me describes an admin session" do
@@ -173,20 +173,17 @@ module Api
         assert_equal "account_pending", json_body.dig("error", "details", "reason")
       end
 
-      test "me over bearer has no CSRF token" do
-        get api_v1_me_path, headers: bearer_headers
-        assert_response :ok
-        assert_equal "api_key", json_body.dig("data", "auth_method")
-        assert_nil json_body.dig("data", "csrf_token")
-        assert_equal true, json_body.dig("data", "acting_admin")
-      end
-
-      test "me rejects anonymous and pending bearer callers" do
+      test "me is session-only" do
         get api_v1_me_path
         assert_response :unauthorized
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
 
-        get api_v1_me_path, headers: bearer_headers(ConsoleApiAuthHelper::DISABLED_TOKEN)
-        assert_response :unauthorized
+        [ bearer_headers, bearer_headers(ConsoleApiAuthHelper::DISABLED_TOKEN) ].each do |headers|
+          get api_v1_me_path, headers: headers
+          assert_response :forbidden
+          assert_equal "session_required", json_body.dig("error", "details", "reason")
+          assert_nil json_body["data"]
+        end
       end
 
       test "descope pauses admin access for the session and restore brings it back" do
@@ -227,7 +224,8 @@ module Api
         assert_response :forbidden
 
         post api_v1_descope_path, headers: bearer_headers
-        assert_response :unprocessable_entity
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
       test "a descoped flag is dropped once the user is no longer an admin" do
@@ -268,9 +266,10 @@ module Api
         assert_response :no_content
       end
 
-      test "session destroy is a no-op for bearer callers" do
+      test "session destroy refuses bearer callers" do
         delete api_v1_session_path, headers: bearer_headers
-        assert_response :no_content
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
     end
   end

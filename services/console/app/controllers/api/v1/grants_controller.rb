@@ -1,6 +1,8 @@
 module Api
   module V1
     class GrantsController < Api::BaseController
+      credential_policy :bearer_or_session
+
       def show
         grant = Grant.find_by_oid!(params[:id])
         render json: serialize(grant)

@@ -38,13 +38,13 @@ module Api
         assert_nil skill.archived_at
       end
 
-      test "a bearer API key acts as its owner" do
+      test "bearer API keys are refused" do
         get api_v1_skills_path(tab: "mine"), headers: bearer_headers(MEMBER_TOKEN)
-        assert_response :ok
-        assert_equal [ skills(:member_private).oid ], json_body["data"].map { |s| s["id"] }
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
 
         get api_v1_skill_path(skills(:other_private).oid), headers: bearer_headers(MEMBER_TOKEN)
-        assert_response :not_found
+        assert_response :forbidden
       end
 
       # -- index ---------------------------------------------------------------

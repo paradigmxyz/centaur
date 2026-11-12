@@ -20,7 +20,7 @@ module Api
 
         assert_active_user_api :get, api_v1_scheduled_tasks_path
         assert_active_user_api :get, new_api_v1_scheduled_task_path
-        assert_active_user_api :get, api_v1_scheduled_task_path(task.oid, view: "console")
+        assert_active_user_api :get, api_v1_scheduled_task_path(task.oid, view: "console"), credential: :session
         assert_active_user_api :post, api_v1_scheduled_tasks_path, params: { data: task_params }
         assert_active_user_api :patch, api_v1_scheduled_task_path(task.oid), params: { data: { name: "x" } }
         assert_active_user_api :delete, api_v1_scheduled_task_path(task.oid), params: {}
@@ -271,16 +271,24 @@ module Api
         assert_equal "Admin's task", other_task.reload.name
       end
 
-      test "a member's bearer key only reaches their own tasks" do
+      test "bearer keys cannot reach the console task views" do
         member = users(:member_user)
         own = create_task(author: member, name: "Member task")
-        other = create_task
 
         get api_v1_scheduled_tasks_path, headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
-        assert_equal [ own.oid ], json_body["data"].pluck("id")
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
 
-        get api_v1_scheduled_task_path(other.oid, view: "console"), headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
-        assert_response :not_found
+        get api_v1_scheduled_task_path(own.oid, view: "console"), headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
+        get api_v1_scheduled_task_path(own.oid, view: "console"), headers: bearer_headers
+        assert_response :forbidden
+
+        # The plain admin lookup keeps accepting the bearer key.
+        get api_v1_scheduled_task_path(own.oid), headers: bearer_headers
+        assert_response :ok
+        assert_equal own.oid, json_body.dig("data", "id")
       end
 
       test "admins get 404 on another user's task for every member action" do
@@ -295,28 +303,25 @@ module Api
         assert_equal [ own.oid ], json_body["data"].pluck("id")
         assert_not json_body["data"].first.key?("author_email")
 
-        [ { headers: {} }, { headers: bearer_headers } ].each do |auth|
-          headers = auth[:headers].presence || csrf_headers
-          get api_v1_scheduled_task_path(task.oid, view: "console"), headers: auth[:headers]
-          assert_response :not_found
+        get api_v1_scheduled_task_path(task.oid, view: "console")
+        assert_response :not_found
 
-          patch api_v1_scheduled_task_path(task.oid), params: { data: { name: "Renamed by admin" } },
-                                                      headers: headers, as: :json
-          assert_response :not_found
+        patch api_v1_scheduled_task_path(task.oid), params: { data: { name: "Renamed by admin" } },
+                                                    headers: csrf_headers, as: :json
+        assert_response :not_found
 
-          assert_no_enqueued_jobs only: ScheduledTaskRunJob do
-            post run_api_v1_scheduled_task_path(task.oid), headers: headers, as: :json
-          end
-          assert_response :not_found
-
-          assert_no_difference -> { ScheduledTask.count } do
-            delete api_v1_scheduled_task_path(task.oid), headers: headers, as: :json
-          end
-          assert_response :not_found
-
-          get slack_channel_options_api_v1_scheduled_tasks_path(task_id: task.oid), headers: auth[:headers]
-          assert_response :not_found
+        assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+          post run_api_v1_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
         end
+        assert_response :not_found
+
+        assert_no_difference -> { ScheduledTask.count } do
+          delete api_v1_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
+        end
+        assert_response :not_found
+
+        get slack_channel_options_api_v1_scheduled_tasks_path(task_id: task.oid)
+        assert_response :not_found
 
         assert_equal "Member task", task.reload.name
 

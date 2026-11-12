@@ -8,6 +8,8 @@ module Api
     # archiving. An acting admin may additionally make any shared skill
     # private (moderation). Admins otherwise get no extra access here.
     class SkillsController < Api::BaseController
+      credential_policy :session
+
       STALE_MESSAGE = "This skill changed since you opened it. Review the latest content before saving.".freeze
 
       allow_active_users

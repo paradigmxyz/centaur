@@ -43,10 +43,16 @@ module Api
         end
       end
 
-      test "bearer admins can read the console secret views" do
+      test "bearer admins cannot read the console secret views" do
+        get api_v1_secrets_path, headers: bearer_headers
+        assert_response :forbidden
         get api_v1_secret_detail_path("static", static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
-        assert_response :ok
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
         get api_v1_secret_role_grants_path("static", static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
+        assert_response :forbidden
+        # The per-kind bearer API is unchanged.
+        get api_v1_static_secret_path(static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
         assert_response :ok
       end
 

@@ -18,6 +18,8 @@ module Api
     # "inline"), injection target, configuration rows, signed headers, and
     # request rules. Unknown kinds and ids are 404s.
     class SecretsController < Api::BaseController
+      credential_policy :session
+
       def index
         kinds = selected_kinds
         query = params[:q].to_s.strip
