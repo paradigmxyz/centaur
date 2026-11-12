@@ -432,7 +432,8 @@ unset _centaur_tools_auto_reload
 # Prompt overlays from mounted repos are appended when present.
 # The selected persona is appended when AGENTS_PERSONA.md exists in the sandbox home.
 # harness-server recomposes this file before its first turn, once the session's
-# credentials are bound, to add overlay session-prompt.sh hook output.
+# credentials are bound, to add overlay session-prompt.sh hook output and pick
+# up overlay prompt changes made since a warm sandbox booted.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
 compose-system-prompt \
     --home-dir "$HOME_DIR" \
