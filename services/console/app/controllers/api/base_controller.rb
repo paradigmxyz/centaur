@@ -99,10 +99,12 @@ module Api
     end
 
     # A disabled session user is signed out on every endpoint, including the
-    # ones open to pending accounts.
+    # ones open to pending accounts. The flash survives the reset so the login
+    # page the SPA falls back to explains why, as the legacy redirect did.
     def authenticate_session!
       if console_session_user.disabled?
         reset_session
+        request.flash[:alert] = ConsoleSignIn::DISABLED_MESSAGE
         return render_error(status: :unauthorized, message: "account disabled",
                             details: { reason: "account_disabled" })
       end

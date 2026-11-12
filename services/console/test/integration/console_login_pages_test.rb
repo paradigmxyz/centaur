@@ -35,6 +35,21 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     assert_nil session[:user_id]
   end
 
+  test "a disabled user's next login page says the account is disabled" do
+    user = create_console_user
+    sign_in_console(user)
+    user.update!(status: :disabled)
+    get api_v1_me_path
+    assert_response :unauthorized
+
+    get login_path(return_to: "/console/skills")
+    assert_response :ok
+    assert_select "[role=alert]", text: "Your account is disabled."
+
+    get login_path
+    assert_select "[role=alert]", count: 0
+  end
+
   test "a pending user's session probe reports the pending status" do
     sign_in_console(users(:pending_user))
     get api_v1_me_path

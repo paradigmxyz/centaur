@@ -70,7 +70,8 @@ cookie.
   invalid token, or a cross-site `Origin`, returns `403` with
   `details.reason = "csrf"`. Bearer requests do not use CSRF tokens.
 - A disabled account's session is cleared and the request returns `401` with
-  `details.reason = "account_disabled"`.
+  `details.reason = "account_disabled"`. The next `/login` page shows
+  "Your account is disabled."
 - A pending account receives `403` with `details.reason = "account_pending"`,
   except on endpoints open to pending accounts (`GET /api/v1/me`,
   `DELETE /api/v1/session`).
