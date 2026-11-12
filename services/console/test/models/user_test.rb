@@ -245,4 +245,58 @@ class UserTest < ActiveSupport::TestCase
                                        identity: identity(subject: "gone-sub", email: "worker@acme.example"))
     assert returning.disabled?
   end
+  # -- API key revocation ------------------------------------------------------
+
+  def admin_with_keys
+    user = User.create!(email: "keys-#{SecureRandom.hex(4)}@example.test", password: "password123456",
+                        status: :active, admin: true)
+    2.times { |i| user.api_keys.create!(name: "k#{i}") }
+    user
+  end
+
+  test "demoting a user revokes all of their API keys" do
+    user = admin_with_keys
+    user.update!(admin: false)
+    assert_equal 2, user.revoked_api_key_count
+    assert_equal 0, user.api_keys.count
+    assert_equal 2, ApiKey.unscoped.where(user: user).where.not(deleted_at: nil).count
+  end
+
+  test "disabling a user revokes all of their API keys" do
+    user = admin_with_keys
+    user.update!(status: :disabled)
+    assert_equal 2, user.revoked_api_key_count
+    assert_equal 0, user.api_keys.count
+  end
+
+  test "moving a user back to pending revokes their API keys" do
+    user = admin_with_keys
+    user.update!(status: :pending)
+    assert_equal 0, user.api_keys.count
+  end
+
+  test "re-promoting does not revive revoked keys" do
+    user = admin_with_keys
+    user.update!(admin: false)
+    user.update!(admin: true, status: :active)
+    assert_nil user.revoked_api_key_count
+    assert_equal 0, user.api_keys.count
+  end
+
+  test "unrelated updates of an active admin keep their keys" do
+    user = admin_with_keys
+    user.update!(name: "Renamed")
+    assert_nil user.revoked_api_key_count
+    assert_equal 2, user.api_keys.count
+  end
+
+  test "revocation is part of the demotion's transaction" do
+    user = admin_with_keys
+    User.transaction do
+      user.update!(admin: false)
+      raise ActiveRecord::Rollback
+    end
+    assert user.reload.admin?
+    assert_equal 2, user.api_keys.count
+  end
 end

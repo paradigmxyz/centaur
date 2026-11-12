@@ -252,6 +252,69 @@ module Api
         assert member.reload.admin?
       end
 
+      # -- bearer keys need an active admin owner ----------------------------------
+
+      def self.routed_requests
+        Rails.application.routes.routes.filter_map do |route|
+          controller = route.defaults[:controller].to_s
+          next unless controller.start_with?("api/v1/")
+
+          klass = "#{controller}_controller".camelize.safe_constantize
+          next unless klass && klass < Api::BaseController
+          next if klass.include?(SandboxAdminAuthentication)
+
+          path = route.path.spec.to_s.sub("(.:format)", "").gsub(/:\w+/, "x1")
+          route.verb.split("|").map { |verb| [ verb.downcase, path, klass, route.defaults[:action].to_s ] }
+        end.flatten(1).uniq
+      end
+
+      test "a non-admin owner's key is refused on every endpoint, including allow_active_users ones" do
+        requests = self.class.routed_requests
+        assert_operator requests.size, :>, 100
+        member = users(:member_user)
+        assert member.active?
+        assert_not member.admin?
+        ENV["CENTAUR_CONSOLE_API_CLIENTS_ENABLED"] = "true"
+        requests.each do |verb, path, klass, action|
+          public_send(verb, path, headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN), as: :json)
+          expected = klass.accepted_credentials_for(action) == :session ? "session_required" : "admin_required"
+          assert_equal 403, response.status, "#{verb.upcase} #{path}: #{response.body}"
+          assert_equal expected, json_body.dig("error", "details", "reason"), "#{verb.upcase} #{path}"
+        end
+        assert_equal 0, member.scheduled_tasks.count
+      ensure
+        ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
+      end
+
+      test "allow_active_users never admits a non-admin owner's key" do
+        klass = Class.new(Api::BaseController) do
+          accepts_credentials :bearer_or_session
+          allow_active_users
+          def create = render(json: { data: current_user.email })
+        end
+        stub_const(:OpenToActiveUsersController, klass) do
+          with_routing do |set|
+            set.draw { post "open", to: "api/v1/credential_policy_test/open_to_active_users#create" }
+            post "/open", headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
+            assert_response :forbidden
+            assert_equal "admin_required", json_body.dig("error", "details", "reason")
+
+            post "/open", headers: bearer_headers
+            assert_response :ok
+            assert_equal users(:acme_admin).email, json_body["data"]
+          end
+        end
+      end
+
+      test "descope does not affect bearer keys" do
+        sign_in_console(users(:acme_admin))
+        post api_v1_descope_path, headers: csrf_headers
+        get api_v1_principals_path
+        assert_response :forbidden
+        get api_v1_principals_path, headers: bearer_headers
+        assert_response :ok
+      end
+
       # -- bearer or session -----------------------------------------------------
 
       test "origin/main endpoints the SPA uses accept both credentials" do

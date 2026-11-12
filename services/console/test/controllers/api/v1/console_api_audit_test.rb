@@ -121,6 +121,23 @@ module Api
         assert_equal 401, entry["status"]
       end
 
+      test "a demotion's audit line counts the API keys it revoked" do
+        sign_in_console(users(:acme_admin))
+        token = console_csrf_token
+        target = users(:globex_admin)
+        @io.truncate(0)
+        @io.rewind
+
+        post demote_api_v1_user_path(target.oid), headers: csrf_headers(token), as: :json
+        assert_response :ok
+
+        entry = sole_audit_entry
+        assert_equal "demote", entry["action"]
+        assert_equal({ "id" => target.oid }, entry["target"])
+        assert_equal 1, entry["revoked_api_keys"]
+        assert_not_includes @io.string, "iak_globex-ci-token"
+      end
+
       test "reads are not audited" do
         get api_v1_principals_path, headers: bearer_headers
         assert_response :ok

@@ -91,6 +91,44 @@ module Api
         assert_equal false, rows.dig(users(:globex_admin).email, "current")
       end
 
+      # -- API key revocation ----------------------------------------------------
+
+      test "demoting an admin revokes their API keys for good" do
+        target = users(:globex_admin)
+        assert_equal 1, target.api_keys.count
+        get api_v1_principals_path, headers: bearer_headers("iak_globex-ci-token")
+        assert_response :ok
+
+        post_action(:demote, target)
+        assert_response :ok
+        assert_equal 0, target.api_keys.count
+
+        get api_v1_principals_path, headers: bearer_headers("iak_globex-ci-token")
+        assert_response :unauthorized
+
+        # Re-promoting does not bring the key back.
+        post_action(:promote, target)
+        assert_response :ok
+        assert target.reload.admin?
+        get api_v1_principals_path, headers: bearer_headers("iak_globex-ci-token")
+        assert_response :unauthorized
+        assert_equal 0, target.api_keys.count
+      end
+
+      test "disabling an admin revokes their API keys" do
+        target = users(:globex_admin)
+        post_action(:disable, target)
+        assert_response :ok
+        assert_equal 0, target.api_keys.count
+        get api_v1_principals_path, headers: bearer_headers("iak_globex-ci-token")
+        assert_response :unauthorized
+
+        post_action(:approve, target.reload)
+        post_action(:promote, target)
+        get api_v1_principals_path, headers: bearer_headers("iak_globex-ci-token")
+        assert_response :unauthorized
+      end
+
       test "approve activates a pending user and records the approver" do
         pending = users(:pending_user)
         post_action(:approve, pending)
