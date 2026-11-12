@@ -49,7 +49,7 @@ const columns: Column<Role>[] = [
     id: "labels",
     header: "Labels",
     cell: (role) =>
-      Object.keys(role.labels ?? {}).length > 0 ? (
+      Object.keys(role.labels).length > 0 ? (
         <LabelChips labels={role.labels} />
       ) : (
         <span className="text-muted-foreground">—</span>

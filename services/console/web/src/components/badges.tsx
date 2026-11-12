@@ -27,8 +27,8 @@ export function LabelChip({ name, value }: { name: string; value: unknown }) {
   );
 }
 
-export function LabelChips({ labels }: { labels: Record<string, unknown> | null | undefined }) {
-  const entries = Object.entries(labels ?? {});
+export function LabelChips({ labels }: { labels: Record<string, unknown> }) {
+  const entries = Object.entries(labels);
   if (entries.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-1">

@@ -66,7 +66,7 @@ function OauthAppDetail() {
           ["Provider", app.provider],
           ["Client ID", app.client_id],
           ["Client secret", app.client_secret_set ? "set" : "not set"],
-          ...Object.entries(app.provider_config ?? {}).map(([key, value]): [string, string] => [humanize(key), value]),
+          ...Object.entries(app.provider_config).map(([key, value]): [string, string] => [humanize(key), value]),
         ]}
       />
       <DefinitionSection title="Flow Config" rows={[["Allowed scopes", app.allowed_scopes.join("\n")]]} />

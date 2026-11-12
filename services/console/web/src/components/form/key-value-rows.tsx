@@ -10,14 +10,14 @@ export interface KeyValueRow {
   value: string;
 }
 
-export function recordToRows(record: Record<string, unknown> | null | undefined): KeyValueRow[] {
+export function recordToRows(record: Record<string, unknown> | undefined): KeyValueRow[] {
   return Object.entries(record ?? {}).map(([key, value]) => ({ key, value: String(value ?? "") }));
 }
 
 /** Rows -> record, dropping rows with a blank key (KvRowParams semantics). */
-export function rowsToRecord(rows: KeyValueRow[] | undefined): Record<string, string> {
+export function rowsToRecord(rows: KeyValueRow[]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const row of rows ?? []) {
+  for (const row of rows) {
     const key = row.key.trim();
     if (key) out[key] = row.value;
   }

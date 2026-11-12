@@ -155,7 +155,7 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
               value: (
                 <div className="flex-1">
                   {row.run_id && <div className="mb-1 text-muted-foreground">run {row.run_id}</div>}
-                  <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 leading-5">{debugJson(row.value)}</pre>
+                  <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 leading-5">{JSON.stringify(row.value, null, 2)}</pre>
                 </div>
               ),
             }))}
@@ -192,14 +192,6 @@ function DefinitionList({ rows }: { rows: { label: string; value: ReactNode; dan
       ))}
     </dl>
   );
-}
-
-function debugJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
-    return String(value);
-  }
 }
 
 const runColumns: Column<WorkflowRun>[] = [
