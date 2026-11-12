@@ -902,9 +902,23 @@ async function handleStopCommand(
   options: SlackbotV2Options,
   trigger: string
 ): Promise<boolean> {
-  if (!isSlackStopCommand(message)) return false
+  if (!isSlackStopCommand(message, await botMentionNames(thread, options))) return false
   await interruptThreadExecution(thread, options, createHandoffTrace(thread, message, 'append'), trigger)
   return true
+}
+
+/**
+ * The names the Chat SDK can put in place of the bot's own <@id> mention: its
+ * cached Slack display name, or the id when that lookup failed.
+ */
+async function botMentionNames(
+  thread: Thread<SlackbotV2ThreadState>,
+  options: SlackbotV2Options
+): Promise<string[]> {
+  const botUserId = thread.adapter.botUserId ?? options.botUserId
+  if (!botUserId) return []
+  const user = await thread.adapter.getUser?.(botUserId)
+  return user?.userName ? [botUserId, user.userName] : [botUserId]
 }
 
 async function interruptThreadExecution(

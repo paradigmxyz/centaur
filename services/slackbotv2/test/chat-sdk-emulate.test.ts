@@ -333,6 +333,29 @@ describe('slackbotv2', () => {
     })
   })
 
+  it("stops on a mention when the bot's Slack display name has several words", async () => {
+    // The Chat SDK puts the bot's cached display name in place of <@bot>.
+    slackApi.setUserProfile(BOT_USER_ID, { name: 'mybot', real_name: 'mybot (dev)', fields: {} })
+    let interrupts = 0
+    bot = createTestBot({
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/interrupt')) {
+          interrupts += 1
+          return Response.json({ ok: true, interrupted: true, thread_key: 'unused' })
+        }
+        return globalThis.fetch(input, init)
+      }
+    })
+    const parent = await postUserMessage('Context before a stop.')
+    const stop = await sendMessage(`<@${BOT_USER_ID}> stop`, { threadTs: parent.ts })
+    expect(stop.response.status).toBe(200)
+    await stop.finished()
+
+    expect(interrupts).toBe(1)
+    expect(codexApi.appends).toHaveLength(0)
+    expect(codexApi.executes).toHaveLength(0)
+  })
+
   it('does not start an execution stopped during its handoff', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

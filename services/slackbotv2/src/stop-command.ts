@@ -1,3 +1,5 @@
+import { escapeRegExp } from './utils'
+
 const STOP_COMMAND_PATTERN = new RegExp(
   [
     String.raw`^`,
@@ -10,16 +12,31 @@ const STOP_COMMAND_PATTERN = new RegExp(
   'i'
 )
 
-export function isSlackStopCommand(message: { text: string }): boolean {
+/**
+ * `botNames` are the names the bot's own mention can take in message.text:
+ * its user id and its Slack display name.
+ */
+export function isSlackStopCommand(
+  message: { text: string },
+  botNames: readonly string[] = []
+): boolean {
   const text = message.text.trim()
   if (!text) return false
   // The Chat SDK normalizes Slack mention tokens before handlers run:
-  // <@U123|name> becomes @name and the bot's own <@U123> becomes @U123, so
-  // message.text never contains raw <@...> tokens. Strip both raw tokens
-  // (defensive) and normalized standalone @mentions; mid-word @ (emails
-  // like user@example.com) is left alone.
-  const withoutMentions = text
-    .replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/g, ' ')
+  // <@U123> becomes @<display name>, the bot's own mention included, and an
+  // id it cannot look up stays @U123, so message.text never contains raw
+  // <@...> tokens. A display name can have several words (`@mybot (dev)`),
+  // so the bot's own names are stripped whole first. Then strip raw tokens
+  // (defensive) and other standalone @mentions; mid-word @ (emails like
+  // user@example.com) is left alone.
+  let withoutMentions = text.replace(/<@[A-Z0-9]+(?:\|[^>]+)?>/g, ' ')
+  for (const name of botNames) {
+    withoutMentions = withoutMentions.replace(
+      new RegExp(`(^|\\s)@${escapeRegExp(name)}(?=\\s|$)`, 'gi'),
+      '$1'
+    )
+  }
+  withoutMentions = withoutMentions
     .replace(/(^|\s)@[A-Za-z0-9._-]+/g, '$1')
     .replace(/\s+/g, ' ')
     .trim()
