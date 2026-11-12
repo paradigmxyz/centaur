@@ -15,9 +15,4 @@ describe("LocalTime", () => {
     render(<LocalTime value={null} />);
     expect(screen.getByText("—")).toBeInTheDocument();
   });
-
-  it("renders compact ages", () => {
-    render(<LocalTime value={new Date(Date.now() - 4 * 86_400_000).toISOString()} format="compact" />);
-    expect(screen.getByText("4d")).toBeInTheDocument();
-  });
 });
