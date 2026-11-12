@@ -6,6 +6,11 @@
 //! credentials, so overlay hooks run here rather than at boot (when a warm
 //! sandbox belongs to no session). Their output is passed to `compose-system-prompt`, which rewrites
 //! the workspace `AGENTS.md` that the harness reads as it starts.
+//!
+//! The prompt is recomposed even when no hook prints anything. A warm sandbox
+//! composes its prompt at boot and may be claimed much later. The repo cache is
+//! mounted live, so recomposing here picks up overlay `SYSTEM_PROMPT.md` changes
+//! made after boot.
 
 use std::env;
 use std::fs;
@@ -221,15 +226,14 @@ fn kill_hook(child: &mut Child) {
 }
 
 /// Writes each `ok` hook's output to a temp file and recomposes the workspace
-/// prompt with them. Returns the pass outcome for the span.
+/// prompt with them. It recomposes with no hook output too, so overlay prompt
+/// changes made since boot reach a claimed warm sandbox. Returns the pass
+/// outcome for the span.
 fn compose(hooks: &[HookOutcome]) -> &'static str {
     let outputs: Vec<&[u8]> = hooks
         .iter()
         .filter_map(|hook| hook.output.as_deref())
         .collect();
-    if outputs.is_empty() {
-        return "no_output";
-    }
     let pass = Uuid::new_v4().simple();
     let mut files = Vec::new();
     for (index, output) in outputs.iter().enumerate() {

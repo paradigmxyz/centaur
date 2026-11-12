@@ -695,6 +695,71 @@ fn blocks_mode_runs_session_prompt_hooks_once_before_the_harness_starts() {
 }
 
 #[test]
+fn blocks_mode_recomposes_the_prompt_without_hook_output() {
+    // A warm sandbox composes its prompt at boot; an overlay prompt changed
+    // since then must still reach the first turn, even with no hook to run.
+    let overlay = temp_path("session-prompt-no-hook-overlay");
+    std::fs::create_dir_all(&overlay).expect("create overlay dir");
+    let prompt = temp_path("session-prompt-no-hook.md");
+    std::fs::write(&prompt, "boot").expect("write boot prompt");
+    let runs = temp_path("session-prompt-no-hook-runs.log");
+    let composer = temp_path("fake-compose-system-prompt-no-hook.sh");
+    std::fs::write(
+        &composer,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "echo \"$*\" >> {runs}\n",
+                "printf recomposed > {prompt}\n"
+            ),
+            runs = shell_quote(&runs),
+            prompt = shell_quote(&prompt),
+        ),
+    )
+    .expect("write fake composer");
+    let mut permissions = std::fs::metadata(&composer)
+        .expect("composer metadata")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    let fake_claude = format!(
+        concat!(
+            "text=$(cat {prompt}); ",
+            "printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}' ",
+            "\"{{\\\"type\\\":\\\"assistant\\\",\\\"is_partial\\\":false,\\\"message\\\":{{\\\"id\\\":\\\"msg_1\\\",\\\"content\\\":[{{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"$text\\\"}}]}}}}\" ",
+            "\"{{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"result\\\":\\\"$text\\\"}}\""
+        ),
+        prompt = shell_quote(&prompt),
+    );
+    let overlay_path = overlay.to_string_lossy().into_owned();
+    let composer_path = composer.to_string_lossy().into_owned();
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::ClaudeCode,
+        Some(fake_claude),
+        None,
+        &[
+            ("CENTAUR_OVERLAY_REPO_DIRS", &overlay_path),
+            ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
+        ],
+    );
+    let first = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&first);
+    assert_eq!(first.text_from_deltas, "recomposed");
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("composer runs"),
+        "--target-prompt AGENTS.md\n"
+    );
+    for path in [&prompt, &runs, &composer] {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = std::fs::remove_dir_all(&overlay);
+}
+
+#[test]
 fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
     // Claude Code outlives each turn, so the blocks `reasoning` field reaches it
     // in-band as an `apply_flag_settings` control request ahead of the user
