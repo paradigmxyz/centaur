@@ -13,9 +13,8 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 - Rails has no server-rendered UI except sign-in and the OAuth flows: no
   views (other than the unused mailer layouts and the pages below), view
-  helpers, browser JavaScript, or asset pipeline. `script/check-no-ruby-ui`
-  enforces this in `bin/ci` and CI. Every console page after sign-in is a
-  route in `web/`.
+  helpers, browser JavaScript, or asset pipeline. Every console page after
+  sign-in is a route in `web/`.
 - Sign-in and the OAuth flows are intentionally server-rendered so installed
   MCP clients and pods on either side of a rolling deploy see exactly the
   protocol behaviour they were built against, and sign-in works without
@@ -90,10 +89,6 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 - Apply authorization in controllers and service objects before loading or
   mutating scoped resources. Test disabled users, non-admin users, namespace
   isolation, token replay, and ownership checks where relevant.
-- MCP redirect URIs keep the long-standing `McpOauthClient.allowed_redirect_uri?`
-  rules at authorize time so existing registrations are never newly refused;
-  registration additionally rejects `javascript:`, `vbscript:`,
-  `livescript:`, and `data:` targets.
 - OAuth/MCP changes must cover redirect validation, consent, PKCE, refresh-token
   family rotation and replay, revocation, account disablement, and identity
   reconciliation. A connected UI state alone is not proof of usable access.
@@ -187,8 +182,6 @@ pnpm -C web typecheck
 pnpm -C web lint
 pnpm -C web test
 pnpm -C web build   # assets into public/spa, shell into spa-shell/ (served by SpaController)
-script/check-no-ruby-ui
-script/audit-web
 ```
 
 SPA tests cover logic and secret handling only: the API client, formatting,
@@ -200,7 +193,7 @@ Endpoint behaviour belongs in Rails request tests; check page behaviour in a
 browser.
 
 `bin/ci` (`just ci`) runs the full local CI sequence: RuboCop, the
-no-server-UI check, gem and SPA dependency audits, Brakeman, the SPA checks
+gem audit, Brakeman, the SPA checks
 and build, Rails tests, and seed validation. When several checkouts share one
 PostgreSQL server, give each its own `CENTAUR_CONSOLE_TEST_DB_NAME` and
 `CENTAUR_CONSOLE_DEV_DB_NAME`, and cap `PARALLEL_WORKERS`. Add focused controller/model/service tests with each

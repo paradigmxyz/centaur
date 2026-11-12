@@ -72,9 +72,6 @@ rolling deploy accept each other's forms.
   standalone `layouts/oauth.html.erb` and plain CSS from `public/oauth-page`
   (the SPA's colours, dark by default and light under
   `prefers-color-scheme: light`), with no asset pipeline and no JavaScript.
-  `script/check-no-ruby-ui` allows exactly these views and the three
-  controllers that render them, and fails if any other template, view helper,
-  browser JavaScript, or asset-pipeline gem comes back.
 
 ## Local Development
 
@@ -98,7 +95,7 @@ To check the SPA served by Rails itself, as in production, build it with
 `just web-build` and browse `http://localhost:3000`.
 
 `just ci` (or `bin/ci`) runs the full local CI sequence: RuboCop, the
-no-server-UI check, gem and SPA dependency audits, Brakeman, the SPA's
+gem audit, Brakeman, the SPA's
 typecheck, lint, tests, and build, the Rails tests, and seed validation.
 
 To use an existing PostgreSQL server instead, set

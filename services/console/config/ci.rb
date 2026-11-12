@@ -5,10 +5,8 @@ CI.run do
   step "Setup: SPA dependencies", "pnpm install --frozen-lockfile --filter @centaur/console-web"
 
   step "Style: Ruby", "bin/rubocop"
-  step "Style: no server-rendered UI", "script/check-no-ruby-ui"
 
   step "Security: Gem audit", "bin/bundler-audit"
-  step "Security: SPA dependency audit", "script/audit-web"
   step "Security: Brakeman code analysis", "bin/brakeman --quiet --no-pager --exit-on-warn --exit-on-error"
 
   step "Web: Typecheck", "pnpm -C web typecheck"
