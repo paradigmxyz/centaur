@@ -65,7 +65,7 @@ A missing or invalid token returns `401`:
 { "error": { "message": "invalid or missing API key" } }
 ```
 
-The key's owner must be an active admin; otherwise the request gets `403` with `"API key owner is not an admin"`. Demoting, disabling, or un-approving a user revokes their API keys.
+The key's owner must be an active admin; otherwise the request gets `403` with `"API key owner is not an admin"`. A demoted or disabled user's keys stop working until they are an active admin again.
 
 The bearer API never accepts the console session cookie: a request with the cookie and no `Authorization` header gets `403` with `details.reason = "bearer_required"` (the browser SPA uses the [Console API](#console-api)). This keeps a browser session from minting API keys or proxy tokens that outlive it.
 
