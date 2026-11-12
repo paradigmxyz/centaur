@@ -57,7 +57,38 @@ Related modules outside this folder:
   `SOURCE_TYPE_LABELS`.
 - `@/app/session` — `useSession()` (`Me` from `GET /api/v1/me`),
   `defaultLandingPath`.
+- `@/lib/use-submit` — `useSubmit(fn)`: `run`, `pending`, `error` for one
+  write, held in component state.
 - `@/test/utils` — `mockApi`, `apiResponse`, `renderRoute`, `adminMe`,
-  `operatorMe` for page tests.
+  `operatorMe` for the SPA tests.
 - Toasts: `import { toast } from "sonner"` (`toast.success` for the legacy
   flash notice, `toast.error` for alerts).
+
+## Reads and writes
+
+- Reads use TanStack Query (`useQuery`, `useSuspenseQuery`) with keys from
+  `createQueryKeys`. A failed query renders an error alert, never an empty
+  state.
+- Writes are plain exported async functions in the feature's `api.ts`, never
+  hooks: `export async function updateRole(queryClient, id, data)` calls `api`,
+  then `queryClient.invalidateQueries` on the narrowest affected keys, and
+  returns the response. The component awaits it, shows the toast, and keeps
+  pending/error state in `useState`, react-hook-form's `isSubmitting`, or
+  `useSubmit`. 422 field errors go through `applyApiErrors` and
+  `FormErrorSummary`.
+- `useMutation` is banned by ESLint (`no-restricted-imports`): request bodies
+  can carry secrets and must never be stored in a TanStack cache. Never call
+  `setQueryData` with a value that holds a secret.
+- Secret-bearing forms (secret inline values, credential secrets and header
+  values, the OAuth app client secret, the SSH private key) clear those fields
+  in a `finally` after every submit. An issued API client secret lives only in
+  route-scoped component state (`features/admin/secret-handoff.tsx`).
+
+## Tests
+
+The SPA keeps tests for logic and for secret handling only: `lib/api`,
+`lib/format`, `LocalTime`, the secret form model, `SecretField`, the shell,
+navigation, and `features/secret-handling.test.tsx` (plaintext gone from the
+inputs, the page, and both TanStack caches after each secret-bearing submit,
+and the show-once API client secret). Page behaviour is covered by the Rails
+request tests and a browser pass.

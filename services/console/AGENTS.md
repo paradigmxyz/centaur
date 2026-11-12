@@ -59,10 +59,13 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   `assert_active_user_api` plus ownership cases. Keep proxy sync
   authentication, sandbox JWTs, and OAuth/MCP tokens as separate trust
   boundaries.
-- In the SPA, a failed query renders an error alert, never an empty state.
-  Secret-bearing mutations use `gcTime: 0`, are reset after they settle, and
-  clear their form fields; plaintext never enters a query key or cache, and
-  tests assert it is absent from the TanStack caches.
+- In the SPA, reads use TanStack Query and a failed query renders an error
+  alert, never an empty state. Writes are plain async functions in each
+  feature's `api.ts` (request, then `invalidateQueries`); `useMutation` is
+  banned by ESLint so request bodies never enter a TanStack cache. Secret
+  plaintext never enters a query key or cache: secret-bearing forms clear
+  their secret fields after every submit, and the show-once API client secret
+  stays in route-scoped component state. See `web/src/components/README.md`.
 - Secret plaintext may be accepted for creation or rotation but must never be
   returned, logged, rendered, inspected in tests, or stored outside encrypted
   model attributes and configured providers.
@@ -129,6 +132,14 @@ pnpm -C web build   # into public/spa, served by Rails for HTML navigations
 script/check-no-ruby-ui
 script/audit-web
 ```
+
+SPA tests cover logic and secret handling only: the API client, formatting,
+local time, the secret form model, the secret field, the shell and
+navigation, and `web/src/features/secret-handling.test.tsx`, which checks that
+secret plaintext leaves the inputs and the TanStack caches after every
+secret-bearing submit and that an issued API client secret is shown once.
+Endpoint behaviour belongs in Rails request tests; check page behaviour in a
+browser.
 
 `bin/ci` (`just ci`) runs the full local CI sequence: RuboCop, the
 no-server-UI check, gem and SPA dependency audits, Brakeman, the SPA checks
