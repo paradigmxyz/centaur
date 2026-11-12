@@ -1,9 +1,8 @@
-// Test helpers for console pages and components.
+// Test helpers for the SPA tests.
 //
-//   const fetchMock = mockApi({ "GET /api/v1/principals": { data: [], meta } });
-//   renderRoute(<PrincipalsListPage />, { path: "/console/principals", me: adminMe() });
-//   await screen.findByText("No principals yet.");
-//   expect(fetchMock.calls("POST /api/v1/grants")[0]?.body).toEqual({...});
+//   const fetchMock = mockApi({ "PUT /api/v1/me/ssh_key": { data: key } });
+//   const { queryClient } = renderRoute(<SshKeyEditPage />, { path: "/console/ssh_key/edit" });
+//   expect(fetchMock.calls("PUT /api/v1/me/ssh_key")[0]?.body).toEqual({...});
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
@@ -12,7 +11,6 @@ import { vi } from "vitest";
 
 import type { Me } from "@/app/session";
 import { ShellContext } from "@/app/shell-context";
-import type { ControlTab } from "@/app/types";
 import { setCsrfToken } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
 
@@ -102,10 +100,8 @@ interface RenderRouteOptions {
   /** Initial URL; defaults to `path`. */
   url?: string;
   me?: Me;
-  controlTabs?: ControlTab[];
   /** Extra routes (e.g. navigation targets). */
   routes?: { path: string; element: ReactElement }[];
-  isSpaPath?: (path: string) => boolean;
 }
 
 /** Renders `element` inside a memory router, a fresh QueryClient, and a seeded session. */
@@ -113,7 +109,7 @@ export function renderRoute(element: ReactElement, options: RenderRouteOptions =
   const path = options.path ?? "/";
   const me = options.me ?? adminMe();
   setCsrfToken(me.csrf_token);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(sharedKeys.me, me);
   const router = createMemoryRouter(
     [{ path, element }, ...(options.routes ?? []), { path: "*", element: <p>other page</p> }],
@@ -121,7 +117,7 @@ export function renderRoute(element: ReactElement, options: RenderRouteOptions =
   );
   const result = render(
     <QueryClientProvider client={queryClient}>
-      <ShellContext.Provider value={{ controlTabs: options.controlTabs ?? [], isSpaPath: options.isSpaPath ?? (() => true) }}>
+      <ShellContext.Provider value={{ controlTabs: [], isSpaPath: () => true }}>
         <RouterProvider router={router} />
       </ShellContext.Provider>
     </QueryClientProvider>,
