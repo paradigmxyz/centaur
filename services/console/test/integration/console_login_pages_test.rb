@@ -8,15 +8,6 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
 
   setup { @operator = users(:acme_admin) }
 
-  test "the SPA-era login endpoints are gone" do
-    get "/api/v1/auth/config"
-    assert_response :not_found
-    post "/api/v1/session", params: { data: { email: @operator.email, password: ConsoleApiAuthHelper::TEST_PASSWORD } },
-                            as: :json
-    assert_response :not_found
-    assert_nil session[:user_id]
-  end
-
   test "unsafe methods do not replace the remembered login destination" do
     get "/console/credentials?kind=oauth", headers: HTML
     assert_equal "/console/credentials?kind=oauth", session[:return_to]

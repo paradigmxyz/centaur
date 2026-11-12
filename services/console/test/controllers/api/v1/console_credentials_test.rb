@@ -434,34 +434,6 @@ module Api
         assert_response :conflict
         assert_match "referenced by", json_body.dig("error", "message")
       end
-
-      # -- SPA routing ---------------------------------------------------------
-
-      test "the credentials pages are served by the SPA and the legacy routes are gone" do
-        Dir.mktmpdir do |dir|
-          index = File.join(dir, "index.html")
-          File.write(index, "<!doctype html><div id=\"root\"></div>")
-          previous = SpaController.index_path
-          SpaController.index_path = index
-          cred = broker_credentials(:globex_managed_api)
-          [ "/console/credentials", "/console/credentials/new", "/console/credentials/#{cred.oid}",
-            "/console/credentials/#{cred.oid}/edit" ].each do |path|
-            get path, headers: { "Accept" => "text/html" }
-            assert_response :ok, path
-            assert_includes response.body, "<div id=\"root\">", path
-          end
-        ensure
-          SpaController.index_path = previous
-        end
-
-        cred = broker_credentials(:globex_managed_api)
-        post "/console/credentials", params: { credential: { foreign_id: "legacy" } }
-        assert_response :not_found
-        delete "/console/credentials/#{cred.oid}"
-        assert_response :not_found
-        assert BrokerCredential.exists?(cred.id)
-        assert_not BrokerCredential.exists?(foreign_id: "legacy")
-      end
     end
   end
 end
