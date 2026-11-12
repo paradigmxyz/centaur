@@ -152,7 +152,9 @@ paths:
   are served only when they are shared in an allowed channel. Message
   permalinks need **History**, and adding or removing reactions needs
   **Upload**. User lookups (`users.info`, `users.list`) are not tied to a
-  channel, so any principal token can make them.
+  channel, so any principal token can make them; `users.list` returns the
+  whole workspace directory, including emails when the Slack app has the
+  `users:read.email` scope.
 - **Direct messages use the user's own token.** Each user connects their Slack
   account through the `slack` [OAuth app](/secrets/oauth-apps), and the
   resulting user token is granted to their DM principal. That token sees only

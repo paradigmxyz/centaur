@@ -749,23 +749,40 @@ async fn get_slack_message_permalink(
     validate_slack_channel_id(&channel_id)?;
     validate_slack_thread_ts(&message_ts)?;
 
-    let config = slack_proxy_config()?;
-    let client = http_client();
-    ensure_slack_channel_allowed(
+    let permalink = authorized_slack_message_permalink(
         &claims,
-        client,
-        config,
+        http_client(),
+        slack_proxy_config()?,
         &channel_id,
-        SlackChannelPermission::History,
+        &message_ts,
     )
     .await?;
-    let permalink = slack_message_permalink(client, config, &channel_id, &message_ts).await?;
     Ok(Json(SlackPermalinkResponse {
         ok: true,
         channel_id,
         message_ts,
         permalink,
     }))
+}
+
+/// Reading a message link requires the channel's History permission (or
+/// default access to a public channel the app has joined).
+async fn authorized_slack_message_permalink(
+    claims: &SlackFileProxyClaims,
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+    message_ts: &str,
+) -> Result<String, ApiError> {
+    ensure_slack_channel_allowed(
+        claims,
+        client,
+        config,
+        channel_id,
+        SlackChannelPermission::History,
+    )
+    .await?;
+    slack_message_permalink(client, config, channel_id, message_ts).await
 }
 
 async fn slack_message_permalink(
@@ -791,75 +808,86 @@ async fn add_slack_reaction(
     headers: HeaderMap,
     Path((channel_id, message_ts, name)): Path<(String, String, String)>,
 ) -> Result<Json<SlackReactionResponse>, ApiError> {
-    let (config, name) =
-        authorize_slack_reaction(&headers, &channel_id, &message_ts, &name).await?;
-    let added = slack_reaction(
-        http_client(),
-        config,
+    handle_slack_reaction(
+        &headers,
         SlackReactionAction::Add,
-        &channel_id,
-        &message_ts,
-        &name,
-    )
-    .await?;
-    Ok(Json(SlackReactionResponse {
-        ok: true,
         channel_id,
         message_ts,
-        name,
-        added: Some(added),
-        removed: None,
-    }))
+        &name,
+    )
+    .await
 }
 
 async fn remove_slack_reaction(
     headers: HeaderMap,
     Path((channel_id, message_ts, name)): Path<(String, String, String)>,
 ) -> Result<Json<SlackReactionResponse>, ApiError> {
-    let (config, name) =
-        authorize_slack_reaction(&headers, &channel_id, &message_ts, &name).await?;
-    let removed = slack_reaction(
-        http_client(),
-        config,
+    handle_slack_reaction(
+        &headers,
         SlackReactionAction::Remove,
+        channel_id,
+        message_ts,
+        &name,
+    )
+    .await
+}
+
+async fn handle_slack_reaction(
+    headers: &HeaderMap,
+    action: SlackReactionAction,
+    channel_id: String,
+    message_ts: String,
+    name: &str,
+) -> Result<Json<SlackReactionResponse>, ApiError> {
+    let claims = authorize_slack_file_proxy(headers)?;
+    validate_slack_channel_id(&channel_id)?;
+    validate_slack_thread_ts(&message_ts)?;
+    let name = normalize_slack_reaction_name(name)?;
+
+    let changed = authorized_slack_reaction(
+        &claims,
+        http_client(),
+        slack_proxy_config()?,
+        action,
         &channel_id,
         &message_ts,
         &name,
     )
     .await?;
+    let (added, removed) = match action {
+        SlackReactionAction::Add => (Some(changed), None),
+        SlackReactionAction::Remove => (None, Some(changed)),
+    };
     Ok(Json(SlackReactionResponse {
         ok: true,
         channel_id,
         message_ts,
         name,
-        added: None,
-        removed: Some(removed),
+        added,
+        removed,
     }))
 }
 
 /// Reacting writes to the channel, so it requires the channel's Upload
 /// permission (or default access to a public channel the app has joined).
-async fn authorize_slack_reaction(
-    headers: &HeaderMap,
+async fn authorized_slack_reaction(
+    claims: &SlackFileProxyClaims,
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    action: SlackReactionAction,
     channel_id: &str,
     message_ts: &str,
     name: &str,
-) -> Result<(&'static SlackFileProxyConfig, String), ApiError> {
-    let claims = authorize_slack_file_proxy(headers)?;
-    validate_slack_channel_id(channel_id)?;
-    validate_slack_thread_ts(message_ts)?;
-    let name = normalize_slack_reaction_name(name)?;
-
-    let config = slack_proxy_config()?;
+) -> Result<bool, ApiError> {
     ensure_slack_channel_allowed(
-        &claims,
-        http_client(),
+        claims,
+        client,
         config,
         channel_id,
         SlackChannelPermission::Upload,
     )
     .await?;
-    Ok((config, name))
+    slack_reaction(client, config, action, channel_id, message_ts, name).await
 }
 
 #[derive(Clone, Copy)]
@@ -2997,6 +3025,115 @@ mod tests {
                 ApiError::BadRequest(_)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn permalink_requires_history_and_reactions_require_upload() {
+        // A private channel ID used only by this test: channel metadata is
+        // cached process-wide by ID.
+        const CHANNEL: &str = "G555555555";
+        const TS: &str = "1700000000.000001";
+        let slack_calls = Arc::new(AtomicUsize::new(0));
+        let counted = |calls: Arc<AtomicUsize>, body: Value| {
+            axum::routing::post(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let body = body.clone();
+                async move { axum::Json(body) }
+            })
+        };
+        let app = axum::Router::new()
+            .route(
+                "/conversations.info",
+                axum::routing::post(|| async {
+                    axum::Json(json!({
+                        "ok": true,
+                        "channel": {"id": CHANNEL, "is_private": true, "is_member": true}
+                    }))
+                }),
+            )
+            .route(
+                "/chat.getPermalink",
+                counted(
+                    slack_calls.clone(),
+                    json!({"ok": true, "permalink": "https://example.slack.com/p1"}),
+                ),
+            )
+            .route(
+                "/reactions.add",
+                counted(slack_calls.clone(), json!({"ok": true})),
+            )
+            .route(
+                "/reactions.remove",
+                counted(slack_calls.clone(), json!({"ok": true})),
+            );
+        let (config, server) = spawn_slack_api(app).await;
+        let claims = |upload: &[&str], history: &[&str]| SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: upload.iter().map(|id| (*id).to_owned()).collect(),
+                // Download never grants either operation.
+                download_channels: vec![CHANNEL.to_owned()],
+                history_channels: history.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        };
+        let permalink = |claims: SlackFileProxyClaims| {
+            let config = &config;
+            async move {
+                authorized_slack_message_permalink(&claims, http_client(), config, CHANNEL, TS)
+                    .await
+            }
+        };
+        let react = |claims: SlackFileProxyClaims, action| {
+            let config = &config;
+            async move {
+                authorized_slack_reaction(
+                    &claims,
+                    http_client(),
+                    config,
+                    action,
+                    CHANNEL,
+                    TS,
+                    "eyes",
+                )
+                .await
+            }
+        };
+
+        // No channel grant: everything is forbidden before Slack is called.
+        assert!(matches!(
+            permalink(claims(&[], &[])).await.unwrap_err(),
+            ApiError::Forbidden(_)
+        ));
+        for action in [SlackReactionAction::Add, SlackReactionAction::Remove] {
+            assert!(matches!(
+                react(claims(&[], &[]), action).await.unwrap_err(),
+                ApiError::Forbidden(_)
+            ));
+        }
+
+        // History grants permalinks but not reactions.
+        assert_eq!(
+            permalink(claims(&[], &[CHANNEL])).await.unwrap(),
+            "https://example.slack.com/p1"
+        );
+        for action in [SlackReactionAction::Add, SlackReactionAction::Remove] {
+            assert!(matches!(
+                react(claims(&[], &[CHANNEL]), action).await.unwrap_err(),
+                ApiError::Forbidden(_)
+            ));
+        }
+
+        // Upload grants reactions but not permalinks.
+        assert!(matches!(
+            permalink(claims(&[CHANNEL], &[])).await.unwrap_err(),
+            ApiError::Forbidden(_)
+        ));
+        for action in [SlackReactionAction::Add, SlackReactionAction::Remove] {
+            assert!(react(claims(&[CHANNEL], &[]), action).await.unwrap());
+        }
+
+        // Only the three authorized operations reached Slack.
+        assert_eq!(slack_calls.load(Ordering::SeqCst), 3);
+        server.abort();
     }
 
     #[test]
