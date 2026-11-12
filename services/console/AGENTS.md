@@ -34,8 +34,10 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   `/mcp/oauth/*` and `/.well-known/*`, the PWA files, `/launch`) answer with
   redirects or JSON. Those namespaces, `/login`, `/logout`, and `/pending` are
   excluded from the SPA fallback, so unknown paths there get the JSON 404.
-- Each console area owns `config/routes/console_<area>.rb` (its `/api/v1`
-  additions and protocol routes) and `web/src/features/<area>/`. Shared SPA
+- Each console area owns `config/routes/console_<area>.rb` (its
+  `/api/v1/console` routes and protocol routes) and `web/src/features/<area>/`;
+  the shell's endpoints are in `config/routes/console.rb`, the bearer and
+  sandbox API in `config/routes/api.rb`. Shared SPA
   code lives in `web/src/components/` (see its `README.md`), `web/src/lib/`,
   and the shell in `web/src/app/`. Business logic stays in models and
   `app/services`; the SPA never relies on an authorization rule the API does
@@ -45,36 +47,44 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Invariants
 
-- Every `/api/v1` operator endpoint (`Api::BaseController`) declares the
-  credential it accepts with `accepts_credentials :bearer | :session |
-  :bearer_or_session` (per controller, `only:`/`except:` per action, `if:`
-  for a request-dependent view). An undeclared action fails closed (raises in
-  development and test, 401 in production);
-  `test/controllers/api/v1/credential_policy_test.rb` pins the full table.
-  - Pre-SPA endpoints stay bearer, and may add the session only where the SPA
-    needs them; anything new, including new actions on older controllers, is
-    session-only.
-  - API keys and proxies stay bearer-only so a browser session cannot mint
-    credentials that outlive it. Admin actions such as user approval, API
-    clients, settings, and workflow force start are session-only so a leaked
-    API key cannot reach them.
-  - The policy is checked before authentication. A wrong credential type gets
-    403 `session_required`/`bearer_required` and never falls back to the other
-    credential; an `Authorization` header always counts as bearer.
-  - Cookie-authenticated writes require the session CSRF token
-    (`X-CSRF-Token`) and a same-origin `Origin`; bearer requests skip CSRF.
-  - Endpoints are admin-only unless they opt in with `allow_active_users`
-    (scope records with `owned_scope` / `require_owner_or_admin!`, which 404s
-    for non-owners) or `allow_pending_users`. Test new endpoints with
-    `assert_admin_only_api` or `assert_active_user_api` (both check the
-    declared credential type) plus ownership cases.
-  - A bearer key is accepted only while its owner is an active admin, on every
-    endpoint (`allow_active_users` widens session access only).
+- The namespace decides the credential, and the two never mix:
+  - `/api/v1/*` is the bearer API (`Api::BaseController`): a bearer API key
+    whose owner is an active admin, on every action, exactly as for machine
+    callers before the SPA. It refuses the console session cookie with 403
+    `bearer_required`. Keep its routes and responses stable; never add SPA
+    fields, filters, or write semantics to it.
+  - `/api/v1/console/*` is the console API (`Api::V1::Console`,
+    `ConsoleApiAuthentication`): the console session only, never a bearer key
+    (403 `session_required`, even alongside a cookie). Every endpoint the SPA
+    calls lives here, and nothing else does. New SPA endpoints go in
+    `Api::V1::Console::BaseController` subclasses; to serve a bearer resource
+    to the SPA, add a thin subclass of the bearer controller that includes
+    `ConsoleApiAuthentication` (like the sandbox admin API) and put any
+    console-only fields, filters, or write semantics in overrides there.
+  - `/api/v1/sandbox/*` keeps its sandbox JWT schemes (including sandbox
+    admin, which subclasses bearer controllers and skips their auth).
+  - A console controller reached outside `/api/v1/console`, or a bearer
+    controller routed under it, fails closed (raises in development and test,
+    401 in production). `test/controllers/api/v1/credential_policy_test.rb`
+    sweeps every route.
+  - API keys and proxies have no console endpoints, so a browser session
+    cannot mint credentials that outlive it; admin actions such as user
+    approval, API clients, settings, and workflow force start are console-only
+    so a leaked API key cannot reach them.
+  - Console writes require the session CSRF token (`X-CSRF-Token`) and a
+    same-origin `Origin`.
+  - Console endpoints are admin-only unless they opt in with
+    `allow_active_users` (scope records with `owned_scope` /
+    `require_owner_or_admin!`, which 404s for non-owners) or
+    `allow_pending_users`; these exist only in the console API. Test new
+    endpoints with `assert_admin_only_api` or `assert_active_user_api` (both
+    check the credential the path's namespace takes) plus ownership cases.
   - Keep proxy sync authentication, sandbox JWTs (including sandbox admin),
     and OAuth/MCP tokens as separate trust boundaries.
 - In the SPA, reads use TanStack Query and a failed query renders an error
   alert, never an empty state. Writes are plain async functions in each
-  feature's `api.ts` (request, then `invalidateQueries`); ESLint bans
+  feature's `api.ts` (request, then `invalidateQueries`), always to a
+  `/api/v1/console/` path (`lib/api.ts` refuses anything else); ESLint bans
   `useMutation` so request bodies never enter a TanStack cache. Secret
   plaintext never enters a query key or cache: secret-bearing forms clear their
   secret fields after every submit, and the show-once API client secret stays

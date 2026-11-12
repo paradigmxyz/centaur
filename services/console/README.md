@@ -47,12 +47,13 @@ on either side of a rolling deploy accept each other's forms.
   `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`, and `/pending` never
   get the shell; unknown paths there return the JSON 404. See
   `lib/spa_request.rb` and `config/routes/spa.rb`.
-- **Data.** The SPA uses only `/api/v1` with the console session cookie. It
+- **Data.** The SPA calls only the console API, `/api/v1/console/*`, with the
+  console session cookie (`web/src/lib/api.ts` refuses any other path). It
   reads the session, CSRF token, nav flags, and one-shot flash from
-  `GET /api/v1/me` and sends `X-CSRF-Token` on every write. A `401` sends the
-  browser to `/login?return_to=<current page>` and a pending account to
-  `/pending` (full page loads); sign-out is `DELETE /api/v1/session`. See
-  [docs/API.md](docs/API.md#authentication).
+  `GET /api/v1/console/me` and sends `X-CSRF-Token` on every write. A `401`
+  sends the browser to `/login?return_to=<current page>` and a pending account
+  to `/pending` (full page loads); sign-out is `DELETE /api/v1/console/session`.
+  See [docs/API.md](docs/API.md#console-api).
 - **Rails-owned browser routes**, answering with redirects or JSON:
   `/auth/:provider/{start,callback}` (SSO), `/oauth/:slug/{start,callback}`
   (broker OAuth consent), `/mcp/oauth/{authorize,token,register}` and the
@@ -193,6 +194,12 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts an API key sent as a bearer token (`Authorization: Bearer iak_...`), the console session cookie, or either, as listed in [docs/API.md](docs/API.md#credential-types-by-endpoint). API keys and proxies are bearer-only. Cookie-authenticated writes also need the session's CSRF token. A bearer key works only while its owner is an active admin. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1` in three namespaces, each taking exactly one credential:
 
-See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
+- `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and refuses the console session cookie (`403 bearer_required`).
+- `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie only (`403 session_required` for any bearer key), with the session's CSRF token on writes. Endpoints are admin-only unless documented otherwise.
+- `/api/v1/sandbox/*` takes the sandbox entitlement JWT that `iron-proxy` injects.
+
+`iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+
+See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync), plus the session-only [Console API](docs/API.md#console-api).
