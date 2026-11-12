@@ -11,6 +11,7 @@
 # rolling deploy or rollback. Everything after sign-in is the SPA.
 class SessionsController < ApplicationController
   layout "oauth"
+  include ServerRenderedPagePolicy
 
   # The login form must be reachable while signed out, so it opts out of the
   # app-wide require_login gate. (logout keeps the gate: it's a no-op when

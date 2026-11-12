@@ -8,21 +8,8 @@
     <meta name="theme-color" content="#09090b" />
     <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" data-console-favicon />
     <link rel="apple-touch-icon" href="/pwa-icon-192.png" />
-    <script>
-      // Apply the stored theme before first paint (same keys as the legacy console).
-      (() => {
-        let theme = null;
-        try {
-          const stored = localStorage.getItem("centaur-console-theme");
-          if (localStorage.getItem("centaur-console-theme-source") === "manual" && (stored === "light" || stored === "dark")) theme = stored;
-        } catch (_error) {}
-        if (!theme) theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-        document.documentElement.dataset.consoleTheme = theme;
-        document.documentElement.classList.toggle("dark", theme === "dark");
-        const favicon = document.querySelector("[data-console-favicon]");
-        if (favicon) favicon.setAttribute("href", theme === "light" ? "/icon-light.svg" : "/icon-dark.svg");
-      })();
-    </script>
+    <!-- No inline scripts: the Content-Security-Policy is script-src 'self'.
+         vite.config.ts injects theme-boot.js (pre-paint theme) at the end of head. -->
   </head>
   <body>
     <div id="root"></div>

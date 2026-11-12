@@ -15,6 +15,7 @@ module Mcp
   # (/login, also server-rendered) returns here through ConsoleReturnPath.
   class OauthController < ApplicationController
     layout "oauth"
+    include ServerRenderedPagePolicy
 
     skip_before_action :require_login, only: %i[metadata register authorize token]
     skip_before_action :require_active_account, only: %i[metadata register authorize token]

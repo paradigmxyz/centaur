@@ -24,6 +24,7 @@ module Oauth
   # outcome is rendered in the same response instead of being handed to the SPA.
   class FlowsController < ApplicationController
     layout "oauth"
+    include ServerRenderedPagePolicy
 
     # The message_verifier purpose binding the signed state to this flow, the
     # state/cookie lifetime, and the encrypted cookie that ties a callback back to
