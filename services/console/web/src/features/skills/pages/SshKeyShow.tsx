@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { CircleCheck } from "lucide-react";
 import { Link, Navigate, useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -10,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/lib/api";
 
-import { usePersonalSshKey, useSshKeyMutations, type PersonalSshKey } from "../api";
+import { deleteSshKey, usePersonalSshKey, type PersonalSshKey } from "../api";
 import { formatUtcMinute, INTEGRATIONS_PATH } from "../sections/helpers";
 
 // Any active user manages their own key; the API scopes it to the caller.
@@ -22,11 +23,11 @@ export default function SshKeyShowPage() {
 
 function SshKeyShow({ sshKey: key }: { sshKey: PersonalSshKey }) {
   const navigate = useNavigate();
-  const { destroy } = useSshKeyMutations();
+  const queryClient = useQueryClient();
 
   const onDelete = async () => {
     try {
-      await destroy.mutateAsync();
+      await deleteSshKey(queryClient);
       toast.success("SSH key deleted. Remove its public key from your environments if it is no longer needed.");
       navigate(INTEGRATIONS_PATH);
     } catch (error) {

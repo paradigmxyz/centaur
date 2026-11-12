@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
@@ -14,8 +15,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { errorMessage } from "@/lib/api";
 import { truncateMiddle } from "@/lib/format";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useApiClient, useApiClientMutations, type ApiClientPrincipalLink } from "../api";
+import {
+  attachApiClientPrincipal,
+  deleteApiClient,
+  detachApiClientPrincipal,
+  makeApiClientPrincipalDefault,
+  rotateApiClientSecret,
+  setApiClientEnabled,
+  useApiClient,
+  type ApiClientPrincipalLink,
+} from "../api";
 import { useIssuedSecret } from "../secret-handoff";
 import { Chip, ScopeChips } from "../sections/ScopeChips";
 
@@ -52,7 +63,10 @@ function ApiClientDetailBody({
   setSecret: (secret: string | null) => void;
 }) {
   const { data: client } = useApiClient(id);
-  const mutations = useApiClientMutations(id);
+  const queryClient = useQueryClient();
+  const makeDefault = useSubmit((linkId: string) => makeApiClientPrincipalDefault(queryClient, id, linkId));
+  const enable = useSubmit(() => setApiClientEnabled(queryClient, id, true));
+  const attachPrincipal = useSubmit((ref: string) => attachApiClientPrincipal(queryClient, id, ref));
   const navigate = useNavigate();
   const [principalRef, setPrincipalRef] = useState("");
   useDocumentTitle(client.name);
@@ -70,20 +84,17 @@ function ApiClientDetailBody({
 
   const rotate = async () => {
     try {
-      const body = await mutations.rotateSecret.mutateAsync();
+      const body = await rotateApiClientSecret(queryClient, id);
       // The plaintext lives only in the parent's state.
       setSecret(body.data.secret);
       toast.success("Secret rotated. The previous secret no longer works.");
     } catch (error) {
       toast.error(errorMessage(error));
-    } finally {
-      // Drop the secret-bearing response from the MutationCache (gcTime 0).
-      mutations.rotateSecret.reset();
     }
   };
 
   const destroy = async () => {
-    if (await run(() => mutations.destroy.mutateAsync(), `Deleted API client ${client.name}.`)) {
+    if (await run(() => deleteApiClient(queryClient, id), `Deleted API client ${client.name}.`)) {
       navigate("/console/api_clients");
     }
   };
@@ -93,7 +104,7 @@ function ApiClientDetailBody({
     const ref = principalRef.trim();
     if (!ref) return;
     try {
-      const body = await mutations.attachPrincipal.mutateAsync(ref);
+      const body = await attachPrincipal.run(ref);
       setPrincipalRef("");
       toast.success(`Attached ${principalLabel(body.data.principal)}.`);
     } catch (error) {
@@ -146,10 +157,10 @@ function ApiClientDetailBody({
               variant="secondary"
               size="sm"
               className={rowButton}
-              disabled={mutations.makeDefault.isPending}
+              disabled={makeDefault.pending}
               onClick={() =>
                 void run(
-                  () => mutations.makeDefault.mutateAsync(link.id),
+                  () => makeDefault.run(link.id),
                   `${principalLabel(link.principal)} is now the default principal.`,
                 )
               }
@@ -162,7 +173,7 @@ function ApiClientDetailBody({
             description="Sessions already bound to it stop accepting turns."
             confirmLabel="Detach"
             onConfirm={() =>
-              run(() => mutations.detachPrincipal.mutateAsync(link.id), `Detached ${principalLabel(link.principal)}.`)
+              run(() => detachApiClientPrincipal(queryClient, id, link.id), `Detached ${principalLabel(link.principal)}.`)
             }
             trigger={
               <Button variant="secondary" size="sm" className={dangerButton}>
@@ -200,8 +211,8 @@ function ApiClientDetailBody({
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={mutations.enable.isPending}
-                onClick={() => void run(() => mutations.enable.mutateAsync(), "API client enabled.")}
+                disabled={enable.pending}
+                onClick={() => void run(() => enable.run(), "API client enabled.")}
               >
                 Enable
               </Button>
@@ -210,7 +221,7 @@ function ApiClientDetailBody({
                 title="Disable this client?"
                 description="Its access tokens stop working immediately."
                 confirmLabel="Disable"
-                onConfirm={() => run(() => mutations.disable.mutateAsync(), "API client disabled.")}
+                onConfirm={() => run(() => setApiClientEnabled(queryClient, id, false), "API client disabled.")}
                 trigger={
                   <Button variant="secondary" size="sm">
                     Disable
@@ -293,7 +304,7 @@ function ApiClientDetailBody({
               value={principalRef}
               onChange={(event) => setPrincipalRef(event.target.value)}
             />
-            <Button type="submit" disabled={mutations.attachPrincipal.isPending}>
+            <Button type="submit" disabled={attachPrincipal.pending}>
               Attach principal
             </Button>
           </form>

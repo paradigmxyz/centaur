@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Clock } from "lucide-react";
 import { Link } from "react-router";
 import { toast } from "sonner";
@@ -10,9 +11,10 @@ import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
+import { useSubmit } from "@/lib/use-submit";
 import { cn } from "@/lib/utils";
 
-import { useScheduledTaskMutations, useScheduledTasks, type ScheduledTask } from "../api";
+import { deleteScheduledTask, runScheduledTask, useScheduledTasks, type ScheduledTask } from "../api";
 
 export default function ScheduledTasksListPage() {
   return (
@@ -26,11 +28,12 @@ const editPath = (task: ScheduledTask) => `/console/scheduled_tasks/${task.id}/e
 
 function ScheduledTasksList() {
   const tasks = useScheduledTasks();
-  const mutations = useScheduledTaskMutations();
+  const queryClient = useQueryClient();
+  const runTask = useSubmit((id: string) => runScheduledTask(queryClient, id));
 
   const run = async (task: ScheduledTask) => {
     try {
-      await mutations.run.mutateAsync(task.id ?? "");
+      await runTask.run(task.id ?? "");
       toast.success("Task queued.");
     } catch (error) {
       toast.error(errorMessage(error));
@@ -39,7 +42,7 @@ function ScheduledTasksList() {
 
   const destroy = async (task: ScheduledTask) => {
     try {
-      await mutations.destroy.mutateAsync(task.id ?? "");
+      await deleteScheduledTask(queryClient, task.id ?? "");
       toast.success("Task deleted.");
     } catch (error) {
       toast.error(errorMessage(error));
@@ -97,7 +100,7 @@ function ScheduledTasksList() {
       header: <span className="sr-only">Actions</span>,
       cell: (task) => (
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" size="sm" disabled={!task.enabled || mutations.run.isPending} onClick={() => void run(task)}>
+          <Button variant="secondary" size="sm" disabled={!task.enabled || runTask.pending} onClick={() => void run(task)}>
             Run now
           </Button>
           <Button asChild variant="secondary" size="sm">

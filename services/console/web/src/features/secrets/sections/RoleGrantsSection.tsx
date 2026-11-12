@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -10,14 +11,16 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useRoleGrantMutations, useRoleGrants, type RoleGrant } from "../api";
+import { assignSecretRole, unassignSecretRole, useRoleGrants, type RoleGrant } from "../api";
 import { QueryErrorAlert } from "../query-error";
 
 /** The "Roles" section: assign the secret to roles and unassign role grants. */
 export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
   const grants = useRoleGrants(kind, id);
-  const mutations = useRoleGrantMutations(kind, id);
+  const queryClient = useQueryClient();
+  const assignRole = useSubmit((roleId: string) => assignSecretRole(queryClient, kind, id, roleId));
   const [selected, setSelected] = useState("");
   const assignable = grants.data?.assignable_roles ?? [];
   const rows = grants.data?.data ?? [];
@@ -26,7 +29,7 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
     const role = assignable.find((candidate) => candidate.id === selected) ?? assignable[0];
     if (!role) return;
     try {
-      await mutations.assign.mutateAsync(role.id);
+      await assignRole.run(role.id);
       setSelected("");
       toast.success(`Assigned secret to ${displayLabel(role)}.`);
     } catch (error) {
@@ -65,7 +68,7 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
           confirmLabel="Unassign"
           onConfirm={async () => {
             try {
-              await mutations.unassign.mutateAsync(grant.id);
+              await unassignSecretRole(queryClient, kind, id, grant.id);
               toast.success("Unassigned secret from role.");
             } catch (error) {
               toast.error(errorMessage(error));
@@ -99,7 +102,7 @@ export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
                 ))}
               </SelectContent>
             </Select>
-            <Button onClick={() => void assign()} disabled={mutations.assign.isPending}>
+            <Button onClick={() => void assign()} disabled={assignRole.pending}>
               Assign role
             </Button>
           </div>

@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -5,7 +6,7 @@ import { BackLink } from "@/components/back-link";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 
-import { API_CLIENT_SCOPES, useCreateApiClient } from "../api";
+import { API_CLIENT_SCOPES, createApiClient } from "../api";
 import { apiClientPath, useStashIssuedSecret } from "../secret-handoff";
 import { ApiClientForm } from "../sections/ApiClientForm";
 
@@ -19,7 +20,7 @@ export default function ApiClientNewPage() {
 
 function ApiClientNew() {
   const navigate = useNavigate();
-  const create = useCreateApiClient();
+  const queryClient = useQueryClient();
   const stashIssuedSecret = useStashIssuedSecret();
 
   return (
@@ -33,16 +34,11 @@ function ApiClientNew() {
         defaults={{ name: "", scopes: [...API_CLIENT_SCOPES] }}
         cancelTo="/console/api_clients"
         onSubmit={async (input) => {
-          let id: string;
-          try {
-            // The response carries the plaintext secret: hand it off, then drop
-            // the mutation (gcTime 0) so it leaves the MutationCache.
-            const body = await create.mutateAsync(input);
-            id = body.data.id;
-            stashIssuedSecret(id, body.data.secret);
-          } finally {
-            create.reset();
-          }
+          // The response carries the plaintext secret: hand it straight to the
+          // detail page (route-scoped state), never to a query cache.
+          const body = await createApiClient(queryClient, input);
+          const id = body.data.id;
+          stashIssuedSecret(id, body.data.secret);
           toast.success("API client created.");
           navigate(apiClientPath(id));
         }}

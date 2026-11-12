@@ -1,7 +1,7 @@
 // Data access for the automation pages: scheduled tasks (any active user, own
 // tasks) and the admin workflow dashboard. Query keys live under
 // "scheduled_tasks" and "workflows" (see lib/query-keys.ts).
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { SlackChannelLoader, SlackChannelOption } from "@/components/slack-channel-picker";
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
@@ -77,32 +77,30 @@ export function useScheduledTask(id: string) {
   });
 }
 
-export function useScheduledTaskMutations() {
-  const queryClient = useQueryClient();
-  const refreshLists = () => queryClient.invalidateQueries({ queryKey: scheduledTaskKeys.lists() });
+const refreshTaskLists = (queryClient: QueryClient) =>
+  queryClient.invalidateQueries({ queryKey: scheduledTaskKeys.lists() });
 
-  return {
-    create: useMutation({
-      mutationFn: (data: ScheduledTaskInput) => api.post<DataEnvelope<ScheduledTask>>(tasksBase, { data }),
-      onSuccess: refreshLists,
-    }),
-    update: useMutation({
-      mutationFn: ({ id, data }: { id: string; data: ScheduledTaskInput }) =>
-        api.patch<DataEnvelope<ScheduledTask>>(`${tasksBase}/${encodeURIComponent(id)}`, { data }),
-      onSuccess: (_body, { id }) => {
-        void refreshLists();
-        void queryClient.invalidateQueries({ queryKey: scheduledTaskKeys.detail(id) });
-      },
-    }),
-    destroy: useMutation({
-      mutationFn: (id: string) => api.delete(`${tasksBase}/${encodeURIComponent(id)}`),
-      onSuccess: refreshLists,
-    }),
-    run: useMutation({
-      mutationFn: (id: string) => api.post(`${tasksBase}/${encodeURIComponent(id)}/run`),
-      onSuccess: refreshLists,
-    }),
-  };
+export async function createScheduledTask(queryClient: QueryClient, data: ScheduledTaskInput) {
+  const body = await api.post<DataEnvelope<ScheduledTask>>(tasksBase, { data });
+  await refreshTaskLists(queryClient);
+  return body;
+}
+
+export async function updateScheduledTask(queryClient: QueryClient, id: string, data: ScheduledTaskInput) {
+  const body = await api.patch<DataEnvelope<ScheduledTask>>(`${tasksBase}/${encodeURIComponent(id)}`, { data });
+  void refreshTaskLists(queryClient);
+  void queryClient.invalidateQueries({ queryKey: scheduledTaskKeys.detail(id) });
+  return body;
+}
+
+export async function deleteScheduledTask(queryClient: QueryClient, id: string) {
+  await api.delete(`${tasksBase}/${encodeURIComponent(id)}`);
+  await refreshTaskLists(queryClient);
+}
+
+export async function runScheduledTask(queryClient: QueryClient, id: string) {
+  await api.post(`${tasksBase}/${encodeURIComponent(id)}/run`);
+  await refreshTaskLists(queryClient);
 }
 
 interface ChannelOptionsResponse {
@@ -220,10 +218,8 @@ export function useWorkflowRuns(key: string, params: { status: string; queue: st
   });
 }
 
-export function useForceStartWorkflow(key: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.post<DataEnvelope<{ run_id: string; created: boolean }>>(`${workflowPath(key)}/runs`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: workflowKeys.all }),
-  });
+export async function forceStartWorkflow(queryClient: QueryClient, key: string) {
+  const body = await api.post<DataEnvelope<{ run_id: string; created: boolean }>>(`${workflowPath(key)}/runs`);
+  await queryClient.invalidateQueries({ queryKey: workflowKeys.all });
+  return body;
 }

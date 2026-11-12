@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -13,8 +14,15 @@ import { SecretGrantPicker } from "@/components/secret-grant-picker";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { secretOptionLabel, type GrantableSummary } from "@/lib/secret-kinds";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useAssignableSecretCount, useDirectGrants, type DirectGrant } from "../api";
+import {
+  grantPrincipalSecret,
+  revokePrincipalGrant,
+  useAssignableSecretCount,
+  useDirectGrants,
+  type DirectGrant,
+} from "../api";
 import type { SectionProps } from "./types";
 
 export function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
@@ -22,7 +30,9 @@ export function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
 }
 
 
-export function DirectGrantsSection({ principal, mutations }: SectionProps) {
+export function DirectGrantsSection({ principal }: SectionProps) {
+  const queryClient = useQueryClient();
+  const grantSecret = useSubmit((secret: GrantableSummary) => grantPrincipalSecret(queryClient, principal.id, secret));
   const [page, setPage] = usePageParam("direct_grants_page");
   const grants = useDirectGrants(principal.id, page);
   const [selected, setSelected] = useState<GrantableSummary | null>(null);
@@ -39,7 +49,7 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
       return;
     }
     try {
-      await mutations.grantSecret.mutateAsync(selected);
+      await grantSecret.run(selected);
       toast.success(`Granted ${secretOptionLabel(selected).replace(/ \(.*\)$/, "")}.`);
       setSelected(null);
     } catch (error) {
@@ -101,7 +111,7 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
             confirmLabel="Revoke"
             onConfirm={async () => {
               try {
-                await mutations.revokeGrant.mutateAsync(row.id);
+                await revokePrincipalGrant(queryClient, principal.id, row.id);
                 toast.success("Revoked grant.");
               } catch (error) {
                 toast.error(errorMessage(error));
@@ -116,7 +126,7 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
         ),
       },
     ],
-    [mutations.revokeGrant],
+    [queryClient, principal.id],
   );
 
   return (
@@ -149,7 +159,7 @@ export function DirectGrantsSection({ principal, mutations }: SectionProps) {
             onChange={setSelected}
             excludeGrantee={`principal:${principal.id}`}
           />
-          <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
+          <Button onClick={() => void grant()} disabled={grantSecret.pending}>
             Grant secret
           </Button>
         </div>

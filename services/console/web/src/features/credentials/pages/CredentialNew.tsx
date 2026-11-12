@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
@@ -5,8 +6,9 @@ import { ResourceBadge } from "@/components/badges";
 import { BackLink } from "@/components/back-link";
 import { useDocumentTitle } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useCreateCredential, useSecretMutation } from "../api";
+import { createCredential, type CredentialPayload } from "../api";
 import { CredentialForm } from "../sections/CredentialForm";
 
 export default function CredentialNewPage() {
@@ -19,7 +21,8 @@ export default function CredentialNewPage() {
 
 function CredentialNew() {
   const navigate = useNavigate();
-  const { submit, error } = useSecretMutation(useCreateCredential());
+  const queryClient = useQueryClient();
+  const create = useSubmit((payload: CredentialPayload) => createCredential(queryClient, payload));
   useDocumentTitle("New credential");
 
   return (
@@ -33,9 +36,9 @@ function CredentialNew() {
       </div>
       <CredentialForm
         submitLabel="Create credential"
-        error={error}
+        error={create.error}
         onSubmit={async (payload) => {
-          const body = await submit(payload);
+          const body = await create.run(payload);
           toast.success("Credential created.");
           navigate(`/console/credentials/${body.data.id}`);
         }}

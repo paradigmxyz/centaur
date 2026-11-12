@@ -1,7 +1,7 @@
 // Data access for the OAuth apps pages and the Integrations page. Query keys
-// live under "oauth_apps" (see lib/query-keys.ts); mutations invalidate the
+// live under "oauth_apps" (see lib/query-keys.ts); writes invalidate the
 // narrowest prefix.
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
 import { createQueryKeys } from "@/lib/query-keys";
@@ -140,26 +140,18 @@ export function useOauthProviders() {
   });
 }
 
-// Create/update bodies may carry the client_secret. gcTime: 0 drops a settled
-// mutation (and its variables) from the MutationCache as soon as it has no
-// observer; callers also reset() after settle so the plaintext is not retained
-// while the page stays mounted.
-export function useCreateOauthApp() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (data: OauthAppInput) => api.post<DataEnvelope<OauthApp>>(base, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: oauthAppKeys.lists() }),
-  });
+// Create/update bodies may carry the client_secret. It lives only in this call
+// and the caller's form, which clears the field afterwards.
+export async function createOauthApp(queryClient: QueryClient, data: OauthAppInput) {
+  const body = await api.post<DataEnvelope<OauthApp>>(base, { data });
+  await queryClient.invalidateQueries({ queryKey: oauthAppKeys.lists() });
+  return body;
 }
 
-export function useUpdateOauthApp(id: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (data: Partial<OauthAppInput>) => api.patch<DataEnvelope<OauthApp>>(`${base}/${id}`, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: oauthAppKeys.all }),
-  });
+export async function updateOauthApp(queryClient: QueryClient, id: string, data: Partial<OauthAppInput>) {
+  const body = await api.patch<DataEnvelope<OauthApp>>(`${base}/${id}`, { data });
+  await queryClient.invalidateQueries({ queryKey: oauthAppKeys.all });
+  return body;
 }
 
 export const integrationKeys = createQueryKeys("integrations");
@@ -173,17 +165,15 @@ export function useIntegrations() {
 }
 
 /** POST /api/v1/oauth_apps/presets/:provider -> the consent start URL. */
-export function useSetupPreset() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (provider: string) =>
-      api.post<DataEnvelope<{ id: string; slug: string; start_url: string }>>(
-        `${base}/presets/${encodeURIComponent(provider)}`,
-      ),
-    onSettled: () =>
-      Promise.all([
-        queryClient.invalidateQueries({ queryKey: integrationKeys.all }),
-        queryClient.invalidateQueries({ queryKey: oauthAppKeys.lists() }),
-      ]),
-  });
+export async function setupPreset(queryClient: QueryClient, provider: string) {
+  try {
+    return await api.post<DataEnvelope<{ id: string; slug: string; start_url: string }>>(
+      `${base}/presets/${encodeURIComponent(provider)}`,
+    );
+  } finally {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: integrationKeys.all }),
+      queryClient.invalidateQueries({ queryKey: oauthAppKeys.lists() }),
+    ]);
+  }
 }

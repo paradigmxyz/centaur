@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -7,8 +8,9 @@ import { BackLink } from "@/components/back-link";
 import { useDocumentTitle } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { errorMessage } from "@/lib/api";
+import { useSubmit } from "@/lib/use-submit";
 
-import { credentialTitle, useCredential, useSecretMutation, useUpdateCredential } from "../api";
+import { credentialTitle, updateCredential, useCredential, type CredentialPayload } from "../api";
 import { CredentialForm } from "../sections/CredentialForm";
 
 export default function CredentialEditPage() {
@@ -22,7 +24,8 @@ export default function CredentialEditPage() {
 function CredentialEdit() {
   const { id = "" } = useParams();
   const { data: credential, error: refetchError } = useCredential(id);
-  const { submit, error } = useSecretMutation(useUpdateCredential(id));
+  const queryClient = useQueryClient();
+  const update = useSubmit((payload: CredentialPayload) => updateCredential(queryClient, id, payload));
   const navigate = useNavigate();
   const title = credentialTitle(credential);
   useDocumentTitle(`Edit ${title}`);
@@ -44,9 +47,9 @@ function CredentialEdit() {
       <CredentialForm
         credential={credential}
         submitLabel="Save changes"
-        error={error}
+        error={update.error}
         onSubmit={async (payload) => {
-          await submit(payload);
+          await update.run(payload);
           toast.success("Credential updated.");
           navigate(`/console/credentials/${credential.id}`);
         }}

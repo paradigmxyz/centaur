@@ -1,6 +1,7 @@
 // The create/edit form for the four console-editable secret kinds. One form
 // model (form-model.ts) with per-kind sections; the payload goes to the
 // kind's own /api/v1 resource (POST to create, PATCH to update).
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Controller, FormProvider, useForm, useFormContext, useWatch, type FieldPath } from "react-hook-form";
 import { Link, useNavigate } from "react-router";
@@ -12,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError, errorMessage } from "@/lib/api";
 import { pluralize } from "@/lib/format";
 
-import { useSaveSecret, type FormKind, type KindRecord } from "../api";
+import { saveSecret, type FormKind, type KindRecord } from "../api";
 import {
   errorMessages,
   GCP_ID_TOKEN_HEADERS,
@@ -73,7 +74,7 @@ function ruleErrors(details: Details): Record<number, string[]> {
 
 export function SecretForm({ kind, record }: { kind: FormKind; record?: KindRecord }) {
   const navigate = useNavigate();
-  const save = useSaveSecret(kind, record?.id);
+  const queryClient = useQueryClient();
   const [details, setDetails] = useState<Details>({});
   const [clientErrors, setClientErrors] = useState<string[]>([]);
   const form = useForm<SecretFormValues>({ defaultValues: toFormValues(kind, record) });
@@ -91,7 +92,7 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
       return;
     }
     try {
-      const body = await save.mutateAsync(toPayload(kind, values, record));
+      const body = await saveSecret(queryClient, kind, record?.id, toPayload(kind, values, record));
       toast.success(record ? "Secret updated." : "Secret created.");
       navigate(`/console/secrets/${kind}/${body.data.id}`);
     } catch (error) {
@@ -108,9 +109,7 @@ export function SecretForm({ kind, record }: { kind: FormKind; record?: KindReco
         form.setError("root", { type: "server", message: errorMessage(error) });
       }
     } finally {
-      // Drop the request body (which may hold an inline value) from the
-      // MutationCache and clear the write-only field, success or error.
-      save.reset();
+      // Clear the write-only inline value, success or error.
       form.setValue("source.secret", "");
     }
   });

@@ -1,6 +1,6 @@
 // Data access for the principals pages. Query keys live under "principals"
-// (see lib/query-keys.ts); mutations invalidate the narrowest prefix.
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+// (see lib/query-keys.ts); writes invalidate the narrowest prefix.
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { SlackChannelPermissionRow } from "@/components/slack-channel-permissions-editor";
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
@@ -166,69 +166,70 @@ export function useAssignableSecretCount(id: string) {
   });
 }
 
-/** Mutations for one principal; each refreshes that principal's queries. */
-export function usePrincipalMutations(id: string) {
-  const queryClient = useQueryClient();
-  const refresh = () => queryClient.invalidateQueries({ queryKey: principalKeys.detail(id) });
-  const refreshAll = () => queryClient.invalidateQueries({ queryKey: principalKeys.all });
-  // Role assignments also change which roles the picker may offer.
-  const refreshRoles = () =>
-    Promise.all([refreshAll(), queryClient.invalidateQueries({ queryKey: ROLE_LISTS })]);
-  // Grant changes also change which secrets the picker may offer.
-  const refreshGrants = () =>
-    Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: SECRETS_ROOT })]);
-
-  return {
-    updateSandboxAccess: useMutation({
-      mutationFn: (access: SandboxAccess) => api.patch(`${base}/${id}`, { data: access }),
-      onSuccess: refresh,
-    }),
-    replaceSlackPermissions: useMutation({
-      mutationFn: (rows: SlackChannelPermissionRow[]) =>
-        api.put(`${base}/${id}/slack_channel_permissions`, { data: { slack_channel_permissions: rows } }),
-      onSuccess: refresh,
-    }),
-    deleteSlackPermission: useMutation({
-      mutationFn: (channelId: string) =>
-        api.delete(`${base}/${id}/slack_channel_permissions/${encodeURIComponent(channelId)}`),
-      onSuccess: refresh,
-    }),
-    assignRole: useMutation({
-      mutationFn: (roleId: string) => api.post(`${base}/${id}/roles`, { data: { role_id: roleId } }),
-      onSuccess: refreshRoles,
-    }),
-    unassignRole: useMutation({
-      mutationFn: (roleId: string) => api.delete(`${base}/${id}/roles/${roleId}`),
-      onSuccess: refreshRoles,
-    }),
-    grantSecret: useMutation({
-      mutationFn: (secret: Pick<GrantableSummary, "kind" | "id">) =>
-        api.post("/api/v1/grants", { data: { principal_id: id, [grantKey(secret.kind)]: secret.id } }),
-      onSuccess: refreshGrants,
-    }),
-    revokeGrant: useMutation({
-      mutationFn: (grantId: string) => api.delete(`/api/v1/grants/${grantId}`),
-      onSuccess: refreshGrants,
-    }),
-    destroy: useMutation({
-      mutationFn: () => api.delete(`${base}/${id}`),
-      // Lists only: removing the detail query while its page is still mounted
-      // would refetch the deleted record.
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: principalKeys.lists() }),
-    }),
-  };
-}
-
 export interface NewPrincipal {
   foreign_id: string | null;
   name: string;
   labels: Record<string, string>;
 }
 
-export function useCreatePrincipal() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (data: NewPrincipal) => api.post<DataEnvelope<Principal>>(base, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: principalKeys.lists() }),
-  });
+const refreshPrincipal = (queryClient: QueryClient, id: string) =>
+  queryClient.invalidateQueries({ queryKey: principalKeys.detail(id) });
+
+/** Role assignments also change which roles the picker may offer. */
+const refreshPrincipalRoles = (queryClient: QueryClient) =>
+  Promise.all([
+    queryClient.invalidateQueries({ queryKey: principalKeys.all }),
+    queryClient.invalidateQueries({ queryKey: ROLE_LISTS }),
+  ]);
+
+/** Grant changes also change which secrets the picker may offer. */
+const refreshPrincipalGrants = (queryClient: QueryClient, id: string) =>
+  Promise.all([refreshPrincipal(queryClient, id), queryClient.invalidateQueries({ queryKey: SECRETS_ROOT })]);
+
+export async function createPrincipal(queryClient: QueryClient, data: NewPrincipal) {
+  const body = await api.post<DataEnvelope<Principal>>(base, { data });
+  await queryClient.invalidateQueries({ queryKey: principalKeys.lists() });
+  return body;
+}
+
+export async function updateSandboxAccess(queryClient: QueryClient, id: string, access: SandboxAccess) {
+  await api.patch(`${base}/${id}`, { data: access });
+  await refreshPrincipal(queryClient, id);
+}
+
+export async function replacePrincipalSlackPermissions(queryClient: QueryClient, id: string, rows: SlackChannelPermissionRow[]) {
+  await api.put(`${base}/${id}/slack_channel_permissions`, { data: { slack_channel_permissions: rows } });
+  await refreshPrincipal(queryClient, id);
+}
+
+export async function deletePrincipalSlackPermission(queryClient: QueryClient, id: string, channelId: string) {
+  await api.delete(`${base}/${id}/slack_channel_permissions/${encodeURIComponent(channelId)}`);
+  await refreshPrincipal(queryClient, id);
+}
+
+export async function assignPrincipalRole(queryClient: QueryClient, id: string, roleId: string) {
+  await api.post(`${base}/${id}/roles`, { data: { role_id: roleId } });
+  await refreshPrincipalRoles(queryClient);
+}
+
+export async function unassignPrincipalRole(queryClient: QueryClient, id: string, roleId: string) {
+  await api.delete(`${base}/${id}/roles/${roleId}`);
+  await refreshPrincipalRoles(queryClient);
+}
+
+export async function grantPrincipalSecret(queryClient: QueryClient, id: string, secret: Pick<GrantableSummary, "kind" | "id">) {
+  await api.post("/api/v1/grants", { data: { principal_id: id, [grantKey(secret.kind)]: secret.id } });
+  await refreshPrincipalGrants(queryClient, id);
+}
+
+export async function revokePrincipalGrant(queryClient: QueryClient, id: string, grantId: string) {
+  await api.delete(`/api/v1/grants/${grantId}`);
+  await refreshPrincipalGrants(queryClient, id);
+}
+
+export async function deletePrincipal(queryClient: QueryClient, id: string) {
+  await api.delete(`${base}/${id}`);
+  // Lists only: removing the detail query while its page is still mounted
+  // would refetch the deleted record.
+  await queryClient.invalidateQueries({ queryKey: principalKeys.lists() });
 }

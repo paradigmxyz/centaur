@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Controller, useForm, useWatch } from "react-hook-form";
 import { useNavigate } from "react-router";
@@ -13,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError } from "@/lib/api";
 
-import { usePersonalSshKey, useSshKeyMutations, validateSshKey } from "../api";
+import { saveSshKey, usePersonalSshKey, validateSshKey } from "../api";
 import { INTEGRATIONS_PATH, validationMessages } from "../sections/helpers";
 
 interface Values {
@@ -34,9 +35,9 @@ interface Feedback {
  * Live check of a pasted key (port of the ssh-key Stimulus controller): 500ms
  * debounce, stale requests aborted, nothing saved. The key is only ever sent
  * to the validate endpoint, whose responses never echo it. The check is a
- * plain request, not a TanStack mutation or query, so the plaintext never
- * enters the Query/Mutation caches; results are matched to the input by an
- * edit counter (`version`) rather than by storing the key.
+ * plain request, not a TanStack query, so the plaintext never enters the
+ * query cache; results are matched to the input by an edit counter
+ * (`version`) rather than by storing the key.
  */
 function useKeyFeedback(privateKey: string, version: number, saved: boolean): Feedback {
   const [result, setResult] = useState<{ version: number; feedback: Feedback } | null>(null);
@@ -84,7 +85,7 @@ function useKeyFeedback(privateKey: string, version: number, saved: boolean): Fe
 // Any active user manages their own key; the API scopes it to the caller.
 export default function SshKeyEditPage() {
   const { data: key } = usePersonalSshKey();
-  const { save } = useSshKeyMutations();
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
   const savedKey = key.saved && key.has_private_key;
   const form = useForm<Values>({ defaultValues: { name: key.name, private_key: "" } });
@@ -98,16 +99,14 @@ export default function SshKeyEditPage() {
     const data: { name: string; private_key?: string } = { name: values.name };
     if (values.private_key.trim() !== "") data.private_key = values.private_key;
     try {
-      await save.mutateAsync(data);
+      await saveSshKey(queryClient, data);
       toast.success("SSH key saved. Register the public key in your environments.");
       navigate("/console/ssh_key");
     } catch (error) {
       applyApiErrors(form.setError, error, ["name", "private_key"]);
       setErrors(validationMessages(error));
     } finally {
-      // Drop the plaintext everywhere it was held: the mutation's variables
-      // (MutationCache) and the form field. The user re-pastes after an error.
-      save.reset();
+      // Drop the plaintext from the form field. The user re-pastes after an error.
       form.setValue("private_key", "");
       setKeyVersion((current) => current + 1);
     }

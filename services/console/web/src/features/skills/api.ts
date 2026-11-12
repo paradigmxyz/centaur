@@ -1,6 +1,6 @@
 // Data access for the Skills pages and the personal SSH key pages. Query keys
 // live under "skills" and "ssh-key" (see lib/query-keys.ts).
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, apiRequest, type DataEnvelope } from "@/lib/api";
 import { createQueryKeys } from "@/lib/query-keys";
@@ -81,45 +81,35 @@ export function useEditorCandidates(enabled: boolean) {
   });
 }
 
-export function useCreateSkill() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (data: SkillInput) => api.post<DataEnvelope<Skill>>(base, { data }),
-    onSuccess: (body) => {
-      queryClient.setQueryData(skillKeys.detail(body.data.id), body);
-      return queryClient.invalidateQueries({ queryKey: skillKeys.lists() });
-    },
-  });
+/** Stores a returned skill (no secrets) and refreshes the lists. */
+function storeSkill(queryClient: QueryClient, body: DataEnvelope<Skill>) {
+  queryClient.setQueryData(skillKeys.detail(body.data.id), body);
+  return queryClient.invalidateQueries({ queryKey: skillKeys.lists() });
 }
 
-/** Mutations for one skill; each stores the returned skill and refreshes the lists. */
-export function useSkillMutations(id: string) {
-  const queryClient = useQueryClient();
-  const store = (body: DataEnvelope<Skill>) => {
-    queryClient.setQueryData(skillKeys.detail(id), body);
-    return queryClient.invalidateQueries({ queryKey: skillKeys.lists() });
-  };
+export async function createSkill(queryClient: QueryClient, data: SkillInput) {
+  const body = await api.post<DataEnvelope<Skill>>(base, { data });
+  await storeSkill(queryClient, body);
+  return body;
+}
 
-  return {
-    update: useMutation({
-      mutationFn: (data: SkillInput) => api.patch<DataEnvelope<Skill>>(`${base}/${id}`, { data }),
-      onSuccess: store,
-    }),
-    share: useMutation({
-      mutationFn: () => api.post<DataEnvelope<Skill>>(`${base}/${id}/share`),
-      onSuccess: store,
-    }),
-    unshare: useMutation({
-      mutationFn: () => api.post<DataEnvelope<Skill>>(`${base}/${id}/unshare`),
-      onSuccess: store,
-    }),
-    archive: useMutation({
-      mutationFn: () => api.delete(`${base}/${id}`),
-      // Lists only: dropping the detail query while its page is mounted would
-      // refetch the archived skill (a 404).
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: skillKeys.lists() }),
-    }),
-  };
+export async function updateSkill(queryClient: QueryClient, id: string, data: SkillInput) {
+  const body = await api.patch<DataEnvelope<Skill>>(`${base}/${id}`, { data });
+  await storeSkill(queryClient, body);
+  return body;
+}
+
+export async function setSkillShared(queryClient: QueryClient, id: string, shared: boolean) {
+  const body = await api.post<DataEnvelope<Skill>>(`${base}/${id}/${shared ? "share" : "unshare"}`);
+  await storeSkill(queryClient, body);
+  return body;
+}
+
+export async function archiveSkill(queryClient: QueryClient, id: string) {
+  await api.delete(`${base}/${id}`);
+  // Lists only: dropping the detail query while its page is mounted would
+  // refetch the archived skill (a 404).
+  await queryClient.invalidateQueries({ queryKey: skillKeys.lists() });
 }
 
 // -- personal SSH key -------------------------------------------------------
@@ -171,23 +161,20 @@ export function validateSshKey(privateKey: string, signal: AbortSignal) {
   });
 }
 
-export function useSshKeyMutations() {
-  const queryClient = useQueryClient();
-  return {
-    // The body carries the private key: gcTime 0 so the settled mutation (and
-    // its variables) leaves the MutationCache as soon as the caller reset()s
-    // it or unmounts. Callers must reset() after every settle.
-    save: useMutation({
-      mutationFn: (data: { name: string; private_key?: string }) =>
-        api.put<DataEnvelope<PersonalSshKey>>(sshKeyPath, { data }),
-      onSuccess: (body) => queryClient.setQueryData(sshKeyKeys.all, body),
-      gcTime: 0,
-    }),
-    destroy: useMutation({
-      mutationFn: () => api.delete(sshKeyPath),
-      // Mark stale without refetching: the mounted page navigates away, and
-      // the next visit loads the (now unsaved) key.
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: sshKeyKeys.all, refetchType: "none" }),
-    }),
-  };
+/**
+ * Saves the caller's key. The body may carry the private key: it lives only in
+ * this call and the caller's form, which clears the field afterwards. The
+ * response never includes the private key, so it is safe to cache.
+ */
+export async function saveSshKey(queryClient: QueryClient, data: { name: string; private_key?: string }) {
+  const body = await api.put<DataEnvelope<PersonalSshKey>>(sshKeyPath, { data });
+  queryClient.setQueryData(sshKeyKeys.all, body);
+  return body;
+}
+
+export async function deleteSshKey(queryClient: QueryClient) {
+  await api.delete(sshKeyPath);
+  // Mark stale without refetching: the mounted page navigates away, and the
+  // next visit loads the (now unsaved) key.
+  await queryClient.invalidateQueries({ queryKey: sshKeyKeys.all, refetchType: "none" });
 }

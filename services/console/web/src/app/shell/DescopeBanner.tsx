@@ -1,24 +1,28 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
+import { restoreAdmin } from "@/app/session";
 import { Button } from "@/components/ui/button";
-import { api, errorMessage } from "@/lib/api";
-import { sharedKeys } from "@/lib/query-keys";
+import { errorMessage } from "@/lib/api";
 
 export function DescopeBanner() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const restore = useMutation({
-    mutationFn: () => api.delete("/api/v1/descope"),
-    onSuccess: async () => {
-      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== sharedKeys.me[0] });
-      await queryClient.invalidateQueries({ queryKey: sharedKeys.me });
+  const [pending, setPending] = useState(false);
+  const restore = async () => {
+    setPending(true);
+    try {
+      await restoreAdmin(queryClient);
       toast.success("Admin permissions restored.");
       navigate("/console/principals");
-    },
-    onError: (error) => toast.error(errorMessage(error)),
-  });
+    } catch (error) {
+      toast.error(errorMessage(error));
+    } finally {
+      setPending(false);
+    }
+  };
 
   return (
     <div
@@ -30,8 +34,8 @@ export function DescopeBanner() {
         type="button"
         size="xs"
         variant="outline"
-        disabled={restore.isPending}
-        onClick={() => restore.mutate()}
+        disabled={pending}
+        onClick={() => void restore()}
         className="border-warning/40 bg-transparent text-warning hover:bg-warning/15 hover:text-warning dark:bg-transparent"
       >
         Restore admin

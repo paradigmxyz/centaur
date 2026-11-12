@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -13,12 +14,13 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/lib/api";
+import { useSubmit } from "@/lib/use-submit";
 
 import {
-  useReplaceSlackExternalTeams,
+  replaceSlackExternalTeams,
+  updateSystemSettings,
   useSlackExternalTeams,
   useSystemSettings,
-  useUpdateSystemSettings,
   type SystemSettings,
   type SystemSettingsInput,
 } from "../api";
@@ -88,14 +90,15 @@ function SystemSettingsPage() {
 
 function DefaultsForm() {
   const { data: settings } = useSystemSettings();
-  const update = useUpdateSystemSettings();
+  const queryClient = useQueryClient();
+  const update = useSubmit((values: SystemSettingsInput) => updateSystemSettings(queryClient, values));
   const form = useForm<SystemSettingsInput>({ defaultValues: inputOf(settings) });
   const { reset } = form;
   useEffect(() => reset(inputOf(settings)), [settings, reset]);
 
   const onSubmit = form.handleSubmit(async (values) => {
     try {
-      await update.mutateAsync(values);
+      await update.run(values);
       toast.success("System settings updated.");
     } catch (error) {
       applyApiErrors(form.setError, error, FIELDS);
@@ -191,14 +194,15 @@ function DefaultsForm() {
 
 function SlackConnectSection() {
   const teams = useSlackExternalTeams();
-  const replace = useReplaceSlackExternalTeams();
+  const queryClient = useQueryClient();
+  const replace = useSubmit((text: string) => replaceSlackExternalTeams(queryClient, text));
   const [text, setText] = useState<string | null>(null);
   const value = text ?? teams.data?.join("\n") ?? "";
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      const body = await replace.mutateAsync(value);
+      const body = await replace.run(value);
       setText(body.data.slack_external_team_ids.join("\n"));
       toast.success("Slack Connect workspaces updated.");
     } catch {
@@ -236,7 +240,7 @@ function SlackConnectSection() {
               onChange={(event) => setText(event.target.value)}
             />
           </FieldShell>
-          <Button type="submit" disabled={replace.isPending}>
+          <Button type="submit" disabled={replace.pending}>
             Save Slack Connect workspaces
           </Button>
         </form>

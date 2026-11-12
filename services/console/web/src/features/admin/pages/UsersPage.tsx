@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { toast } from "sonner";
 
@@ -13,8 +14,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCaption, TableCell, TableRow } from "@/components/ui/table";
 import { errorMessage } from "@/lib/api";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useUserAction, useUsers, type ConsoleUser, type UserAction } from "../api";
+import { runUserAction, useUsers, type ConsoleUser, type UserAction } from "../api";
 
 const SUCCESS: Record<UserAction, (user: ConsoleUser) => string> = {
   approve: (user) => `Approved ${user.email}.`,
@@ -61,11 +63,12 @@ function EmailCell({ user }: { user: ConsoleUser }) {
 
 function UsersPage() {
   const users = useUsers();
-  const action = useUserAction();
+  const queryClient = useQueryClient();
+  const action = useSubmit((user: ConsoleUser, name: UserAction) => runUserAction(queryClient, user, name));
 
   const run = async (user: ConsoleUser, name: UserAction) => {
     try {
-      await action.mutateAsync({ user, action: name });
+      await action.run(user, name);
       toast.success(SUCCESS[name](user));
     } catch (error) {
       toast.error(errorMessage(error));
@@ -121,7 +124,7 @@ function UsersPage() {
               variant="secondary"
               size="sm"
               className={actionButton}
-              disabled={action.isPending}
+              disabled={action.pending}
               onClick={() => void run(user, "promote")}
             >
               Make admin
@@ -176,7 +179,7 @@ function UsersPage() {
                       requested <LocalTime value={user.created_at} format="relative" />
                     </TableCell>
                     <TableCell className="px-5 py-2.5 text-right">
-                      <Button size="sm" disabled={action.isPending} onClick={() => void run(user, "approve")}>
+                      <Button size="sm" disabled={action.pending} onClick={() => void run(user, "approve")}>
                         Approve
                       </Button>
                     </TableCell>

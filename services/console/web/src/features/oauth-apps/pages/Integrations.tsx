@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 
@@ -10,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { errorMessage, navigation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-import { useIntegrations, useSetupPreset, type IntegrationApp, type IntegrationPreset, type IntegrationUsage } from "../api";
+import { setupPreset, useIntegrations, type IntegrationApp, type IntegrationPreset, type IntegrationUsage } from "../api";
 import { ProviderTile } from "../provider-logo";
 
 const USAGE_TEXT: Record<IntegrationUsage, string> = {
@@ -144,13 +145,17 @@ function AppCard({ app }: { app: IntegrationApp }) {
 }
 
 function PresetCard({ preset }: { preset: IntegrationPreset }) {
-  const setup = useSetupPreset();
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState(false);
   const connect = async () => {
+    setPending(true);
     try {
-      const body = await setup.mutateAsync(preset.provider);
+      const body = await setupPreset(queryClient, preset.provider);
       navigation.assign(body.data.start_url);
     } catch (error) {
       toast.error(errorMessage(error));
+    } finally {
+      setPending(false);
     }
   };
   return (
@@ -161,7 +166,7 @@ function PresetCard({ preset }: { preset: IntegrationPreset }) {
       </div>
       {preset.description && <p className="text-xs text-muted-foreground">{preset.description}</p>}
       <div className="mt-auto pt-1">
-        <Button type="button" variant="outline" onClick={connect} disabled={setup.isPending}>
+        <Button type="button" variant="outline" onClick={connect} disabled={pending}>
           Connect
         </Button>
       </div>

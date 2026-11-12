@@ -1,7 +1,7 @@
 // Data access for the secrets pages. Query keys live under "secrets" (shared
 // with the grant pickers' sharedKeys.secrets lists, so invalidating the lists
-// refreshes them too); mutations invalidate the narrowest prefix.
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+// refreshes them too); writes invalidate the narrowest prefix.
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
 import { createQueryKeys } from "@/lib/query-keys";
@@ -177,52 +177,41 @@ export function useRoleGrants(kind: string, id: string) {
   });
 }
 
-export function useRoleGrantMutations(kind: string, id: string) {
-  const queryClient = useQueryClient();
-  const refresh = () => queryClient.invalidateQueries({ queryKey: secretKeys.sub(`${kind}:${id}`, "role_grants") });
-  return {
-    assign: useMutation({
-      mutationFn: (roleId: string) =>
-        api.post<DataEnvelope<RoleGrant>>(`${detailPath(kind, id)}/role_grants`, { data: { role_id: roleId } }),
-      onSuccess: refresh,
-    }),
-    unassign: useMutation({
-      mutationFn: (grantId: string) => api.delete(`${detailPath(kind, id)}/role_grants/${encodeURIComponent(grantId)}`),
-      onSuccess: refresh,
-    }),
-  };
+const refreshRoleGrants = (queryClient: QueryClient, kind: string, id: string) =>
+  queryClient.invalidateQueries({ queryKey: secretKeys.sub(`${kind}:${id}`, "role_grants") });
+
+export async function assignSecretRole(queryClient: QueryClient, kind: string, id: string, roleId: string) {
+  const body = await api.post<DataEnvelope<RoleGrant>>(`${detailPath(kind, id)}/role_grants`, { data: { role_id: roleId } });
+  await refreshRoleGrants(queryClient, kind, id);
+  return body;
+}
+
+export async function unassignSecretRole(queryClient: QueryClient, kind: string, id: string, grantId: string) {
+  await api.delete(`${detailPath(kind, id)}/role_grants/${encodeURIComponent(grantId)}`);
+  await refreshRoleGrants(queryClient, kind, id);
 }
 
 /**
  * Create (no id) or PATCH (id) one form-kind secret. The body may carry an
- * inline source value, so the mutation is never retained in the
- * MutationCache (gcTime 0); the form also calls reset() once it settles.
+ * inline source value: it lives only in this call and the caller's form,
+ * which clears the field afterwards.
  */
-export function useSaveSecret(kind: FormKind, id?: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (data: Record<string, unknown>) =>
-      id
-        ? api.patch<DataEnvelope<KindRecord>>(`${KIND_RESOURCE[kind]}/${id}`, { data })
-        : api.post<DataEnvelope<KindRecord>>(KIND_RESOURCE[kind], { data }),
-    onSuccess: async (body) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: secretKeys.lists() }),
-        queryClient.invalidateQueries({ queryKey: secretKeys.detail(`${kind}:${body.data.id}`) }),
-      ]);
-    },
-  });
+export async function saveSecret(queryClient: QueryClient, kind: FormKind, id: string | undefined, data: Record<string, unknown>) {
+  const body = id
+    ? await api.patch<DataEnvelope<KindRecord>>(`${KIND_RESOURCE[kind]}/${id}`, { data })
+    : await api.post<DataEnvelope<KindRecord>>(KIND_RESOURCE[kind], { data });
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: secretKeys.lists() }),
+    queryClient.invalidateQueries({ queryKey: secretKeys.detail(`${kind}:${body.data.id}`) }),
+  ]);
+  return body;
 }
 
-export function useDeleteSecret(kind: FormKind, id: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.delete(`${KIND_RESOURCE[kind]}/${id}`),
-    // Lists only: removing the detail query while its page is still mounted
-    // would refetch the deleted record.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: secretKeys.lists() }),
-  });
+export async function deleteSecret(queryClient: QueryClient, kind: FormKind, id: string) {
+  await api.delete(`${KIND_RESOURCE[kind]}/${id}`);
+  // Lists only: removing the detail query while its page is still mounted
+  // would refetch the deleted record.
+  await queryClient.invalidateQueries({ queryKey: secretKeys.lists() });
 }
 
 export type { SecretKind };

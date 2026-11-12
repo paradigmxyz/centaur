@@ -35,8 +35,7 @@ export function ApiClientForm({ mode, defaults, cancelTo, onSubmit }: ApiClientF
     defaultValues: { name: defaults.name, principal: "", scopes: defaults.scopes },
   });
 
-  // Held here rather than read from the mutation, which callers reset as soon
-  // as it settles so no response stays in the MutationCache.
+  // The last submit error, for the summary (the server response only).
   const [error, setError] = useState<unknown>(null);
 
   const submit = form.handleSubmit(async (values) => {

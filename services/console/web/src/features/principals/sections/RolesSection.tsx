@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -10,14 +11,23 @@ import { usePageParam } from "@/components/pagination";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useAssignableRoleSummary, usePrincipalRoles, type RoleSummary } from "../api";
+import {
+  assignPrincipalRole,
+  unassignPrincipalRole,
+  useAssignableRoleSummary,
+  usePrincipalRoles,
+  type RoleSummary,
+} from "../api";
 import { RolePicker } from "./RolePicker";
 import type { SectionProps } from "./types";
 
 const PER_PAGE = 50;
 
-export function RolesSection({ principal, mutations }: SectionProps) {
+export function RolesSection({ principal }: SectionProps) {
+  const queryClient = useQueryClient();
+  const assignRole = useSubmit((roleId: string) => assignPrincipalRole(queryClient, principal.id, roleId));
   const roles = usePrincipalRoles(principal.id);
   // The server leaves assigned roles out (across all pages); the form is
   // hidden once nothing is left to assign, and stays usable if the count fails.
@@ -39,7 +49,7 @@ export function RolesSection({ principal, mutations }: SectionProps) {
       return;
     }
     try {
-      await mutations.assignRole.mutateAsync(role.id);
+      await assignRole.run(role.id);
       setSelected(null);
       toast.success(`Assigned role ${displayLabel(role)}.`);
     } catch (error) {
@@ -66,7 +76,7 @@ export function RolesSection({ principal, mutations }: SectionProps) {
           confirmLabel="Unassign"
           onConfirm={async () => {
             try {
-              await mutations.unassignRole.mutateAsync(role.id);
+              await unassignPrincipalRole(queryClient, principal.id, role.id);
               toast.success(`Unassigned role ${displayLabel(role)}.`);
             } catch (error) {
               toast.error(errorMessage(error));
@@ -93,7 +103,7 @@ export function RolesSection({ principal, mutations }: SectionProps) {
               value={selected ?? assignable.data?.first ?? null}
               onChange={setSelected}
             />
-            <Button onClick={() => void assign()} disabled={mutations.assignRole.isPending}>
+            <Button onClick={() => void assign()} disabled={assignRole.pending}>
               Assign role
             </Button>
           </div>

@@ -1,11 +1,13 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { BackLink } from "@/components/back-link";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useCreateRole } from "../api";
+import { createRole, type RoleFormData } from "../api";
 import { RoleForm } from "../sections/RoleForm";
 
 export default function RoleNewPage() {
@@ -18,7 +20,8 @@ export default function RoleNewPage() {
 
 function RoleNew() {
   const navigate = useNavigate();
-  const create = useCreateRole();
+  const queryClient = useQueryClient();
+  const create = useSubmit((data: RoleFormData) => createRole(queryClient, data));
 
   return (
     <>
@@ -29,7 +32,7 @@ function RoleNew() {
       <RoleForm
         error={create.error}
         onSubmit={async (data) => {
-          const body = await create.mutateAsync(data);
+          const body = await create.run(data);
           toast.success("Role created.");
           navigate(`/console/roles/${body.data.id}`);
         }}

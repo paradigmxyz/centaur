@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -14,9 +15,10 @@ import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
 import { ApiError, errorMessage } from "@/lib/api";
 import { pluralize, truncateMiddle } from "@/lib/format";
+import { useSubmit } from "@/lib/use-submit";
 import { cn } from "@/lib/utils";
 
-import { useForceStartWorkflow, useWorkflow, useWorkflowRuns, type WorkflowDetail, type WorkflowRun } from "../api";
+import { forceStartWorkflow, useWorkflow, useWorkflowRuns, type WorkflowDetail, type WorkflowRun } from "../api";
 import { Attempts, Started, WorkflowStatusPill } from "../sections/workflow-cells";
 import { statusLabel, WORKFLOW_DB_UNAVAILABLE } from "../sections/workflow-format";
 
@@ -72,13 +74,14 @@ function WorkflowDetailRoute() {
 
 function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
   const key = workflow.workflow_key;
-  const forceStart = useForceStartWorkflow(key);
+  const queryClient = useQueryClient();
+  const forceStart = useSubmit(() => forceStartWorkflow(queryClient, key));
   const schedule = workflow.schedule;
   const totalRuns = pluralize(workflow.run_count, "run");
 
   const trigger = async () => {
     try {
-      const { data } = await forceStart.mutateAsync();
+      const { data } = await forceStart.run();
       if (data.created) toast.success(`Run queued (${data.run_id}).`);
       else toast.success(`A run with this idempotency key is already queued (${data.run_id}).`);
     } catch (error) {
@@ -112,7 +115,7 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
               confirmLabel="Manually Trigger"
               destructive={false}
               onConfirm={trigger}
-              trigger={<Button disabled={forceStart.isPending}>Manually Trigger</Button>}
+              trigger={<Button disabled={forceStart.pending}>Manually Trigger</Button>}
             />
           </div>
         </div>

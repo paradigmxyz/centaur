@@ -1,8 +1,8 @@
 // Data access for the role pages. Query keys live under "roles" (see
-// lib/query-keys.ts); mutations invalidate the narrowest prefix. Role changes
+// lib/query-keys.ts); writes invalidate the narrowest prefix. Role changes
 // also refresh cached principal pages, which show role names, inherited Slack
 // permissions, and effective grants.
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { SlackChannelPermissionRow } from "@/components/slack-channel-permissions-editor";
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
@@ -83,50 +83,47 @@ export function useAssignableSecretCount(id: string) {
   });
 }
 
-/** Mutations for one role; each refreshes that role and cached principal pages. */
-export function useRoleMutations(id: string) {
-  const queryClient = useQueryClient();
-  const refresh = () =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: roleKeys.detail(id) }),
-      queryClient.invalidateQueries({ queryKey: PRINCIPALS_ROOT }),
-    ]);
-  // Grant changes also change which secrets the picker may offer.
-  const refreshGrants = () =>
-    Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: SECRETS_ROOT })]);
-
-  return {
-    update: useMutation({
-      mutationFn: (data: RoleFormData) => api.patch<DataEnvelope<Role>>(`${base}/${id}`, { data }),
-      onSuccess: () =>
-        Promise.all([refresh(), queryClient.invalidateQueries({ queryKey: roleKeys.lists() })]),
-    }),
-    replaceSlackPermissions: useMutation({
-      mutationFn: (rows: SlackChannelPermissionRow[]) =>
-        api.put(`${base}/${id}/slack_channel_permissions`, { data: { slack_channel_permissions: rows } }),
-      onSuccess: refresh,
-    }),
-    deleteSlackPermission: useMutation({
-      mutationFn: (channelId: string) =>
-        api.delete(`${base}/${id}/slack_channel_permissions/${encodeURIComponent(channelId)}`),
-      onSuccess: refresh,
-    }),
-    grantSecret: useMutation({
-      mutationFn: (secret: Pick<GrantableSummary, "kind" | "id">) =>
-        api.post("/api/v1/grants", { data: { role_id: id, [grantKey(secret.kind)]: secret.id } }),
-      onSuccess: refreshGrants,
-    }),
-    revokeGrant: useMutation({
-      mutationFn: (grantId: string) => api.delete(`/api/v1/grants/${grantId}`),
-      onSuccess: refreshGrants,
-    }),
-  };
+/** Refreshes one role and cached principal pages (which embed role data). */
+function refreshRole(queryClient: QueryClient, id: string) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: roleKeys.detail(id) }),
+    queryClient.invalidateQueries({ queryKey: PRINCIPALS_ROOT }),
+  ]);
 }
 
-export function useCreateRole() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (data: RoleFormData) => api.post<DataEnvelope<Role>>(base, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: roleKeys.lists() }),
-  });
+/** Grant changes also change which secrets the picker may offer. */
+function refreshRoleGrants(queryClient: QueryClient, id: string) {
+  return Promise.all([refreshRole(queryClient, id), queryClient.invalidateQueries({ queryKey: SECRETS_ROOT })]);
+}
+
+export async function createRole(queryClient: QueryClient, data: RoleFormData) {
+  const body = await api.post<DataEnvelope<Role>>(base, { data });
+  await queryClient.invalidateQueries({ queryKey: roleKeys.lists() });
+  return body;
+}
+
+export async function updateRole(queryClient: QueryClient, id: string, data: RoleFormData) {
+  const body = await api.patch<DataEnvelope<Role>>(`${base}/${id}`, { data });
+  await Promise.all([refreshRole(queryClient, id), queryClient.invalidateQueries({ queryKey: roleKeys.lists() })]);
+  return body;
+}
+
+export async function replaceRoleSlackPermissions(queryClient: QueryClient, id: string, rows: SlackChannelPermissionRow[]) {
+  await api.put(`${base}/${id}/slack_channel_permissions`, { data: { slack_channel_permissions: rows } });
+  await refreshRole(queryClient, id);
+}
+
+export async function deleteRoleSlackPermission(queryClient: QueryClient, id: string, channelId: string) {
+  await api.delete(`${base}/${id}/slack_channel_permissions/${encodeURIComponent(channelId)}`);
+  await refreshRole(queryClient, id);
+}
+
+export async function grantRoleSecret(queryClient: QueryClient, id: string, secret: Pick<GrantableSummary, "kind" | "id">) {
+  await api.post("/api/v1/grants", { data: { role_id: id, [grantKey(secret.kind)]: secret.id } });
+  await refreshRoleGrants(queryClient, id);
+}
+
+export async function revokeRoleGrant(queryClient: QueryClient, id: string, grantId: string) {
+  await api.delete(`/api/v1/grants/${grantId}`);
+  await refreshRoleGrants(queryClient, id);
 }

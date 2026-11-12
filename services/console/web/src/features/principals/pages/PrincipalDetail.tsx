@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -10,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
 
-import { usePrincipal, usePrincipalMutations } from "../api";
+import { deletePrincipal, usePrincipal } from "../api";
 import { DirectGrantsSection } from "../sections/DirectGrantsSection";
 import { EffectiveGrantsSection } from "../sections/EffectiveGrantsSection";
 import { RolesSection } from "../sections/RolesSection";
@@ -28,13 +29,13 @@ export default function PrincipalDetailPage() {
 function PrincipalDetail() {
   const { id = "" } = useParams();
   const { data: principal } = usePrincipal(id);
-  const mutations = usePrincipalMutations(id);
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
   useDocumentTitle(displayLabel(principal));
 
   const onDelete = async () => {
     try {
-      await mutations.destroy.mutateAsync();
+      await deletePrincipal(queryClient, id);
       toast.success(`Deleted principal ${displayLabel(principal)}.`);
       navigate("/console/principals");
     } catch (error) {
@@ -78,10 +79,10 @@ function PrincipalDetail() {
         </div>
       </div>
 
-      <SlackPermissionsSection principal={principal} mutations={mutations} />
-      <SandboxAccessSection principal={principal} mutations={mutations} />
-      <RolesSection principal={principal} mutations={mutations} />
-      <DirectGrantsSection principal={principal} mutations={mutations} />
+      <SlackPermissionsSection principal={principal} />
+      <SandboxAccessSection principal={principal} />
+      <RolesSection principal={principal} />
+      <DirectGrantsSection principal={principal} />
       <EffectiveGrantsSection principal={principal} />
     </>
   );

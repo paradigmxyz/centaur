@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -13,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError, errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
 
-import { credentialTitle, useCredential, useDeleteCredential } from "../api";
+import { credentialTitle, deleteCredential, useCredential } from "../api";
 import { DefinitionSection } from "../sections/DefinitionSection";
 
 const linkClass = "text-primary hover:underline";
@@ -30,14 +31,14 @@ export default function CredentialDetailPage() {
 function CredentialDetail() {
   const { id = "" } = useParams();
   const { data: credential, error: refetchError } = useCredential(id);
-  const destroy = useDeleteCredential(id);
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
   const title = credentialTitle(credential);
   useDocumentTitle(title);
 
   const onDelete = async () => {
     try {
-      await destroy.mutateAsync();
+      await deleteCredential(queryClient, id);
       toast.success("Credential deleted.");
       navigate("/console/credentials");
     } catch (error) {

@@ -1,4 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useQueryClient } from "@tanstack/react-query";
 import { FormProvider, useForm } from "react-hook-form";
 import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -11,8 +12,9 @@ import { KeyValueRowsField, rowsToRecord } from "@/components/form/key-value-row
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useCreatePrincipal } from "../api";
+import { createPrincipal, type NewPrincipal } from "../api";
 
 const schema = z.object({
   foreign_id: z
@@ -36,7 +38,8 @@ export default function PrincipalNewPage() {
 
 function PrincipalNew() {
   const navigate = useNavigate();
-  const create = useCreatePrincipal();
+  const queryClient = useQueryClient();
+  const create = useSubmit((data: NewPrincipal) => createPrincipal(queryClient, data));
   const form = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: { foreign_id: "", name: "", labels: [] },
@@ -44,7 +47,7 @@ function PrincipalNew() {
 
   const onSubmit = form.handleSubmit(async (values) => {
     try {
-      const body = await create.mutateAsync({
+      const body = await create.run({
         foreign_id: values.foreign_id || null,
         name: values.name,
         labels: rowsToRecord(values.labels),

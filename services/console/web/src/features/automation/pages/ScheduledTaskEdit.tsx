@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -6,7 +7,7 @@ import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { errorMessage } from "@/lib/api";
 
-import { useScheduledTask, useScheduledTaskMutations } from "../api";
+import { updateScheduledTask, useScheduledTask } from "../api";
 import { ScheduledTaskForm } from "../sections/ScheduledTaskForm";
 
 export default function ScheduledTaskEditPage() {
@@ -20,7 +21,7 @@ export default function ScheduledTaskEditPage() {
 function ScheduledTaskEdit() {
   const { id = "" } = useParams();
   const { data: task, error, isError } = useScheduledTask(id);
-  const { update } = useScheduledTaskMutations();
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
 
   return (
@@ -36,7 +37,7 @@ function ScheduledTaskEdit() {
         task={task}
         submitLabel="Save task"
         onSubmit={async (data) => {
-          await update.mutateAsync({ id, data });
+          await updateScheduledTask(queryClient, id, data);
           toast.success("Task saved.");
           navigate("/console/scheduled_tasks");
         }}

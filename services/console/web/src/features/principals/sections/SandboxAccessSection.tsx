@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -7,7 +8,7 @@ import { SectionHeading } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 
-import type { SandboxAccess } from "../api";
+import { updateSandboxAccess, type SandboxAccess } from "../api";
 import type { SectionProps } from "./types";
 
 const REPO_CACHE_OPTIONS = [
@@ -33,14 +34,15 @@ function accessOf(principal: SectionProps["principal"]): SandboxAccess {
   };
 }
 
-export function SandboxAccessSection({ principal, mutations }: SectionProps) {
+export function SandboxAccessSection({ principal }: SectionProps) {
+  const queryClient = useQueryClient();
   const form = useForm<SandboxAccess>({ defaultValues: accessOf(principal) });
   const { reset } = form;
   useEffect(() => reset(accessOf(principal)), [principal, reset]);
 
   const onSubmit = form.handleSubmit(async (values) => {
     try {
-      await mutations.updateSandboxAccess.mutateAsync(values);
+      await updateSandboxAccess(queryClient, principal.id, values);
       toast.success("Updated sandbox access.");
     } catch (error) {
       toast.error(errorMessage(error));

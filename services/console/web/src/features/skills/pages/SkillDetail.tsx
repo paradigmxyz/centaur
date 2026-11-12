@@ -1,3 +1,5 @@
+import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -8,7 +10,7 @@ import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-import { userLabel, useSkill, useSkillMutations, type Skill } from "../api";
+import { archiveSkill, setSkillShared, userLabel, useSkill, type Skill } from "../api";
 import { skillsTabPath, toSentence, validationMessages } from "../sections/helpers";
 import { SkillMarkdown, VisibilityBadge } from "../sections/SkillParts";
 
@@ -80,27 +82,33 @@ function SkillDetail() {
 /** Edit (owner/editor); owner: visibility switch + Archive; moderating admin: Make Private. */
 function SkillActions({ skill }: { skill: Skill }) {
   const navigate = useNavigate();
-  const mutations = useSkillMutations(skill.id);
+  const queryClient = useQueryClient();
   const { viewer } = skill;
   const shared = skill.visibility === "shared";
-  const busy = mutations.share.isPending || mutations.unshare.isPending || mutations.archive.isPending;
+  const [busy, setBusy] = useState(false);
 
   const setVisibility = async (share: boolean) => {
+    setBusy(true);
     try {
-      await (share ? mutations.share : mutations.unshare).mutateAsync();
+      await setSkillShared(queryClient, skill.id, share);
       toast.success(share ? "Skill is now shared." : "Skill is now private.");
     } catch (error) {
       toast.error(toSentence(validationMessages(error)));
+    } finally {
+      setBusy(false);
     }
   };
 
   const archive = async () => {
+    setBusy(true);
     try {
-      await mutations.archive.mutateAsync();
+      await archiveSkill(queryClient, skill.id);
       toast.success("Skill archived.");
       navigate("/console/skills/mine");
     } catch (error) {
       toast.error(toSentence(validationMessages(error)));
+    } finally {
+      setBusy(false);
     }
   };
 

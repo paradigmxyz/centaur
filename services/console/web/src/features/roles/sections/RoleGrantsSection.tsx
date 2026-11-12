@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -14,8 +15,9 @@ import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { displayLabel } from "@/lib/format";
 import type { GrantableSummary } from "@/lib/secret-kinds";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useAssignableSecretCount, useRoleGrants, type RoleGrant } from "../api";
+import { grantRoleSecret, revokeRoleGrant, useAssignableSecretCount, useRoleGrants, type RoleGrant } from "../api";
 import type { SectionProps } from "./types";
 
 function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
@@ -23,7 +25,9 @@ function secretPath(secret: Pick<GrantableSummary, "kind" | "id">) {
 }
 
 /** The role's secret grants (legacy "Secrets" section): grant picker + table. */
-export function RoleGrantsSection({ role, mutations }: SectionProps) {
+export function RoleGrantsSection({ role }: SectionProps) {
+  const queryClient = useQueryClient();
+  const grantSecret = useSubmit((secret: GrantableSummary) => grantRoleSecret(queryClient, role.id, secret));
   const [page, setPage] = usePageParam("grants_page");
   const grants = useRoleGrants(role.id, page);
   const [selected, setSelected] = useState<GrantableSummary | null>(null);
@@ -38,7 +42,7 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
       return;
     }
     try {
-      await mutations.grantSecret.mutateAsync(selected);
+      await grantSecret.run(selected);
       toast.success(`Granted ${displayLabel(selected)}.`);
       setSelected(null);
     } catch (error) {
@@ -100,7 +104,7 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
             confirmLabel="Revoke"
             onConfirm={async () => {
               try {
-                await mutations.revokeGrant.mutateAsync(row.id);
+                await revokeRoleGrant(queryClient, role.id, row.id);
                 toast.success("Revoked grant.");
               } catch (error) {
                 toast.error(errorMessage(error));
@@ -115,7 +119,7 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
         ),
       },
     ],
-    [mutations.revokeGrant],
+    [queryClient, role.id],
   );
 
   return (
@@ -127,7 +131,7 @@ export function RoleGrantsSection({ role, mutations }: SectionProps) {
             <div className="min-w-0 flex-1 sm:w-80 sm:flex-none">
               <SecretGrantPicker value={selected} onChange={setSelected} excludeGrantee={`role:${role.id}`} />
             </div>
-            <Button onClick={() => void grant()} disabled={mutations.grantSecret.isPending}>
+            <Button onClick={() => void grant()} disabled={grantSecret.pending}>
               Grant secret
             </Button>
           </div>

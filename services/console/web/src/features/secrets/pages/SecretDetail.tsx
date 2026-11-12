@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -11,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { secretKindLabel } from "@/lib/secret-kinds";
 
-import { isFormKind, secretTitle, useDeleteSecret, useSecretDetail, type FormKind, type SecretDetail as Detail } from "../api";
+import { deleteSecret, isFormKind, secretTitle, useSecretDetail, type FormKind, type SecretDetail as Detail } from "../api";
 import { ConfigurationSection, RequestRulesSection, SignedHeadersSection, SourcesSection } from "../sections/DetailSections";
 import { QueryErrorAlert } from "../query-error";
 import { RoleGrantsSection } from "../sections/RoleGrantsSection";
@@ -94,11 +95,11 @@ function SecretDetail() {
 }
 
 function EditActions({ kind, secret }: { kind: FormKind; secret: Detail }) {
-  const destroy = useDeleteSecret(kind, secret.id);
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
   const onDelete = async () => {
     try {
-      await destroy.mutateAsync();
+      await deleteSecret(queryClient, kind, secret.id);
       toast.success("Secret deleted.");
       navigate("/console/secrets");
     } catch (error) {

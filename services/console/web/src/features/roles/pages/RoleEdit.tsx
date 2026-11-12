@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -5,8 +6,9 @@ import { BackLink } from "@/components/back-link";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { displayLabel } from "@/lib/format";
+import { useSubmit } from "@/lib/use-submit";
 
-import { useRole, useRoleMutations } from "../api";
+import { updateRole, useRole, type RoleFormData } from "../api";
 import { RoleForm } from "../sections/RoleForm";
 
 export default function RoleEditPage() {
@@ -20,7 +22,8 @@ export default function RoleEditPage() {
 function RoleEdit() {
   const { id = "" } = useParams();
   const { data: role } = useRole(id);
-  const { update } = useRoleMutations(id);
+  const queryClient = useQueryClient();
+  const update = useSubmit((data: RoleFormData) => updateRole(queryClient, id, data));
   const navigate = useNavigate();
 
   return (
@@ -33,7 +36,7 @@ function RoleEdit() {
         role={role}
         error={update.error}
         onSubmit={async (data) => {
-          await update.mutateAsync(data);
+          await update.run(data);
           toast.success("Role updated.");
           navigate(`/console/roles/${role.id}`);
         }}

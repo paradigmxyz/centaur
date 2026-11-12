@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -9,7 +10,7 @@ import { useDocumentTitle } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { errorMessage } from "@/lib/api";
 
-import { useCreateOauthApp, useOauthProviders } from "../api";
+import { createOauthApp, useOauthProviders } from "../api";
 import { OauthAppErrors } from "../sections/OauthAppErrors";
 import { OauthAppForm } from "../sections/OauthAppForm";
 
@@ -25,7 +26,7 @@ function OauthAppNew() {
   useDocumentTitle("New App");
   const navigate = useNavigate();
   const providers = useOauthProviders();
-  const create = useCreateOauthApp();
+  const queryClient = useQueryClient();
   const [saveError, setSaveError] = useState<unknown>(null);
 
   return (
@@ -50,15 +51,12 @@ function OauthAppNew() {
           onSubmit={async (payload) => {
             setSaveError(null);
             try {
-              const body = await create.mutateAsync(payload);
+              const body = await createOauthApp(queryClient, payload);
               toast.success("OAuth app created.");
               navigate(`/console/oauth_apps/${body.data.id}`);
             } catch (error) {
               setSaveError(error);
               throw error;
-            } finally {
-              // Drop the payload (client_secret) from the MutationCache.
-              create.reset();
             }
           }}
         />

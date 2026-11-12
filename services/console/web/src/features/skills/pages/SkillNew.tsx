@@ -1,10 +1,11 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 
-import { useCreateSkill } from "../api";
+import { createSkill } from "../api";
 import { SkillForm } from "../sections/SkillForm";
 
 export default function SkillNewPage() {
@@ -17,7 +18,7 @@ export default function SkillNewPage() {
 
 function SkillNew() {
   const navigate = useNavigate();
-  const create = useCreateSkill();
+  const queryClient = useQueryClient();
 
   return (
     <>
@@ -26,7 +27,7 @@ function SkillNew() {
         canManageEditors
         cancelTo="/console/skills"
         onSubmit={async (input) => {
-          const body = await create.mutateAsync(input);
+          const body = await createSkill(queryClient, input);
           toast.success("Skill created.");
           navigate(`/console/skills/${body.data.id}`);
         }}

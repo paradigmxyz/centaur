@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
@@ -9,7 +10,7 @@ import { useDocumentTitle } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { errorMessage } from "@/lib/api";
 
-import { useOauthApp, useOauthProviders, useUpdateOauthApp } from "../api";
+import { updateOauthApp, useOauthApp, useOauthProviders } from "../api";
 import { OauthAppErrors } from "../sections/OauthAppErrors";
 import { OauthAppForm } from "../sections/OauthAppForm";
 
@@ -27,7 +28,7 @@ function OauthAppEdit() {
   useDocumentTitle(`Edit ${app.slug}`);
   const navigate = useNavigate();
   const providers = useOauthProviders();
-  const update = useUpdateOauthApp(id);
+  const queryClient = useQueryClient();
   const [saveError, setSaveError] = useState<unknown>(null);
 
   return (
@@ -53,15 +54,12 @@ function OauthAppEdit() {
           onSubmit={async (payload) => {
             setSaveError(null);
             try {
-              await update.mutateAsync(payload);
+              await updateOauthApp(queryClient, id, payload);
               toast.success("OAuth app updated.");
               navigate(`/console/oauth_apps/${app.id}`);
             } catch (error) {
               setSaveError(error);
               throw error;
-            } finally {
-              // Drop the payload (client_secret) from the MutationCache.
-              update.reset();
             }
           }}
         />

@@ -1,6 +1,6 @@
 // The signed-in caller, from GET /api/v1/me. The shell loads it once; every
 // component reads it through useSession() (never fetch /me directly).
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, setCsrfToken, type DataEnvelope } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
@@ -51,6 +51,31 @@ export function useSession(): Me {
 /** Non-suspending variant for places that render before the shell. */
 export function useOptionalSession() {
   return useQuery(meQueryOptions);
+}
+
+/** Drops every cached query except the session (data loaded under other permissions). */
+function removeNonSessionQueries(queryClient: QueryClient) {
+  queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== sharedKeys.me[0] });
+}
+
+/** POST /api/v1/descope ("view as operator"); returns the refreshed session. */
+export async function descope(queryClient: QueryClient): Promise<Me> {
+  await api.post("/api/v1/descope");
+  removeNonSessionQueries(queryClient);
+  return queryClient.fetchQuery({ queryKey: sharedKeys.me, queryFn: fetchMe });
+}
+
+/** DELETE /api/v1/descope: restore admin permissions. */
+export async function restoreAdmin(queryClient: QueryClient) {
+  await api.delete("/api/v1/descope");
+  removeNonSessionQueries(queryClient);
+  await queryClient.invalidateQueries({ queryKey: sharedKeys.me });
+}
+
+/** DELETE /api/v1/session; the caller then leaves the SPA. */
+export async function signOut(queryClient: QueryClient) {
+  await api.delete("/api/v1/session");
+  queryClient.clear();
 }
 
 /** Where a signed-in user lands: admins on Principals, everyone else on Integrations. */

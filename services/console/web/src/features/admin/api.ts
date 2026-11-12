@@ -1,11 +1,10 @@
 // Data access for the admin pages (users, API clients, system settings).
 // Query keys live under "admin" (see lib/query-keys.ts).
 //
-// API client secrets are never cached: the create/rotate mutations use
-// gcTime 0 and callers reset() them as soon as they settle, so the response
-// leaves the MutationCache; detail queries are refreshed by invalidation, never
-// seeded from those responses.
-import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+// API client secrets are never cached: the create/rotate responses go straight
+// to the caller (which keeps the secret in route-scoped component state);
+// detail queries are refreshed by invalidation, never seeded from them.
+import { useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope } from "@/lib/api";
 import { createQueryKeys } from "@/lib/query-keys";
@@ -47,13 +46,12 @@ export function useUsers() {
   });
 }
 
-export function useUserAction() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ user, action }: { user: ConsoleUser; action: UserAction }) =>
-      api.post<DataEnvelope<ConsoleUser>>(`${usersBase}/${user.id}/${action}`),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: adminKeys.list({ resource: "users" }) }),
-  });
+export async function runUserAction(queryClient: QueryClient, user: ConsoleUser, action: UserAction) {
+  try {
+    return await api.post<DataEnvelope<ConsoleUser>>(`${usersBase}/${user.id}/${action}`);
+  } finally {
+    await queryClient.invalidateQueries({ queryKey: adminKeys.list({ resource: "users" }) });
+  }
 }
 
 // -- API clients ---------------------------------------------------------------
@@ -107,64 +105,61 @@ export function useApiClient(id: string) {
   });
 }
 
-export function useCreateApiClient() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (data: ApiClientInput) => api.post<DataEnvelope<IssuedApiClient>>(clientsBase, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: clientsListKey }),
-  });
+/** The response carries the plaintext secret; never cache it. */
+export async function createApiClient(queryClient: QueryClient, data: ApiClientInput) {
+  const body = await api.post<DataEnvelope<IssuedApiClient>>(clientsBase, { data });
+  await queryClient.invalidateQueries({ queryKey: clientsListKey });
+  return body;
 }
 
-export function useUpdateApiClient(id: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (data: Omit<ApiClientInput, "principal">) =>
-      api.patch<DataEnvelope<ApiClient>>(`${clientsBase}/${id}`, { data }),
-    onSuccess: (body) => {
-      queryClient.setQueryData(clientKey(id), body);
-      return queryClient.invalidateQueries({ queryKey: clientsListKey });
-    },
-  });
+export async function updateApiClient(queryClient: QueryClient, id: string, data: Omit<ApiClientInput, "principal">) {
+  const body = await api.patch<DataEnvelope<ApiClient>>(`${clientsBase}/${id}`, { data });
+  queryClient.setQueryData(clientKey(id), body);
+  await queryClient.invalidateQueries({ queryKey: clientsListKey });
+  return body;
 }
 
-/** Mutations on one client; each refreshes it (and the list). */
-export function useApiClientMutations(id: string) {
-  const queryClient = useQueryClient();
-  const refresh = () =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: clientKey(id) }),
-      queryClient.invalidateQueries({ queryKey: clientsListKey }),
-    ]);
-  const member = `${clientsBase}/${id}`;
+const clientPath = (id: string) => `${clientsBase}/${id}`;
 
-  return {
-    rotateSecret: useMutation({
-      gcTime: 0,
-      mutationFn: () => api.post<DataEnvelope<IssuedApiClient>>(`${member}/rotate_secret`),
-      onSuccess: refresh,
-    }),
-    disable: useMutation({ mutationFn: () => api.post(`${member}/disable`), onSuccess: refresh }),
-    enable: useMutation({ mutationFn: () => api.post(`${member}/enable`), onSuccess: refresh }),
-    destroy: useMutation({
-      mutationFn: () => api.delete(member),
-      // List only: dropping the detail query while its page is mounted would refetch it.
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: clientsListKey }),
-    }),
-    attachPrincipal: useMutation({
-      mutationFn: (principal: string) =>
-        api.post<DataEnvelope<ApiClientPrincipalLink>>(`${member}/principals`, { data: { principal } }),
-      onSuccess: refresh,
-    }),
-    detachPrincipal: useMutation({
-      mutationFn: (linkId: string) => api.delete(`${member}/principals/${linkId}`),
-      onSuccess: refresh,
-    }),
-    makeDefault: useMutation({
-      mutationFn: (linkId: string) => api.post(`${member}/principals/${linkId}/default`),
-      onSuccess: refresh,
-    }),
-  };
+/** Refreshes one client and the list. */
+const refreshApiClient = (queryClient: QueryClient, id: string) =>
+  Promise.all([
+    queryClient.invalidateQueries({ queryKey: clientKey(id) }),
+    queryClient.invalidateQueries({ queryKey: clientsListKey }),
+  ]);
+
+/** The response carries the new plaintext secret; never cache it. */
+export async function rotateApiClientSecret(queryClient: QueryClient, id: string) {
+  const body = await api.post<DataEnvelope<IssuedApiClient>>(`${clientPath(id)}/rotate_secret`);
+  await refreshApiClient(queryClient, id);
+  return body;
+}
+
+export async function setApiClientEnabled(queryClient: QueryClient, id: string, enabled: boolean) {
+  await api.post(`${clientPath(id)}/${enabled ? "enable" : "disable"}`);
+  await refreshApiClient(queryClient, id);
+}
+
+export async function deleteApiClient(queryClient: QueryClient, id: string) {
+  await api.delete(clientPath(id));
+  // List only: dropping the detail query while its page is mounted would refetch it.
+  await queryClient.invalidateQueries({ queryKey: clientsListKey });
+}
+
+export async function attachApiClientPrincipal(queryClient: QueryClient, id: string, principal: string) {
+  const body = await api.post<DataEnvelope<ApiClientPrincipalLink>>(`${clientPath(id)}/principals`, { data: { principal } });
+  await refreshApiClient(queryClient, id);
+  return body;
+}
+
+export async function detachApiClientPrincipal(queryClient: QueryClient, id: string, linkId: string) {
+  await api.delete(`${clientPath(id)}/principals/${linkId}`);
+  await refreshApiClient(queryClient, id);
+}
+
+export async function makeApiClientPrincipalDefault(queryClient: QueryClient, id: string, linkId: string) {
+  await api.post(`${clientPath(id)}/principals/${linkId}/default`);
+  await refreshApiClient(queryClient, id);
 }
 
 // -- system settings -------------------------------------------------------------
@@ -203,12 +198,10 @@ export function useSystemSettings() {
   });
 }
 
-export function useUpdateSystemSettings() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (data: SystemSettingsInput) => api.patch<DataEnvelope<SystemSettings>>(settingsBase, { data }),
-    onSuccess: (body) => queryClient.setQueryData(settingsKey, body),
-  });
+export async function updateSystemSettings(queryClient: QueryClient, data: SystemSettingsInput) {
+  const body = await api.patch<DataEnvelope<SystemSettings>>(settingsBase, { data });
+  queryClient.setQueryData(settingsKey, body);
+  return body;
 }
 
 export function useSlackExternalTeams() {
@@ -221,13 +214,10 @@ export function useSlackExternalTeams() {
   });
 }
 
-export function useReplaceSlackExternalTeams() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (text: string) =>
-      api.put<DataEnvelope<{ slack_external_team_ids: string[] }>>(`${settingsBase}/slack_external_teams`, {
-        data: { slack_external_team_ids: text },
-      }),
-    onSuccess: (body) => queryClient.setQueryData(slackTeamsKey, body),
+export async function replaceSlackExternalTeams(queryClient: QueryClient, text: string) {
+  const body = await api.put<DataEnvelope<{ slack_external_team_ids: string[] }>>(`${settingsBase}/slack_external_teams`, {
+    data: { slack_external_team_ids: text },
   });
+  queryClient.setQueryData(slackTeamsKey, body);
+  return body;
 }

@@ -7,7 +7,7 @@
 //   keys.detail(id)          -> ["principals", "detail", id]
 //   keys.sub(id, "grants", { page }) -> ["principals", "detail", id, "grants", { page }]
 //
-// After a mutation, invalidate the narrowest prefix that covers what changed,
+// After a write, invalidate the narrowest prefix that covers what changed,
 // e.g. queryClient.invalidateQueries({ queryKey: keys.detail(id) }).
 
 export function createQueryKeys<const Root extends string>(root: Root) {

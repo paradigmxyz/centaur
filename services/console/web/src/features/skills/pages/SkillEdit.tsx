@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -6,7 +7,7 @@ import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { ApiError } from "@/lib/api";
 
-import { useSkill, useSkillMutations } from "../api";
+import { updateSkill, useSkill } from "../api";
 import { SkillForm } from "../sections/SkillForm";
 
 export default function SkillEditPage() {
@@ -20,7 +21,7 @@ export default function SkillEditPage() {
 function SkillEdit() {
   const { id = "" } = useParams();
   const { data: skill, refetch } = useSkill(id);
-  const { update } = useSkillMutations(id);
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
 
   // Readers who cannot edit get the same 404 the API returns on update.
@@ -46,7 +47,7 @@ function SkillEdit() {
         cancelTo={`/console/skills/${skill.id}`}
         onSubmit={async (input) => {
           try {
-            await update.mutateAsync(input);
+            await updateSkill(queryClient, id, input);
           } catch (error) {
             if (error instanceof ApiError && error.status === 409) {
               // Like the legacy redirect back to edit: show the latest content.

@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { toast } from "sonner";
 
@@ -5,9 +6,11 @@ import { adminSlackChannelLoader, useSlackChannelNames } from "@/components/slac
 import { SlackChannelPermissionsEditor } from "@/components/slack-channel-permissions-editor";
 import { errorMessage } from "@/lib/api";
 
+import { deletePrincipalSlackPermission, replacePrincipalSlackPermissions } from "../api";
 import type { SectionProps } from "./types";
 
-export function SlackPermissionsSection({ principal, mutations }: SectionProps) {
+export function SlackPermissionsSection({ principal }: SectionProps) {
+  const queryClient = useQueryClient();
   const ids = useMemo(
     () => [
       ...principal.slack_channel_permissions.map((row) => row.channel_id),
@@ -32,7 +35,7 @@ export function SlackPermissionsSection({ principal, mutations }: SectionProps) 
       loadOptions={loadOptions}
       onSave={async (rows) => {
         try {
-          await mutations.replaceSlackPermissions.mutateAsync(rows);
+          await replacePrincipalSlackPermissions(queryClient, principal.id, rows);
           toast.success("Updated Slack channel permissions.");
         } catch (error) {
           throw new Error(errorMessage(error), { cause: error });
@@ -40,7 +43,7 @@ export function SlackPermissionsSection({ principal, mutations }: SectionProps) 
       }}
       onDelete={async (channelId) => {
         try {
-          await mutations.deleteSlackPermission.mutateAsync(channelId);
+          await deletePrincipalSlackPermission(queryClient, principal.id, channelId);
           toast.success("Deleted Slack channel permission.");
         } catch (error) {
           toast.error(errorMessage(error));

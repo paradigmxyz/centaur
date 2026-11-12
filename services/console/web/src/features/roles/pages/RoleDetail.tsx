@@ -7,7 +7,7 @@ import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
 import { displayLabel } from "@/lib/format";
 
-import { useRole, useRoleMutations } from "../api";
+import { useRole } from "../api";
 import { RoleGrantsSection } from "../sections/RoleGrantsSection";
 import { RoleSlackPermissionsSection } from "../sections/RoleSlackPermissionsSection";
 
@@ -22,7 +22,6 @@ export default function RoleDetailPage() {
 function RoleDetail() {
   const { id = "" } = useParams();
   const { data: role } = useRole(id);
-  const mutations = useRoleMutations(id);
   const title = displayLabel(role);
   useDocumentTitle(title);
 
@@ -54,8 +53,8 @@ function RoleDetail() {
         </div>
       </div>
 
-      <RoleSlackPermissionsSection role={role} mutations={mutations} />
-      <RoleGrantsSection role={role} mutations={mutations} />
+      <RoleSlackPermissionsSection role={role} />
+      <RoleGrantsSection role={role} />
     </>
   );
 }

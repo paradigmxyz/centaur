@@ -1,9 +1,7 @@
 // Data access for the broker credential pages (/api/v1/broker_credentials).
 // Query keys live under "credentials". The API never returns token material,
 // write-only values, or header values: only names and has_* presence flags.
-import { keepPreviousData, useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-
-import { useState } from "react";
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
 import { createQueryKeys } from "@/lib/query-keys";
@@ -106,58 +104,23 @@ export function useCredential(id: string) {
 }
 
 // Create/update bodies carry write-only plaintext (client secret, refresh
-// token, username, password, API key, header values). `gcTime: 0` drops the
-// mutation from the MutationCache once it is unobserved, and callers reset() it
-// as soon as it settles (see useSecretMutation) so the variables never linger.
-export function useCreateCredential() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (data: CredentialPayload) => api.post<DataEnvelope<BrokerCredential>>(base, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: credentialKeys.lists() }),
-  });
+// token, username, password, API key, header values). It lives only in this
+// call and the caller's form, which clears those fields afterwards.
+export async function createCredential(queryClient: QueryClient, data: CredentialPayload) {
+  const body = await api.post<DataEnvelope<BrokerCredential>>(base, { data });
+  await queryClient.invalidateQueries({ queryKey: credentialKeys.lists() });
+  return body;
 }
 
-export function useUpdateCredential(id: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (data: CredentialPayload) => api.patch<DataEnvelope<BrokerCredential>>(`${base}/${id}`, { data }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: credentialKeys.all }),
-  });
+export async function updateCredential(queryClient: QueryClient, id: string, data: CredentialPayload) {
+  const body = await api.patch<DataEnvelope<BrokerCredential>>(`${base}/${id}`, { data });
+  await queryClient.invalidateQueries({ queryKey: credentialKeys.all });
+  return body;
 }
 
-export function useDeleteCredential(id: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.delete(`${base}/${id}`),
-    // Lists only: removing the detail query while its page is still mounted
-    // would refetch the deleted record.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: credentialKeys.lists() }),
-  });
-}
-
-/**
- * Runs a secret-bearing create/update mutation and resets it as soon as it
- * settles, so its plaintext variables leave the MutationCache. The error is
- * kept in component state (it carries only the server's response) for the
- * form's error summary.
- */
-export function useSecretMutation<T>(mutation: {
-  mutateAsync: (data: CredentialPayload) => Promise<T>;
-  reset: () => void;
-}) {
-  const [error, setError] = useState<unknown>(null);
-  const submit = async (data: CredentialPayload): Promise<T> => {
-    setError(null);
-    try {
-      return await mutation.mutateAsync(data);
-    } catch (caught) {
-      setError(caught);
-      throw caught;
-    } finally {
-      mutation.reset();
-    }
-  };
-  return { submit, error };
+export async function deleteCredential(queryClient: QueryClient, id: string) {
+  await api.delete(`${base}/${id}`);
+  // Lists only: removing the detail query while its page is still mounted
+  // would refetch the deleted record.
+  await queryClient.invalidateQueries({ queryKey: credentialKeys.lists() });
 }

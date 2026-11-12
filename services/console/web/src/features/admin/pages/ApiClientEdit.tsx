@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 
@@ -5,7 +6,7 @@ import { BackLink } from "@/components/back-link";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 
-import { useApiClient, useUpdateApiClient } from "../api";
+import { updateApiClient, useApiClient } from "../api";
 import { ApiClientForm } from "../sections/ApiClientForm";
 
 export default function ApiClientEditPage() {
@@ -19,7 +20,7 @@ export default function ApiClientEditPage() {
 function ApiClientEdit() {
   const { id = "" } = useParams();
   const { data: client } = useApiClient(id);
-  const update = useUpdateApiClient(id);
+  const queryClient = useQueryClient();
   const navigate = useNavigate();
   const detailPath = `/console/api_clients/${client.id}`;
 
@@ -34,7 +35,7 @@ function ApiClientEdit() {
         defaults={{ name: client.name, scopes: client.scopes }}
         cancelTo={detailPath}
         onSubmit={async (input) => {
-          await update.mutateAsync(input);
+          await updateApiClient(queryClient, id, input);
           toast.success("API client updated.");
           navigate(detailPath);
         }}

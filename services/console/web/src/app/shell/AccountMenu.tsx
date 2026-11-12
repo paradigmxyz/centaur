@@ -1,10 +1,10 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { ChevronsUpDown, LogOut, Monitor, Moon, Sun, UserCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 
-import { defaultLandingPath, type Me } from "@/app/session";
+import { defaultLandingPath, descope, signOut, type Me } from "@/app/session";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,8 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { SidebarMenu, SidebarMenuItem } from "@/components/ui/sidebar";
-import { api, errorMessage, navigation } from "@/lib/api";
-import { sharedKeys } from "@/lib/query-keys";
+import { errorMessage, navigation } from "@/lib/api";
 import { nextPreference, useTheme, type ThemePreference } from "@/lib/theme";
 
 const THEME_LABELS: Record<ThemePreference, string> = {
@@ -34,25 +33,24 @@ export function AccountMenu({ me }: { me: Me }) {
   const { preference, setPreference } = useTheme();
   const installPrompt = useInstallPrompt();
 
-  const descope = useMutation({
-    mutationFn: () => api.post("/api/v1/descope"),
-    onSuccess: async () => {
-      // Drop admin data cached under the old permissions.
-      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== sharedKeys.me[0] });
-      const fresh = await queryClient.fetchQuery({ queryKey: sharedKeys.me, queryFn: () => api.get<{ data: Me }>("/api/v1/me").then((b) => b.data) });
+  const viewAsOperator = async () => {
+    try {
+      // Drops admin data cached under the old permissions.
+      const fresh = await descope(queryClient);
       navigate(defaultLandingPath(fresh));
-    },
-    onError: (error) => toast.error(errorMessage(error)),
-  });
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  };
 
-  const signOut = useMutation({
-    mutationFn: () => api.delete("/api/v1/session"),
-    onSuccess: () => {
-      queryClient.clear();
+  const leave = async () => {
+    try {
+      await signOut(queryClient);
       navigation.assign("/login");
-    },
-    onError: (error) => toast.error(errorMessage(error)),
-  });
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  };
 
   const next = nextPreference(preference);
   const ThemeIcon = preference === "light" ? Sun : preference === "dark" ? Moon : Monitor;
@@ -102,12 +100,12 @@ export function AccountMenu({ me }: { me: Me }) {
               <ThemeIcon /> {THEME_LABELS[preference]}
             </DropdownMenuItem>
             {me.acting_admin && me.auth_method === "session" && (
-              <DropdownMenuItem title="Temporarily pause your admin permissions" onSelect={() => descope.mutate()}>
+              <DropdownMenuItem title="Temporarily pause your admin permissions" onSelect={() => void viewAsOperator()}>
                 <UserCircle /> View as operator
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => signOut.mutate()}>
+            <DropdownMenuItem onSelect={() => void leave()}>
               <LogOut /> Sign out
             </DropdownMenuItem>
           </DropdownMenuContent>

@@ -20,6 +20,22 @@ export default tseslint.config(
     rules: {
       ...reactHooks.configs.recommended.rules,
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+      // Reads use TanStack Query; writes are plain async functions in each
+      // feature's api.ts, so request bodies (which may carry secrets) never
+      // enter a TanStack cache.
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@tanstack/react-query",
+              importNames: ["useMutation", "useMutationState", "useIsMutating", "MutationCache"],
+              message:
+                "Writes are plain async functions in the feature's api.ts (apiRequest, then queryClient.invalidateQueries); track pending/error with useState or useSubmit from @/lib/use-submit. See src/components/README.md.",
+            },
+          ],
+        },
+      ],
     },
   },
   {
