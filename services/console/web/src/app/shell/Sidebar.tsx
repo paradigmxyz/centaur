@@ -25,7 +25,7 @@ interface ConsoleSidebarProps {
 /** The console sidebar: logo, section links, and the account menu. Off-canvas (a Sheet) on mobile. */
 export function ConsoleSidebar({ nav, pathname, footer }: ConsoleSidebarProps) {
   return (
-    <Sidebar collapsible="offcanvas">
+    <Sidebar>
       <SidebarHeader className="h-14 justify-center px-4">
         <Link
           to="/"

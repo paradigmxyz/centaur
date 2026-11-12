@@ -52,9 +52,6 @@ export function AppShell() {
   );
 }
 
-// The desktop sidebar is always expanded; only the mobile drawer opens and closes.
-const keepOpen = () => {};
-
 function ShellFrame() {
   const me = useSession();
   const location = useLocation();
@@ -72,7 +69,7 @@ function ShellFrame() {
 
   return (
     <ShellContext.Provider value={shell}>
-      <SidebarProvider open onOpenChange={keepOpen}>
+      <SidebarProvider>
         <ConsoleSidebar nav={nav} pathname={location.pathname} footer={<AccountMenu me={me} />} />
         <CloseDrawerOnNavigate pathname={location.pathname} />
         <SidebarInset className="min-w-0">

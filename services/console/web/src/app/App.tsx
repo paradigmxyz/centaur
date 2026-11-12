@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { RouterProvider, type createBrowserRouter } from "react-router";
 
 import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { ApiError } from "@/lib/api";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
 
@@ -30,10 +29,8 @@ export function App({ router }: { router: ReturnType<typeof createBrowserRouter>
 
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <RouterProvider router={router} />
-        <Toaster position="top-right" />
-      </TooltipProvider>
+      <RouterProvider router={router} />
+      <Toaster position="top-right" />
     </QueryClientProvider>
   );
 }

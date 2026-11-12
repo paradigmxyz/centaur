@@ -59,10 +59,6 @@ module ConsoleReturnPath
     nil
   end
 
-  def safe?(raw)
-    !safe(raw).nil?
-  end
-
   # "." / ".." segments (literal or percent-encoded) are resolved by the
   # browser, so "/console/../api" would escape the allowlisted prefix.
   def dot_segment?(path)

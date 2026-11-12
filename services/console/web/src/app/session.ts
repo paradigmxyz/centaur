@@ -1,6 +1,6 @@
 // The signed-in caller, from GET /api/v1/me. The shell loads it once; every
 // component reads it through useSession() (never fetch /me directly).
-import { useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
+import { useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, setCsrfToken, type DataEnvelope } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
@@ -46,11 +46,6 @@ export const meQueryOptions = {
 /** The session inside the authenticated shell (suspends until loaded). */
 export function useSession(): Me {
   return useSuspenseQuery(meQueryOptions).data;
-}
-
-/** Non-suspending variant for places that render before the shell. */
-export function useOptionalSession() {
-  return useQuery(meQueryOptions);
 }
 
 /** Drops every cached query except the session (data loaded under other permissions). */
