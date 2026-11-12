@@ -493,6 +493,19 @@ module Mcp
       assert_response :ok
     end
 
+    test "token responses are never cached, including errors" do
+      client = create_client
+      exchange_authorization_code(client, authorize_code(client))
+      assert_response :ok
+      assert_equal "no-store", response.headers["Cache-Control"]
+      assert_equal "no-cache", response.headers["Pragma"]
+
+      post "/mcp/oauth/token", params: { grant_type: "refresh_token", client_id: client.public_client_id, refresh_token: "mcprt_bogus" }
+      assert_response :bad_request
+      assert_equal "no-store", response.headers["Cache-Control"]
+      assert_equal "no-cache", response.headers["Pragma"]
+    end
+
     test "authorization code exchange returns a JWT access token for the console principal" do
       client = create_client
       code = authorize_code(client)

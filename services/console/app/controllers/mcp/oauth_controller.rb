@@ -15,6 +15,8 @@ module Mcp
 
     skip_before_action :require_login, only: %i[metadata register authorize token]
     skip_before_action :require_active_account, only: %i[metadata register authorize token]
+    # RFC 6749 section 5.1: token responses, errors included, must not be cached.
+    before_action :prevent_token_caching, only: :token
     skip_forgery_protection only: %i[register token]
 
     ACCESS_TOKEN_TTL_SECONDS = 1.hour.to_i
@@ -406,6 +408,11 @@ module Mcp
       else
         render plain: description, status: :bad_request
       end
+    end
+
+    def prevent_token_caching
+      response.headers["Cache-Control"] = "no-store"
+      response.headers["Pragma"] = "no-cache"
     end
 
     def oauth_error(error, description, status:)
