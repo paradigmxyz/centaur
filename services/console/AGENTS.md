@@ -70,7 +70,14 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   `require_owner_or_admin!`, which 404s for non-owners) or
   `allow_pending_users`. Test new endpoints with `assert_admin_only_api` or
   `assert_active_user_api` (they check the declared credential type) plus
-  ownership cases. Every non-GET request, including refused ones, logs one
+  ownership cases. A bearer key is accepted only while its owner is an
+  active admin, on every endpoint (`allow_active_users` widens session
+  access only; descope never applies to keys). Demoting or disabling a user
+  (or moving them to pending), by any path, revokes all of their API keys in
+  the same transaction (`User` callback); re-promotion revives nothing. This
+  includes the key api-rs uses (`IRON_CONTROL_API_KEY`) if its owner is
+  demoted or disabled; it must then be reissued. Every non-GET request,
+  including refused ones, logs one
   `console_api_audit` JSON line (user, auth method and API key oid, never the
   token, controller/action, path ids, status); never add request bodies or
   secret values to it. Keep proxy sync authentication, sandbox JWTs
