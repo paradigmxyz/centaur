@@ -319,6 +319,25 @@ module Api
         assert_equal "renamed-by-upsert", ref.reload.name
       end
 
+      test "PUT by OID clears foreign_id only for an explicit null" do
+        ref = static_secrets(:acme_prod_api_key)
+        data = {
+          name: ref.name,
+          inject_config: { "header" => "Authorization" },
+          source: { source_type: "env", config: { "var" => "X" } },
+          rules: [ { host: "x.example.com", http_methods: [ "GET" ], paths: [ "/" ] } ]
+        }
+
+        put api_v1_static_secret_url(id: ref.oid), params: { data: data }.to_json, headers: auth_headers
+        assert_response :ok
+        assert_equal "prod-api-key", ref.reload.foreign_id
+
+        put api_v1_static_secret_url(id: ref.oid), params: { data: data.merge(foreign_id: nil) }.to_json,
+                                                   headers: auth_headers
+        assert_response :ok
+        assert_nil ref.reload.foreign_id
+      end
+
       test "POST returns 400 when the data key is missing" do
         post api_v1_static_secrets_url, params: {}.to_json, headers: auth_headers
         assert_response :bad_request

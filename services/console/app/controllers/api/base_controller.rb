@@ -178,14 +178,28 @@ module Api
     # its column default rather than retained from the existing record, so the
     # body always replaces the whole document. The identity column foreign_id
     # is the exception: an upsert by foreign_id sets it on the
-    # record before assignment, so a blank body value must not wipe them.
+    # record before assignment, so an omitted or blank body value must not
+    # wipe it. Only an explicit JSON null on a record addressed by its opaque
+    # id clears it (see #explicit_foreign_id_clear?); a kind whose foreign_id
+    # is required then fails validation with a 422 rather than clearing.
     def permit_document(ref, attrs, *scalars, **filters)
       permitted = attrs.permit(:foreign_id, *scalars, **filters)
-      permitted.delete(:foreign_id) if permitted[:foreign_id].blank? && ref.foreign_id.present?
+      if permitted[:foreign_id].blank? && ref.foreign_id.present? && !explicit_foreign_id_clear?(ref, attrs)
+        permitted.delete(:foreign_id)
+      end
 
       defaults = ref.class.column_defaults
       columns = (scalars + filters.keys).map(&:to_s)
       permitted.with_defaults(columns.index_with { |c| defaults[c] })
+    end
+
+    # True when the body explicitly sends `foreign_id: null` (an omitted key or
+    # a blank string does not count) to an existing record addressed by its
+    # opaque id in the URL. An upsert addressed by foreign_id keeps the
+    # URL-derived identity.
+    def explicit_foreign_id_clear?(ref, attrs)
+      ref.persisted? && params[:id].to_s == ref.oid &&
+        attrs.key?(:foreign_id) && attrs[:foreign_id].nil?
     end
 
     # Resolves the target of a PUT/PATCH write so the verb behaves as an upsert.

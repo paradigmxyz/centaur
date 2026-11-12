@@ -242,6 +242,8 @@ For the resources with a `foreign_id` (static secrets, GCP auth secrets, GCP ID 
 - **`:id` is anything else**: it is treated as a globally unique `foreign_id`. The record is **updated if it exists, created if it does not**. Creation responds `201`; update responds `200`.
 
 This makes provisioning idempotent: `PUT /api/v1/roles/infra` converges the `infra` role whether or not it already exists, in one call. Omitting `foreign_id` from the body does not clear it.
+
+For the secret kinds, a write addressed by **OID** may clear an optional `foreign_id` by sending an explicit JSON `"foreign_id": null`. Omitting the key, or sending a blank string, keeps the stored value, and a write addressed by `foreign_id` always keeps that URL identity. A kind whose `foreign_id` is required (PG DSN secrets) returns `422` instead of clearing it.
 - **`labels`** is an arbitrary string-keyed object (defaults to `{}`).
 - **Timestamps** are ISO 8601 UTC.
 

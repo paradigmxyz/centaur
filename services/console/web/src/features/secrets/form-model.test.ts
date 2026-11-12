@@ -1,11 +1,25 @@
 import { describe, expect, it } from "vitest";
 
 import type { KindRecord } from "./api";
-import { errorMessages, normalizeDetails, rulesPayload, settingsPayload, sourcePayload, splitTerms, toFormValues, toPayload } from "./form-model";
+import { errorMessages, foreignIdPayload, normalizeDetails, rulesPayload, settingsPayload, sourcePayload, splitTerms, toFormValues, toPayload } from "./form-model";
 
 const base = { id: "ssr_1", foreign_id: null, name: "n", description: null, labels: {}, created_at: "", updated_at: "" };
 
 describe("secret form model", () => {
+  it("sends a null foreign_id only when the user cleared an existing one", () => {
+    const withId: KindRecord = { ...base, foreign_id: "stored-id" };
+    expect(foreignIdPayload(" new-id ", withId)).toEqual({ foreign_id: "new-id" });
+    expect(foreignIdPayload("  ", withId)).toEqual({ foreign_id: null });
+    expect(foreignIdPayload("", base)).toEqual({});
+    expect(foreignIdPayload("", undefined)).toEqual({});
+
+    const record: KindRecord = { ...withId, inject_config: { header: "X-Key" }, source: { source_type: "env", config: { var: "V" } } };
+    const values = toFormValues("static", record);
+    expect(toPayload("static", values, record).foreign_id).toBe("stored-id");
+    expect(toPayload("static", { ...values, foreign_id: "" }, record)).toHaveProperty("foreign_id", null);
+    expect(toPayload("static", { ...values, foreign_id: "" })).not.toHaveProperty("foreign_id");
+  });
+
   it("never prefills an inline value and omits a blank one", () => {
     const record: KindRecord = { ...base, inject_config: { header: "X-Key" }, source: { source_type: "control_plane", config: {} } };
     const values = toFormValues("static", record);

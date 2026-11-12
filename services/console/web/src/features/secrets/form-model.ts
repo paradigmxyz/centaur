@@ -238,11 +238,23 @@ export function settingsPayload(settings: SettingValues[]) {
     );
 }
 
+/**
+ * The foreign_id part of the body. A blank field is omitted (the server keeps
+ * the stored identity) unless the user cleared an existing Foreign ID; only
+ * then is it sent as an explicit null, which clears it on an update by OID
+ * (docs/API.md#upsert-put--patch).
+ */
+export function foreignIdPayload(value: string, record?: KindRecord): { foreign_id?: string | null } {
+  const trimmed = value.trim();
+  if (trimmed) return { foreign_id: trimmed };
+  return record?.foreign_id ? { foreign_id: null } : {};
+}
+
 /** The `data` body for POST/PATCH /api/v1/<kind>_secrets. */
 export function toPayload(kind: FormKind, values: SecretFormValues, record?: KindRecord): Record<string, unknown> {
   const stored = storedSource(kind, record);
   const identity = {
-    foreign_id: blankToNull(values.foreign_id),
+    ...foreignIdPayload(values.foreign_id, record),
     name: blankToNull(values.name),
     description: blankToNull(values.description),
     labels: rowsToRecord(values.labels),

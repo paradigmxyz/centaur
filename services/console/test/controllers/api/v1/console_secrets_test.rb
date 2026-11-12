@@ -807,6 +807,72 @@ module Api
         assert_equal "{\"type\":\"service_account\"}", secret.reload.keyfile_source.secret
       end
 
+      # -- clearing a foreign_id ------------------------------------------------
+
+      test "an explicit null foreign_id clears it on a static secret addressed by OID" do
+        secret = StaticSecret.create!(name: "clear-id", foreign_id: "clear-me", inject_config: { "header" => "Authorization" },
+                                      source: SecretSource.new(source_type: "env", config: { "var" => "CLEAR_ME" }))
+        patch api_v1_static_secret_path(secret.oid), params: { data: {
+          foreign_id: nil, name: "clear-id", inject_config: { header: "Authorization" },
+          source: { source_type: "env", config: { var: "CLEAR_ME" } }
+        } }, headers: csrf_headers, as: :json
+        assert_response :ok
+        assert_nil json_body.dig("data", "foreign_id")
+        assert_nil secret.reload.foreign_id
+      end
+
+      test "an omitted or blank foreign_id keeps it on a static secret addressed by OID" do
+        secret = static_secrets(:acme_prod_api_key)
+        body = { name: secret.name, inject_config: secret.inject_config, replace_config: secret.replace_config,
+                 source: { source_type: "env", config: { var: "PROD_API_KEY" } } }
+        [ body, body.merge(foreign_id: ""), body.merge(foreign_id: "  ") ].each do |data|
+          patch api_v1_static_secret_path(secret.oid), params: { data: data }, headers: csrf_headers, as: :json
+          assert_response :ok
+          assert_equal "prod-api-key", secret.reload.foreign_id
+        end
+      end
+
+      test "an explicit null foreign_id keeps the identity of an upsert addressed by foreign_id" do
+        secret = static_secrets(:acme_prod_api_key)
+        put api_v1_static_secret_path("prod-api-key"), params: { data: {
+          foreign_id: nil, name: secret.name, inject_config: secret.inject_config, replace_config: secret.replace_config,
+          source: { source_type: "env", config: { var: "PROD_API_KEY" } }
+        } }, headers: csrf_headers, as: :json
+        assert_response :ok
+        assert_equal secret.oid, json_body.dig("data", "id")
+        assert_equal "prod-api-key", secret.reload.foreign_id
+      end
+
+      test "an explicit null foreign_id clears it on gcp_auth and gcp_id_token secrets" do
+        gcp_auth = gcp_auth_secrets(:acme_gcs_keyfile)
+        patch api_v1_gcp_auth_secret_path(gcp_auth.oid), params: { data: {
+          foreign_id: nil, credentials_provider: { type: "workload_identity" }, subject: nil,
+          scopes: [ "https://www.googleapis.com/auth/cloud-platform" ], rules: []
+        } }, headers: csrf_headers, as: :json
+        assert_response :ok
+        assert_nil gcp_auth.reload.foreign_id
+
+        id_token = gcp_id_token_secrets(:acme_cloud_run)
+        patch api_v1_gcp_id_token_secret_path(id_token.oid), params: { data: {
+          foreign_id: nil, audience: id_token.audience, header: id_token.header,
+          keyfile: { source_type: "env", config: { var: "CLOUD_RUN_KEYFILE" } },
+          rules: [ { host: "my-service-abc123-uc.a.run.app" } ]
+        } }, headers: csrf_headers, as: :json
+        assert_response :ok
+        assert_nil id_token.reload.foreign_id
+      end
+
+      test "an explicit null foreign_id on a pg_dsn secret is a 422 because it is required" do
+        secret = pg_dsn_secrets(:acme_reporting_pg)
+        patch api_v1_pg_dsn_secret_path(secret.oid), params: { data: {
+          foreign_id: nil, database: secret.database, role: secret.role, settings: [],
+          dsn: { source_type: "env", config: { var: "REPORTING_DSN" } }
+        } }, headers: csrf_headers, as: :json
+        assert_response :unprocessable_entity
+        assert json_body.dig("error", "details", "foreign_id").present?
+        assert_equal "pg-reporting", secret.reload.foreign_id
+      end
+
       private
 
       def static_payload_managed_by(secret)
