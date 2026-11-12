@@ -128,7 +128,7 @@ module Api
         end
 
         def render_client
-          render json: { data: client_payload(@api_client.reload) }
+          render json: { data: client_payload(reloaded_client) }
         end
 
         # The plaintext secret appears in this response only; it is never stored,
@@ -136,7 +136,12 @@ module Api
         def render_issued_secret(status:)
           response.headers["Cache-Control"] = "no-store"
           secret = @api_client.secret
-          render status: status, json: { data: client_payload(@api_client.reload).merge(secret: secret) }
+          render status: status, json: { data: client_payload(reloaded_client).merge(secret: secret) }
+        end
+
+        # The client as stored, with its principal links preloaded for the payload.
+        def reloaded_client
+          ApiClient.includes(api_client_principals: :principal).find(@api_client.id)
         end
 
         def client_payload(client)

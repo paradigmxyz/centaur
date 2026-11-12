@@ -88,6 +88,19 @@ module Api
         assert json_body["data"].none? { |c| c.key?("secret") }
       end
 
+      test "show and writes load the attached principals in one query" do
+        client = create_client
+        client.attach_principal!(principals(:acme_channel))
+        show = -> { get api_v1_console_api_client_path(client.oid) }
+        enable = -> { post enable_api_v1_console_api_client_path(client.oid), headers: csrf_headers }
+        enable.call # fetch the CSRF token outside the counted requests
+
+        assert_queries_do_not_grow(show) { client.attach_principal!(principals(:acme_user_bob)) }
+        assert_equal 2, json_body.dig("data", "principals_count")
+        assert_queries_do_not_grow(enable) { client.attach_principal!(principals(:acme_user_alice)) }
+        assert_equal 3, json_body.dig("data", "principals").size
+      end
+
       test "create shows the secret once with its default principal attached" do
         principal = principals(:acme_user_alice)
 
