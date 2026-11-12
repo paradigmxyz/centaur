@@ -1,5 +1,5 @@
 // Theme preference, compatible with the legacy console's localStorage keys and
-// the inline bootstrap script in index.html (which applies the theme before
+// web/theme-boot.js (loaded from index.html's <head>; applies the theme before
 // first paint). Preference cycles system -> light -> dark.
 import { useSyncExternalStore } from "react";
 

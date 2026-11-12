@@ -1,8 +1,9 @@
 /// <reference types="vitest/config" />
+import fs from "node:fs";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 
 // Rails serves the production build from services/console/public/spa, so
 // built asset URLs live under /spa/. The dev server runs at / and proxies the
@@ -23,9 +24,52 @@ const railsPaths = [
   "/up",
 ];
 
+// The pre-paint theme script (theme-boot.js) must run before first paint, so
+// it is a classic render-blocking script rather than part of the deferred
+// module bundle. Rails sends `script-src 'self'` with no inline allowance
+// (config/initializers/content_security_policy.rb), so instead of inlining it
+// in index.html this plugin emits it as a content-hashed file under
+// /spa/assets/ (long-cacheable, like the bundle) and injects a <script src>
+// at the end of <head>. The dev server serves it at /theme-boot.js.
+const THEME_BOOT_NAME = "theme-boot.js";
+const themeBootPath = path.resolve(import.meta.dirname, THEME_BOOT_NAME);
+
+function themeBootScript(): Plugin {
+  let isBuild = false;
+  let base = "/";
+  return {
+    name: "console-theme-boot",
+    configResolved(config) {
+      isBuild = config.command === "build";
+      base = config.base;
+    },
+    buildStart() {
+      if (!isBuild) return;
+      this.emitFile({ type: "asset", name: THEME_BOOT_NAME, source: fs.readFileSync(themeBootPath, "utf8") });
+    },
+    configureServer(server) {
+      server.middlewares.use(`/${THEME_BOOT_NAME}`, (_req, res) => {
+        res.setHeader("Content-Type", "text/javascript");
+        res.end(fs.readFileSync(themeBootPath, "utf8"));
+      });
+    },
+    transformIndexHtml(_html, ctx) {
+      let src = `/${THEME_BOOT_NAME}`;
+      if (ctx.bundle) {
+        const asset = Object.values(ctx.bundle).find(
+          (output) => output.type === "asset" && output.names.includes(THEME_BOOT_NAME),
+        );
+        if (!asset) throw new Error(`${THEME_BOOT_NAME} was not emitted`);
+        src = `${base}${asset.fileName}`;
+      }
+      return [{ tag: "script", attrs: { src }, injectTo: "head" }];
+    },
+  };
+}
+
 export default defineConfig(({ command }) => ({
   base: command === "build" ? "/spa/" : "/",
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), themeBootScript()],
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
