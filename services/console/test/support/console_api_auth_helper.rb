@@ -110,11 +110,16 @@ module ConsoleApiAuthHelper
   end
 
   # Like assert_admin_only_api for endpoints that opt in with
-  # allow_active_users: only anonymous, disabled, pending, wrong-credential,
-  # and CSRF-less writes are refused.
+  # allow_active_users: anonymous, disabled, pending, wrong-credential, and
+  # CSRF-less writes are refused, and so are non-admin bearer keys.
   def assert_active_user_api(method, path, params: nil, credential: nil)
     policy = credential || declared_credential_policy(method, path)
     assert_api_denials(method, path, params: params, policy: policy)
+    # allow_active_users widens session access only: keys need an admin owner.
+    if accepts_bearer?(policy)
+      assert_api_status(:forbidden, method, path, params: params, reason: "admin_required",
+                        headers: bearer_headers(MEMBER_TOKEN))
+    end
     if accepts_session?(policy) && !%w[get head].include?(method.to_s)
       assert_api_status(:forbidden, method, path, params: params, reason: "csrf",
                         sign_in: create_console_user, csrf: false)

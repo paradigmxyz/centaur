@@ -18,8 +18,11 @@ module Api
   # session's CSRF token in X-CSRF-Token (fetch it from GET /api/v1/me);
   # bearer requests skip CSRF because browsers never attach them ambiently.
   #
+  # A bearer key is accepted only when its owner is an active admin, on every
+  # endpoint (demoting or disabling a user revokes their keys, see User).
+  #
   # Authorization is per endpoint. Every action is admin-only unless the
-  # controller opts in with `allow_active_users` (any active account; scope
+  # controller opts in with `allow_active_users` (any active session; scope
   # records with `owned_scope` / `require_owner_or_admin!`) or
   # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me). For
   # session requests the admin check honours the "view as operator" descope.
@@ -89,9 +92,10 @@ module Api
     end
     private_class_method :matching_accepted_credentials_rules
 
-    # Opts actions into any active (approved, not disabled) account instead of
-    # the admin-only default. The action must scope what it loads to the
-    # caller unless acting_admin?.
+    # Opts actions into any active (approved, not disabled) session account
+    # instead of the admin-only default. Bearer keys still need an admin
+    # owner. The action must scope what it loads to the caller unless
+    # acting_admin?.
     def self.allow_active_users(**options)
       skip_before_action :require_admin!, **options
     end
@@ -155,8 +159,14 @@ module Api
         action: action_name,
         http_method: request.request_method,
         target: audit_target,
-        status: @audit_status || response.status
+        status: @audit_status || response.status,
+        **audit_details
       }
+    end
+
+    # Extra fields an action adds to its audit line (e.g. revoked_api_keys).
+    def audit_details
+      @audit_details ||= {}
     end
 
     # The identity behind a refused credential, for the audit line only.
@@ -271,6 +281,13 @@ module Api
       @current_api_key = ApiKey.find_by_token(token) if token.present?
       unless current_api_key&.user&.active?
         return render_error(status: :unauthorized, message: "invalid or missing API key")
+      end
+      # As on main, a bearer key acts only for an active admin, on every
+      # endpoint: allow_active_users widens session access, never bearer
+      # access (and descope never applies to keys).
+      unless current_api_key.user.admin?
+        return render_error(status: :forbidden, message: "API key owner is not an admin",
+                            details: { reason: "admin_required" })
       end
 
       @auth_method = :api_key

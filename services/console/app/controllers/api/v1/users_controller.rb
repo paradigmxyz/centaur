@@ -8,8 +8,10 @@ module Api
     #   POST /api/v1/users/:id/promote  make an active admin
     #   POST /api/v1/users/:id/demote   drop admin (not your own account)
     #
-    # Admin-only. Disabling also revokes the user's MCP OAuth refresh tokens
-    # (User callback), and their console session is reset on its next request.
+    # Admin-only. Disabling also revokes the user's MCP OAuth refresh tokens,
+    # and disabling or demoting revokes all of their API keys (User callbacks;
+    # the count goes into the audit line). Their console session is reset on
+    # its next request.
     class UsersController < Api::BaseController
       accepts_credentials :session
 
@@ -60,6 +62,7 @@ module Api
       end
 
       def render_user
+        audit_details[:revoked_api_keys] = @user.revoked_api_key_count if @user.revoked_api_key_count
         render json: { data: user_payload(@user.reload) }
       end
 
