@@ -8,7 +8,7 @@ module Api
     # "session". Send csrf_token back as X-CSRF-Token on every write. `flash`
     # carries (once) any notice/alert left by a redirect-based flow.
     class MeController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       allow_pending_users only: :show
 

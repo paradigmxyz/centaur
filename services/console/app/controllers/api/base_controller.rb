@@ -2,7 +2,7 @@ module Api
   # Base for the operator JSON API under /api/v1.
   #
   # Credentials. Every controller declares which credential each action
-  # accepts (`credential_policy`):
+  # accepts (`accepts_credentials`):
   #
   #   :bearer             a bearer ApiKey only (machine callers, CLIs)
   #   :session            the console session cookie only (the browser SPA)
@@ -32,7 +32,7 @@ module Api
     include ActionController::RequestForgeryProtection
 
     CSRF_SAFE_METHODS = %w[GET HEAD].freeze
-    CREDENTIAL_POLICIES = %i[bearer session bearer_or_session].freeze
+    CREDENTIAL_TYPES = %i[bearer session bearer_or_session].freeze
 
     # Raised (in development and test) for an action with no credential
     # policy, so a new endpoint cannot ship without choosing one.
@@ -54,40 +54,40 @@ module Api
     # Ordered [policy, only, except, if] declarations; the last one matching
     # an action wins, so a controller can declare a default and then override
     # single actions. Subclasses inherit their parent's declarations.
-    class_attribute :credential_policy_rules, instance_writer: false, default: [].freeze
+    class_attribute :accepted_credentials_rules, instance_writer: false, default: [].freeze
 
-    # Declares the credential type +policy+ (see CREDENTIAL_POLICIES) for the
+    # Declares the credential type +policy+ (see CREDENTIAL_TYPES) for the
     # controller's actions, or only:/except: some of them. +if:+ names a
     # predicate method for a request-dependent override (it must not depend
     # on the caller's identity, which is not known yet).
-    def self.credential_policy(policy, only: nil, except: nil, if: nil)
-      unless CREDENTIAL_POLICIES.include?(policy)
+    def self.accepts_credentials(policy, only: nil, except: nil, if: nil)
+      unless CREDENTIAL_TYPES.include?(policy)
         raise ArgumentError, "unknown credential policy #{policy.inspect}"
       end
 
       rule = [ policy, only && Array(only).map(&:to_s), except && Array(except).map(&:to_s), binding.local_variable_get(:if) ]
-      self.credential_policy_rules = (credential_policy_rules + [ rule.freeze ]).freeze
+      self.accepted_credentials_rules = (accepted_credentials_rules + [ rule.freeze ]).freeze
     end
 
     # The unconditional policy declared for +action+, or nil when none
     # applies. Conditional (if:) overrides are listed by
-    # conditional_credential_policies_for.
-    def self.credential_policy_for(action)
-      matching_credential_policy_rules(action).reverse.find { |rule| rule[3].nil? }&.first
+    # conditional_accepted_credentials_for.
+    def self.accepted_credentials_for(action)
+      matching_accepted_credentials_rules(action).reverse.find { |rule| rule[3].nil? }&.first
     end
 
     # [[policy, predicate], ...] for the conditional overrides of +action+.
-    def self.conditional_credential_policies_for(action)
-      matching_credential_policy_rules(action).select { |rule| rule[3] }.map { |rule| [ rule[0], rule[3] ] }
+    def self.conditional_accepted_credentials_for(action)
+      matching_accepted_credentials_rules(action).select { |rule| rule[3] }.map { |rule| [ rule[0], rule[3] ] }
     end
 
-    def self.matching_credential_policy_rules(action)
+    def self.matching_accepted_credentials_rules(action)
       action = action.to_s
-      credential_policy_rules.select do |_policy, only, except, _condition|
+      accepted_credentials_rules.select do |_policy, only, except, _condition|
         (only.nil? || only.include?(action)) && (except.nil? || !except.include?(action))
       end
     end
-    private_class_method :matching_credential_policy_rules
+    private_class_method :matching_accepted_credentials_rules
 
     # Opts actions into any active (approved, not disabled) account instead of
     # the admin-only default. The action must scope what it loads to the
@@ -201,7 +201,7 @@ module Api
     # session cookie is also present.
     def authenticate_request!
       presented = presented_credential
-      policy = credential_policy_for_request
+      policy = accepted_credentials_for_request
       return refuse_missing_credential_policy! if policy.nil?
 
       if presented == :api_key
@@ -246,7 +246,7 @@ module Api
     end
 
     def refuse_missing_credential_policy!
-      message = "#{self.class.name}##{action_name} declares no credential_policy"
+      message = "#{self.class.name}##{action_name} declares no accepts_credentials"
       raise MissingCredentialPolicy, message if Rails.env.local?
 
       Rails.logger.error(message)
@@ -256,8 +256,8 @@ module Api
 
     # The last declaration matching this action whose if: predicate (if any)
     # holds for this request.
-    def credential_policy_for_request
-      self.class.credential_policy_rules.reverse.each do |policy, only, except, condition|
+    def accepted_credentials_for_request
+      self.class.accepted_credentials_rules.reverse.each do |policy, only, except, condition|
         next unless (only.nil? || only.include?(action_name)) && (except.nil? || !except.include?(action_name))
         next if condition && !send(condition)
 

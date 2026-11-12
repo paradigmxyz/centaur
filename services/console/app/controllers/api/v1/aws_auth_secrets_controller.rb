@@ -1,7 +1,7 @@
 module Api
   module V1
     class AwsAuthSecretsController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
 
       # The credential roles parsed from named top-level keys in the request body.
       CREDENTIAL_ROLES = %w[access_key_id secret_access_key session_token].freeze

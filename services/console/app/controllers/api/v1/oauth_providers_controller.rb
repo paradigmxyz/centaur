@@ -5,7 +5,7 @@ module Api
     # The supported OAuth app providers, in registry order (the first is the
     # form default), with the provider_config keys the custom provider takes.
     class OauthProvidersController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       def index
         render json: { data: Oauth::Providers.registry.values.map { |provider| provider_payload(provider) } }

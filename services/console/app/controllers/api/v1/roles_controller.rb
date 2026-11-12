@@ -1,9 +1,9 @@
 module Api
   module V1
     class RolesController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
       # Added for the console SPA; not part of the bearer API.
-      credential_policy :session, only: %i[replace_slack_channel_permissions destroy_slack_channel_permission]
+      accepts_credentials :session, only: %i[replace_slack_channel_permissions destroy_slack_channel_permission]
 
       include SlackChannelPermissionApi
 

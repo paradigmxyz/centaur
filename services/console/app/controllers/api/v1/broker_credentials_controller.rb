@@ -5,7 +5,7 @@ module Api
     # differences: initial values are write-only, and the rotating token blob
     # (access_token/refresh_token) is NEVER serialized back.
     class BrokerCredentialsController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
 
       def index
         records, meta = paginated_label_search(BrokerCredential.includes(:oauth_app, :static_secret))

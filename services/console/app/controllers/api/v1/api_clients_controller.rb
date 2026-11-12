@@ -9,7 +9,7 @@ module Api
     # responses (with Cache-Control: no-store). It is stored as a digest and
     # can never be read back.
     class ApiClientsController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       prepend_before_action :require_api_clients_enabled
       before_action :set_api_client, except: %i[index create]

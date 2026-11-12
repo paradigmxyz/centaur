@@ -7,7 +7,7 @@ module Api
     # The grantee is resolved by oid first, so an unknown grantee returns 404
     # rather than an empty page. Grant payloads match GrantsController#show.
     class GranteeGrantsController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
 
       def index
         grantee = resolve_grantee

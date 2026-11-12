@@ -7,7 +7,7 @@ module Api
     # ever reach their own key. The private key is write-only: no response,
     # including validation errors, ever contains it.
     class PersonalSshKeysController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       DEFAULT_NAME = "My SSH key".freeze
 

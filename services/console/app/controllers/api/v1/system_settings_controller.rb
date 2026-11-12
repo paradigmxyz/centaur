@@ -8,7 +8,7 @@ module Api
     #   GET   /api/v1/system_settings/slack_external_teams  allowed external Slack team ids
     #   PUT   /api/v1/system_settings/slack_external_teams  replace the whole list
     class SystemSettingsController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       class_attribute :api_client_factory, default: -> { CentaurApiClient.new(timeout: 5) }
 

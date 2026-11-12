@@ -11,10 +11,10 @@ module Api
     # any active user, scoped to the tasks they authored. Any other task is a
     # 404 for everyone, admins included (the legacy console's authority).
     class ScheduledTasksController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
       # Added for the console SPA; not part of the bearer API.
-      credential_policy :session, only: %i[index new create update destroy run slack_channel_options]
-      credential_policy :session, only: :show, if: :console_view?
+      accepts_credentials :session, only: %i[index new create update destroy run slack_channel_options]
+      accepts_credentials :session, only: :show, if: :console_view?
 
       MAX_CHANNEL_OPTIONS = 20
 

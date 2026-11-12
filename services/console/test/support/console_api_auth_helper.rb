@@ -78,7 +78,7 @@ module ConsoleApiAuthHelper
 
   # Runs +method+ +path+ in a separate integration session per caller and
   # asserts the admin-only contract for the endpoint's declared credential
-  # policy (Api::BaseController.credential_policy; pass +credential:+ to
+  # policy (Api::BaseController.accepts_credentials; pass +credential:+ to
   # override it for a request-dependent action):
   #
   # - always: anonymous 401;
@@ -125,8 +125,8 @@ module ConsoleApiAuthHelper
   def declared_credential_policy(method, path)
     route = Rails.application.routes.recognize_path(path.to_s.split("?").first, method: method.to_s.upcase)
     controller = "#{route[:controller]}_controller".camelize.constantize
-    controller.credential_policy_for(route[:action]) ||
-      flunk("#{controller}##{route[:action]} declares no credential_policy")
+    controller.accepted_credentials_for(route[:action]) ||
+      flunk("#{controller}##{route[:action]} declares no accepts_credentials")
   end
 
   private

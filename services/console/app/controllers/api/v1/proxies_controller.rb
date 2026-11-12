@@ -1,7 +1,7 @@
 module Api
   module V1
     class ProxiesController < Api::BaseController
-      credential_policy :bearer
+      accepts_credentials :bearer
 
       def index
         scope = ::Proxy.all

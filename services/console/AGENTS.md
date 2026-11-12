@@ -48,7 +48,7 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 ## Invariants
 
 - Every `/api/v1` operator endpoint (`Api::BaseController`) declares the
-  credential it accepts with `credential_policy :bearer | :session |
+  credential it accepts with `accepts_credentials :bearer | :session |
   :bearer_or_session` (per controller, `only:`/`except:` per action, `if:`
   for a request-dependent view). An action with no declaration fails closed
   (raises in development and test, 401 in production), and

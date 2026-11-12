@@ -7,7 +7,7 @@ module Api
     # The flag lives in the cookie session, so bearer API keys cannot use it
     # (403 details.reason=session_required).
     class DescopesController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       allow_active_users only: :destroy
 

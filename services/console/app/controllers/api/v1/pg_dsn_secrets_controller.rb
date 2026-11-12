@@ -1,7 +1,7 @@
 module Api
   module V1
     class PgDsnSecretsController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
 
       include SecretDocumentWrites
 

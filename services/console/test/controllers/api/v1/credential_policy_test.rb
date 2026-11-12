@@ -5,7 +5,7 @@ module Api
     # Every /api/v1 endpoint accepts exactly the credential type it accepted
     # before the console SPA (bearer API keys), except that endpoints the SPA
     # needs may also accept the console session; endpoints added for the SPA
-    # accept only the session (Api::BaseController.credential_policy).
+    # accept only the session (Api::BaseController.accepts_credentials).
     class CredentialPolicyTest < ActionDispatch::IntegrationTest
       B = :bearer
       S = :session
@@ -67,14 +67,14 @@ module Api
       test "every /api/v1 action handled by Api::BaseController declares a credential policy" do
         actions = self.class.routed_actions
         assert_operator actions.size, :>, 100
-        missing = actions.reject { |klass, action| klass.credential_policy_for(action) }
+        missing = actions.reject { |klass, action| klass.accepted_credentials_for(action) }
         assert_empty missing.map { |klass, action| "#{klass}##{action}" }
       end
 
       test "the declared policies match the intended table exactly" do
         actual = self.class.routed_actions.each_with_object({}) do |(klass, action), table|
           name = klass.controller_path.delete_prefix("api/v1/")
-          (table[name] ||= {})[action] = klass.credential_policy_for(action)
+          (table[name] ||= {})[action] = klass.accepted_credentials_for(action)
         end
         assert_equal EXPECTED.keys.sort, actual.keys.sort
         EXPECTED.each do |controller, actions|
@@ -83,7 +83,7 @@ module Api
       end
 
       test "the scheduled task console view is session-only" do
-        assert_equal [ [ S, :console_view? ] ], ScheduledTasksController.conditional_credential_policies_for(:show)
+        assert_equal [ [ S, :console_view? ] ], ScheduledTasksController.conditional_accepted_credentials_for(:show)
       end
 
       test "sandbox admin controllers stay on sandbox token authentication" do
@@ -103,7 +103,7 @@ module Api
         klass = Class.new(Api::BaseController) do
           def index = render(json: { data: "reached" })
         end
-        assert_nil klass.credential_policy_for(:index)
+        assert_nil klass.accepted_credentials_for(:index)
         stub_const(:UndeclaredCredentialsController, klass) do
           with_routing do |set|
             set.draw { get "undeclared", to: "api/v1/credential_policy_test/undeclared_credentials#index" }
@@ -121,8 +121,8 @@ module Api
         end
       end
 
-      test "credential_policy rejects unknown policies" do
-        assert_raises(ArgumentError) { Class.new(Api::BaseController) { credential_policy :cookie } }
+      test "accepts_credentials rejects unknown policies" do
+        assert_raises(ArgumentError) { Class.new(Api::BaseController) { accepts_credentials :cookie } }
       end
 
       # -- bearer only -----------------------------------------------------------

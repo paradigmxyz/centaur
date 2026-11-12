@@ -1,7 +1,7 @@
 module Api
   module V1
     class OauthTokenSecretsController < Api::BaseController
-      credential_policy :bearer_or_session
+      accepts_credentials :bearer_or_session
 
       def index
         records, meta = paginated_label_search(OauthTokenSecret.all)

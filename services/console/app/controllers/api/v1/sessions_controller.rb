@@ -7,7 +7,7 @@ module Api
     # Session only (a bearer key gets 403 session_required). Pending accounts
     # may sign out too.
     class SessionsController < Api::BaseController
-      credential_policy :session
+      accepts_credentials :session
 
       allow_pending_users only: :destroy
 
