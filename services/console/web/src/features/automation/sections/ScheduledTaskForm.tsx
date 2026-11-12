@@ -180,6 +180,9 @@ export function ScheduledTaskForm({ task, submitLabel, onSubmit }: ScheduledTask
                     aria-label="Delivery channel"
                     loadOptions={loadOptions}
                     value={field.value}
+                    selectedLabel={
+                      task.delivery_mode === "channel" && field.value === task.delivery_channel ? task.delivery_name : null
+                    }
                     onChange={field.onChange}
                     onValidityChange={setChannelValid}
                     pattern={CHANNEL_ID_PATTERN}

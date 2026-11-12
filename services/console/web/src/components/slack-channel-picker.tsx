@@ -57,6 +57,11 @@ export function useSlackChannelNames(channelIds: string[]) {
   });
 }
 
+/** How a chosen channel reads in the picker input: "#general (C0123456789)". */
+export function channelDisplay(label: string, channelId: string) {
+  return `${label} (${channelId})`;
+}
+
 export const SLACK_DESTINATION_PATTERN = /^[CDGUW][A-Z0-9]{8,}$/;
 const MAX_RESULTS = 20;
 
@@ -67,6 +72,11 @@ interface SlackChannelPickerProps {
    * the input (e.g. after saving), remount the picker with a new `key`.
    */
   value: string;
+  /**
+   * Display label of the saved `value` (e.g. "#general"), so an edit form shows
+   * it the way a fresh selection does. Without one the raw id is shown.
+   */
+  selectedLabel?: string | null;
   onChange: (channelId: string) => void;
   /** Reports false while the user typed text that is not a channel id. */
   onValidityChange?: (valid: boolean) => void;
@@ -85,6 +95,7 @@ interface SlackChannelPickerProps {
 export function SlackChannelPicker({
   loadOptions,
   value,
+  selectedLabel,
   onChange,
   onValidityChange,
   pattern = SLACK_DESTINATION_PATTERN,
@@ -96,8 +107,9 @@ export function SlackChannelPicker({
   const generatedId = useId();
   const inputId = id ?? generatedId;
   const listId = `${inputId}-listbox`;
-  const [text, setText] = useState(value);
-  const [selectedDisplay, setSelectedDisplay] = useState<string | null>(null);
+  const initialDisplay = value && selectedLabel ? channelDisplay(selectedLabel, value) : null;
+  const [text, setText] = useState(initialDisplay ?? value);
+  const [selectedDisplay, setSelectedDisplay] = useState<string | null>(initialDisplay);
   const [options, setOptions] = useState<SlackChannelOption[]>([]);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
@@ -133,7 +145,7 @@ export function SlackChannelPicker({
   };
 
   const select = (option: SlackChannelOption) => {
-    const display = `${option.label} (${option.channel_id})`;
+    const display = channelDisplay(option.label, option.channel_id);
     setText(display);
     setSelectedDisplay(display);
     onChange(option.channel_id);

@@ -87,7 +87,7 @@ Related modules outside this folder:
 ## Tests
 
 The SPA keeps tests for logic and for secret handling only: `lib/api`,
-`lib/format`, `LocalTime`, stale-page clamping in `Pagination`, the secret form model, `SecretField`, the shell,
+`lib/format`, `LocalTime`, stale-page clamping in `Pagination`, the Slack channel picker's saved label, the secret form model, `SecretField`, the shell,
 navigation, and `features/secret-handling.test.tsx` (plaintext gone from the
 inputs, the page, and both TanStack caches after each secret-bearing submit,
 and the show-once API client secret). Page behaviour is covered by the Rails
