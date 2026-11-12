@@ -47,17 +47,34 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Invariants
 
-- `/api/v1` operator endpoints accept either a bearer API key or the console
-  session cookie (the SPA); the former separation between bearer and cookie
-  callers is intentionally gone. An `Authorization` header always wins and a
-  bad bearer token never falls back to the cookie. Cookie-authenticated writes
-  require the session CSRF token (`X-CSRF-Token`) and a same-origin `Origin`;
-  bearer requests skip CSRF. Every endpoint is admin-only and descope-aware
-  unless it opts in with `allow_active_users` (scope records with
-  `owned_scope` / `require_owner_or_admin!`, which 404s for non-owners) or
+- Every `/api/v1` operator endpoint (`Api::BaseController`) declares the
+  credential it accepts with `credential_policy :bearer | :session |
+  :bearer_or_session` (per controller, `only:`/`except:` per action, `if:`
+  for a request-dependent view). An action with no declaration fails closed
+  (raises in development and test, 401 in production), and
+  `test/controllers/api/v1/credential_policy_test.rb` pins the full table.
+  The rule: an endpoint accepts exactly the credential type it accepted
+  before the SPA (bearer), except that endpoints the SPA needs may also accept
+  the session; anything added for the SPA, including new actions on older
+  controllers, is session-only. API keys and proxies stay bearer-only so a
+  browser session cannot mint credentials that outlive it, and admin actions
+  such as user approval, API clients, settings, and workflow force start are
+  session-only so a leaked API key cannot reach them. The policy is checked
+  before authentication; a wrong credential type gets 403
+  `session_required`/`bearer_required` and never falls back to the other
+  credential (an `Authorization` header always counts as bearer).
+  Cookie-authenticated writes require the session CSRF token
+  (`X-CSRF-Token`) and a same-origin `Origin`; bearer requests skip CSRF.
+  Every endpoint is admin-only and descope-aware unless it opts in with
+  `allow_active_users` (scope records with `owned_scope` /
+  `require_owner_or_admin!`, which 404s for non-owners) or
   `allow_pending_users`. Test new endpoints with `assert_admin_only_api` or
-  `assert_active_user_api` plus ownership cases. Keep proxy sync
-  authentication, sandbox JWTs, and OAuth/MCP tokens as separate trust
+  `assert_active_user_api` (they check the declared credential type) plus
+  ownership cases. Every non-GET request, including refused ones, logs one
+  `console_api_audit` JSON line (user, auth method and API key oid, never the
+  token, controller/action, path ids, status); never add request bodies or
+  secret values to it. Keep proxy sync authentication, sandbox JWTs
+  (including sandbox admin), and OAuth/MCP tokens as separate trust
   boundaries.
 - In the SPA, reads use TanStack Query and a failed query renders an error
   alert, never an empty state. Writes are plain async functions in each

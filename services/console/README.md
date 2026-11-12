@@ -198,6 +198,6 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. Operator endpoints authenticate with either an API key sent as a bearer token (`Authorization: Bearer iak_...`) or the console session cookie (the SPA); cookie-authenticated writes also need the session's CSRF token. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts a declared credential type: an API key sent as a bearer token (`Authorization: Bearer iak_...`), the console session cookie (the SPA), or either one (see [docs/API.md](docs/API.md#credential-types-by-endpoint)). API keys and proxies are bearer-only; endpoints added for the SPA are session-only; cookie-authenticated writes also need the session's CSRF token. Every write is recorded in a `console_api_audit` log line. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).

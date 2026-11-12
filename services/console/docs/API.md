@@ -1,9 +1,11 @@
 # iron-control API
 
-`iron-control` exposes a JSON API under `/api/v1`. Resource endpoints require API key authentication or a console session cookie, and sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
+`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts a bearer API key, the console session cookie, or either, as listed in [Credential types by endpoint](#credential-types-by-endpoint). Sandbox read endpoints use the sandbox entitlement JWT injected by `iron-proxy`.
 
 - [Authentication](#authentication)
+  - [Credential types by endpoint](#credential-types-by-endpoint)
   - [Console session (browser SPA)](#console-session-browser-spa)
+  - [Audit log](#audit-log)
   - [Session endpoints](#session-endpoints)
   - [Console auth pages](#console-auth-pages)
 - [Conventions](#conventions)
@@ -58,12 +60,40 @@ A missing or invalid token returns `401`:
 { "error": { "message": "invalid or missing API key" } }
 ```
 
-### Console session (browser SPA)
+### Credential types by endpoint
 
-The console SPA calls the same `/api/v1` endpoints with the console session
-cookie instead of a bearer token. An `Authorization` header, when present, is
+Every endpoint accepts exactly one credential type, or both. Endpoints that
+existed before the console SPA keep accepting bearer API keys; those the SPA
+uses also accept the session cookie; endpoints added for the SPA accept only
+the session, so an API key cannot approve users, rotate API client secrets, or
+force-start workflows, and a browser session cannot mint API keys or proxy
+tokens.
+
+| Credential | Endpoints |
+|---|---|
+| Bearer only | `/api/v1/api_keys` (all), `/api/v1/proxies` (all) |
+| Bearer or session | every `/api/v1/<kind>_secrets` resource (static, gcp_auth, gcp_id_token, aws_auth, oauth_token, pg_dsn, hmac, ssh_key) including lookups; `/api/v1/broker_credentials` (CRUD, lookup); `/api/v1/oauth_apps` (CRUD, `lookup/:slug`); `/api/v1/principals` index/show/create/update, lookups, `effective_config`, and `POST …/slack_channel_permissions`; `/api/v1/principals/:id/roles`; `/api/v1/principals/:id/grants` and `/api/v1/roles/:id/grants`; `/api/v1/grants`; `/api/v1/roles` CRUD, lookups, and `POST …/slack_channel_permissions`; `GET /api/v1/scheduled_tasks/:id` (without `?view=console`) |
+| Session only | `/api/v1/me`, `/api/v1/me/ssh_key`, `/api/v1/descope`, `/api/v1/session`, `/api/v1/users`, `/api/v1/api_clients`, `/api/v1/system_settings` (incl. `slack_external_teams`), `/api/v1/workflows` (incl. runs and force start), `/api/v1/scheduled_tasks` (index, new, create, update, destroy, run, `slack_channel_options`, and `GET /:id?view=console`), `/api/v1/skills`, `/api/v1/integrations`, `/api/v1/oauth_providers`, `/api/v1/oauth_apps/presets/:provider`, `/api/v1/oauth_apps/:id/credentials`, `/api/v1/oauth_apps/:id/provider_details`, `/api/v1/secrets` (index, `:kind/:id` detail, role grants), `/api/v1/slack_channels`, `DELETE /api/v1/principals/:id`, `GET /api/v1/principals/:id/effective_grants`, and `PUT`/`DELETE …/slack_channel_permissions` on principals and roles |
+
+A request with the wrong credential type is refused before anything else runs,
+whatever its validity, and never falls back to the other credential:
+
+- an `Authorization` header on a session-only endpoint returns `403` with
+  `details.reason = "session_required"` (even when a session cookie is also
+  sent);
+- a session cookie (without an `Authorization` header) on a bearer-only
+  endpoint returns `403` with `details.reason = "bearer_required"`;
+- no credential returns `401` (`details.reason = "session_required"` on
+  session-only endpoints).
+
+On endpoints that accept both, an `Authorization` header, when present, is
 authoritative: an invalid bearer token is rejected and never falls back to the
 cookie.
+
+### Console session (browser SPA)
+
+The console SPA calls the session and bearer-or-session endpoints above with
+the console session cookie.
 
 - Cookie-authenticated requests other than `GET`/`HEAD` must send the
   session's CSRF token as `X-CSRF-Token` (from `GET /api/v1/me`). A missing or
@@ -75,6 +105,25 @@ cookie.
 - A pending account receives `403` with `details.reason = "account_pending"`,
   except on endpoints open to pending accounts (`GET /api/v1/me`,
   `DELETE /api/v1/session`).
+
+### Audit log
+
+Every non-`GET` request to an operator endpoint, including refused ones,
+writes one structured log line:
+
+```json
+{ "event": "console_api_audit", "user_id": "usr_…", "user_email": "ops@example.com",
+  "auth_method": "session", "api_key_id": null, "authenticated": true,
+  "controller": "api/v1/users", "action": "promote", "http_method": "POST",
+  "target": { "id": "usr_…" }, "status": 200 }
+```
+
+`auth_method` is `session`, `api_key` (with `api_key_id`, the key's oid, never
+the token), or `null` for anonymous requests. For refused requests it is the
+credential presented and `authenticated` is `false`. `target` holds the path
+parameters (ids, foreign ids, slugs) after parameter filtering. Request bodies
+and secret values are never logged. Sandbox admin requests log their own
+`sandbox_admin_request` line instead.
 
 ### Authorization
 
@@ -92,10 +141,10 @@ unaffected.
 
 | Method | Path | Access | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/me` | session or bearer, including pending sessions | Caller identity and SPA navigation flags |
+| `GET` | `/api/v1/me` | session, including pending sessions | Caller identity and SPA navigation flags |
 | `POST` | `/api/v1/descope` | admin session | Pause admin permissions for this session |
 | `DELETE` | `/api/v1/descope` | active session | Restore admin permissions |
-| `DELETE` | `/api/v1/session` | session (no-op for bearer) | Sign the console session out (`204`) |
+| `DELETE` | `/api/v1/session` | session, including pending sessions | Sign the console session out (`204`) |
 
 `GET /api/v1/me` response (sent with `Cache-Control: no-store`):
 
@@ -119,10 +168,11 @@ unaffected.
 }
 ```
 
-`csrf_token` is `null` for bearer callers. `flash` hands off (once) any
+`auth_method` is always `"session"`. `flash` hands off (once) any
 `notice`/`alert` left by a redirect-based flow such as SSO or an OAuth
 callback; it is `{}` when there is none. `POST`/`DELETE /api/v1/descope`
-return `{ "data": { "descoped": true|false } }`; bearer callers receive `422`.
+return `{ "data": { "descoped": true|false } }`. Bearer callers receive `403`
+`session_required` on all three endpoints.
 
 ### Console auth pages
 
@@ -1303,13 +1353,18 @@ Returns `201`. The `client_secret` is never echoed back:
 | `GET`  | `/api/v1/oauth_apps/lookup/:slug` | Fetch by slug. `404` if missing. |
 | `PUT`/`PATCH` | `/api/v1/oauth_apps/:id` | [Upsert](#upsert-put--patch) by OID or slug. Omitted fields are preserved; `client_secret` is only changed when supplied. |
 | `DELETE` | `/api/v1/oauth_apps/:id` | Delete. Returns `204`; `404` if missing. Returns `409` while the app still has minted credentials (delete or unlink them first). |
+
+The three endpoints below back the console pages and are console session only (API keys get `403 session_required`).
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
 | `GET`  | `/api/v1/oauth_apps/:id/credentials` | The broker credentials the app minted, oldest first. `labels[k]=v` and pagination optional. Each row has `id`, `foreign_id`, `name`, `status`, `provider_email`, `external_user_key`, and `created_at`; token material is never included. `404` if the app is missing. |
 | `GET`  | `/api/v1/oauth_apps/:id/provider_details` | Provider-specific details for a shared app's connected account (its oldest credential). Returns `data: { provider, credential, details }`, where `credential` is `null` for personal apps or when nothing is connected, else `{ id, provider_subject, static_secret_id }` (`static_secret_id` is the wrapping static secret, or `null`). `details` is fetched live from the provider with 2-second timeouts, only while the credential is live with an unexpired access token (it is never refreshed). Today only `mercator` returns details (`{ claimed, ... }`). Any provider failure yields `{}`. |
 | `POST` | `/api/v1/oauth_apps/presets/:provider` | Set up a provider preset. If the preset's app (keyed by its slug) does not exist yet, iron-control registers an OAuth client with the provider (RFC 7591 dynamic registration) and creates the app. Returns `200` with `data: { id, slug, start_url }`; send the admin to `start_url` to connect the account. `404` for providers without a preset, `409` when an existing app with the preset's slug has a different provider, shared mode, or is disabled, and `502` when registration fails (no app is created). |
 
 ### OAuth providers
 
-`GET /api/v1/oauth_providers` (admin) lists the [supported providers](#supported-providers) in registry order. The first one is the console form's default.
+`GET /api/v1/oauth_providers` (admin, console session only) lists the [supported providers](#supported-providers) in registry order. The first one is the console form's default.
 
 ```json
 {
@@ -1326,7 +1381,7 @@ Returns `201`. The `client_secret` is never echoed back:
 
 ### Integrations
 
-`GET /api/v1/integrations` serves the console Integrations page. Unlike the rest of this section, any active console user may call it, with a session cookie or an API key. It returns the OAuth apps the caller can connect and their connection state:
+`GET /api/v1/integrations` serves the console Integrations page. Unlike the rest of this section, any active console user may call it, with the console session (session only; API keys get `403 session_required`). It returns the OAuth apps the caller can connect and their connection state:
 
 ```json
 {
@@ -1550,10 +1605,10 @@ Returns `201`:
 | `GET`  | `/api/v1/principals/:principal_id/grants` | [List the grants](#list-by-grantee) granted directly to the principal. |
 | `POST` | `/api/v1/principals/:id/slack_channel_permissions` | Idempotently create or update one direct Slack channel permission. Omitted flags default to enabled on create and remain unchanged on update. |
 | `PUT`/`PATCH` | `/api/v1/principals/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, first-class identity fields, `labels`, and direct `slack_channel_permissions` are mutable on an existing record. `foreign_id` applies only when creating. |
-| `DELETE` | `/api/v1/principals/:id` | Delete by OID. Removes direct grants, role assignments, Slack channel permissions, scheduled tasks, MCP OAuth codes and refresh tokens, and sync snapshots; assigned proxies are unassigned. Returns `204`. |
-| `GET`  | `/api/v1/principals/:id/effective_grants` | Paginated secrets the principal resolves to, directly or through roles. See below. |
-| `PUT`  | `/api/v1/principals/:id/slack_channel_permissions` | Replace the direct Slack channel permissions with `data.slack_channel_permissions`. DM rows (`D…`) are API-managed: stored DM rows are kept and submitted DM rows ignored. An unchanged submission writes nothing. Returns the stored rows. |
-| `DELETE` | `/api/v1/principals/:id/slack_channel_permissions/:channel_id` | Delete one direct Slack channel permission. `204`; `404` if absent. |
+| `DELETE` | `/api/v1/principals/:id` | Delete by OID. Removes direct grants, role assignments, Slack channel permissions, scheduled tasks, MCP OAuth codes and refresh tokens, and sync snapshots; assigned proxies are unassigned. Returns `204`. Console session only. |
+| `GET`  | `/api/v1/principals/:id/effective_grants` | Paginated secrets the principal resolves to, directly or through roles. See below. Console session only. |
+| `PUT`  | `/api/v1/principals/:id/slack_channel_permissions` | Replace the direct Slack channel permissions with `data.slack_channel_permissions`. DM rows (`D…`) are API-managed: stored DM rows are kept and submitted DM rows ignored. An unchanged submission writes nothing. Returns the stored rows. Console session only. |
+| `DELETE` | `/api/v1/principals/:id/slack_channel_permissions/:channel_id` | Delete one direct Slack channel permission. `204`; `404` if absent. Console session only. |
 
 Console-only list and fetch options (additive):
 
@@ -1677,8 +1732,8 @@ Returns `201`:
 | `GET`    | `/api/v1/roles/:role_id/grants` | [List the grants](#list-by-grantee) attached to the role. |
 | `POST`   | `/api/v1/roles/:id/slack_channel_permissions` | Idempotently create or update one role-owned Slack channel permission without replacing other rows. Omitted flags default to enabled on create and remain unchanged on update. |
 | `PUT`/`PATCH` | `/api/v1/roles/:id` | [Upsert](#upsert-put--patch) by OID or `foreign_id`. `name`, `labels`, and `slack_channel_permissions` are mutable on an existing record; `foreign_id` applies only when creating. |
-| `PUT`    | `/api/v1/roles/:id/slack_channel_permissions` | Replace the role's Slack channel permissions with `data.slack_channel_permissions`. Rows are keyed by `channel_id`. An unchanged submission writes nothing; a change bumps the sync config of every principal holding the role. Returns the stored rows. `422` if a row has no permission enabled. |
-| `DELETE` | `/api/v1/roles/:id/slack_channel_permissions/:channel_id` | Delete one role Slack channel permission. `204`; `404` if absent. |
+| `PUT`    | `/api/v1/roles/:id/slack_channel_permissions` | Replace the role's Slack channel permissions with `data.slack_channel_permissions`. Rows are keyed by `channel_id`. An unchanged submission writes nothing; a change bumps the sync config of every principal holding the role. Returns the stored rows. `422` if a row has no permission enabled. Console session only. |
+| `DELETE` | `/api/v1/roles/:id/slack_channel_permissions/:channel_id` | Delete one role Slack channel permission. `204`; `404` if absent. Console session only. |
 | `DELETE` | `/api/v1/roles/:id` | Delete. Returns `204`. Cascades: the role's grants and its assignments are removed. |
 
 ### Role assignments
@@ -1780,7 +1835,8 @@ The principal endpoint lists only the principal's **direct** grants, not those i
 `GET /api/v1/secrets` lists grantable secrets of every kind in one paginated
 list, ordered by name (case-insensitive) then creation time. Only identifying
 metadata, source backend labels, and the managing integration are returned,
-never source references or values.
+never source references or values. Every endpoint in this section (list,
+detail, role grants) is console session only.
 
 | Param | Notes |
 |---|---|
@@ -1860,7 +1916,7 @@ A role is `{ id, foreign_id, name }`.
 ## Slack channels
 
 `GET /api/v1/slack_channels` searches the Slack channel catalog for channel
-pickers (admin-only, `Cache-Control: no-store`). At most 20 active channels are
+pickers (admin-only, console session only, `Cache-Control: no-store`). At most 20 active channels are
 returned.
 
 | Param | Notes |
@@ -1884,7 +1940,7 @@ loading.
 
 ## API keys
 
-API keys belong to the authenticated user and authenticate API requests. They are scoped to the current user: listing and fetching only ever return your own keys.
+API keys belong to the authenticated user and authenticate API requests. They are scoped to the current user: listing and fetching only ever return your own keys. These endpoints accept only a bearer API key; the console session gets `403 bearer_required`, so a browser session cannot mint a key that outlives it.
 
 ### Create
 
@@ -1920,7 +1976,8 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 ## Users
 
-Console operator accounts, for the console Users page. Admin-only. Users are
+Console operator accounts, for the console Users page. Admin-only, console
+session only (API keys get `403 session_required`). Users are
 addressed by `usr_…` oid.
 
 | Method | Path | Notes |
@@ -1955,7 +2012,8 @@ accounts. `approved_by` is `{ "id", "email" }` or `null`.
 ## API clients
 
 Machine callers of the api-rs session API, such as eval runners. Each client
-runs sessions as one of its attached principals. Admin-only. While
+runs sessions as one of its attached principals. Admin-only, console session
+only (API keys get `403 session_required`). While
 `CENTAUR_CONSOLE_API_CLIENTS_ENABLED` is off, every endpoint returns `404`
 `{"error":{"message":"not found"}}`, before authentication, so the feature is
 not advertised. Clients are addressed by `acl_…` oid (the client id), and
@@ -1998,7 +2056,8 @@ A `link_id` that belongs to another client returns `404`.
 
 ## System settings
 
-Deployment-wide defaults for new control-plane records. Admin-only.
+Deployment-wide defaults for new control-plane records. Admin-only, console
+session only (API keys get `403 session_required`).
 
 `GET /api/v1/system_settings`:
 
@@ -2056,14 +2115,15 @@ When the sandbox principal is a Slack channel, the endpoints manage that channel
 | `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
 | `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`; disabled tasks return `422`. |
 
-The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key, returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
+The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key (or an admin console session), returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
 
 Responses include the task's optional cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`. Omit `--cron` when creating a manual-only task, or pass `update-task --cron ""` to remove an existing recurring schedule.
 
 ### Console scheduled tasks
 
 The console Scheduled Tasks pages use these endpoints. Any active Console user
-may call them with the session cookie or a bearer API key. Each one is scoped
+may call them with the session cookie (session only; API keys get `403`
+`session_required`). Each one is scoped
 to tasks the caller authored. Any other user's task returns `404` for every
 caller, admins included. Tasks owned by a Slack channel are managed from Slack
 and are never returned here. Responses set `Cache-Control: no-store`.
@@ -2112,6 +2172,8 @@ when the caller has none.
 ## Workflows
 
 The admin-only workflow dashboard reads the api-rs workflow read-only views.
+Console session only: API keys get `403 session_required`, including on
+force start.
 Schedules and run details come from the workflows API and are best-effort.
 `:id` is the workflow key: the workflow name, or the task name for older runs.
 It may contain dots. If the workflow views are missing or unreadable, the
@@ -2156,7 +2218,7 @@ Editor responses include each editor's OID, email, name, and account status, plu
 
 ### Console skills
 
-The Console Skills pages use these endpoints. They accept a bearer API key or a Console session cookie (writes need `X-CSRF-Token`) and are open to every **active** user, not only admins. Visibility matches the agent catalog: every public skill, plus the caller's own skills and the skills the caller edits. Requests for any other skill return `404`. Owners and editors can update content. Only the owner can manage editors, share, or archive. An acting admin (not descoped) can additionally make any public skill private, for moderation.
+The Console Skills pages use these endpoints. They accept only the Console session cookie (writes need `X-CSRF-Token`; API keys get `403 session_required`) and are open to every **active** user, not only admins. Visibility matches the agent catalog: every public skill, plus the caller's own skills and the skills the caller edits. Requests for any other skill return `404`. Owners and editors can update content. Only the owner can manage editors, share, or archive. An acting admin (not descoped) can additionally make any public skill private, for moderation.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -2181,7 +2243,7 @@ Validation failures return `422` with per-field `details`: `name`, `description`
 
 ## Personal SSH key
 
-`/api/v1/me/ssh_key` manages the **caller's own** personal SSH key, an `SshKeySecret` owned by the caller. It is open to every active user, using either a bearer key or a session cookie with `X-CSRF-Token` on writes. There is no ID in the path, so a caller can only ever reach their own key. Every response sets `Cache-Control: no-store`. The private key is write-only. No response contains it, and that includes validation errors.
+`/api/v1/me/ssh_key` manages the **caller's own** personal SSH key, an `SshKeySecret` owned by the caller. It is open to every active user, using the console session cookie with `X-CSRF-Token` on writes (session only). There is no ID in the path, so a caller can only ever reach their own key. Every response sets `Cache-Control: no-store`. The private key is write-only. No response contains it, and that includes validation errors.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -2201,6 +2263,8 @@ The key object contains these fields:
 Admins see personal keys as ordinary `ssh_key` secrets in [`GET /api/v1/secrets`](#secrets-all-kinds) and can grant them elsewhere.
 
 ## Proxies
+
+Proxy endpoints accept only a bearer API key; the console session gets `403 bearer_required`.
 
 A proxy represents an `iron-proxy` instance. It may be assigned a principal, in which case it receives config for the secrets granted to that principal. A proxy can also boot **unassigned**: it authenticates and syncs normally but receives an empty config until a principal is assigned. The principal can be assigned, swapped, or cleared at any time without reissuing the token.
 
