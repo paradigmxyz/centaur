@@ -79,10 +79,7 @@ module Mcp
     def authorize
       return redirect_to_login unless current_user
       return redirect_to pending_path if current_user.pending?
-      if current_user.disabled?
-        reset_session
-        return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE
-      end
+      return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE if current_user.disabled?
 
       authorization = validated_authorization_request
       return unless authorization

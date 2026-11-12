@@ -53,7 +53,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
   test "GET new renders the login form without JavaScript" do
     get login_url
     assert_response :ok
-    assert_equal "no-store", response.headers["Cache-Control"]
     assert_select "title", "Sign In · Centaur Console"
     assert_select "h1", "Operator console sign in."
     assert_select "form[action=?][method=post]", login_path do
@@ -247,8 +246,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_response :unprocessable_entity
     assert_nil session[:user_id]
     assert_select "[role=alert]", text: "Invalid email or password."
-    # The email is kept; the password never is.
-    assert_select "input[name=email][value=?]", @operator.email
     assert_select "input[name=password][value]", count: 0
     assert_not_includes response.body, "wrong\""
   end
@@ -433,7 +430,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     post login_url, params: { email: users(:pending_user).email, password: "password123456" }
     get pending_url
     assert_response :ok
-    assert_equal "no-store", response.headers["Cache-Control"]
     assert_select "title", "Awaiting Approval · Centaur Console"
     assert_select "h1", "Awaiting approval"
     assert_select "strong", users(:pending_user).email

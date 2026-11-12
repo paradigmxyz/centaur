@@ -6,6 +6,9 @@
 # pages, which are intentionally server-rendered (layouts/oauth). The console
 # UI itself is the SPA served by SpaController.
 class ApplicationController < ActionController::Base
+  # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
+  allow_browser versions: :modern
+
   include ConsoleSession
   include ConsoleSignIn
   include OauthAppUrls

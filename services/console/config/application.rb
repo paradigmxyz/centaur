@@ -17,7 +17,7 @@ module IronControl
     # Please, add to the `ignore` list any other `lib` subdirectories that do
     # not contain `.rb` files, or that should not be reloaded or eager loaded.
     # Common ones are `templates`, `generators`, or `middleware`, for example.
-    config.autoload_lib(ignore: %w[assets tasks json_log_formatter.rb console_env.rb console_log_filter.rb secure_session_cookie.rb])
+    config.autoload_lib(ignore: %w[assets tasks json_log_formatter.rb console_env.rb secure_session_cookie.rb])
 
     # Configuration for the application, engines, and railties goes here.
     #

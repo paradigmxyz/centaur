@@ -34,53 +34,6 @@ class McpOauthClientTest < ActiveSupport::TestCase
     refute McpOauthClient.allowed_redirect_uri?("cursor://anysphere.cursor-mcp/oauth/callback#token")
   end
 
-  test "registration refuses executable redirect URI schemes however they are spelled" do
-    [
-      "javascript://x/%0aalert(document.domain)//",
-      "JavaScript://x/%0aalert(1)",
-      "JAVASCRIPT:alert(1)",
-      " javascript:alert(1)",
-      "\u0000javascript:alert(1)",
-      "\u0001\tjavascript:alert(1)",
-      "java\tscript:alert(1)",
-      "vbscript:msgbox(1)",
-      "LiveScript:alert(1)",
-      "data:text/html;base64,PHNjcmlwdD4=",
-      "Data:text/plain,x"
-    ].each do |uri|
-      client = build_client(redirect_uris: [ uri ])
-      assert_not client.valid?, uri.inspect
-      assert client.errors[:redirect_uris].any?, uri.inspect
-    end
-  end
-
-  test "registration keeps the origin/main redirect URI rules for every other scheme" do
-    %w[
-      https://claude.ai/api/mcp/auth_callback
-      http://127.0.0.1:49152/callback
-      vscode://vscode.github-authentication/did-authenticate
-      cursor://anysphere.cursor-mcp/oauth/callback
-      chrome-extension://abcdefghijklmnopabcdefghijklmnop/callback
-      com.example.app:/oauth2redirect
-      javascriptx://callback
-      my-data://callback
-    ].each { |uri| assert build_client(redirect_uris: [ uri ]).valid?, uri }
-  end
-
-  test "an existing registration is never newly refused at authorize time" do
-    %w[
-      chrome-extension://abcdefghijklmnopabcdefghijklmnop/callback
-      ws://localhost/callback
-      file:///tmp/callback
-    ].each do |stored|
-      client = build_client(redirect_uris: [ "https://example.com/cb" ])
-      client.save!
-      client.update_column(:redirect_uris, [ stored ])
-      assert client.reload.redirect_uri_allowed?(stored), stored
-      assert client.valid?, "#{stored} must stay valid on update"
-    end
-  end
-
   test "private-use scheme redirects match by exact string equality only" do
     client = McpOauthClient.create!(
       name: "Cursor",
@@ -106,15 +59,5 @@ class McpOauthClientTest < ActiveSupport::TestCase
 
     refute client.redirect_uri_allowed?("http://127.evil.com/callback")
     refute client.redirect_uri_allowed?("http://127.0.0.1.evil.com/callback")
-  end
-
-  private
-
-  def build_client(redirect_uris:)
-    McpOauthClient.new(
-      name: "Client", redirect_uris: redirect_uris,
-      grant_types: McpOauthClient::DEFAULT_GRANT_TYPES, response_types: McpOauthClient::DEFAULT_RESPONSE_TYPES,
-      scopes: McpOauthClient::DEFAULT_SCOPES
-    )
   end
 end

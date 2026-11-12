@@ -173,7 +173,7 @@ accept each other's forms during a rolling deploy or rollback.
 | `DELETE` | `/logout` | session, authenticity token required | Sign out (form post with `_method=delete`) |
 | `GET` | `/pending` | pending session | Holding page for an account awaiting approval |
 
-- `GET /login` (sent with `Cache-Control: no-store`) shows a "Continue with
+- `GET /login` shows a "Continue with
   <Provider>" link to `/auth/<provider>/start` for each configured SSO
   provider and, unless `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false`, a form
   posting `authenticity_token`, `email`, and `password` to `/login`. A
@@ -213,11 +213,8 @@ against. The sign-in step (`/login`) is server-rendered too.
 Dynamic client registration (`POST /mcp/oauth/register`) accepts `https`
 redirect URIs, loopback `http`, and native private-use schemes (`cursor://`,
 `vscode://`, `chrome-extension://`, `com.example.app:/…`), and rejects
-fragments, wildcards, and non-loopback `http`. Registration also rejects
-`javascript:`, `vbscript:`, `livescript:`, and `data:` redirect URIs (in any
-case, after leading whitespace or control characters). That extra check
-applies to new registrations only; authorize-time checks are unchanged, so an
-existing registration is never newly refused.
+fragments, wildcards, and non-loopback `http`. These rules are unchanged from
+before the SPA.
 
 `GET /mcp/oauth/authorize` sends a signed-out browser to `/login` (which
 returns here after sign-in), a pending account to `/pending`, and a disabled

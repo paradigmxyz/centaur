@@ -7,18 +7,12 @@ class McpOauthClient < ApplicationRecord
   DEFAULT_GRANT_TYPES = %w[authorization_code refresh_token].freeze
   DEFAULT_RESPONSE_TYPES = %w[code].freeze
   DEFAULT_SCOPES = %w[mcp:tools].freeze
-  # Schemes a browser executes or renders as a document. New registrations may
-  # not use them as a redirect target, so the post-consent redirect can never
-  # turn into script execution. Checked at registration only: existing
-  # registrations keep authorizing exactly as before.
-  EXECUTABLE_REDIRECT_SCHEMES = %w[javascript vbscript livescript data].freeze
 
   has_many :authorization_codes, class_name: "McpOauthAuthorizationCode", dependent: :destroy
   has_many :refresh_tokens, class_name: "McpOauthRefreshToken", dependent: :destroy
 
   validates :redirect_uris, presence: true
   validate :redirect_uris_valid
-  validate :redirect_uri_schemes_safe, on: :create
   validate :grant_types_supported
   validate :response_types_supported
   validate :scopes_supported
@@ -50,25 +44,6 @@ class McpOauthClient < ApplicationRecord
     redirect_uris.each do |uri|
       errors.add(:redirect_uris, "#{uri.inspect} is not an allowed public-client redirect URI") unless self.class.allowed_redirect_uri?(uri)
     end
-  end
-
-  def redirect_uri_schemes_safe
-    return unless redirect_uris.is_a?(Array)
-
-    redirect_uris.each do |uri|
-      next unless self.class.executable_redirect_scheme?(uri)
-
-      errors.add(:redirect_uris, "#{uri.inspect} uses a scheme that is not allowed for redirect URIs")
-    end
-  end
-
-  # Whether +value+ names an executable scheme the way a browser would read it:
-  # case-insensitively, after leading whitespace and control characters, and
-  # with embedded tabs and newlines removed ("java\tscript:").
-  def self.executable_redirect_scheme?(value)
-    normalized = value.to_s.sub(/\A[[:space:][:cntrl:]]+/, "").gsub(/[\t\n\r]/, "")
-    scheme = normalized[/\A([^:\/?#]+):/, 1].to_s.downcase
-    EXECUTABLE_REDIRECT_SCHEMES.include?(scheme)
   end
 
   def grant_types_supported

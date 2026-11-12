@@ -6,6 +6,9 @@
 # SPA through GET /api/v1/me, so this controller is deliberately public: the
 # HTML shell holds no data.
 class SpaController < ActionController::Base
+  # Same browser floor as the server-rendered pages (ApplicationController).
+  allow_browser versions: :modern
+
   include ConsoleSignIn
 
   class_attribute :index_path, default: Rails.root.join("spa-shell", "index.html")

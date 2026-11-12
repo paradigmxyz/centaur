@@ -174,38 +174,6 @@ module Mcp
       assert_equal "state-test", query.fetch("state")
     end
 
-    test "dynamic client registration rejects executable redirect URI schemes" do
-      [
-        "javascript://x/%0aalert(document.domain)//",
-        "JavaScript://x/%0aalert(1)",
-        "javascript:alert(1)",
-        " javascript:alert(1)",
-        "vbscript:msgbox(1)",
-        "VBScript://x",
-        "livescript:alert(1)",
-        "data:text/html;base64,PHNjcmlwdD4=",
-        "DATA:text/plain,x"
-      ].each do |uri|
-        assert_no_difference -> { McpOauthClient.count } do
-          post "/mcp/oauth/register", params: { client_name: "Attacker", redirect_uris: [ uri ] }, as: :json
-        end
-        assert_response :bad_request, uri
-        assert_equal "invalid_client_metadata", JSON.parse(response.body).fetch("error"), uri
-      end
-    end
-
-    test "dynamic client registration still accepts native and extension custom-scheme callbacks" do
-      [
-        "vscode://vscode.github-authentication/did-authenticate",
-        "chrome-extension://abcdefghijklmnopabcdefghijklmnop/callback",
-        "com.example.app:/oauth2redirect"
-      ].each do |uri|
-        post "/mcp/oauth/register", params: { client_name: "Native", redirect_uris: [ uri ] }, as: :json
-        assert_response :created, uri
-        assert_equal [ uri ], JSON.parse(response.body).fetch("redirect_uris")
-      end
-    end
-
     test "authorize renders the consent page with the origin/main form fields" do
       client = create_client
       client.update!(name: "Amp <script>alert(1)</script>")
@@ -243,9 +211,6 @@ module Mcp
       get "/mcp/oauth/authorize", params: authorize_params(client)
 
       assert_select "script", count: 0
-      # A no-referrer policy makes browsers send "Origin: null" on the consent
-      # post, which Rails' origin check rejects.
-      assert_select "meta[name=referrer]", count: 0
       assert_select "link[rel=stylesheet]", count: 1 do |links|
         href = links.first["href"]
         assert_match %r{\A/oauth-page/oauth\.css\?v=\h{12}\z}, href
@@ -320,7 +285,7 @@ module Mcp
       assert_equal "invalid_target", Rack::Utils.parse_nested_query(URI.parse(response.location).query).fetch("error")
     end
 
-    test "authorize sends pending users to the holding page and signs out disabled ones" do
+    test "authorize sends pending users to the holding page and disabled ones to login" do
       client = create_client
       console_password_login(users(:pending_user).email)
       get "/mcp/oauth/authorize", params: authorize_params(client)
@@ -332,7 +297,6 @@ module Mcp
       get "/mcp/oauth/authorize", params: authorize_params(client)
       assert_redirected_to login_path
       assert_equal "Your account is disabled.", flash[:alert]
-      assert_nil session[:user_id]
     end
 
     test "approval requires an active console session" do

@@ -25,7 +25,6 @@ class SessionsController < ApplicationController
   # their landing page. A signed-out browser's allowlisted ?return_to= (the SPA
   # sends it on a 401) is remembered for the post-login redirect.
   def new
-    response.headers["Cache-Control"] = "no-store"
     return redirect_to(safe_return_to || default_console_landing_path) if current_user&.active?
 
     remember_console_return_path(params[:return_to]) if current_user.nil? && params[:return_to].present?
@@ -34,7 +33,6 @@ class SessionsController < ApplicationController
   # GET /pending: holding page for a signed-in but not-yet-approved user.
   # Active users have no reason to be here, so send them to the console.
   def pending
-    response.headers["Cache-Control"] = "no-store"
     return redirect_to default_console_landing_path if current_user.active?
 
     @email = current_user.email
