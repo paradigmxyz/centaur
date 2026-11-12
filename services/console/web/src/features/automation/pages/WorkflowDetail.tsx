@@ -240,7 +240,6 @@ const runColumns: Column<WorkflowRun>[] = [
   },
 ];
 
-/** Status/queue filter chips + paginated run table. Changing a filter resets the page. */
 function HistoricalRuns({ workflow }: { workflow: WorkflowDetail }) {
   const [params] = useSearchParams();
   const { pathname } = useLocation();

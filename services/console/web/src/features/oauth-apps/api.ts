@@ -1,6 +1,3 @@
-// Data access for the OAuth apps pages and the Integrations page. Query keys
-// live under "oauth_apps" (see lib/query-keys.ts); writes invalidate the
-// narrowest prefix.
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
@@ -79,7 +76,6 @@ export interface Integrations {
   ssh_key: { configured: boolean };
 }
 
-/** The write payload for POST/PATCH /api/v1/oauth_apps. */
 export interface OauthAppInput {
   slug: string;
   description: string;
@@ -96,7 +92,7 @@ export interface OauthAppInput {
 
 const base = "/api/v1/oauth_apps";
 
-/** Apps, oldest first. The legacy page was unpaginated, so pages are the API max (200). */
+/** Apps, oldest first, in pages of the API max (200). */
 export function useOauthAppList(page: number) {
   return useQuery({
     queryKey: oauthAppKeys.list({ limit: 200, page }),

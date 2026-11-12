@@ -1,6 +1,5 @@
-// Data access for the broker credential pages (/api/v1/broker_credentials).
-// Query keys live under "credentials". The API never returns token material,
-// write-only values, or header values: only names and has_* presence flags.
+// The API never returns token material, write-only values, or header values:
+// only names and has_* presence flags.
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, type DataEnvelope, type ListEnvelope } from "@/lib/api";
@@ -82,7 +81,6 @@ export type CredentialPayload = {
 
 const base = "/api/v1/broker_credentials";
 
-/** name || foreign_id || oid (the legacy page title). */
 export function credentialTitle(credential: Pick<BrokerCredential, "id" | "name" | "foreign_id">): string {
   return credential.name || credential.foreign_id || credential.id;
 }

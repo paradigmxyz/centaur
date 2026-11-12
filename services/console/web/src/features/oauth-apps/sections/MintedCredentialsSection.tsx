@@ -43,7 +43,6 @@ const columns: Column<MintedCredential>[] = [
   },
 ];
 
-/** The credentials this app minted (legacy "Minted Credentials" table). */
 export function MintedCredentialsSection({ appId }: { appId: string }) {
   const [page, setPage] = usePageParam("credentials_page");
   const list = useMintedCredentials(appId, page);

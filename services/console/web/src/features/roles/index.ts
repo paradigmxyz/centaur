@@ -1,5 +1,3 @@
-// Roles slice: list, create, detail (Slack channel permissions and secret
-// grants), and edit. Copies the principals reference slice.
 import type { FeatureModule } from "@/app/types";
 
 const roles: FeatureModule = {

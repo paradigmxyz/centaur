@@ -1,4 +1,3 @@
-// Admin slice: Users, API Clients, and Settings (Control tabs, admins only).
 import { redirect } from "react-router";
 
 import type { FeatureModule } from "@/app/types";

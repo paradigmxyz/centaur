@@ -20,10 +20,6 @@ interface UserTypeaheadProps {
   emptyText?: string;
 }
 
-/**
- * Multi-user picker with a filterable listbox (port of user_typeahead).
- * Selected users render as removable rows; values are opaque user ids.
- */
 export function UserTypeahead({
   options,
   value,

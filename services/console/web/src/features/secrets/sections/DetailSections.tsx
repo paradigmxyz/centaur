@@ -1,5 +1,3 @@
-// Read-only sections of the secret detail page, rendered from the server's
-// console view (GET /api/v1/secrets/:kind/:id).
 import { DataTable, type Column } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
 import { SectionHeading } from "@/components/page-header";

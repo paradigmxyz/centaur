@@ -1,6 +1,5 @@
-// OAuth apps slice: the admin Apps pages (list, detail, new, edit), provider
-// presets, and the user-facing Integrations page. Consent itself runs on the
-// Rails protocol routes /oauth/:slug/start|callback, linked by full page loads.
+// Consent runs on the Rails protocol routes /oauth/:slug/start|callback,
+// linked by full page loads.
 import { Link2 } from "lucide-react";
 
 import type { FeatureModule } from "@/app/types";

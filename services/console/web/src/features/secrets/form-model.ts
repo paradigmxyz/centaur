@@ -1,6 +1,3 @@
-// Form values for the secret create/edit pages and their mapping to and from
-// the per-kind /api/v1 payloads. Pure functions so they can be unit tested.
-//
 // Inline (control_plane) values are write-only: the API never returns them,
 // the form never prefills them, and on edit a blank inline value is omitted so
 // the server keeps the stored one (PATCH semantics, docs/API.md#secret-sources).
@@ -139,7 +136,6 @@ function sourceValues(source: SourcePayload | null | undefined): SourceValues {
   };
 }
 
-/** The stored source of a record for its kind (source / dsn / keyfile). */
 export function storedSource(kind: FormKind, record: KindRecord | undefined): SourcePayload | null {
   if (!record) return null;
   if (kind === "static") return record.source ?? null;
@@ -147,7 +143,6 @@ export function storedSource(kind: FormKind, record: KindRecord | undefined): So
   return record.keyfile ?? null;
 }
 
-/** Form defaults for a new secret (record undefined) or an existing one. */
 export function toFormValues(kind: FormKind, record?: KindRecord): SecretFormValues {
   const inject = record?.inject_config ?? {};
   const replace = record?.replace_config ?? {};
@@ -185,7 +180,6 @@ export function toFormValues(kind: FormKind, record?: KindRecord): SecretFormVal
   };
 }
 
-/** pg_setting_row_attrs: a stored setting as { name, kind, value }. */
 function settingRow(setting: { name: string; value?: string; value_from?: Record<string, string> }): SettingValues {
   const ref = setting.value_from;
   const kind = ref ? SETTING_KINDS.map((k) => k.value).find((k) => k !== "literal" && k in ref) : undefined;
@@ -250,7 +244,6 @@ export function foreignIdPayload(value: string, record?: KindRecord): { foreign_
   return record?.foreign_id ? { foreign_id: null } : {};
 }
 
-/** The `data` body for POST/PATCH /api/v1/<kind>_secrets. */
 export function toPayload(kind: FormKind, values: SecretFormValues, record?: KindRecord): Record<string, unknown> {
   const stored = storedSource(kind, record);
   const identity = {

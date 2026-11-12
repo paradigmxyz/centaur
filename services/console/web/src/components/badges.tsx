@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-/** Green resource badge (kind labels, "STATIC", "SLACK_DM"). */
 export function ResourceBadge({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
   return (
     <Badge
@@ -20,7 +19,6 @@ export function ResourceBadge({ children, className, title }: { children: ReactN
   );
 }
 
-/** key=value label chip. */
 export function LabelChip({ name, value }: { name: string; value: unknown }) {
   return (
     <Badge variant="outline" className="rounded-md bg-muted/50 font-mono text-[11px] font-normal text-muted-foreground">
@@ -41,7 +39,6 @@ export function LabelChips({ labels }: { labels: Record<string, unknown> | null 
   );
 }
 
-/** Blue pill for role names. */
 export function RolePill({ children, title }: { children: ReactNode; title?: string }) {
   return (
     <Badge
@@ -84,14 +81,12 @@ export function StatusBadge({ tone, children, title }: { tone: StatusTone; child
   );
 }
 
-/** credential_status_classes: live / dead / bootstrapping. */
 export function credentialStatusTone(status: string): StatusTone {
   if (status === "live") return "success";
   if (status === "dead") return "danger";
   return "warning";
 }
 
-/** workflow_status_classes. */
 export function workflowStatusTone(status: string): StatusTone {
   switch (status) {
     case "completed":
@@ -108,7 +103,6 @@ export function workflowStatusTone(status: string): StatusTone {
   }
 }
 
-/** User account status (active / pending / disabled). */
 export function userStatusTone(status: string): StatusTone {
   if (status === "active") return "success";
   if (status === "disabled") return "danger";

@@ -1,4 +1,3 @@
-// Small presentational pieces shared by the skills pages.
 import { Link, useLocation } from "react-router";
 
 import { ResourceBadge, RolePill } from "@/components/badges";
@@ -7,12 +6,10 @@ import { cn } from "@/lib/utils";
 import type { SkillTab, SkillVisibility } from "../api";
 import { skillsTabPath } from "./helpers";
 
-/** PUBLIC (green) / PRIVATE (role pill), as on the legacy pages. */
 export function VisibilityBadge({ visibility }: { visibility: SkillVisibility }) {
   return visibility === "shared" ? <ResourceBadge>PUBLIC</ResourceBadge> : <RolePill>PRIVATE</RolePill>;
 }
 
-/** "Public Skills" / "My Skills" tab strip; the search query carries across tabs. */
 export function SkillTabs({ tab, q }: { tab: SkillTab; q: string }) {
   const { pathname } = useLocation();
   const tabs: { id: SkillTab; label: string }[] = [

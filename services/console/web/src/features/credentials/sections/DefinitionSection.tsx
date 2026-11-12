@@ -8,10 +8,7 @@ function isBlank(value: ReactNode) {
   return value === null || value === undefined || value === false || value === "";
 }
 
-/**
- * A labeled definition list (the credential detail page's dl sections). Pass
- * `false`/`null` rows to skip them; blank values render an em dash.
- */
+/** Pass `false`/`null` rows to skip them; blank values render an em dash. */
 export function DefinitionSection({
   title,
   rows,

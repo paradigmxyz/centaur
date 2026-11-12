@@ -1,6 +1,3 @@
-// Formatting helpers ported from app/helpers/application_helper.rb and the
-// localtime Stimulus controller.
-
 /** "salesforce…rest-api": keep head and tail of long opaque ids. */
 export function truncateMiddle(value: string | null | undefined, max = 40, omission = "…"): string {
   const text = value ?? "";

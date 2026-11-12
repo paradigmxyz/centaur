@@ -16,11 +16,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { navigation } from "@/lib/api";
 import lockup from "@/assets/centaur-lockup-white.svg";
 
-/**
- * Full-page placeholder: the shell's Suspense fallback while the session
- * loads, and the router's HydrateFallback while a lazy route loads on a full
- * page load.
- */
 export function ShellLoading() {
   return (
     <div role="status" className="grid min-h-svh place-items-center text-sm text-muted-foreground">
@@ -29,7 +24,6 @@ export function ShellLoading() {
   );
 }
 
-/** Placeholder while a lazy page loads: a header and a table-shaped block. */
 function PageLoading() {
   return (
     <div role="status" className="space-y-6">
@@ -61,9 +55,7 @@ function ShellFrame() {
 
   useFlashToasts(me.flash);
 
-  // An account awaiting approval may only see the holding page (server-rendered
-  // /pending, a full page load); send it there instead of rendering pages whose
-  // API calls would all be refused.
+  // A pending account may only see the server-rendered /pending page.
   if (me.user.status === "pending") return <FullPageRedirect to="/pending" />;
 
   return (
@@ -90,7 +82,6 @@ function FullPageRedirect({ to }: { to: string }) {
   return <ShellLoading />;
 }
 
-/** Closes the mobile navigation drawer after every navigation. */
 function CloseDrawerOnNavigate({ pathname }: { pathname: string }) {
   const { setOpenMobile } = useSidebar();
   const last = useRef(pathname);

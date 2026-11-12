@@ -15,11 +15,7 @@ interface RolePickerProps {
   onChange: (role: RoleSummary) => void;
 }
 
-/**
- * Searchable assign-role picker backed by GET /api/v1/roles with
- * `exclude_principal`, so roles beyond the first API page stay reachable by
- * search and already-assigned roles are never offered.
- */
+/** Searches server-side with `exclude_principal`, so roles beyond the first API page stay reachable. */
 export function RolePicker({ principalId, value, onChange }: RolePickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");

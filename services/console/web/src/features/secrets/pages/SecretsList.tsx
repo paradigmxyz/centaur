@@ -101,7 +101,7 @@ function SecretsList() {
   const [params] = useSearchParams();
   const q = params.get("q") ?? "";
   const rawType = params.get("type") ?? "";
-  // Unknown types are ignored, like the legacy page.
+  // Unknown types are ignored.
   const type = (SECRET_KIND_SLUGS as string[]).includes(rawType) ? rawType : "";
   const [page, setPage] = usePageParam();
   const list = useSecretList({ q, kind: type, page });
@@ -161,7 +161,6 @@ function AddSecretMenu() {
   );
 }
 
-/** The q + type filter form (GET-style: the URL holds the filters). */
 function SecretFilters({ q, type }: { q: string; type: string }) {
   const [, setParams] = useSearchParams();
   const [query, setQuery] = useState(q);

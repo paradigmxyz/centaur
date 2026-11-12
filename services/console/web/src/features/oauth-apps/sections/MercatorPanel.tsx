@@ -5,7 +5,6 @@ import type { ProviderDetails } from "../api";
 
 type Credential = NonNullable<ProviderDetails["credential"]>;
 
-/** Legacy oauth_apps/providers/_mercator: the shared wallet panel. */
 export function MercatorPanel({ credential, details }: { credential: Credential; details: Record<string, unknown> }) {
   const subject = credential.provider_subject ?? "";
   const short = `${subject.slice(0, 6)}…${subject.slice(-4)}`;

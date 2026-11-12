@@ -1,4 +1,3 @@
-// Table cells shared by the workflow index and detail pages.
 import { StatusBadge, workflowStatusTone } from "@/components/badges";
 import { LocalTime } from "@/components/local-time";
 
@@ -9,7 +8,6 @@ export function WorkflowStatusPill({ status }: { status: string }) {
   return <StatusBadge tone={workflowStatusTone(status)}>{statusLabel(status)}</StatusBadge>;
 }
 
-/** "1 / 3" or "2 / unlimited". */
 export function Attempts({ run }: { run: Pick<WorkflowTiming, "attempts" | "max_attempts"> }) {
   return (
     <>
@@ -19,7 +17,6 @@ export function Attempts({ run }: { run: Pick<WorkflowTiming, "attempts" | "max_
   );
 }
 
-/** Relative start time, plus "queued 4m" when the run waited in the queue. */
 export function Started({ run }: { run: Pick<WorkflowTiming, "started_at" | "created_at"> }) {
   return (
     <>

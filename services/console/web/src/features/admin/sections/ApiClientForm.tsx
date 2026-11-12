@@ -28,7 +28,6 @@ interface ApiClientFormProps {
   onSubmit: (input: ApiClientInput) => Promise<void>;
 }
 
-/** The legacy api_clients/_form: name, (new only) default principal, scopes. */
 export function ApiClientForm({ mode, defaults, cancelTo, onSubmit }: ApiClientFormProps) {
   const form = useForm<Values>({
     resolver: zodResolver(schema),

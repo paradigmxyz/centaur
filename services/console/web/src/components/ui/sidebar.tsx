@@ -1,7 +1,5 @@
-// Trimmed from the shadcn/ui sidebar to what the console uses: a fixed,
-// always-open desktop sidebar and a Sheet drawer on mobile. Collapsing,
-// side/variant options, the cookie, the keyboard shortcut, tooltips, and the
-// unused sub-components were removed; copy them back from upstream if needed.
+// Trimmed from the shadcn/ui sidebar: a fixed desktop sidebar and a Sheet
+// drawer on mobile. Copy removed parts back from upstream if needed.
 import * as React from "react"
 import { Slot } from "radix-ui"
 

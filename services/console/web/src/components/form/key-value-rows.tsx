@@ -10,7 +10,6 @@ export interface KeyValueRow {
   value: string;
 }
 
-/** {a: "1"} -> [{key: "a", value: "1"}] */
 export function recordToRows(record: Record<string, unknown> | null | undefined): KeyValueRow[] {
   return Object.entries(record ?? {}).map(([key, value]) => ({ key, value: String(value ?? "") }));
 }
@@ -27,7 +26,6 @@ export function rowsToRecord(rows: KeyValueRow[] | undefined): Record<string, st
 
 interface KeyValueRowsFieldProps<T extends FieldValues> {
   control: Control<T>;
-  /** An array field of {key, value} rows. */
   name: ArrayPath<T>;
   title: string;
   addLabel?: string;
@@ -35,10 +33,6 @@ interface KeyValueRowsFieldProps<T extends FieldValues> {
   valuePlaceholder?: string;
 }
 
-/**
- * Repeatable key/value rows (labels, headers, settings) -- the nested-fields
- * Stimulus pattern. Store rows in the form; convert with rowsToRecord on submit.
- */
 export function KeyValueRowsField<T extends FieldValues>({
   control,
   name,

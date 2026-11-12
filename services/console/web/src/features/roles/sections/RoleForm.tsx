@@ -30,10 +30,7 @@ interface RoleFormProps {
   error: unknown;
 }
 
-/**
- * The role identity + labels form (legacy roles/_form). There is no namespace
- * field, and the foreign ID can only be set when creating.
- */
+/** There is no namespace field, and the foreign ID can only be set when creating. */
 export function RoleForm({ role, onSubmit, error }: RoleFormProps) {
   const form = useForm<Values>({
     resolver: zodResolver(schema),

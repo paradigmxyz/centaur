@@ -23,7 +23,6 @@ interface ConfirmDialogProps {
   onConfirm: () => unknown;
 }
 
-/** Replaces Turbo's data-turbo-confirm for destructive actions. */
 export function ConfirmDialog({
   trigger,
   title,

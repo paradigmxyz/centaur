@@ -1,8 +1,3 @@
-// Principals slice: the reference implementation other slices copy.
-//
-// - routes: SPA pages, lazily loaded per page.
-// - controlTabs: the "Principals" tab (first, so the Control nav entry and the
-//   admin landing point here).
 import type { FeatureModule } from "@/app/types";
 
 const principals: FeatureModule = {

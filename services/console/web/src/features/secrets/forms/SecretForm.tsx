@@ -1,6 +1,3 @@
-// The create/edit form for the four console-editable secret kinds. One form
-// model (form-model.ts) with per-kind sections; the payload goes to the
-// kind's own /api/v1 resource (POST to create, PATCH to update).
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Controller, FormProvider, useForm, useFormContext, useWatch, type FieldPath } from "react-hook-form";

@@ -1,5 +1,3 @@
-// Data access for the Skills pages and the personal SSH key pages. Query keys
-// live under "skills" and "ssh-key" (see lib/query-keys.ts).
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import { api, apiRequest, type DataEnvelope } from "@/lib/api";
@@ -48,7 +46,6 @@ export interface SkillInput {
   editor_ids?: string[];
 }
 
-/** "Name (email)" or just the email, as the legacy pages labelled users. */
 export function userLabel(user: SkillUser): string {
   return user.name ? `${user.name} (${user.email})` : user.email;
 }
@@ -111,8 +108,6 @@ export async function archiveSkill(queryClient: QueryClient, id: string) {
   // refetch the archived skill (a 404).
   await queryClient.invalidateQueries({ queryKey: skillKeys.lists() });
 }
-
-// -- personal SSH key -------------------------------------------------------
 
 export interface SshKeyGrant {
   id: string;

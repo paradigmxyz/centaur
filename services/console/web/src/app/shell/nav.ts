@@ -10,10 +10,6 @@ export function visibleControlTabs(features: FeatureModule[], me: Me): ControlTa
     .sort((a, b) => a.order - b.order);
 }
 
-/**
- * Sidebar entries for the current user. The shell owns the "Control" entry,
- * which points at the first Control tab and is active anywhere in the section.
- */
 export function visibleNav(features: FeatureModule[], me: Me): NavEntry[] {
   const entries = features.flatMap((feature) => feature.nav ?? []).filter((entry) => entry.visible(me));
   const tabs = visibleControlTabs(features, me);

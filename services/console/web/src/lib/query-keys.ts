@@ -1,14 +1,5 @@
-// Query key conventions. Every feature owns one root key (its slice id) and
-// builds keys through createQueryKeys so invalidation by prefix works:
-//
-//   const keys = createQueryKeys("principals");
-//   keys.all                 -> ["principals"]
-//   keys.list({ q, page })   -> ["principals", "list", { q, page }]
-//   keys.detail(id)          -> ["principals", "detail", id]
-//   keys.sub(id, "grants", { page }) -> ["principals", "detail", id, "grants", { page }]
-//
-// After a write, invalidate the narrowest prefix that covers what changed,
-// e.g. queryClient.invalidateQueries({ queryKey: keys.detail(id) }).
+// Every feature owns one root key and builds keys through createQueryKeys so
+// invalidation by prefix works. After a write, invalidate the narrowest prefix.
 
 export function createQueryKeys<const Root extends string>(root: Root) {
   return {

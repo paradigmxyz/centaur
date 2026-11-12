@@ -1,5 +1,3 @@
-// Data access for the principals pages. Query keys live under "principals"
-// (see lib/query-keys.ts); writes invalidate the narrowest prefix.
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { SlackChannelPermissionRow } from "@/components/slack-channel-permissions-editor";
@@ -76,7 +74,6 @@ export function usePrincipalList(params: { q: string; page: number }) {
   });
 }
 
-/** Unfiltered principal count for the "N principals total." subtitle. */
 export function usePrincipalTotal() {
   return useQuery({
     queryKey: principalKeys.list({ total: true }),
@@ -116,11 +113,7 @@ function assignableRolesQuery(id: string, params: { q?: string; limit: number })
   };
 }
 
-/**
- * Roles not yet assigned to the principal (the server excludes them across
- * all pages): `total` decides whether the assign form shows, and `first` is
- * the picker's default, as the legacy select preselected its first option.
- */
+/** Unassigned roles (the server excludes them across all pages); `total` decides whether the assign form shows. */
 export function useAssignableRoleSummary(id: string) {
   return useQuery({
     ...assignableRolesQuery(id, { limit: 1 }),
@@ -128,7 +121,6 @@ export function useAssignableRoleSummary(id: string) {
   });
 }
 
-/** One search page of assignable roles for the picker, fetched while it is open. */
 export function useAssignableRoles(id: string, q: string, enabled: boolean) {
   return useQuery({
     ...assignableRolesQuery(id, { q, limit: ROLE_PICKER_LIMIT }),

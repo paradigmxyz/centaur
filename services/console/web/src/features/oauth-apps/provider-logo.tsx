@@ -1,7 +1,5 @@
-// Brand logos for OAuth providers (ported from the legacy oauth_provider_logo
-// helper). Official marks keep their own colors (Google's G, Slack's
-// pinwheel); GitHub, Granola, and Attio use currentColor so they follow the
-// theme. Unknown providers fall back to the first two letters of the key.
+// Official marks keep their own colors; GitHub, Granola, and Attio use
+// currentColor so they follow the theme.
 import { cn } from "@/lib/utils";
 
 type LogoPaths = { viewBox: string; paths: [fill: string, d: string][] };
@@ -57,7 +55,6 @@ export function hasProviderLogo(provider: string) {
   return provider === "mercator" || provider in LOGOS;
 }
 
-/** The provider's brand mark, or null when there is none. */
 export function ProviderLogo({ provider, className = "size-8 shrink-0" }: { provider: string; className?: string }) {
   if (provider === "mercator") {
     return (
@@ -84,7 +81,6 @@ export function ProviderLogo({ provider, className = "size-8 shrink-0" }: { prov
   );
 }
 
-/** The 40px tile used on Integrations cards: the logo, else the provider's first two letters. */
 export function ProviderTile({ provider, fallback = true }: { provider: string; fallback?: boolean }) {
   if (hasProviderLogo(provider)) {
     return (

@@ -14,7 +14,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 
 const headClass = "h-10 px-5 text-xs font-medium text-muted-foreground";
 
-/** One permission row as the API serializes it (slack_channel_permissions_payload). */
 export interface SlackChannelPermissionRow {
   channel_id: string;
   upload_enabled: boolean;
@@ -34,13 +33,10 @@ export const SLACK_PERMISSION_FLAGS: { attribute: Flag; label: string }[] = [
 const DEFAULT_FLAGS: Record<Flag, boolean> = { upload_enabled: true, download_enabled: true, history_enabled: true };
 
 export interface SlackChannelPermissionsEditorProps {
-  /** The owner's direct permissions. */
   permissions: SlackChannelPermissionRow[];
   /** Read-only permissions inherited from roles (principals only). */
   inherited?: SlackChannelPermissionRow[];
-  /** channel_id -> catalog name, for display. */
   channelNames?: Record<string, string>;
-  /** Catalog warning (missing token, catalog loading). */
   catalogError?: string | null;
   /**
    * Principals: DM rows (channel ids starting with "D") are API-managed and
@@ -53,17 +49,11 @@ export interface SlackChannelPermissionsEditorProps {
    * server preserves). Resolve on success; throw to keep the draft.
    */
   onSave: (rows: SlackChannelPermissionRow[]) => Promise<unknown>;
-  /** Delete one direct permission. */
   onDelete: (channelId: string) => Promise<unknown>;
 }
 
 const isDirectMessage = (channelId: string) => channelId.toUpperCase().startsWith("D");
 
-/**
- * The Slack channel permissions section shared by the principal and role
- * pages: editable flags per channel, delete per row, an add row with the
- * channel picker, and the inherited-from-roles table.
- */
 export function SlackChannelPermissionsEditor({
   permissions,
   inherited = [],

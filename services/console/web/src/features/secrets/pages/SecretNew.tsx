@@ -24,7 +24,7 @@ function SecretNew() {
   useDocumentTitle(editable ? `New ${secretKindLabel(kind)} secret` : "Secret not found");
 
   if (!editable) {
-    // Only the form kinds can be created here (the legacy route 404'd).
+    // Only the form kinds can be created here.
     return (
       <>
         <BackLink to="/console/secrets">back to secrets</BackLink>

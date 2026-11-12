@@ -42,7 +42,6 @@ export function adminSlackChannelLoader(excludeOwner?: string): SlackChannelLoad
   };
 }
 
-/** Catalog names for known channel ids (admin endpoint), plus the catalog warning. */
 export function useSlackChannelNames(channelIds: string[]) {
   const ids = [...new Set(channelIds)].sort();
   return useQuery({
@@ -57,7 +56,6 @@ export function useSlackChannelNames(channelIds: string[]) {
   });
 }
 
-/** How a chosen channel reads in the picker input: "#general (C0123456789)". */
 export function channelDisplay(label: string, channelId: string) {
   return `${label} (${channelId})`;
 }
@@ -88,10 +86,6 @@ interface SlackChannelPickerProps {
   "aria-label"?: string;
 }
 
-/**
- * Debounced Slack channel combobox (port of slack_channel_autocomplete): pick a
- * catalog match or type a raw channel id. Keyboard: arrows, Enter, Escape.
- */
 export function SlackChannelPicker({
   loadOptions,
   value,

@@ -16,10 +16,8 @@ interface SecretFieldProps<T extends FieldValues> {
 }
 
 /**
- * Write-only secret input. It is never prefilled: the API never returns
- * plaintext. When a value is stored, the empty field reads "•••••••• (unchanged)"
- * and leaving it blank keeps the stored value -- strip blank secret fields with
- * omitBlankSecrets before submitting so they are omitted from the request.
+ * Write-only: never prefilled. A blank field keeps the stored value; strip it
+ * with omitBlankSecrets before submitting.
  */
 export function SecretField<T extends FieldValues>({
   control,
@@ -58,7 +56,6 @@ export function SecretField<T extends FieldValues>({
   );
 }
 
-/** Returns a copy of `values` without the listed keys whose value is blank. */
 export function omitBlankSecrets<T extends Record<string, unknown>>(values: T, keys: readonly (keyof T)[]): Partial<T> {
   const blank = (value: unknown) =>
     value === undefined || value === null || (typeof value === "string" && value.trim() === "");

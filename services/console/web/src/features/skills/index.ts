@@ -1,6 +1,3 @@
-// Skills slice: skill authoring (Public Skills / My Skills, show, new, edit)
-// and the caller's personal SSH key (/console/ssh_key), both open to every
-// active user. The Integrations page links to the SSH key pages.
 import { Workflow } from "lucide-react";
 import type { ComponentType } from "react";
 

@@ -1,5 +1,3 @@
-// The single list of console features. One line per slice; slices never edit
-// this file -- they fill in web/src/features/<slice>/index.ts instead.
 import type { FeatureModule } from "@/app/types";
 import admin from "@/features/admin";
 import authPages from "@/features/auth-pages";

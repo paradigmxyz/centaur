@@ -1,12 +1,5 @@
-// Typed fetch wrapper for the Rails JSON API under /api/v1.
-//
-// - Sends the console session cookie (same-origin) and, for writes, the CSRF
-//   token from GET /api/v1/me as X-CSRF-Token.
-// - Parses the error envelope {error: {message, details}} into ApiError.
-// - 401 sends the browser to the server-rendered /login (full page load,
-//   with the current page as return_to); 403 "account_pending" to /pending.
-// - A 403 "csrf" (stale token after sign-in elsewhere) refreshes the token
-//   and retries once.
+// Writes send the CSRF token from GET /api/v1/me. A 403 "csrf" (stale token
+// after sign-in elsewhere) refreshes the token and retries once.
 
 export type ErrorDetails = Record<string, unknown> & { reason?: string };
 
@@ -74,12 +67,7 @@ export const navigation = {
   },
 };
 
-/**
- * The server-rendered login page (a full page load, not an SPA route), with
- * the current page as return_to. Rails remembers it only when it is an
- * allowlisted same-origin path (ConsoleReturnPath) and returns there after
- * sign-in.
- */
+/** Rails honours return_to only for allowlisted same-origin paths (ConsoleReturnPath). */
 export function loginUrl(location: Pick<Location, "pathname" | "search"> = window.location): string {
   const here = location.pathname + location.search;
   return `/login?return_to=${encodeURIComponent(here)}`;

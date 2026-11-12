@@ -1,6 +1,3 @@
-// Data access for the automation pages: scheduled tasks (any active user, own
-// tasks) and the admin workflow dashboard. Query keys live under
-// "scheduled_tasks" and "workflows" (see lib/query-keys.ts).
 import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { SlackChannelLoader, SlackChannelOption } from "@/components/slack-channel-picker";
@@ -9,8 +6,6 @@ import { createQueryKeys } from "@/lib/query-keys";
 
 export const scheduledTaskKeys = createQueryKeys("scheduled_tasks");
 export const workflowKeys = createQueryKeys("workflows");
-
-// ---- Scheduled tasks -------------------------------------------------------
 
 export type DeliveryMode = "dm" | "channel";
 export type SchedulePreset = "manual" | "daily" | "weekdays" | "mondays" | "fridays" | "custom";
@@ -59,7 +54,6 @@ export function useScheduledTasks() {
   });
 }
 
-/** Defaults for the new-task form (daily, enabled, DM when linked). */
 export function useNewScheduledTask() {
   return useSuspenseQuery({
     queryKey: scheduledTaskKeys.detail("new"),
@@ -122,8 +116,6 @@ export function deliveryChannelLoader(taskId?: string | null): SlackChannelLoade
     return { options: body.data, error: body.meta.catalog_error };
   };
 }
-
-// ---- Workflows -------------------------------------------------------------
 
 export interface WorkflowTiming {
   status: string;

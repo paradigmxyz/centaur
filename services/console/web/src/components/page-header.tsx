@@ -14,7 +14,6 @@ interface PageHeaderProps {
   className?: string;
 }
 
-/** Ported from console/_page_header: title + subtitle with actions on the right. */
 export function PageHeader({ title, subtitle, actions, icon: Icon, documentTitle, className }: PageHeaderProps) {
   useDocumentTitle(documentTitle ?? (typeof title === "string" ? title : undefined));
   return (
@@ -40,14 +39,12 @@ export function PageHeader({ title, subtitle, actions, icon: Icon, documentTitle
   );
 }
 
-/** Sets "<page> · Centaur Console" as the document title. */
 export function useDocumentTitle(title: string | undefined) {
   useEffect(() => {
     document.title = title ? `${title} · Centaur Console` : "Centaur Console";
   }, [title]);
 }
 
-/** Section heading used inside pages ("Roles", "Direct grants", ...). */
 export function SectionHeading({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <h2 className={cn("mb-1 text-base font-semibold tracking-tight", className)}>

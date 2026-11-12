@@ -16,7 +16,6 @@ import { useSubmit } from "@/lib/use-submit";
 import { assignSecretRole, unassignSecretRole, useRoleGrants, type RoleGrant } from "../api";
 import { QueryErrorAlert } from "../query-error";
 
-/** The "Roles" section: assign the secret to roles and unassign role grants. */
 export function RoleGrantsSection({ kind, id }: { kind: string; id: string }) {
   const grants = useRoleGrants(kind, id);
   const queryClient = useQueryClient();

@@ -1,9 +1,6 @@
 /*
- * Standalone styles for the server-rendered pages (layouts/oauth.html.erb): the
- * console login and pending pages, the MCP OAuth consent page, and the broker
- * OAuth result page. Plain CSS served
- * from public/, with no asset pipeline and no JavaScript. The colours mirror the
- * SPA theme in web/src/index.css: dark by default, light when the browser asks for it.
+ * Styles for the server-rendered pages (layouts/oauth.html.erb), served from
+ * public/ with no asset pipeline. Colours mirror web/src/index.css.
  */
 
 @font-face {
@@ -97,7 +94,6 @@ body {
   padding: 4rem 1.5rem;
 }
 
-/* The faint brand glow behind the card. */
 .oauth-main::before {
   content: "";
   position: absolute;
@@ -267,8 +263,6 @@ body {
 .oauth-result-retry {
   margin-top: 1.25rem;
 }
-
-/* Login and pending pages. */
 
 .oauth-header h1.oauth-subtitle {
   font-weight: 400;

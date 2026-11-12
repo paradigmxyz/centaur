@@ -24,13 +24,8 @@ const railsPaths = [
   "/up",
 ];
 
-// The pre-paint theme script (theme-boot.js) must run before first paint, so
-// it is a classic render-blocking script rather than part of the deferred
-// module bundle. Rails sends `script-src 'self'` with no inline allowance
-// (config/initializers/content_security_policy.rb), so instead of inlining it
-// in index.html this plugin emits it as a content-hashed file under
-// /spa/assets/ (long-cacheable, like the bundle) and injects a <script src>
-// at the end of <head>. The dev server serves it at /theme-boot.js.
+// theme-boot.js must run before first paint as a classic script. The CSP has
+// no inline allowance, so emit it as a hashed asset and inject a <script src>.
 const THEME_BOOT_NAME = "theme-boot.js";
 const themeBootPath = path.resolve(import.meta.dirname, THEME_BOOT_NAME);
 
@@ -67,11 +62,8 @@ function themeBootScript(): Plugin {
   };
 }
 
-// Rails serves public/ through its static file server, which sends no
-// Content-Security-Policy. The built shell (index.html) therefore must not live
-// there: after the build this plugin moves it to services/console/spa-shell/,
-// where only SpaController serves it (with the CSP). public/spa keeps just the
-// content-hashed assets.
+// Rails serves public/ without a CSP, so the built index.html must not live
+// there: move it to spa-shell/, where only SpaController serves it (with the CSP).
 const SHELL_DIR = path.resolve(import.meta.dirname, "../spa-shell");
 
 function moveShellOutOfPublic(): Plugin {
@@ -98,8 +90,7 @@ export default defineConfig(({ command }) => ({
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
-  // Rails' public/ holds the favicons and PWA icons. Serve them in dev only;
-  // in production Rails serves them itself.
+  // Favicons and PWA icons; Rails serves them in production.
   publicDir: command === "build" ? false : "../public",
   server: {
     port: 5173,
