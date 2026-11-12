@@ -353,19 +353,19 @@ spec:
             - name: SESSION_SANDBOX_RUNNING_LIMIT
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
-              value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
+              value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | int64 | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
-              value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
+              value: {{ .Values.apiRs.sandboxReapIntervalSecs | int64 | quote }}
             - name: SESSION_EVENTS_RETENTION_DAYS
               value: {{ .Values.apiRs.sessionEventsRetentionDays | default 0 | quote }}
             - name: SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS
               value: {{ .Values.apiRs.sessionEventsRetentionSweepIntervalSecs | quote }}
             - name: SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS
-              value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | quote }}
+              value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | int64 | quote }}
             - name: SESSION_SANDBOX_CLEANUP_INTERVAL_SECS
-              value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | quote }}
+              value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | int64 | quote }}
             - name: SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS
-              value: {{ .Values.apiRs.sandboxIdleCleanupBackstopSecs | quote }}
+              value: {{ .Values.apiRs.sandboxIdleCleanupBackstopSecs | int64 | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
 {{- if .Values.apiRs.activitySummary.enabled }}
