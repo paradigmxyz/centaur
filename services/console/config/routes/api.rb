@@ -1,6 +1,4 @@
-# Existing /api/v1 resources. New SPA-facing endpoints live in the owning
-# slice's config/routes/console_<slice>.rb inside its own
-# `namespace :api do namespace :v1 do ... end end` block.
+# SPA-facing endpoints live in the owning area's config/routes/console_*.rb.
 
 namespace :api do
   namespace :v1 do
@@ -89,8 +87,6 @@ namespace :api do
       resources :grants, only: %i[index], controller: :grantee_grants
     end
     resources :grants, only: %i[show create destroy]
-  # Shared console building blocks: cross-kind grantable secret list and
-  # Slack channel catalog search.
   resources :secrets, only: %i[index]
   resources :slack_channels, only: %i[index]
     resources :api_keys, only: %i[index show create destroy]

@@ -21,7 +21,6 @@ class SecureSessionCookie
     @app.call(env)
   end
 
-  # True when +public_url+ is an https URL.
   def self.https_public_url?(public_url)
     URI.parse(public_url.to_s).scheme == "https"
   rescue URI::InvalidURIError

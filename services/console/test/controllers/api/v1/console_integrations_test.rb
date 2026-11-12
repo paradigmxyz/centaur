@@ -2,8 +2,7 @@ require "test_helper"
 
 module Api
   module V1
-    # GET /api/v1/integrations, ported from the former HTML
-    # console/integrations_controller_test.rb: what each user sees, their
+    # GET /api/v1/integrations: what each user sees, their
     # connection state, and that shared apps and presets stay admin-only.
     class ConsoleIntegrationsTest < ActionDispatch::IntegrationTest
       def apps = json_body.dig("data", "apps")

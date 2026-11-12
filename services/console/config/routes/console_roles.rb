@@ -1,6 +1,3 @@
-# Roles slice. The pages live in the SPA (web/src/features/roles).
-
-# /api/v1 additions used by the role pages (see docs/API.md#roles).
 namespace :api do
   namespace :v1 do
     resources :roles, only: [] do

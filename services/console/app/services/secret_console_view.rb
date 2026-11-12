@@ -1,13 +1,10 @@
 # Console-facing, read-only views of a grantable secret of any kind: where its
 # value is resolved from (backend + reference), what it injects into, the
 # per-kind configuration rows, and whether an OAuth integration manages it.
-# Used by GET /api/v1/secrets (list rows) and GET /api/v1/secrets/:kind/:id.
 #
 # Never includes a secret value: an inline (control_plane) source is shown as
 # the literal reference "inline".
 module SecretConsoleView
-  # Friendly labels for the source backend (and the gcp_auth
-  # credentials_provider type).
   SOURCE_TYPE_LABELS = {
     "env" => "Env", "aws_sm" => "AWS-SM", "aws_ssm" => "AWS-SSM",
     "1password" => "1Password", "1password_connect" => "1Password-Connect",
@@ -27,7 +24,6 @@ module SecretConsoleView
     raw_segments(record).map { |seg| seg.merge(type_label: source_type_label(seg[:type])) }
   end
 
-  # The distinct backend labels (e.g. ["1Password", "Env"]) for the list.
   def source_types(record)
     raw_segments(record).map { |seg| source_type_label(seg[:type]) }.uniq
   end
@@ -63,8 +59,6 @@ module SecretConsoleView
     end
   end
 
-  # The "Configuration" rows of the detail page: [{ label:, value: }], with
-  # multi-value fields joined by newlines.
   def configuration(record)
     rows = []
     if (inj = injection(record)).present?
@@ -74,7 +68,6 @@ module SecretConsoleView
     rows.map { |label, value| { label: label, value: value.to_s } }
   end
 
-  # The HMAC signed header templates ([{ name:, value: }]), or nil for other kinds.
   def signed_headers(record)
     return nil unless record.is_a?(HmacSecret)
 
@@ -83,7 +76,6 @@ module SecretConsoleView
     end
   end
 
-  # Request rules for the kinds that support them, nil otherwise.
   def rules(record)
     return nil unless record.respond_to?(:rules)
 

@@ -75,7 +75,7 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "Rails protocol routes take precedence over the SPA" do
-    # OAuth protocol endpoints stay Rails routes after the UI moves to the SPA.
+    # OAuth protocol endpoints stay Rails routes.
     get "/oauth/unknown-app/start", headers: HTML
     assert_response :redirect
     # The login and pending pages are server-rendered, not SPA routes.

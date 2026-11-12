@@ -1,10 +1,6 @@
-# Base class for the console's browser-facing Rails endpoints that are not
-# part of the JSON API: password login (/login, /logout, /pending), SSO login
-# (/auth/:provider/*), the broker OAuth consent flow (/oauth/:slug/*), the MCP
-# OAuth authorization server, and the PWA launch handler. They answer with
-# redirects or JSON, except the login, pending, OAuth consent, and OAuth result
-# pages, which are intentionally server-rendered (layouts/oauth). The console
-# UI itself is the SPA served by SpaController.
+# Base class for the console's browser-facing endpoints outside the JSON API
+# (login, SSO, OAuth consent, MCP OAuth, PWA launch). The console UI itself is
+# the SPA served by SpaController.
 class ApplicationController < ActionController::Base
   # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
   allow_browser versions: :modern
@@ -13,7 +9,7 @@ class ApplicationController < ActionController::Base
   include ConsoleSignIn
   include OauthAppUrls
 
-  # 404 for record lookups (find_by_oid! and friends). Mirrors Api::BaseController.
+  # 404 for record lookups (find_by_oid! and friends).
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
   # Require a console session by default. Endpoints that must stay reachable
@@ -27,8 +23,6 @@ class ApplicationController < ActionController::Base
 
   private
 
-  # The signed-in operator for cookie-session (console) requests, or nil.
-  # Api::BaseController resolves the same session user (or an API key owner).
   def current_user
     console_session_user
   end
@@ -37,8 +31,6 @@ class ApplicationController < ActionController::Base
     current_user&.admin? || false
   end
 
-  # before_action gate: bounce anonymous requests to the login page,
-  # remembering where they were going.
   def require_login
     return if current_user
 
@@ -70,9 +62,6 @@ class ApplicationController < ActionController::Base
     acting_admin? ? console_principals_path : console_integrations_path
   end
 
-  # Completes an SSO login: establishes the console session and redirects to
-  # the remembered return path or the user's landing page. Failures land on
-  # the login page, which renders the flash alert.
   def sign_in_console_user(user)
     return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE if user.disabled?
 

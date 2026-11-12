@@ -2,17 +2,13 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console secrets pages, ported from the
-    # former HTML controller tests (console_controller_test.rb secret cases and
-    # console/secrets_controller_test.rb). Requests use the console session
-    # cookie (+ CSRF) as the SPA does; bodies are the JSON the SPA forms send.
+    # Requests use the console session cookie (+ CSRF) as the SPA does; bodies
+    # are the JSON the SPA forms send.
     class ConsoleSecretsTest < ActionDispatch::IntegrationTest
       setup do
         @operator = users(:acme_admin)
         sign_in_console(@operator)
       end
-
-      # -- authorization -----------------------------------------------------
 
       test "secret list, detail, and role grant endpoints are admin-only" do
         secret = static_secrets(:acme_prod_api_key)
@@ -51,12 +47,9 @@ module Api
         assert_equal "session_required", json_body.dig("error", "details", "reason")
         get api_v1_secret_role_grants_path("static", static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
         assert_response :forbidden
-        # The per-kind bearer API is unchanged.
         get api_v1_static_secret_path(static_secrets(:acme_prod_api_key).oid), headers: bearer_headers
         assert_response :ok
       end
-
-      # -- list ----------------------------------------------------------------
 
       test "secrets list combines kinds with backend labels but never references" do
         secret = static_secrets(:acme_prod_api_key)
@@ -104,8 +97,6 @@ module Api
         assert_equal [ managed.oid ], rows.map { |s| s["id"] }
         assert_equal managed.broker_credential.oid, rows.first.dig("managed_by", "broker_credential_id")
       end
-
-      # -- detail --------------------------------------------------------------
 
       test "secret detail marks the form kinds editable and the others read-only" do
         get api_v1_secret_detail_path("static", static_secrets(:acme_prod_api_key).oid)
@@ -238,8 +229,6 @@ module Api
         assert_response :not_found
       end
 
-      # -- role grants -----------------------------------------------------------
-
       test "role grants list the secret's role grants and the assignable roles" do
         secret = static_secrets(:acme_prod_api_key)
         grant = grants(:acme_infra_prod_api_key)
@@ -330,7 +319,6 @@ module Api
         assert Grant.exists?(direct.id)
       end
 
-      # -- 422 compatibility ---------------------------------------------------------
       # Nested validation errors keep the keys earlier versions returned, and
       # add path keys ("rules[1].cidr", "keyfile.config") alongside them.
 
@@ -408,8 +396,6 @@ module Api
         assert_equal "CLOUD_RUN_SA_KEYFILE", id_token.reload.keyfile_source.config["var"]
       end
 
-      # -- static forms ------------------------------------------------------------
-
       test "creating a static secret stores its source, rules, and labels" do
         assert_difference -> { StaticSecret.count } => 1, -> { SecretSource.count } => 1, -> { RequestRule.count } => 2 do
           post api_v1_static_secrets_path, params: { data: {
@@ -481,7 +467,7 @@ module Api
           } }, headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
-        # The rule's own keys (as before) plus the additive path key.
+        # The rule's own keys plus the additive path key.
         assert_equal({ "base" => [ "host and cidr are mutually exclusive" ],
                        "rules[0].base" => [ "host and cidr are mutually exclusive" ] }, json_body.dig("error", "details"))
       end
@@ -563,8 +549,6 @@ module Api
         assert_response :no_content
         assert_not StaticSecret.exists?(secret.id)
       end
-
-      # -- pg_dsn forms -----------------------------------------------------------
 
       test "creating a pg_dsn secret with an inline DSN source" do
         assert_difference -> { PgDsnSecret.count } => 1, -> { SecretSource.count } => 1 do
@@ -694,8 +678,6 @@ module Api
         assert_response :unprocessable_entity
       end
 
-      # -- gcp_auth forms ---------------------------------------------------------
-
       test "creating a keyfile gcp_auth secret with a source and rules" do
         assert_difference -> { GcpAuthSecret.count } => 1, -> { SecretSource.count } => 1, -> { RequestRule.count } => 1 do
           post api_v1_gcp_auth_secrets_path, params: { data: {
@@ -754,8 +736,6 @@ module Api
         assert_equal({ "type" => "workload_identity" }, secret.credentials_provider)
       end
 
-      # -- gcp_id_token forms -----------------------------------------------------
-
       test "creating a gcp_id_token secret with a keyfile source and rule" do
         assert_difference -> { GcpIdTokenSecret.count } => 1, -> { SecretSource.count } => 1, -> { RequestRule.count } => 1 do
           post api_v1_gcp_id_token_secrets_path, params: { data: {
@@ -812,8 +792,6 @@ module Api
         assert_no_match "service_account", response.body
         assert_equal "{\"type\":\"service_account\"}", secret.reload.keyfile_source.secret
       end
-
-      # -- clearing a foreign_id ------------------------------------------------
 
       test "an explicit null foreign_id clears it on a static secret addressed by OID" do
         secret = StaticSecret.create!(name: "clear-id", foreign_id: "clear-me", inject_config: { "header" => "Authorization" },

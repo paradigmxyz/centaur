@@ -48,8 +48,6 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     assert_equal "pending", json_body.dig("data", "user", "status")
   end
 
-  # --- DELETE /api/v1/session (the SPA's sign-out button) ----------------------
-
   test "SPA sign-out clears the session and leaves a notice for the login page" do
     sign_in_console(@operator)
     console_sign_out

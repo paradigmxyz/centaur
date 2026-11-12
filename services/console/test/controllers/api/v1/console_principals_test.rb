@@ -2,18 +2,12 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console principals pages, ported from the
-    # former HTML controller tests (console_controller_test.rb principal cases
-    # and console/principals_controller_test.rb). Requests use the console
-    # session cookie (+ CSRF) as the SPA does; bearer parity is covered where
-    # the endpoint is new.
+    # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsolePrincipalsTest < ActionDispatch::IntegrationTest
       setup do
         @operator = users(:acme_admin)
         sign_in_console(@operator)
       end
-
-      # -- authorization -----------------------------------------------------
 
       test "principal endpoints are admin-only for every caller type" do
         principal = principals(:acme_user_bob)
@@ -38,8 +32,6 @@ module Api
              headers: csrf_headers, as: :json
         assert_response :not_found
       end
-
-      # -- index ---------------------------------------------------------------
 
       test "index searches names and foreign ids case insensitively" do
         principal = principals(:acme_channel)
@@ -124,8 +116,6 @@ module Api
         assert labels.key?(Principal::SANDBOX_REPO_CACHE_LABEL)
       end
 
-      # -- create --------------------------------------------------------------
-
       test "create applies default sandbox capabilities and default roles" do
         system_settings(:default).update!(
           default_sandbox_repo_cache: "public",
@@ -170,8 +160,6 @@ module Api
         assert_match(/has already been taken/, json_body.dig("error", "details", "foreign_id").join)
       end
 
-      # -- sandbox access ------------------------------------------------------
-
       test "sandbox access is updated with a partial PATCH" do
         principal = principals(:acme_user_bob)
         patch api_v1_principal_path(principal.oid),
@@ -187,8 +175,6 @@ module Api
         assert_equal false, principal.sandbox_observability_enabled
         assert_equal false, principal.sandbox_workflows_write_enabled
       end
-
-      # -- Slack channel permissions -------------------------------------------
 
       test "replacing Slack channel permissions stores the submitted rows" do
         principal = principals(:acme_user_bob)
@@ -277,8 +263,6 @@ module Api
         assert_equal true, inherited.first["history_enabled"]
       end
 
-      # -- delete --------------------------------------------------------------
-
       test "destroy deletes the principal and dependent access records" do
         principal = principals(:acme_channel)
         proxy = proxies(:acme_proxy)
@@ -310,8 +294,6 @@ module Api
         assert Principal.exists?(principal.id)
       end
 
-      # -- roles -----------------------------------------------------------------
-
       test "assigning and unassigning a role" do
         principal = principals(:acme_user_bob)
         role = roles(:acme_admin_role)
@@ -334,8 +316,6 @@ module Api
         end
         assert_response :no_content
       end
-
-      # -- grants ----------------------------------------------------------------
 
       test "direct grants include the secret's kind, name, and foreign id" do
         principal = principals(:acme_channel)
@@ -427,8 +407,6 @@ module Api
         assert_equal 53, json_body.dig("meta", "total")
       end
 
-      # -- grant picker: cross-kind secret list ---------------------------------
-
       test "secrets lists every kind with identifying metadata only" do
         get api_v1_secrets_path(limit: 200)
         assert_response :ok
@@ -504,8 +482,6 @@ module Api
         get api_v1_secrets_path(exclude_grantee: "user:#{users(:acme_admin).id}")
         assert_response :bad_request
       end
-
-      # -- Slack channel catalog -----------------------------------------------
 
       test "slack channels return bounded catalog matches and exclude an owner's channels" do
         principal = principals(:acme_channel)

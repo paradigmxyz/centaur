@@ -1,8 +1,4 @@
-# Skills slice: skill authoring and the personal SSH key. The pages live in the
-# SPA (web/src/features/skills).
-
-# /api/v1 endpoints behind those pages (see docs/API.md#console-skills and
-# docs/API.md#personal-ssh-key). Open to any active user.
+# Open to any active user.
 namespace :api do
   namespace :v1 do
     resources :skills, only: %i[index show create update destroy] do

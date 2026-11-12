@@ -10,12 +10,10 @@ class OauthPresetSetup
   # (another provider, the wrong shared mode, or disabled).
   class Conflict < StandardError; end
 
-  # Whether +provider+ offers a preset the console can register on its own.
   def self.supported?(provider)
     provider.respond_to?(:preset) && provider.respond_to?(:registration_endpoint)
   end
 
-  # Providers with a preset whose provider has no OAuth app yet.
   def self.available_providers
     configured = OauthApp.distinct.pluck(:provider)
     Oauth::Providers.registry.values.select { |provider| supported?(provider) && !configured.include?(provider.key) }

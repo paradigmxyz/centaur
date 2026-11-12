@@ -13,7 +13,6 @@ class OauthAppProviderDetails
     @app = app
   end
 
-  # The shared account's credential, or nil.
   def credential
     return @credential if defined?(@credential)
 

@@ -1,7 +1,5 @@
 module Api
   module V1
-    # Scheduled tasks.
-    #
     # GET /api/v1/scheduled_tasks/:id (no ?view) is the admin-only execution
     # state lookup used by the workflow host: id, enabled, delivery_channel, and
     # never the prompt. It accepts a bearer key or the session; everything
@@ -9,10 +7,9 @@ module Api
     #
     # Everything else backs the console Scheduled Tasks pages and is open to
     # any active user, scoped to the tasks they authored. Any other task is a
-    # 404 for everyone, admins included (the legacy console's authority).
+    # 404 for everyone, admins included.
     class ScheduledTasksController < Api::BaseController
       accepts_credentials :bearer_or_session
-      # Added for the console SPA; not part of the bearer API.
       accepts_credentials :session, only: %i[index new create update destroy run slack_channel_options]
       accepts_credentials :session, only: :show, if: :console_view?
 
@@ -150,7 +147,7 @@ module Api
         }
       end
 
-      # Legacy form rule: a user id destination is a DM, any other destination
+      # A user id destination is a DM, any other destination
       # a channel; a new task defaults to the DM when one is linked.
       def delivery_mode(task, dm_user_id)
         return "dm" if task.delivery_channel.to_s.start_with?("U", "W")

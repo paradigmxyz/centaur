@@ -1,8 +1,4 @@
-# Admin slice: users, API clients, and system settings. The pages live in the
-# SPA (web/src/features/admin).
-
-# /api/v1 additions used by the admin pages (see docs/API.md#users,
-# #api-clients, and #system-settings). All admin-only.
+# All admin-only.
 namespace :api do
   namespace :v1 do
     resources :users, only: %i[index] do

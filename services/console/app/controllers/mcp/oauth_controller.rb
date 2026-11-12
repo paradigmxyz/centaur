@@ -8,11 +8,7 @@ module Mcp
   #
   # The consent page is intentionally server-rendered (layouts/oauth) rather
   # than an SPA route, so installed MCP clients keep exactly the protocol
-  # behaviour they were built against: GET /mcp/oauth/authorize validates the
-  # request and renders the consent form, and POST /mcp/oauth/authorize (a
-  # standard Rails form with an authenticity token) revalidates it, issues the
-  # code, and redirects to the registered redirect_uri. The login step
-  # (/login, also server-rendered) returns here through ConsoleReturnPath.
+  # behaviour they were built against.
   class OauthController < ApplicationController
     layout "oauth"
     include ServerRenderedPagePolicy

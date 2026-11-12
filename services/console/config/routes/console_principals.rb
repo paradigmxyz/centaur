@@ -1,8 +1,6 @@
-# Principals slice. The pages live in the SPA (web/src/features/principals);
-# Rails only keeps the path helper for the admin landing-page redirect.
+# Path helper for the admin landing-page redirect.
 direct(:console_principals) { "/console/principals" }
 
-# /api/v1 additions used by the principals pages (see docs/API.md#principals).
 namespace :api do
   namespace :v1 do
     resources :principals, only: %i[destroy] do

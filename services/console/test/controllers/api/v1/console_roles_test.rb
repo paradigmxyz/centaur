@@ -2,19 +2,12 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console role pages, ported from the former
-    # HTML controller tests (console/roles_controller_test.rb, the role cases of
-    # console/slack_channel_permissions_controller_test.rb and
-    # console/slack_channel_options_controller_test.rb, and the role case of
-    # console_controller_test.rb). Requests use the console session cookie
-    # (+ CSRF) as the SPA does; bearer parity is covered where the endpoint is new.
+    # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsoleRolesTest < ActionDispatch::IntegrationTest
       setup do
         @operator = users(:acme_admin)
         sign_in_console(@operator)
       end
-
-      # -- authorization -----------------------------------------------------
 
       test "role endpoints are admin-only for every caller type" do
         role = roles(:acme_infra)
@@ -95,8 +88,6 @@ module Api
         assert_response :not_found
       end
 
-      # -- index / show ----------------------------------------------------------
-
       test "index lists every role with identity and labels" do
         get api_v1_roles_path(limit: 200)
         assert_response :ok
@@ -115,8 +106,6 @@ module Api
         assert_equal role.name, json_body.dig("data", "name")
         assert_equal [ "C0123456789" ], json_body.dig("data", "slack_channel_permissions").map { |p| p["channel_id"] }
       end
-
-      # -- create / update -------------------------------------------------------
 
       test "create persists role identity and labels without a namespace" do
         assert_difference -> { Role.count }, 1 do
@@ -170,8 +159,6 @@ module Api
         assert_response :ok
         assert_equal "Via bearer", role.reload.name
       end
-
-      # -- grants ----------------------------------------------------------------
 
       test "role grants include the secret's kind, name, and foreign id" do
         role = roles(:acme_infra)
@@ -256,8 +243,6 @@ module Api
         get api_v1_secrets_path(exclude_grantee: "role:role_missing")
         assert_response :not_found
       end
-
-      # -- Slack channel permissions -------------------------------------------
 
       test "replacing stores role permissions" do
         role = roles(:acme_infra)
@@ -410,14 +395,12 @@ module Api
         assert_response :forbidden
         assert role.slack_channel_permissions.exists?(channel_id: "C0123456789")
 
-        # The origin/main POST upsert keeps accepting the bearer key.
+        # The POST upsert keeps accepting the bearer key.
         post slack_channel_permissions_api_v1_role_path(role.oid),
              params: { data: { channel_id: "C0123456789", history_enabled: true, upload_enabled: true } },
              headers: bearer_headers, as: :json
         assert_response :success
       end
-
-      # -- Slack channel catalog (role owner) ------------------------------------
 
       test "role channel options use the shared catalog lookup and exclude the role's channels" do
         role = roles(:acme_infra)

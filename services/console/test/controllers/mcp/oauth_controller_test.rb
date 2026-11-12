@@ -5,7 +5,7 @@ require "uri"
 
 module Mcp
   class OauthControllerTest < ActionDispatch::IntegrationTest
-    # The hidden fields origin/main's consent form posted (plus decision from
+    # The hidden fields the previous release's consent form posted (plus decision from
     # the button). Installed clients and open consent tabs depend on them.
     ORIGIN_MAIN_FORM_FIELDS = %w[
       authenticity_token response_type client_id redirect_uri scope state resource code_challenge code_challenge_method
@@ -431,7 +431,7 @@ module Mcp
         get "/mcp/oauth/authorize", params: authorize_params(client)
         token = css_select("input[name=authenticity_token]").first["value"]
 
-        # The exact body origin/main's authorize.html.erb submitted for Allow.
+        # The exact body the previous release's consent form submitted for Allow.
         body = {
           "authenticity_token" => token,
           "response_type" => "code",

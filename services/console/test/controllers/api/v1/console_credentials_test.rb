@@ -2,10 +2,7 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console credentials pages, ported from the
-    # former HTML controller tests (console/broker_credentials_controller_test.rb
-    # and the credential cases in console_controller_test.rb). Requests use the
-    # console session cookie (+ CSRF) as the SPA does.
+    # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsoleCredentialsTest < ActionDispatch::IntegrationTest
       POLICY = {
         early_refresh_fraction: 0.5, early_refresh_slack_seconds: 120,
@@ -24,8 +21,6 @@ module Api
       def update_credential(cred, data)
         patch api_v1_broker_credential_path(cred.oid), params: { data: data }, headers: csrf_headers, as: :json
       end
-
-      # -- authorization -------------------------------------------------------
 
       test "credential endpoints are admin-only for every caller type" do
         cred = broker_credentials(:globex_managed_api)
@@ -47,8 +42,6 @@ module Api
         delete api_v1_broker_credential_path("bcr_missing"), headers: csrf_headers
         assert_response :not_found
       end
-
-      # -- index / show --------------------------------------------------------
 
       test "index lists credentials with id, status, provenance, and no token material" do
         app = oauth_apps(:acme_google)
@@ -167,8 +160,6 @@ module Api
         assert_equal app.client_id, data["effective_client_id"]
       end
 
-      # -- create --------------------------------------------------------------
-
       test "create builds a credential with config, scopes, headers, labels, and a seed" do
         assert_difference -> { BrokerCredential.count } => 1 do
           create_credential(POLICY.merge(
@@ -270,8 +261,6 @@ module Api
         assert details.key?("token_endpoint")
         assert details.key?("client_id")
       end
-
-      # -- update --------------------------------------------------------------
 
       test "update changes attributes and replaces scopes, headers, and labels" do
         cred = broker_credentials(:acme_managed_gmail)
@@ -386,9 +375,7 @@ module Api
         assert_equal "api-key", cred.api_key
       end
 
-      # The legacy form had two username inputs (password and Preqin panels) and
-      # preferred the Preqin one; the SPA sends only the selected grant's fields
-      # as `username` (see credentials.test.tsx), so the API sees one value.
+
       test "update of a preqin username stores it and reschedules the credential" do
         cred = BrokerCredential.create!(foreign_id: "preqin-username",
                                         grant: "preqin", username: "old-user", api_key: "api-key",
@@ -414,8 +401,6 @@ module Api
         assert_nil cred.dead_reason
         assert_equal 0, cred.failure_count
       end
-
-      # -- destroy -------------------------------------------------------------
 
       test "destroy removes an unreferenced credential" do
         cred = broker_credentials(:globex_managed_api)

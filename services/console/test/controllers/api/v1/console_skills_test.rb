@@ -2,8 +2,6 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1/skills surface behind the console Skills pages, ported from
-    # the former HTML controller tests (console/skills_controller_test.rb).
     # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsoleSkillsTest < ActionDispatch::IntegrationTest
       setup do
@@ -15,8 +13,6 @@ module Api
         { data: { name: skill.name, description: skill.description, instructions: skill.content,
                   lock_version: skill.lock_version }.merge(overrides) }
       end
-
-      # -- authorization -----------------------------------------------------
 
       test "skill endpoints are open to active users only" do
         skill = skills(:admin_shared)
@@ -46,8 +42,6 @@ module Api
         get api_v1_skill_path(skills(:other_private).oid), headers: bearer_headers(MEMBER_TOKEN)
         assert_response :forbidden
       end
-
-      # -- index ---------------------------------------------------------------
 
       test "shows public skills by default" do
         get api_v1_skills_path
@@ -89,8 +83,6 @@ module Api
         get api_v1_skills_path(tab: "mine")
         assert_empty json_body["data"]
       end
-
-      # -- show ----------------------------------------------------------------
 
       test "shows editor identities to viewers of a shared skill" do
         skill = skills(:admin_shared)
@@ -155,8 +147,6 @@ module Api
         assert_response :not_found
         assert skills(:admin_shared).reload.shared?
       end
-
-      # -- create / update / share / archive -----------------------------------
 
       test "creates edits and immediately shares a skill" do
         assert_difference("Skill.count", 1) do
@@ -318,8 +308,6 @@ module Api
         assert_equal SkillsController::STALE_MESSAGE, json_body.dig("error", "message")
         assert_equal "Changed elsewhere.", skill.reload.description
       end
-
-      # -- editor candidates -----------------------------------------------------
 
       test "editor candidates are other active users, filterable by name or email" do
         get editor_candidates_api_v1_skills_path

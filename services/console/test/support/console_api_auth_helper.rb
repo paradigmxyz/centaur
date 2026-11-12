@@ -23,22 +23,18 @@ module ConsoleApiAuthHelper
     user
   end
 
-  # POST /login for +email+, as the server-rendered login form submits it
-  # (the test environment skips the authenticity token; the CSRF tests in
-  # sessions_controller_test turn forgery protection on). The response (a
-  # redirect, or the re-rendered form) is left for the caller to inspect.
+  # POST /login for +email+. The response (a redirect, or the re-rendered
+  # form) is left for the caller to inspect.
   def console_password_login(email, password = TEST_PASSWORD)
     post login_path, params: { email: email, password: password }
     @console_csrf_token = nil
   end
 
-  # DELETE /api/v1/session, as the SPA's sign-out button does.
   def console_sign_out
     delete api_v1_session_path, headers: csrf_headers
     @console_csrf_token = nil
   end
 
-  # Where the last console_password_login sent the browser (path and query).
   def console_login_redirect
     location = response.location || raise("no redirect: #{response.status}")
     URI.parse(location).request_uri
@@ -124,7 +120,6 @@ module ConsoleApiAuthHelper
     end
   end
 
-  # The credential policy the routed controller declares for +method+ +path+.
   def declared_credential_policy(method, path)
     route = Rails.application.routes.recognize_path(path.to_s.split("?").first, method: method.to_s.upcase)
     controller = "#{route[:controller]}_controller".camelize.constantize
