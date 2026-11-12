@@ -5,7 +5,6 @@
 - [Authentication](#authentication)
   - [Credential types by endpoint](#credential-types-by-endpoint)
   - [Console session (browser SPA)](#console-session-browser-spa)
-  - [Audit log](#audit-log)
   - [Session endpoints](#session-endpoints)
   - [Console auth pages](#console-auth-pages)
 - [Conventions](#conventions)
@@ -106,26 +105,6 @@ the console session cookie.
   except on endpoints open to pending accounts (`GET /api/v1/me`,
   `DELETE /api/v1/session`).
 
-### Audit log
-
-Every non-`GET` request to an operator endpoint, including refused ones,
-writes one structured log line:
-
-```json
-{ "event": "console_api_audit", "user_id": "usr_…", "user_email": "ops@example.com",
-  "auth_method": "session", "api_key_id": null, "authenticated": true,
-  "controller": "api/v1/users", "action": "promote", "http_method": "POST",
-  "target": { "id": "usr_…" }, "status": 200 }
-```
-
-`auth_method` is `session`, `api_key` (with `api_key_id`, the key's oid, never
-the token), or `null` for anonymous requests. A demote, disable, or approve
-that revoked API keys adds `revoked_api_keys` (the count). For refused requests it is the
-credential presented and `authenticated` is `false`. `target` holds the path
-parameters (ids, foreign ids, slugs) after parameter filtering. Request bodies
-and secret values are never logged. Sandbox admin requests log their own
-`sandbox_admin_request` line instead.
-
 ### Authorization
 
 Endpoints are admin-only unless documented otherwise. A non-admin caller
@@ -135,8 +114,6 @@ for sessions). Endpoints documented as open to active users admit any active
 console **session** and scope their records to the caller unless the caller is
 an acting admin. A bearer key is accepted only when its owner is an active
 admin, on every endpoint.
-
-Demoting or disabling a user (or moving them back to pending), by any path, revokes all of their API keys in the same transaction; re-promoting them does not bring the keys back. That includes the key api-rs uses (`IRON_CONTROL_API_KEY`, often the bootstrap `CENTAUR_CONSOLE_INITIAL_API_KEY`) when its owner is demoted or disabled: mint a new key as an active admin (`POST /api/v1/api_keys`) and update api-rs's secret. A revoked token cannot be reused.
 
 An admin session may pause its admin permissions ("view as operator"); while
 descoped, admin-only endpoints return `403` for that session. Bearer keys are
@@ -1989,9 +1966,9 @@ addressed by `usr_…` oid.
 |---|---|---|
 | `GET` | `/api/v1/users` | Every user, unpaginated, admins first then by email. Optional `status` (`pending`, `active`, `disabled`; anything else returns `400`). |
 | `POST` | `/api/v1/users/:id/approve` | Activate a pending user and record the approver. |
-| `POST` | `/api/v1/users/:id/disable` | Revoke access. Also revokes the user's MCP OAuth refresh tokens and all of their API keys; their console session is signed out on its next request. Your own account returns `422` (`"You can't disable your own account."`, `details.reason = "self"`). |
+| `POST` | `/api/v1/users/:id/disable` | Revoke access. Also revokes the user's MCP OAuth refresh tokens, and their API keys stop working; their console session is signed out on its next request. Your own account returns `422` (`"You can't disable your own account."`, `details.reason = "self"`). |
 | `POST` | `/api/v1/users/:id/promote` | Make the user an admin. This also activates the account. |
-| `POST` | `/api/v1/users/:id/demote` | Remove admin. Also revokes all of the user's API keys (see [Authorization](#authorization)). Your own account returns `422` (`"You can't demote your own account."`, `details.reason = "self"`). |
+| `POST` | `/api/v1/users/:id/demote` | Remove admin. The user's API keys stop working while they are not an active admin (see [Authorization](#authorization)). Your own account returns `422` (`"You can't demote your own account."`, `details.reason = "self"`). |
 
 Each action returns the updated user as `{ "data": user }`. The list
 response looks like this:

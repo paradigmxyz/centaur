@@ -20,17 +20,6 @@ class User < ApplicationRecord
 
   after_update :revoke_mcp_oauth_refresh_tokens_when_disabled,
                if: -> { saved_change_to_status? && disabled? }
-  # API keys only ever act for an active admin. Revoke them in the same
-  # transaction as any change that ends that (demotion, disabling, or a move
-  # back to pending), whatever path saved it (API, console, rake task), so a
-  # later re-promotion cannot bring old keys back.
-  before_update { @revoked_api_key_count = nil }
-  after_update :revoke_api_keys_when_no_longer_active_admin,
-               if: -> { (saved_change_to_admin? || saved_change_to_status?) && !(admin? && active?) }
-
-  # Number of API keys the last save revoked (nil when it revoked none), for
-  # the caller's audit line.
-  attr_reader :revoked_api_key_count
 
   # active: normal operator (SSO users are provisioned active). pending: legacy
   # state from the retired approval queue, flipped to active on next SSO login.
@@ -49,11 +38,6 @@ class User < ApplicationRecord
   # Marks a pending user active, recording who approved them and when.
   def approve!(by:)
     update!(status: :active, approved_at: Time.current, approved_by: by)
-  end
-
-  # Soft-deletes every live API key of this user; returns how many.
-  def revoke_api_keys!(at: Time.current)
-    api_keys.update_all(deleted_at: at, updated_at: at)
   end
 
   def revoke_mcp_oauth_refresh_tokens!
@@ -129,14 +113,5 @@ class User < ApplicationRecord
 
   def revoke_mcp_oauth_refresh_tokens_when_disabled
     revoke_mcp_oauth_refresh_tokens!
-  end
-
-  def revoke_api_keys_when_no_longer_active_admin
-    count = revoke_api_keys!
-    @revoked_api_key_count = count
-    return if count.zero?
-
-    Rails.logger.info({ event: "user_api_keys_revoked", user_id: oid, user_email: email,
-                        admin: admin?, status: status, revoked_api_keys: count })
   end
 end

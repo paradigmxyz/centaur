@@ -19,16 +19,13 @@ module Api
   # bearer requests skip CSRF because browsers never attach them ambiently.
   #
   # A bearer key is accepted only when its owner is an active admin, on every
-  # endpoint (demoting or disabling a user revokes their keys, see User).
+  # endpoint, as before the console SPA.
   #
   # Authorization is per endpoint. Every action is admin-only unless the
   # controller opts in with `allow_active_users` (any active session; scope
   # records with `owned_scope` / `require_owner_or_admin!`) or
   # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me). For
   # session requests the admin check honours the "view as operator" descope.
-  #
-  # Every non-GET request emits one `console_api_audit` log line (actor, auth
-  # method, target ids, status), including refused ones.
   class BaseController < ActionController::API
     include ApiRequestSupport
     include ConsoleSession
@@ -115,73 +112,6 @@ module Api
 
     private
 
-    AUDIT_SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
-
-    # Wraps every action, including ones a before_action refused, so each
-    # non-GET request leaves exactly one audit line. An exception that
-    # escapes rescue_from is logged with the status Rails will answer with.
-    def process_action(*)
-      super
-    rescue Exception => e # rubocop:disable Lint/RescueException -- re-raised
-      @audit_status = ActionDispatch::ExceptionWrapper.status_code_for_exception(e.class.name)
-      raise
-    ensure
-      emit_console_api_audit
-    end
-
-    # One structured line per write: who (user, auth method, API key oid),
-    # what (controller, action, method, path-parameter ids), and the outcome.
-    # Never request bodies or tokens; target ids go through the app's
-    # parameter filter (ConsoleLogFilter).
-    def emit_console_api_audit
-      return if AUDIT_SAFE_METHODS.include?(request.request_method)
-      # Sandbox admin requests authenticate with a sandbox JWT and log their
-      # own sandbox_admin_request line.
-      return if is_a?(SandboxAdminAuthentication)
-
-      Rails.logger.info(console_api_audit_entry)
-    rescue StandardError => e
-      Rails.logger.error("console_api_audit failed: #{e.class}")
-    end
-
-    def console_api_audit_entry
-      user = current_user || audit_presented_user
-      method = auth_method || presented_credential
-      api_key = current_api_key || @presented_api_key
-      {
-        event: "console_api_audit",
-        user_id: user&.oid,
-        user_email: user&.email,
-        auth_method: method == :none ? nil : method.to_s,
-        api_key_id: (api_key&.oid if method == :api_key),
-        authenticated: auth_method.present?,
-        controller: controller_path,
-        action: action_name,
-        http_method: request.request_method,
-        target: audit_target,
-        status: @audit_status || response.status,
-        **audit_details
-      }
-    end
-
-    # Extra fields an action adds to its audit line (e.g. revoked_api_keys).
-    def audit_details
-      @audit_details ||= {}
-    end
-
-    # The identity behind a refused credential, for the audit line only.
-    def audit_presented_user
-      case presented_credential
-      when :api_key then @presented_api_key&.user
-      when :session then console_session_user
-      end
-    end
-
-    def audit_target
-      keys = request.path_parameters.keys.map(&:to_s) - %w[controller action format]
-      request.filtered_parameters.slice(*keys)
-    end
-
     # :api_key, :session, or nil before authentication.
     attr_reader :auth_method
 
@@ -231,12 +161,10 @@ module Api
     end
 
     # :api_key when an Authorization header is present, :session when the
-    # cookie names a user, otherwise nil. Identity is resolved here only for
-    # the audit line; authentication proper happens afterwards.
+    # cookie names a user, otherwise :none. Authentication proper happens
+    # afterwards.
     def presented_credential
       @presented_credential ||= if request.headers["Authorization"].present?
-        token = bearer_token
-        @presented_api_key = ApiKey.find_by_token(token) if token.present?
         :api_key
       elsif console_session_user
         :session
