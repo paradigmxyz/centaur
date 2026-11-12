@@ -1,9 +1,4 @@
-# Automation slice: workflows and scheduled tasks. The pages live in the SPA
-# (web/src/features/automation).
-
-# /api/v1 endpoints behind the automation pages (see docs/API.md#workflows and
-# docs/API.md#scheduled-tasks). GET /api/v1/scheduled_tasks/:id is drawn in
-# api.rb.
+# GET /api/v1/scheduled_tasks/:id is drawn in api.rb.
 namespace :api do
   namespace :v1 do
     resources :workflows, only: %i[index show], constraints: { id: %r{[^/]+} }, format: false do

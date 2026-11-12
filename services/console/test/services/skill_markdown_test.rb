@@ -1,7 +1,6 @@
 require "test_helper"
 require "timeout"
 
-# Ported from the console_markdown helper tests (application_helper_test.rb).
 class SkillMarkdownTest < ActiveSupport::TestCase
   include Rails::Dom::Testing::Assertions::SelectorAssertions
 

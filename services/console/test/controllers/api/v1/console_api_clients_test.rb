@@ -2,8 +2,6 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console API Clients pages, ported from the
-    # former console/api_clients_controller_test.rb.
     class ConsoleApiClientsTest < ActionDispatch::IntegrationTest
       setup do
         ENV["CENTAUR_CONSOLE_API_CLIENTS_ENABLED"] = "true"

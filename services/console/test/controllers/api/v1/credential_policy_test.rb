@@ -2,10 +2,6 @@ require "test_helper"
 
 module Api
   module V1
-    # Every /api/v1 endpoint accepts exactly the credential type it accepted
-    # before the console SPA (bearer API keys), except that endpoints the SPA
-    # needs may also accept the console session; endpoints added for the SPA
-    # accept only the session (Api::BaseController.accepts_credentials).
     class CredentialPolicyTest < ActionDispatch::IntegrationTest
       B = :bearer
       S = :session
@@ -124,8 +120,6 @@ module Api
         assert_raises(ArgumentError) { Class.new(Api::BaseController) { accepts_credentials :cookie } }
       end
 
-      # -- bearer only -----------------------------------------------------------
-
       test "a session cannot mint, list, or revoke API keys" do
         sign_in_console(users(:acme_admin))
         key = api_keys(:acme_ci_key)
@@ -174,8 +168,6 @@ module Api
         assert_response :unprocessable_entity
         assert_nil ApiKey.unscoped.find(api_keys(:acme_ci_key).id).deleted_at
       end
-
-      # -- session only ----------------------------------------------------------
 
       test "a bearer admin key cannot manage users" do
         member = users(:member_user)
@@ -251,8 +243,6 @@ module Api
         assert member.reload.admin?
       end
 
-      # -- bearer keys need an active admin owner ----------------------------------
-
       def self.routed_requests
         Rails.application.routes.routes.filter_map do |route|
           controller = route.defaults[:controller].to_s
@@ -304,8 +294,6 @@ module Api
           end
         end
       end
-
-      # -- bearer or session -----------------------------------------------------
 
       test "origin/main endpoints the SPA uses accept both credentials" do
         get api_v1_principals_path, headers: bearer_headers

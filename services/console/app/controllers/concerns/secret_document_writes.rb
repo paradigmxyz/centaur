@@ -51,7 +51,7 @@ module SecretDocumentWrites
   # - :association (pg_dsn, gcp_auth, gcp_id_token, called before assignment):
   #   the parent's own validation errors plus "rules" => ["is invalid"] (the
   #   has_many autosave error), and "<association>" => ["is invalid"] for an
-  #   invalid source (e.g. "keyfile_source"), which was silently dropped before.
+  #   invalid source (e.g. "keyfile_source").
   def validate_nested_secret_records!(record, legacy:, sources: {}, rules: [], source_associations: {}, prepare: nil)
     invalid_sources = sources.select { |_name, source| source && !source.valid? }
     invalid_rules = Array(rules).each_with_index.reject { |rule, _index| rule.valid? }

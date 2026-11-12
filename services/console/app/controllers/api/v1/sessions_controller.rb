@@ -1,8 +1,7 @@
 module Api
   module V1
-    # DELETE /api/v1/session signs the console session out (the SPA's sign-out
-    # button). Password sign-in is the server-rendered POST /login form
-    # (SessionsController).
+    # DELETE /api/v1/session signs the console session out. Password sign-in is
+    # the server-rendered POST /login form (SessionsController).
     #
     # Session only (a bearer key gets 403 session_required). Pending accounts
     # may sign out too.

@@ -2,8 +2,7 @@
 # under config/pwa (no templates, no session): the browser fetches them outside
 # an authenticated page load. They are served with no-cache rather than from
 # public/ so a deploy's changes reach installed apps without waiting out the
-# long-lived public file cache headers. The SPA registers the worker
-# (web/src/features/auth-pages/pwa.ts).
+# long-lived public file cache headers.
 class PwaController < ActionController::API
   FILES_DIR = Rails.root.join("config", "pwa")
 

@@ -14,7 +14,7 @@ class ConsoleReturnPathTest < ActiveSupport::TestCase
       "/oauth/google~team/start" => "/oauth/google~team/start",
       "/oauth/acme.google_v2-x/start" => "/oauth/acme.google_v2-x/start",
       "/launch?target=web%2Bcentaur%3A%2F%2Fconsole" => "/launch?target=web%2Bcentaur%3A%2F%2Fconsole",
-      # Opaque OAuth state may carry an unencoded backslash, as origin/main accepted.
+      # Opaque OAuth state may carry an unencoded backslash.
       "/mcp/oauth/authorize?client_id=moc_1&state=opaque\\client-state" =>
         "/mcp/oauth/authorize?client_id=moc_1&state=opaque\\client-state"
     }.each do |raw, expected|

@@ -2,9 +2,7 @@ require "test_helper"
 
 module Api
   module V1
-    # /api/v1/me/ssh_key behind the console SSH key pages, ported from the
-    # former HTML controller tests (console/ssh_keys_controller_test.rb). The
-    # private key is write-only: no response may contain it.
+    # The private key is write-only: no response may contain it.
     class ConsolePersonalSshKeyTest < ActionDispatch::IntegrationTest
       PRIVATE_KEY_MARKER = /PRIVATE KEY/
 

@@ -28,7 +28,6 @@ class WorkflowDashboard
     @logger = logger
   end
 
-  # One row per workflow (its latest run) with the per-queue breakdown.
   def index(page:)
     with_workflow_database do
       total = CentaurWorkflowRun.workflow_count
@@ -55,7 +54,6 @@ class WorkflowDashboard
     end
   end
 
-  # One page of a workflow's runs, optionally filtered by status and queue.
   def runs(workflow_name, status:, queue:, page:)
     with_workflow_database do
       total = CentaurWorkflowRun.run_count(workflow_name, status: status, queue: queue)

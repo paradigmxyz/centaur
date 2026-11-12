@@ -1,15 +1,14 @@
 require "test_helper"
 
 # The server-rendered login and pending pages and their form endpoints
-# (GET/POST /login, DELETE /logout, GET /pending). Ports origin/main's
-# sessions_controller_test and adds the return-path, CSRF, and rolling-deploy
-# compatibility cases: a pod on either version must accept the other's forms.
+# (GET/POST /login, DELETE /logout, GET /pending). During a rolling deploy a
+# pod on either version must accept the other's forms.
 class SessionsControllerTest < ActionDispatch::IntegrationTest
   HTML = { "Accept" => "text/html,application/xhtml+xml" }.freeze
 
-  # origin/main's app/views/sessions/new.html.erb form, verbatim apart from
-  # the CSS classes. Rendered through this app's helpers to prove a form an
-  # old pod served posts successfully to a new one.
+  # The previous release's login form, verbatim apart from the CSS classes.
+  # Rendered through this app's helpers to prove a form an old pod served
+  # posts successfully to a new one.
   ORIGIN_MAIN_LOGIN_FORM = <<~ERB.freeze
     <%= form_with url: login_path, method: :post do |f| %>
       <%= f.label :email %>
@@ -47,8 +46,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     get login_path
     form_fields("form[action='/login']").merge("email" => email, "password" => password)
   end
-
-  # --- GET /login ------------------------------------------------------------
 
   test "GET new renders the login form without JavaScript" do
     get login_url
@@ -131,8 +128,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_select "[role=status]", count: 0
   end
 
-  # --- POST /login -------------------------------------------------------------
-
   test "valid credentials sign in and redirect to the console" do
     post login_url, params: { email: @operator.email, password: "password123456" }
     assert_redirected_to console_principals_path
@@ -194,8 +189,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "login returns to an MCP authorize request whose state carries an unencoded backslash" do
-    # origin/main remembered request.fullpath verbatim, so clients that send
-    # opaque state without encoding "\\" kept working; the return path must too.
+    # Clients that send opaque state without encoding "\\" must keep working.
     query = "response_type=code&client_id=moc_x&redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback" \
             "&scope=mcp%3Atools&state=opaque\\client-state&code_challenge=abc&code_challenge_method=S256"
     get "/mcp/oauth/authorize?#{query}"
@@ -285,8 +279,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "account_pending", json_body.dig("error", "details", "reason")
   end
 
-  # --- CSRF ----------------------------------------------------------------------
-
   test "the login form carries an authenticity token and POST /login requires it" do
     with_forgery_protection do
       fields = sign_in_form(@operator.email)
@@ -325,8 +317,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
       assert_equal @operator.id, session[:user_id]
     end
   end
-
-  # --- rolling deploy compatibility ----------------------------------------------
 
   test "a login form built exactly like origin/main's posts successfully" do
     with_forgery_protection do
@@ -402,8 +392,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  # --- DELETE /logout --------------------------------------------------------------
-
   test "logout clears the session" do
     post login_url, params: { email: @operator.email, password: "password123456" }
     delete logout_url
@@ -423,8 +411,6 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to login_path
     assert_nil session[:user_id]
   end
-
-  # --- GET /pending ----------------------------------------------------------------
 
   test "the pending page is reachable by a pending user" do
     post login_url, params: { email: users(:pending_user).email, password: "password123456" }

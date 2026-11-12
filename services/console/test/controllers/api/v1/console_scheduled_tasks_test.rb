@@ -2,10 +2,7 @@ require "test_helper"
 
 module Api
   module V1
-    # The console Scheduled Tasks endpoints, ported from the former
-    # Console::ScheduledTasksController and the scheduled-task half of
-    # Console::SlackChannelOptionsController HTML tests. Requests use the
-    # console session cookie (+ CSRF) as the SPA does.
+    # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsoleScheduledTasksTest < ActionDispatch::IntegrationTest
       include ActiveJob::TestHelper
 

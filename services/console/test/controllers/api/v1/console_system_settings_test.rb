@@ -2,8 +2,6 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console Settings page, ported from the
-    # former console/system_settings_controller_test.rb.
     class ConsoleSystemSettingsTest < ActionDispatch::IntegrationTest
       class FakeApiClient
         attr_reader :replaced

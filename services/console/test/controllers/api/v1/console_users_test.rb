@@ -2,9 +2,7 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console Users page, ported from the former
-    # console/users_controller_test.rb. Requests use the console session cookie
-    # (+ CSRF) as the SPA does; bearer parity is checked where it matters.
+    # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsoleUsersTest < ActionDispatch::IntegrationTest
       setup do
         @admin = users(:acme_admin)
@@ -90,8 +88,6 @@ module Api
         assert_equal true, rows.dig(users(:acme_admin).email, "current")
         assert_equal false, rows.dig(users(:globex_admin).email, "current")
       end
-
-      # -- API key revocation ----------------------------------------------------
 
       test "approve activates a pending user and records the approver" do
         pending = users(:pending_user)

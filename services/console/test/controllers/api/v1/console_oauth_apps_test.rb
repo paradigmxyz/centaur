@@ -2,11 +2,7 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 surface behind the console Apps pages, ported from the former
-    # HTML controller tests (console/oauth_apps_controller_test.rb,
-    # console/oauth_presets_controller_test.rb, console/mercator_details_test.rb,
-    # and the oauth app cases of console_controller_test.rb). Requests use the
-    # console session cookie (+ CSRF) as the SPA does.
+    # Requests use the console session cookie (+ CSRF) as the SPA does.
     class ConsoleOauthAppsTest < ActionDispatch::IntegrationTest
       setup do
         @operator = users(:acme_admin)
@@ -33,8 +29,6 @@ module Api
           allowed_scopes: %w[https://www.googleapis.com/auth/gmail.readonly], provider_config: {}, labels: {} }.merge(overrides)
       end
 
-      # -- authorization -----------------------------------------------------
-
       test "app endpoints are admin-only for every caller type" do
         app = oauth_apps(:acme_google)
         registration_client { |**| flunk "Must not register" }
@@ -50,8 +44,6 @@ module Api
         assert_not OauthApp.exists?(slug: "mercator")
         assert_equal "Acme Google integration", app.reload.description
       end
-
-      # -- list / detail ------------------------------------------------------
 
       test "oauth apps list carries provider, client id, and minted credential counts" do
         app = oauth_apps(:acme_google)
@@ -133,8 +125,6 @@ module Api
         assert_equal [], json_body["data"].find { |p| p["key"] == "google" }["config_keys"]
         assert json_body["data"].find { |p| p["key"] == "mercator" }["presettable"]
       end
-
-      # -- create / update (ported form behaviour) ----------------------------
 
       test "shared mode is set on create and kept on edit" do
         template = oauth_apps(:acme_google)
@@ -282,8 +272,6 @@ module Api
         assert_not_includes response.body, "rotated"
       end
 
-      # -- presets --------------------------------------------------------------
-
       test "preset registers once even with existing manual credentials and then shows manage" do
         BrokerCredential.create!(token_endpoint: "https://mercator.sh/oauth/token", client_id: "manual")
         registration_client do |**request|
@@ -374,8 +362,6 @@ module Api
         assert_response :forbidden
         assert_not OauthApp.exists?(slug: "mercator")
       end
-
-      # -- provider details (Mercator) -----------------------------------------
 
       def mercator_app
         @provider = Oauth::Providers.fetch("mercator")

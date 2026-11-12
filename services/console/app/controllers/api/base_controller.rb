@@ -8,18 +8,13 @@ module Api
   #   :session            the console session cookie only (the browser SPA)
   #   :bearer_or_session  either one
   #
-  # Endpoints keep the credential type they accepted before the SPA existed
-  # (bearer); only the ones the SPA needs also accept the session, and
-  # endpoints added for the SPA accept only the session. A request carrying
-  # the wrong type is refused before anything else runs (403
+  # A request carrying the wrong type is refused before anything else runs (403
   # details.reason=session_required / bearer_required); it never falls back
   # to the other credential. An action without a declaration fails closed.
   # Cookie-authenticated requests that are not GET/HEAD must carry the
   # session's CSRF token in X-CSRF-Token (fetch it from GET /api/v1/me);
   # bearer requests skip CSRF because browsers never attach them ambiently.
-  #
-  # A bearer key is accepted only when its owner is an active admin, on every
-  # endpoint, as before the console SPA.
+  # A bearer key is accepted only when its owner is an active admin.
   #
   # Authorization is per endpoint. Every action is admin-only unless the
   # controller opts in with `allow_active_users` (any active session; scope
@@ -68,14 +63,10 @@ module Api
       self.accepted_credentials_rules = (accepted_credentials_rules + [ rule.freeze ]).freeze
     end
 
-    # The unconditional policy declared for +action+, or nil when none
-    # applies. Conditional (if:) overrides are listed by
-    # conditional_accepted_credentials_for.
     def self.accepted_credentials_for(action)
       matching_accepted_credentials_rules(action).reverse.find { |rule| rule[3].nil? }&.first
     end
 
-    # [[policy, predicate], ...] for the conditional overrides of +action+.
     def self.conditional_accepted_credentials_for(action)
       matching_accepted_credentials_rules(action).select { |rule| rule[3] }.map { |rule| [ rule[0], rule[3] ] }
     end
@@ -122,15 +113,11 @@ module Api
       auth_method == :session
     end
 
-    # Admin check for authorization decisions (a bearer caller acts with its
-    # key owner's admin flag).
     def acting_admin?
       current_user&.admin? || false
     end
 
-    # Enforces the action's credential policy before anything else, then
-    # authenticates with the one credential type the request presented. An
-    # Authorization header always counts as a bearer credential, even when a
+    # An Authorization header always counts as a bearer credential, even when a
     # session cookie is also present.
     def authenticate_request!
       presented = presented_credential
@@ -153,9 +140,6 @@ module Api
       end
     end
 
-    # :api_key when an Authorization header is present, :session when the
-    # cookie names a user, otherwise :none. Authentication proper happens
-    # afterwards.
     def presented_credential
       @presented_credential ||= if request.headers["Authorization"].present?
         :api_key
@@ -185,8 +169,6 @@ module Api
                    details: { reason: "credential_policy_missing" })
     end
 
-    # The last declaration matching this action whose if: predicate (if any)
-    # holds for this request.
     def accepted_credentials_for_request
       self.class.accepted_credentials_rules.reverse.each do |policy, only, except, condition|
         next unless (only.nil? || only.include?(action_name)) && (except.nil? || !except.include?(action_name))
@@ -203,9 +185,7 @@ module Api
       unless current_api_key&.user&.active?
         return render_error(status: :unauthorized, message: "invalid or missing API key")
       end
-      # As on main, a bearer key acts only for an active admin, on every
-      # endpoint: allow_active_users widens session access, never bearer
-      # access.
+      # allow_active_users widens session access, never bearer access.
       unless current_api_key.user.admin?
         return render_error(status: :forbidden, message: "API key owner is not an admin",
                             details: { reason: "admin_required" })
@@ -216,7 +196,7 @@ module Api
 
     # A disabled session user is signed out on every endpoint, including the
     # ones open to pending accounts. The flash survives the reset so the login
-    # page the SPA falls back to explains why, as the legacy redirect did.
+    # page explains why.
     def authenticate_session!
       if console_session_user.disabled?
         reset_session
@@ -252,9 +232,8 @@ module Api
       render_error(status: :forbidden, message: message, details: { reason: "admin_required" })
     end
 
-    # One-shot handoff of the Rails flash set by a redirect-based flow (SSO or
-    # OAuth callback, legacy HTML action) to the SPA: returns and clears any
-    # pending notice/alert. The SPA shows them as toasts.
+    # One-shot handoff to the SPA of the flash set by a redirect-based flow
+    # (SSO or OAuth callback).
     def consume_console_flash
       flash = request.flash
       payload = { notice: flash[:notice].presence, alert: flash[:alert].presence }.compact

@@ -5,10 +5,9 @@
 # CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false.
 #
 # Intentionally server-rendered (layouts/oauth, no JavaScript): sign-in is a
-# step of the MCP OAuth flow, and the form keeps origin/main's wire contract
-# (POST /login with email/password and the Rails authenticity token, DELETE
-# /logout) so pods on either version accept each other's forms during a
-# rolling deploy or rollback. Everything after sign-in is the SPA.
+# step of the MCP OAuth flow. Keep the form contract (POST /login with
+# email/password and the Rails authenticity token, DELETE /logout) stable so
+# pods on either version accept each other's forms during a rolling deploy.
 class SessionsController < ApplicationController
   layout "oauth"
   include ServerRenderedPagePolicy
@@ -38,7 +37,6 @@ class SessionsController < ApplicationController
     @email = current_user.email
   end
 
-  # POST /login
   def create
     unless password_login_enabled?
       flash.now[:alert] = "Email and password sign in is disabled."
@@ -59,7 +57,6 @@ class SessionsController < ApplicationController
     redirect_to establish_console_session!(user)
   end
 
-  # DELETE /logout
   def destroy
     reset_session
     redirect_to login_path, notice: "Signed out."

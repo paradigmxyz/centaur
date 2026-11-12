@@ -2,10 +2,8 @@
 # browser navigation (GET/HEAD that accepts HTML) that no Rails route claimed
 # serves the SPA, which renders its own not-found page. API, framework, and
 # protocol namespaces (MCP OAuth, broker OAuth, SSO) and the server-rendered
-# login pages keep the JSON 404 for unknown paths, as on origin/main, so
-# machine clients never get HTML.
-#
-# Legacy Rails routes declared earlier still win for their paths.
+# login pages keep the JSON 404 for unknown paths, so machine clients never
+# get HTML.
 module SpaRequest
   EXCLUDED_PREFIXES = %w[
     /api

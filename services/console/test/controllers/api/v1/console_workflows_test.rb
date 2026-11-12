@@ -2,9 +2,8 @@ require "test_helper"
 
 module Api
   module V1
-    # /api/v1/workflows, ported from the former Console::WorkflowsController
-    # HTML tests. Requests use the console session cookie (+ CSRF) as the SPA
-    # does; bearer access is covered by the authorization test.
+    # Requests use the console session cookie (+ CSRF) as the SPA does; bearer
+    # access is covered by the authorization test.
     class ConsoleWorkflowsTest < ActionDispatch::IntegrationTest
       FakeWorkflowRun = Struct.new(
         :workflow_name, :workflow_name_label, :task_name, :display_status, :queue_name, :queue_label,
