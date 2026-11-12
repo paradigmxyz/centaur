@@ -318,7 +318,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "a login form built exactly like origin/main's posts successfully" do
+  test "a login form built like the previous release's posts successfully" do
     with_forgery_protection do
       get login_path
       html = controller.render_to_string(inline: ORIGIN_MAIN_LOGIN_FORM)
@@ -336,7 +336,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "the pending page's sign-out form matches origin/main's button_to DELETE /logout" do
+  test "the pending page's sign-out form posts DELETE /logout like button_to" do
     with_forgery_protection do
       post login_url, params: sign_in_form(users(:pending_user).email)
       get pending_url

@@ -174,7 +174,7 @@ module Mcp
       assert_equal "state-test", query.fetch("state")
     end
 
-    test "authorize renders the consent page with the origin/main form fields" do
+    test "authorize renders the consent page with the established form fields" do
       client = create_client
       client.update!(name: "Amp <script>alert(1)</script>")
       console_password_login(@operator.email)
@@ -243,7 +243,7 @@ module Mcp
       end
     end
 
-    test "authorize validates in origin/main order" do
+    test "authorize validates in the established order" do
       client = create_client
       console_password_login(@operator.email)
 
@@ -423,7 +423,7 @@ module Mcp
       end
     end
 
-    test "upgrade compatibility: a consent form built exactly like origin/main's posts successfully" do
+    test "upgrade compatibility: a consent form built like the previous release's posts successfully" do
       client = create_client
       console_password_login(@operator.email)
 
