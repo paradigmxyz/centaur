@@ -86,6 +86,46 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 - Use local fixtures or synthetic snapshots for UI work; do not make tests
   depend on a remote database.
 
+## Content-Security-Policy
+
+Every Rails response carries an enforcing CSP; files under `public/` (the SPA
+assets, `public/oauth-page`, icons, `offline.html`) are served before the
+middleware and carry none. `test/integration/content_security_policy_test.rb`
+pins the exact headers.
+
+- SPA shell and everything else (`config/initializers/content_security_policy.rb`):
+  `default-src 'self'; script-src 'self'; style-src 'self'; style-src-elem
+  'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src
+  'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri
+  'none'; frame-ancestors 'none'`. `SpaController` serves `index.html`
+  through Rails so the shell gets it.
+- Server-rendered sign-in and OAuth pages (`ServerRenderedPagePolicy`, applied
+  before every other callback): the same with `script-src 'none'`, plain
+  `style-src 'self'`, and no `style-src-elem`.
+- No inline or eval script in the SPA. `web/index.html` must not contain an
+  inline `<script>` or `on*=` handler: the pre-paint theme script is
+  `web/theme-boot.js`, which `vite.config.ts` emits as a hashed file and
+  injects into `<head>`. zod runs `jitless` (`main.tsx`) because its
+  `new Function` probe trips `script-src`. Do not add `'unsafe-inline'`,
+  `'unsafe-eval'`, hashes, or external origins to `script-src`; load new
+  code from the bundle.
+- `style-src-elem 'unsafe-inline'` exists only because sonner and Radix's
+  scroll lock inject `<style>` elements at runtime. `style=""` attributes stay
+  blocked; set inline styles through React's `style` prop (CSSOM), never
+  `setAttribute("style")` or raw HTML. Every fetch directive is `'self'`, so
+  new images, fonts, or API origins need a policy change; self-host them.
+- Never set `form-action`, on any page. Browsers enforce it on the redirect
+  that follows a form submission, and the MCP consent post
+  (`POST /mcp/oauth/authorize`) redirects to the client's registered
+  `redirect_uri` (`http://127.0.0.1:<port>`, `cursor://`, `vscode://`,
+  `chrome-extension://`, `https://...`). The login post can end there too
+  (`POST /login` -> `/mcp/oauth/authorize` -> error redirect to the client).
+  `form-action 'self'` would silently break MCP installs.
+- After a policy, dependency, or `index.html` change, load the SPA (admin and
+  member) and the full MCP flow (loopback and custom-scheme redirects,
+  approve and deny) in a browser and fail on any `securitypolicyviolation`
+  event or `Refused to` console message.
+
 ## Local database
 
 Console runs on stock PostgreSQL 16 and needs no extensions beyond the
