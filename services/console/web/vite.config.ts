@@ -67,9 +67,34 @@ function themeBootScript(): Plugin {
   };
 }
 
+// Rails serves public/ through its static file server, which sends no
+// Content-Security-Policy. The built shell (index.html) therefore must not live
+// there: after the build this plugin moves it to services/console/spa-shell/,
+// where only SpaController serves it (with the CSP). public/spa keeps just the
+// content-hashed assets.
+const SHELL_DIR = path.resolve(import.meta.dirname, "../spa-shell");
+
+function moveShellOutOfPublic(): Plugin {
+  let outDir = "";
+  return {
+    name: "console-shell-out-of-public",
+    apply: "build",
+    configResolved(config) {
+      outDir = path.resolve(config.root, config.build.outDir);
+    },
+    closeBundle() {
+      const built = path.join(outDir, "index.html");
+      if (!fs.existsSync(built)) return;
+      fs.mkdirSync(SHELL_DIR, { recursive: true });
+      fs.copyFileSync(built, path.join(SHELL_DIR, "index.html"));
+      fs.rmSync(built);
+    },
+  };
+}
+
 export default defineConfig(({ command }) => ({
   base: command === "build" ? "/spa/" : "/",
-  plugins: [react(), tailwindcss(), themeBootScript()],
+  plugins: [react(), tailwindcss(), themeBootScript(), moveShellOutOfPublic()],
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },

@@ -39,3 +39,4 @@
 
 # Console SPA build output (services/console/web).
 /public/spa
+/spa-shell

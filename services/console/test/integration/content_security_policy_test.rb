@@ -168,8 +168,24 @@ class ContentSecurityPolicyTest < ActionDispatch::IntegrationTest
     assert_includes WEB_ROOT.join("vite.config.ts").read, "theme-boot.js"
   end
 
+  test "the SPA shell is never served from public/, where it would get no CSP" do
+    shell = Rails.root.join("spa-shell", "index.html")
+    skip "SPA not built (pnpm -C web build)" unless shell.file?
+
+    assert_not Rails.public_path.join("spa", "index.html").exist?, "the build must not leave the shell in public/spa"
+    [ "/spa", "/spa/", "/spa/index.html", "/spa/%69ndex.html", "/spa//index.html" ].each do |path|
+      get path, headers: { "Accept" => "text/html" }
+      assert_not_equal shell.read, response.body, "#{path} must not serve the shell"
+    end
+
+    get "/console/principals", headers: { "Accept" => "text/html" }
+    assert_response :ok
+    assert_equal shell.read, response.body
+    assert_includes response.headers["Content-Security-Policy"], "script-src 'self'"
+  end
+
   test "the built SPA index has no inline script and loads the theme script from /spa/assets" do
-    built = Rails.public_path.join("spa", "index.html")
+    built = Rails.root.join("spa-shell", "index.html")
     skip "SPA not built (pnpm -C web build)" unless built.file?
 
     html = built.read

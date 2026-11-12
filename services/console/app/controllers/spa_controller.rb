@@ -1,11 +1,14 @@
-# Serves the built console SPA (services/console/web, built into public/spa)
-# for browser navigations matched by SpaRequest. Authentication happens in the
+# Serves the built console SPA shell for browser navigations matched by
+# SpaRequest. The build puts content-hashed assets in public/spa/assets and the
+# shell in spa-shell/index.html, outside public/, so the shell is only ever
+# served from here, with the Content-Security-Policy header (static files under
+# public/ get none). Authentication happens in the
 # SPA through GET /api/v1/me, so this controller is deliberately public: the
 # HTML shell holds no data.
 class SpaController < ActionController::Base
   include ConsoleSignIn
 
-  class_attribute :index_path, default: Rails.public_path.join("spa", "index.html")
+  class_attribute :index_path, default: Rails.root.join("spa-shell", "index.html")
 
   NOT_BUILT_MESSAGE = <<~TEXT.freeze
     The console web app has not been built.

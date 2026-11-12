@@ -39,9 +39,11 @@ consent page, and the broker OAuth result page stay server-rendered by Rails
 built against, sign-in works without JavaScript, and pods on either side of a
 rolling deploy accept each other's forms.
 
-- **Serving.** `pnpm -C web build` writes the app to `public/spa` (asset URLs
-  under `/spa/`). Any browser `GET`/`HEAD` navigation that no Rails route
-  claims gets `public/spa/index.html` from `SpaController`, served `no-cache`;
+- **Serving.** `pnpm -C web build` writes content-hashed assets to
+  `public/spa` (URLs under `/spa/`) and the HTML shell to `spa-shell/index.html`,
+  outside `public/`, so the static file server never serves it without the
+  Content-Security-Policy. Any browser `GET`/`HEAD` navigation that no Rails
+  route claims gets that shell from `SpaController`, served `no-cache`;
   React Router renders the page, including its own not-found page. API,
   framework, and protocol prefixes (`/api`, `/rails`, `/spa`, `/assets`,
   `/.well-known`, `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`,
@@ -122,7 +124,7 @@ The console requires an authenticated user and API key before any API endpoint w
 | --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
 | `CENTAUR_CONSOLE_INITIAL_USER_EMAIL`    | yes      | Email for the initial user.                                                                              |
 | `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD` | yes      | Password for the initial user (minimum 12 characters).                                                   |
-| `CENTAUR_CONSOLE_INITIAL_API_KEY`       | no       | Plaintext API key for the initial user. Must match `iak_` followed by 64 lowercase hex characters (a 32-byte hex string). If omitted, a token is generated and logged once at startup. Revoked if that user is demoted or disabled (see below). |
+| `CENTAUR_CONSOLE_INITIAL_API_KEY`       | no       | Plaintext API key for the initial user. Must match `iak_` followed by 64 lowercase hex characters (a 32-byte hex string). If omitted, a token is generated and logged once at startup. |
 
 Behavior:
 
@@ -198,6 +200,6 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts a declared credential type: an API key sent as a bearer token (`Authorization: Bearer iak_...`), the console session cookie (the SPA), or either one (see [docs/API.md](docs/API.md#credential-types-by-endpoint)). API keys and proxies are bearer-only; endpoints added for the SPA are session-only; cookie-authenticated writes also need the session's CSRF token. Every write is recorded in a `console_api_audit` log line. A bearer key works only while its owner is an active admin. Demoting or disabling a user (or moving them back to pending), by any path, revokes all of their API keys in the same transaction; re-promoting them does not bring the keys back. That includes the key api-rs uses (`IRON_CONTROL_API_KEY`, often the bootstrap `CENTAUR_CONSOLE_INITIAL_API_KEY`) when its owner is demoted or disabled: mint a new key as an active admin (`POST /api/v1/api_keys`) and update api-rs's secret. A revoked token cannot be reused. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1`. Each operator endpoint accepts a declared credential type: an API key sent as a bearer token (`Authorization: Bearer iak_...`), the console session cookie (the SPA), or either one (see [docs/API.md](docs/API.md#credential-types-by-endpoint)). API keys and proxies are bearer-only; endpoints added for the SPA are session-only; cookie-authenticated writes also need the session's CSRF token. A bearer key works only while its owner is an active admin. Endpoints are admin-only unless documented otherwise. `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).

@@ -13,7 +13,8 @@
 ARG RUBY_VERSION=3.4.12
 ARG NODE_VERSION=24
 
-# Build the console SPA into services/console/public/spa.
+# Build the console SPA: hashed assets into services/console/public/spa and
+# the shell into services/console/spa-shell (served only by SpaController).
 FROM docker.io/library/node:$NODE_VERSION-slim AS web
 WORKDIR /repo
 RUN npm install -g pnpm@10.34.9
@@ -64,6 +65,7 @@ RUN bundle install && \
 COPY services/console/ .
 RUN rm -rf web
 COPY --from=web /repo/services/console/public/spa public/spa
+COPY --from=web /repo/services/console/spa-shell spa-shell
 
 # Precompile bootsnap code for faster boot times. The UI is the prebuilt SPA
 # above; there is no Rails asset pipeline to precompile.

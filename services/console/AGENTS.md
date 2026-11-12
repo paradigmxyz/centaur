@@ -28,8 +28,10 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   step with `web/src/index.css`. Do not move them into the SPA, and keep
   their URLs, form field names, messages, validation order, and redirects
   stable. The SPA reaches `/login` and `/pending` with full page loads.
-- Rails serves `public/spa/index.html` (built by `pnpm -C web build`) for any
-  browser navigation no route claims (`SpaController`, `lib/spa_request.rb`).
+- Rails serves `spa-shell/index.html` (built by `pnpm -C web build`, which
+  puts only hashed assets in `public/spa`) for any browser navigation no route
+  claims (`SpaController`, `lib/spa_request.rb`). Never put the shell back under
+  `public/`: static files get no Content-Security-Policy.
   The remaining browser-facing Rails routes are the sign-in pages and
   protocol endpoints: SSO (`/auth/:provider/*`), broker OAuth consent
   (`/oauth/:slug/*`), the MCP OAuth server (`/mcp/oauth/*`, `/.well-known/*`),
@@ -72,15 +74,7 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   `assert_active_user_api` (they check the declared credential type) plus
   ownership cases. A bearer key is accepted only while its owner is an
   active admin, on every endpoint (`allow_active_users` widens session
-  access only; descope never applies to keys). Demoting or disabling a user
-  (or moving them to pending), by any path, revokes all of their API keys in
-  the same transaction (`User` callback); re-promotion revives nothing. This
-  includes the key api-rs uses (`IRON_CONTROL_API_KEY`) if its owner is
-  demoted or disabled; it must then be reissued. Every non-GET request,
-  including refused ones, logs one
-  `console_api_audit` JSON line (user, auth method and API key oid, never the
-  token, controller/action, path ids, status); never add request bodies or
-  secret values to it. Keep proxy sync authentication, sandbox JWTs
+  access only; descope never applies to keys). Keep proxy sync authentication, sandbox JWTs
   (including sandbox admin), and OAuth/MCP tokens as separate trust
   boundaries.
 - In the SPA, reads use TanStack Query and a failed query renders an error
@@ -192,7 +186,7 @@ pnpm install --frozen-lockfile --filter @centaur/console-web
 pnpm -C web typecheck
 pnpm -C web lint
 pnpm -C web test
-pnpm -C web build   # into public/spa, served by Rails for HTML navigations
+pnpm -C web build   # assets into public/spa, shell into spa-shell/ (served by SpaController)
 script/check-no-ruby-ui
 script/audit-web
 ```

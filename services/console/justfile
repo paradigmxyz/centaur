@@ -40,7 +40,7 @@ deps:
     @bundle check || bundle install
     pnpm install --frozen-lockfile --filter @centaur/console-web
 
-# Build the SPA into public/spa (served by Rails for HTML navigations).
+# Build the SPA: assets into public/spa, the shell into spa-shell/ (served by SpaController).
 web-build:
     pnpm -C web build
 
