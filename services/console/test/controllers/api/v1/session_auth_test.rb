@@ -83,6 +83,22 @@ module Api
         assert_response :forbidden
       end
 
+      test "cookie writes without an Origin, or with Origin null, are rejected with the JSON error" do
+        sign_in_console(users(:acme_admin))
+        token = console_csrf_token
+        assert_no_difference -> { Principal.count } do
+          post api_v1_console_principals_path, params: { data: { foreign_id: "no-origin" } },
+               headers: { "X-CSRF-Token" => token }, as: :json
+          assert_response :forbidden
+          assert_equal "csrf", json_body.dig("error", "details", "reason")
+
+          post api_v1_console_principals_path, params: { data: { foreign_id: "null-origin" } },
+               headers: { "X-CSRF-Token" => token, "Origin" => "null" }, as: :json
+          assert_response :forbidden
+          assert_equal "csrf", json_body.dig("error", "details", "reason")
+        end
+      end
+
       test "bearer writes skip CSRF" do
         post api_v1_principals_path, params: { data: { foreign_id: "bearer-write" } },
              headers: bearer_headers, as: :json

@@ -103,10 +103,17 @@ async function refreshCsrfToken(): Promise<void> {
   setCsrfToken(body.data?.csrf_token);
 }
 
-export async function apiRequest<T>(path: string, options: RequestOptions = {}, retried = false): Promise<T> {
-  if (!path.startsWith(CONSOLE_API_PREFIX)) {
+/** The same-origin console API URL for `path`, checked after normalization ("..", encoded dots, backslashes). */
+function consoleApiUrl(path: string, query?: Record<string, QueryValue>): string {
+  const url = new URL(buildUrl(path, query), window.location.origin);
+  if (url.origin !== window.location.origin || !url.pathname.startsWith(CONSOLE_API_PREFIX)) {
     throw new Error(`The console SPA only calls ${CONSOLE_API_PREFIX}*; refused ${path}`);
   }
+  return url.pathname + url.search;
+}
+
+export async function apiRequest<T>(path: string, options: RequestOptions = {}, retried = false): Promise<T> {
+  const url = consoleApiUrl(path, options.query);
   const method = options.method ?? "GET";
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
@@ -115,7 +122,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}, 
     if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
   }
 
-  const response = await fetch(buildUrl(path, options.query), {
+  const response = await fetch(url, {
     method,
     headers,
     credentials: "same-origin",

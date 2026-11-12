@@ -118,8 +118,8 @@ module Api
         headers = csrf_headers
         requests.reject { |_verb, path, _klass, _action| path.start_with?(CONSOLE_PREFIX) }.each do |verb, path, _klass, _action|
           public_send(verb, path, headers: headers, as: :json)
-          assert_equal 403, response.status, "#{verb.upcase} #{path} admin session: #{response.body}"
-          assert_equal "bearer_required", json_body.dig("error", "details", "reason"), "#{verb.upcase} #{path}"
+          assert_equal 401, response.status, "#{verb.upcase} #{path} admin session: #{response.body}"
+          assert_equal "invalid or missing API key", json_body.dig("error", "message"), "#{verb.upcase} #{path}"
         end
 
         assert_equal before, counts.call
@@ -194,15 +194,15 @@ module Api
         assert_no_difference -> { ApiKey.unscoped.count } do
           post api_v1_api_keys_path, params: { data: { name: "browser" } }, headers: csrf_headers, as: :json
         end
-        assert_bearer_required
+        assert_cookie_not_accepted
         assert_no_match(/iak_/, response.body)
 
         delete api_v1_api_key_path(key.oid), headers: csrf_headers
-        assert_bearer_required
+        assert_cookie_not_accepted
         assert_nil ApiKey.unscoped.find(key.id).deleted_at
 
         get api_v1_api_keys_path
-        assert_bearer_required
+        assert_cookie_not_accepted
       end
 
       test "a session cannot create, change, or delete proxies" do
@@ -212,14 +212,14 @@ module Api
         assert_no_difference -> { ::Proxy.count } do
           post api_v1_proxies_path, params: { data: { name: "browser" } }, headers: csrf_headers, as: :json
         end
-        assert_bearer_required
+        assert_cookie_not_accepted
 
         patch api_v1_proxy_path(proxy.oid), params: { data: { name: "renamed" } }, headers: csrf_headers, as: :json
-        assert_bearer_required
+        assert_cookie_not_accepted
         assert_equal "policy-proxy", proxy.reload.name
 
         delete api_v1_proxy_path(proxy.oid), headers: csrf_headers
-        assert_bearer_required
+        assert_cookie_not_accepted
         assert ::Proxy.exists?(proxy.id)
       end
 
@@ -230,14 +230,14 @@ module Api
         assert_no_difference -> { Principal.count } do
           post api_v1_principals_path, params: { data: { foreign_id: "from-browser" } }, headers: csrf_headers, as: :json
         end
-        assert_bearer_required
+        assert_cookie_not_accepted
 
         patch api_v1_principal_path(principal.oid), params: { data: { name: "renamed" } }, headers: csrf_headers, as: :json
-        assert_bearer_required
+        assert_cookie_not_accepted
         assert_not_equal "renamed", principal.reload.name
 
         get api_v1_static_secrets_path
-        assert_bearer_required
+        assert_cookie_not_accepted
       end
 
       test "bearer keys still mint API keys and proxies" do
@@ -335,9 +335,9 @@ module Api
 
       private
 
-      def assert_bearer_required
-        assert_response :forbidden
-        assert_equal "bearer_required", json_body.dig("error", "details", "reason")
+      def assert_cookie_not_accepted
+        assert_response :unauthorized
+        assert_equal "invalid or missing API key", json_body.dig("error", "message")
       end
 
       def assert_session_required

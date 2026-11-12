@@ -25,7 +25,17 @@ describe("api client", () => {
 
   it("refuses any path outside the console API without a request", async () => {
     const mock = mockApi({});
-    for (const path of ["/api/v1/principals", "/api/v1/me", "/api/v1/consolex", "/api/v1/sandbox/permissions", "/up"]) {
+    for (const path of [
+      "/api/v1/principals",
+      "/api/v1/me",
+      "/api/v1/consolex",
+      "/api/v1/sandbox/permissions",
+      "/up",
+      "/api/v1/console/../principals",
+      "/api/v1/console/%2e%2e/principals",
+      "/api/v1/console/..\\principals",
+      "//evil.example/api/v1/console/me",
+    ]) {
       await expect(api.get(path)).rejects.toThrow(/only calls \/api\/v1\/console\//);
       await expect(api.post(path, { data: {} })).rejects.toThrow(/refused/);
     }

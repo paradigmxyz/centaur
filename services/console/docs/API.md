@@ -65,9 +65,9 @@ A missing or invalid token returns `401`:
 { "error": { "message": "invalid or missing API key" } }
 ```
 
-The key's owner must be an active admin; otherwise the request gets `403` with `"API key owner is not an admin"`. A demoted or disabled user's keys stop working until they are an active admin again.
+A key whose owner is disabled or pending gets `401` (`"invalid or missing API key"`); an active owner who is not an admin gets `403` (`"API key owner is not an admin"`). A demoted or disabled user's keys stop working until they are an active admin again.
 
-The bearer API never accepts the console session cookie: a request with the cookie and no `Authorization` header gets `403` with `details.reason = "bearer_required"` (the browser SPA uses the [Console API](#console-api)). This keeps a browser session from minting API keys or proxy tokens that outlive it.
+The bearer API never accepts the console session cookie: a request with only the cookie is unauthenticated (`401`, as without a key). The browser SPA uses the [Console API](#console-api). This keeps a browser session from minting API keys or proxy tokens that outlive it.
 
 `iron-proxy` instances authenticate to [proxy sync](#proxy-sync), served by the separate `proxy-sync` service, with their own token (`iprx_` followed by 64 lowercase hex characters), issued once when the proxy is created. An invalid proxy token returns `401` with `"invalid or missing proxy token"`.
 
@@ -2256,7 +2256,7 @@ stored, so it cannot be returned again.
 | `GET` | `/api/v1/console/api_clients` | Every client, unpaginated, by creation order (`meta.total`). |
 | `GET` | `/api/v1/console/api_clients/:id` | One client. |
 | `POST` | `/api/v1/console/api_clients` | `{"data": {"name", "scopes": [...], "principal"}}`. `scopes` is a subset of `sessions:read` and `sessions:write`; blank entries are dropped and at least one is required. The optional `principal` (oid or foreign ID) is attached as the default; if it matches nothing, returns `422` with `details.base = ["No principal matches \"x\"."]` and creates nothing. Returns `201` with `secret`. |
-| `PATCH` | `/api/v1/console/api_clients/:id` | Update `name` and/or `scopes`; omitted fields are kept. Never changes the secret. |
+| `PUT`/`PATCH` | `/api/v1/console/api_clients/:id` | Update `name` and/or `scopes`; omitted fields are kept. Never changes the secret. |
 | `DELETE` | `/api/v1/console/api_clients/:id` | Delete the client and its principal links. Returns `204`. |
 | `POST` | `/api/v1/console/api_clients/:id/rotate_secret` | Issue a new secret; the previous secret and its access tokens stop working immediately. Returns the client with `secret`. |
 | `POST` | `/api/v1/console/api_clients/:id/disable` | Disable (idempotent). The client's access tokens stop working. |
@@ -2291,7 +2291,7 @@ Deployment-wide defaults for new control-plane records. Admin-only.
 `roles` lists every role (by name, then foreign ID). New principals with no
 preassigned roles receive the roles in `default_role_ids`.
 
-`PATCH /api/v1/console/system_settings` takes `{"data": {...}}` with any of the
+`PUT`/`PATCH /api/v1/console/system_settings` takes `{"data": {...}}` with any of the
 `default_sandbox_*` fields (`default_sandbox_repo_cache` is `none`, `public`,
 or `all`) and `default_role_ids`, a list of role oids that replaces the default
 set (`[]` clears it; omitted keeps it). Invalid values and unknown role oids

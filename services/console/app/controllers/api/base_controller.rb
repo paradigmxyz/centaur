@@ -7,8 +7,8 @@ module Api
   # ConsoleApiAuthentication and take the console session cookie instead;
   # sandbox controllers use their own JWT schemes. The two never mix:
   #
-  # - a request with the console session cookie and no Authorization header
-  #   gets 403 details.reason=bearer_required here (it never falls back);
+  # - a request with only the console session cookie is unauthenticated here
+  #   (401, as for any request without a valid key);
   # - a controller or path in the console namespace that reaches this bearer
   #   check fails closed, so a console controller cannot silently accept keys.
   class BaseController < ActionController::API
@@ -43,13 +43,6 @@ module Api
 
     def authenticate_api_key!
       return refuse_credential_namespace_mismatch! if console_namespace_request?
-
-      if request.headers["Authorization"].blank? && console_session_user
-        return render_error(status: :forbidden,
-                            message: "this endpoint requires a bearer API key; the console session is not accepted " \
-                                     "(the console API is under /api/v1/console)",
-                            details: { reason: "bearer_required" })
-      end
 
       token = bearer_token
       @current_api_key = ApiKey.find_by_token(token) if token.present?

@@ -196,7 +196,7 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 `iron-control` exposes a JSON API under `/api/v1` in three namespaces, each taking exactly one credential:
 
-- `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and refuses the console session cookie (`403 bearer_required`).
+- `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and does not accept the console session cookie.
 - `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie only (`403 session_required` for any bearer key), with the session's CSRF token on writes. Endpoints are admin-only unless documented otherwise.
 - `/api/v1/sandbox/*` takes the sandbox entitlement JWT that `iron-proxy` injects.
 

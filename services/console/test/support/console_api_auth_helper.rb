@@ -49,8 +49,9 @@ module ConsoleApiAuthHelper
     end
   end
 
+  # What the SPA sends on writes: the session's CSRF token and this origin.
   def csrf_headers(token = console_csrf_token)
-    { "X-CSRF-Token" => token }
+    { "X-CSRF-Token" => token, "Origin" => "http://www.example.com" }
   end
 
   def bearer_headers(token = ADMIN_TOKEN)
@@ -80,7 +81,7 @@ module ConsoleApiAuthHelper
   #   admin's, 403 session_required; disabled cookie 401, pending cookie 403,
   #   non-admin cookie 403, and (for writes) admin cookie without CSRF 403;
   # - bearer: anonymous, bad, and disabled bearer 401; non-admin bearer 403;
-  #   an admin's console cookie 403 bearer_required.
+  #   an admin's console cookie 401 (it is not a credential here).
   #
   # Success paths are left to the caller because they have side effects.
   def assert_admin_only_api(method, path, params: nil)
@@ -138,7 +139,7 @@ module ConsoleApiAuthHelper
       assert_api_status(:unauthorized, method, path, params: params)
       assert_api_status(:unauthorized, method, path, params: params, headers: bearer_headers("iak_bogus"))
       assert_api_status(:unauthorized, method, path, params: params, headers: bearer_headers(DISABLED_TOKEN))
-      assert_api_status(:forbidden, method, path, params: params, reason: "bearer_required",
+      assert_api_status(:unauthorized, method, path, params: params, message: "invalid or missing API key",
                         sign_in: create_console_user(admin: true), csrf: true)
     end
   end

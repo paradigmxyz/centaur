@@ -50,8 +50,8 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 - The namespace decides the credential, and the two never mix:
   - `/api/v1/*` is the bearer API (`Api::BaseController`): a bearer API key
     whose owner is an active admin, on every action, exactly as for machine
-    callers before the SPA. It refuses the console session cookie with 403
-    `bearer_required`. Keep its routes and responses stable; never add SPA
+    callers before the SPA. It does not accept the console session cookie.
+    Keep its routes and responses stable; never add SPA
     fields, filters, or write semantics to it.
   - `/api/v1/console/*` is the console API (`Api::V1::Console`,
     `ConsoleApiAuthentication`): the console session only, never a bearer key

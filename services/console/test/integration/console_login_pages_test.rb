@@ -61,7 +61,7 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     post login_path, params: { email: @operator.email, password: ConsoleApiAuthHelper::TEST_PASSWORD }
     assert_equal @operator.id, session[:user_id]
 
-    delete api_v1_console_session_path, headers: { "X-CSRF-Token" => token }
+    delete api_v1_console_session_path, headers: { "X-CSRF-Token" => token, "Origin" => "http://www.example.com" }
     assert_response :forbidden
     assert_equal @operator.id, session[:user_id]
   end

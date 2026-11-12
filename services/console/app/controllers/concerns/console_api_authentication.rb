@@ -109,9 +109,11 @@ module ConsoleApiAuthentication
     render_error(status: :forbidden, message: "account pending approval", details: { reason: "account_pending" })
   end
 
+  # Writes need the session's CSRF token and an Origin header naming this
+  # console; an absent or "null" Origin is refused.
   def verify_session_csrf_token!
     return if CSRF_SAFE_METHODS.include?(request.request_method)
-    return if valid_request_origin? && any_authenticity_token_valid?
+    return if request.origin.present? && request.origin == request.base_url && any_authenticity_token_valid?
 
     render_error(status: :forbidden, message: "invalid or missing CSRF token", details: { reason: "csrf" })
   end

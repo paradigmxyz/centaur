@@ -141,17 +141,15 @@ module Api
         assert_no_difference -> { ApiKey.count } do
           post api_v1_api_keys_url, params: { data: { name: "from-browser" } }, headers: csrf_headers, as: :json
         end
-        assert_response :forbidden
-        assert_equal "bearer_required", json_body.dig("error", "details", "reason")
+        assert_response :unauthorized
         assert_no_match(/iak_/, response.body)
 
         delete api_v1_api_key_url(id: key.oid), headers: csrf_headers
-        assert_response :forbidden
+        assert_response :unauthorized
         assert_nil ApiKey.unscoped.find(key.id).deleted_at
 
         get api_v1_api_keys_url
-        assert_response :forbidden
-        assert_equal "bearer_required", json_body.dig("error", "details", "reason")
+        assert_response :unauthorized
       end
 
       test "DELETE on another user's key returns 404" do
