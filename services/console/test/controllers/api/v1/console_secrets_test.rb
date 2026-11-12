@@ -69,6 +69,39 @@ module Api
         assert_equal 1, json_body["data"].size
       end
 
+      test "secrets list loads only the requested page, in a fixed number of queries" do
+        insert_secrets = lambda do |prefix, count|
+          now = Time.current
+          StaticSecret.insert_all!((1..count).map do |number|
+            { created_at: now, updated_at: now, name: "#{prefix} #{number}", inject_config: { header: "Authorization" } }
+          end)
+          PgDsnSecret.insert_all!((1..count).map do |number|
+            { created_at: now, updated_at: now, name: "#{prefix} pg #{number}", database: "db", created_by_id: @operator.id }
+          end)
+        end
+        insert_secrets.call("Early", 3)
+        request = -> { get api_v1_console_secrets_path(limit: 2) }
+
+        assert_queries_do_not_grow(request) { insert_secrets.call("Later", 20) }
+        loaded = capture_instantiations(&request)
+        assert_equal 2, json_body["data"].size
+        assert_operator loaded.slice(*SecretKinds::SECRET_KINDS.values.map { |c| c[:model].name }).values.sum, :<=, 2
+      end
+
+      test "secrets list orders by case-insensitive name across kinds, unnamed first" do
+        now = Time.current
+        StaticSecret.insert_all!([ "beta", "Alpha", nil ].map do |name|
+          { created_at: now, updated_at: now, name: name, inject_config: { header: "Authorization" } }
+        end)
+        PgDsnSecret.insert_all!([ { created_at: now, updated_at: now, name: "ALPHA", database: "db", created_by_id: @operator.id } ])
+
+        get api_v1_console_secrets_path(limit: 200)
+        names = json_body["data"].map { |row| row["name"] }
+        keys = names.map { |name| name.to_s.downcase }
+        assert_equal keys.sort, keys
+        assert_nil names.first
+      end
+
       test "secrets list badges an OAuth-flow-managed static secret" do
         managed = static_secrets(:acme_managed_gmail_secret)
         get api_v1_console_secrets_path(limit: 200)

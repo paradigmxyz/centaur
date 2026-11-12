@@ -20,27 +20,11 @@ module Api
       # request rules. Unknown kinds and ids are 404s.
       class SecretsController < BaseController
         def index
-          kinds = selected_kinds
-          query = params[:q].to_s.strip
-          granted = granted_secret_ids
-          rows = kinds.flat_map do |kind, config|
-            model = config.fetch(:model)
-            scope = model.includes(config.fetch(:includes))
-            scope = scope.includes(broker_credential: :oauth_app) if model == StaticSecret
-            excluded = granted&.fetch(:"#{kind}_secret_id", nil)
-            scope = scope.where.not(id: excluded) if excluded.present?
-            if query.present?
-              pattern = "%#{model.sanitize_sql_like(query)}%"
-              scope = scope.where("name ILIKE :pattern OR foreign_id ILIKE :pattern", pattern: pattern)
-            end
-            scope.to_a
-          end
-          rows.sort_by! { |secret| [ secret.name.to_s.downcase, secret.created_at, secret.id ] }
-
+          scopes = filtered_scopes
           limit = pagination_limit
           page = pagination_page
-          total = rows.size
-          page_rows = rows.slice((page - 1) * limit, limit) || []
+          total = count_secrets(scopes)
+          page_rows = page_of_secrets(scopes, limit: limit, offset: (page - 1) * limit)
           total_pages = total.zero? ? 0 : ((total + limit - 1) / limit)
           render json: {
             data: page_rows.map { |secret| secret_payload(secret) },
@@ -54,6 +38,71 @@ module Api
         end
 
         private
+
+        # The list's order: name (case-insensitive, unnamed first, compared
+        # bytewise), then creation time and id, then kind as the final tiebreak.
+        # Only one page of ids leaves the database; its records are loaded per
+        # kind with the associations the payload reads.
+        def page_of_secrets(scopes, limit:, offset:)
+          return [] if offset.negative?
+
+          secrets = secrets_union(scopes)
+          query = Arel::SelectManager.new(secrets).project(secrets[:kind], secrets[:id])
+                                     .order(Arel.sql('secrets.sort_name COLLATE "C"'), secrets[:created_at],
+                                            secrets[:id], secrets[:kind_position])
+                                     .take(limit).skip(offset)
+          rows = ActiveRecord::Base.connection.select_rows(query)
+          loaded = rows.group_by(&:first).to_h do |kind, kind_rows|
+            config = SecretKinds::SECRET_KINDS.fetch(kind)
+            scope = config.fetch(:model).includes(config.fetch(:includes))
+            scope = scope.includes(broker_credential: :oauth_app) if config.fetch(:model) == StaticSecret
+            [ kind, scope.where(id: kind_rows.map(&:second)).index_by(&:id) ]
+          end
+          rows.map { |kind, id| loaded.fetch(kind).fetch(id) }
+        end
+
+        def count_secrets(scopes)
+          secrets = secrets_union(scopes)
+          query = Arel::SelectManager.new(secrets).project(Arel.star.count)
+          ActiveRecord::Base.connection.select_value(query).to_i
+        end
+
+        # Every selected kind's filtered rows as one derived table, "secrets",
+        # with the columns the list sorts on.
+        def secrets_union(scopes)
+          selects = scopes.map.with_index do |(kind, scope), position|
+            table = scope.arel_table
+            scope.select(
+              Arel::Nodes.build_quoted(kind).as("kind"),
+              Arel::Nodes.build_quoted(position).as("kind_position"),
+              table[:id].as("id"),
+              Arel::Nodes::NamedFunction.new("lower", [
+                Arel::Nodes::NamedFunction.new("coalesce", [ table[:name], Arel::Nodes.build_quoted("") ])
+              ]).as("sort_name"),
+              table[:created_at].as("created_at")
+            ).arel
+          end
+          union = selects.reduce { |left, right| Arel::Nodes::UnionAll.new(left, right) }
+          Arel::Nodes::TableAlias.new(Arel::Nodes::Grouping.new(union), "secrets")
+        end
+
+        # The filtered relation of each selected kind, keyed by kind slug.
+        def filtered_scopes
+          kinds = selected_kinds
+          query = params[:q].to_s.strip
+          granted = granted_secret_ids
+          kinds.to_h do |kind, config|
+            model = config.fetch(:model)
+            scope = model.all
+            excluded = granted&.fetch(:"#{kind}_secret_id", nil)
+            scope = scope.where.not(id: excluded) if excluded.present?
+            if query.present?
+              pattern = "%#{model.sanitize_sql_like(query)}%"
+              scope = scope.where("name ILIKE :pattern OR foreign_id ILIKE :pattern", pattern: pattern)
+            end
+            [ kind, scope ]
+          end
+        end
 
         def selected_kinds
           kind = params[:kind].presence
