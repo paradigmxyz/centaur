@@ -26,7 +26,7 @@ class SessionsController < ApplicationController
   def new
     return redirect_to(safe_return_to || default_console_landing_path) if current_user&.active?
 
-    remember_console_return_path(params[:return_to]) if current_user.nil? && params[:return_to].present?
+    remember_console_return_path(params[:return_to]) if current_user.nil?
   end
 
   # GET /pending: holding page for a signed-in but not-yet-approved user.

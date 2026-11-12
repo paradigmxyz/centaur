@@ -83,7 +83,7 @@ module Api
             id: grant.oid,
             grantee_type: grant.role ? "role" : "principal",
             grantee_id: grantee.oid,
-            label: grantee.try(:name).presence || grantee.foreign_id.presence || grantee.oid,
+            label: grantee.name.presence || grantee.foreign_id.presence || grantee.oid,
             principal_kind: grant.principal&.kind
           }
         end

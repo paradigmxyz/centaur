@@ -115,7 +115,7 @@ module Api
           visibility: skill.visibility,
           author: skill.user.name.presence || skill.user.email,
           owner: user_payload(skill.user),
-          updated_at: skill.updated_at&.iso8601,
+          updated_at: skill.updated_at.iso8601,
           viewer: { owner: owner?(skill) }
         }
       end
@@ -128,7 +128,7 @@ module Api
           content_html: SkillMarkdown.render(skill.content),
           lock_version: skill.lock_version,
           checksum: skill.checksum,
-          created_at: skill.created_at&.iso8601,
+          created_at: skill.created_at.iso8601,
           editors: editors.map { |editor| user_payload(editor) },
           viewer: {
             owner: owner,

@@ -155,7 +155,7 @@ module Api
           kind: kind,
           grant_key: PrincipalEffectiveGrantsPage::GRANT_COLUMN_BY_KIND.fetch(kind),
           foreign_id: secret.foreign_id,
-          name: secret.try(:name),
+          name: secret.name,
           direct: sources.any? { |source| source[:type] == :direct },
           roles: roles.map { |role| { id: role.oid, foreign_id: role.foreign_id, name: role.name } }
         }

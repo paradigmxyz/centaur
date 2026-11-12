@@ -79,7 +79,7 @@ module Api
         SlackChannelCatalogSync.enqueue_if_empty
         channels = policy.allowed_channels.matching(params[:q]).ordered.limit(MAX_CHANNEL_OPTIONS)
         render json: {
-          data: channels.map { |channel| channel_option(channel) },
+          data: channels.map { |channel| slack_channel_option(channel) },
           meta: { catalog_error: catalog_error(policy) }
         }
       end
@@ -162,16 +162,6 @@ module Api
       rescue StandardError => e
         Rails.logger.warn("scheduled_task_slack_channels_load_failed error=#{e.class}: #{e.message}")
         {}
-      end
-
-      def channel_option(channel)
-        {
-          channel_id: channel.channel_id,
-          name: channel.name,
-          private: channel.private,
-          label: "##{channel.name}",
-          description: "#{channel.channel_id} · #{channel.private ? "Private" : "Public"}"
-        }
       end
 
       def catalog_error(policy)

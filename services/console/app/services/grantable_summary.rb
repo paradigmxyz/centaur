@@ -16,7 +16,7 @@ module GrantableSummary
       kind_label: SecretKinds::SECRET_KINDS.dig(kind, :label),
       id: secret.oid,
       foreign_id: secret.foreign_id,
-      name: secret.try(:name)
+      name: secret.name
     }
   end
 end

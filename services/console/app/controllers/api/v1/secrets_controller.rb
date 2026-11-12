@@ -36,7 +36,7 @@ module Api
           end
           scope.to_a
         end
-        rows.sort_by! { |secret| [ secret.try(:name).to_s.downcase, secret.created_at, secret.id ] }
+        rows.sort_by! { |secret| [ secret.name.to_s.downcase, secret.created_at, secret.id ] }
 
         limit = pagination_limit
         page = pagination_page
@@ -67,7 +67,7 @@ module Api
       # Secret ids already granted to the exclude_grantee, keyed by grant column,
       # or nil when no grantee filter was given.
       def granted_secret_ids
-        grantee = exclude_grantee
+        grantee = principal_or_role_param!(:exclude_grantee)
         return unless grantee
 
         columns = Grant::GRANTABLE_ASSOCIATIONS.map { |assoc| :"#{assoc}_id" }
@@ -76,22 +76,10 @@ module Api
         end
       end
 
-      def exclude_grantee
-        raw = params[:exclude_grantee].presence
-        return unless raw
-
-        type, oid = raw.to_s.split(":", 2)
-        case type
-        when "principal" then Principal.find_by_oid!(oid)
-        when "role" then Role.find_by_oid!(oid)
-        else raise ActionController::BadRequest, "exclude_grantee must be principal:<oid> or role:<oid>"
-        end
-      end
-
       def secret_payload(secret)
         GrantableSummary.call(secret).merge(
           grant_key: :"#{GrantableSummary.kind_for(secret)}_secret_id",
-          description: secret.try(:description),
+          description: secret.description,
           labels: secret.labels,
           source_types: SecretConsoleView.source_types(secret),
           managed_by: SecretConsoleView.managed_by(secret),

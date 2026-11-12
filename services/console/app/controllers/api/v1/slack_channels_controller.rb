@@ -21,7 +21,7 @@ module Api
       def index
         response.headers["Cache-Control"] = "no-store"
         SlackChannelCatalogSync.enqueue_if_empty
-        render json: { data: channels.map { |channel| channel_payload(channel) }, meta: { catalog_error: catalog_error } }
+        render json: { data: channels.map { |channel| slack_channel_option(channel) }, meta: { catalog_error: catalog_error } }
       end
 
       private
@@ -31,32 +31,10 @@ module Api
         return SlackBotChannel.where(channel_id: ids.first(200)).ordered if ids.any?
 
         scope = SlackBotChannel.active
-        if (owner = exclude_owner)
+        if (owner = principal_or_role_param!(:exclude_owner))
           scope = scope.excluding_channel_ids(owner.slack_channel_permissions.pluck(:channel_id))
         end
         scope.matching(params[:q]).ordered.limit(MAX_RESULTS)
-      end
-
-      def exclude_owner
-        raw = params[:exclude_owner].presence
-        return unless raw
-
-        type, oid = raw.to_s.split(":", 2)
-        case type
-        when "principal" then Principal.find_by_oid!(oid)
-        when "role" then Role.find_by_oid!(oid)
-        else raise ActionController::BadRequest, "exclude_owner must be principal:<oid> or role:<oid>"
-        end
-      end
-
-      def channel_payload(channel)
-        {
-          channel_id: channel.channel_id,
-          name: channel.name,
-          private: channel.private,
-          label: "##{channel.name}",
-          description: "#{channel.channel_id} · #{channel.private ? "Private" : "Public"}"
-        }
       end
 
       def catalog_error
