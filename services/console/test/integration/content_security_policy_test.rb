@@ -136,7 +136,7 @@ class ContentSecurityPolicyTest < ActionDispatch::IntegrationTest
   end
 
   test "JSON, metadata, health, and PWA responses are unaffected" do
-    get "/api/v1/me"
+    get "/api/v1/console/me"
     assert_response :unauthorized
     assert_equal "application/json", response.media_type
 

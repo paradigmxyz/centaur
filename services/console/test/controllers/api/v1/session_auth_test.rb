@@ -2,23 +2,31 @@ require "test_helper"
 
 module Api
   module V1
-    # The /api/v1 authentication matrix: bearer API keys and console session
-    # cookies (with CSRF), account status, and admin-by-default authorization.
+    # The /api/v1 authentication matrix: bearer API keys on the bearer API,
+    # console session cookies (with CSRF) on /api/v1/console, account status,
+    # and admin-by-default authorization.
     class SessionAuthTest < ActionDispatch::IntegrationTest
-      test "anonymous requests are rejected with the API key message" do
+      test "anonymous bearer API requests are rejected with the API key message" do
         get api_v1_principals_path
         assert_response :unauthorized
         assert_equal "invalid or missing API key", json_body.dig("error", "message")
       end
 
+      test "anonymous console API requests are told to sign in" do
+        get api_v1_console_principals_path
+        assert_response :unauthorized
+        assert_equal "console session required", json_body.dig("error", "message")
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
+      end
+
       test "an admin session cookie authenticates GET requests without a CSRF token" do
         sign_in_console(users(:acme_admin))
-        get console_api_v1_principals_path
+        get api_v1_console_principals_path
         assert_response :ok
         assert json_body["data"].any?
       end
 
-      test "an admin bearer key still authenticates without a session" do
+      test "an admin bearer key still authenticates on the bearer API without a session" do
         get api_v1_principals_path, headers: bearer_headers
         assert_response :ok
       end
@@ -27,32 +35,40 @@ module Api
         sign_in_console(users(:acme_admin))
         get api_v1_principals_path, headers: bearer_headers("iak_bogus")
         assert_response :unauthorized
+
+        get api_v1_console_principals_path, headers: bearer_headers("iak_bogus")
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
       test "a non-Bearer Authorization header never falls back to the session cookie" do
         sign_in_console(users(:acme_admin))
         get api_v1_principals_path, headers: { "Authorization" => "Basic Zm9vOmJhcg==" }
         assert_response :unauthorized
+
+        get api_v1_console_principals_path, headers: { "Authorization" => "Basic Zm9vOmJhcg==" }
+        assert_response :forbidden
+        assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
       test "cookie-authenticated writes require the CSRF token" do
         sign_in_console(users(:acme_admin))
 
         assert_no_difference -> { Principal.count } do
-          post api_v1_principals_path, params: { data: { foreign_id: "csrf-missing" } }, as: :json
+          post api_v1_console_principals_path, params: { data: { foreign_id: "csrf-missing" } }, as: :json
         end
         assert_response :forbidden
         assert_equal "invalid or missing CSRF token", json_body.dig("error", "message")
         assert_equal "csrf", json_body.dig("error", "details", "reason")
 
         assert_no_difference -> { Principal.count } do
-          post api_v1_principals_path, params: { data: { foreign_id: "csrf-bad" } },
+          post api_v1_console_principals_path, params: { data: { foreign_id: "csrf-bad" } },
                headers: csrf_headers("not-a-token"), as: :json
         end
         assert_response :forbidden
 
         assert_difference -> { Principal.count }, 1 do
-          post api_v1_principals_path, params: { data: { foreign_id: "csrf-ok" } },
+          post api_v1_console_principals_path, params: { data: { foreign_id: "csrf-ok" } },
                headers: csrf_headers, as: :json
         end
         assert_response :created
@@ -62,7 +78,7 @@ module Api
       test "cookie writes from a foreign Origin are rejected even with the token" do
         sign_in_console(users(:acme_admin))
         token = console_csrf_token
-        post api_v1_principals_path, params: { data: { foreign_id: "csrf-origin" } },
+        post api_v1_console_principals_path, params: { data: { foreign_id: "csrf-origin" } },
              headers: csrf_headers(token).merge("Origin" => "https://evil.example"), as: :json
         assert_response :forbidden
       end
@@ -74,6 +90,8 @@ module Api
       end
 
       test "admin-only endpoints refuse every non-admin combination" do
+        assert_admin_only_api :get, api_v1_console_principals_path
+        assert_admin_only_api :post, api_v1_console_principals_path, params: { data: { foreign_id: "matrix" } }
         assert_admin_only_api :get, api_v1_principals_path
         assert_admin_only_api :post, api_v1_principals_path, params: { data: { foreign_id: "matrix" } }
         assert_equal 0, Principal.where(foreign_id: "matrix").count
@@ -90,19 +108,19 @@ module Api
         sign_in_console(user)
         user.update!(status: :disabled)
 
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_response :unauthorized
         assert_equal "account_disabled", json_body.dig("error", "details", "reason")
 
         user.update!(status: :active)
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_response :unauthorized
         assert_equal "console session required", json_body.dig("error", "message")
       end
 
       test "me describes an admin session" do
         sign_in_console(users(:acme_admin))
-        get api_v1_me_path
+        get api_v1_console_me_path
 
         assert_response :ok
         assert_equal "no-store", response.headers["Cache-Control"]
@@ -121,24 +139,24 @@ module Api
 
       test "me hands off a pending redirect flash exactly once" do
         sign_in_console(users(:acme_admin))
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_equal({ "notice" => "Signed in as admin@acme.example." }, json_body.dig("data", "flash"))
 
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_equal({}, json_body.dig("data", "flash"))
       end
 
       test "a redirect flash survives the SPA shell request" do
         sign_in_console(users(:acme_admin))
         get "/console/spa-only-page", headers: { "Accept" => "text/html" }
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_equal "Signed in as admin@acme.example.", json_body.dig("data", "flash", "notice")
       end
 
       test "me shows the api clients section only when the feature is enabled" do
         with_env("CENTAUR_CONSOLE_API_CLIENTS_ENABLED" => "true") do
           sign_in_console(users(:acme_admin))
-          get api_v1_me_path
+          get api_v1_console_me_path
           assert_equal true, json_body.dig("data", "nav", "api_clients")
           assert_equal true, json_body.dig("data", "features", "api_clients")
         end
@@ -146,7 +164,7 @@ module Api
 
       test "me describes a regular operator session" do
         sign_in_console(users(:member_user))
-        get api_v1_me_path
+        get api_v1_console_me_path
 
         assert_response :ok
         data = json_body["data"]
@@ -160,24 +178,24 @@ module Api
 
       test "me is reachable by a pending account so the SPA can show the holding page" do
         sign_in_console(users(:pending_user))
-        get api_v1_me_path
+        get api_v1_console_me_path
 
         assert_response :ok
         assert_equal "pending", json_body.dig("data", "user", "status")
         assert_equal false, json_body.dig("data", "nav", "integrations")
 
-        get console_api_v1_principals_path
+        get api_v1_console_principals_path
         assert_response :forbidden
         assert_equal "account_pending", json_body.dig("error", "details", "reason")
       end
 
       test "me is session-only" do
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_response :unauthorized
         assert_equal "session_required", json_body.dig("error", "details", "reason")
 
         [ bearer_headers, bearer_headers(ConsoleApiAuthHelper::DISABLED_TOKEN) ].each do |headers|
-          get api_v1_me_path, headers: headers
+          get api_v1_console_me_path, headers: headers
           assert_response :forbidden
           assert_equal "session_required", json_body.dig("error", "details", "reason")
           assert_nil json_body["data"]
@@ -185,7 +203,7 @@ module Api
       end
 
       test "session destroy refuses bearer callers" do
-        delete api_v1_session_path, headers: bearer_headers
+        delete api_v1_console_session_path, headers: bearer_headers
         assert_response :forbidden
         assert_equal "session_required", json_body.dig("error", "details", "reason")
       end

@@ -2,77 +2,73 @@ require "test_helper"
 
 module Api
   module V1
+    # The namespace decides the credential: every /api/v1/console/* action takes
+    # the console session only, every other /api/v1 action (outside
+    # /api/v1/sandbox) a bearer API key only. Nothing accepts both.
     class CredentialPolicyTest < ActionDispatch::IntegrationTest
-      B = :bearer
-      S = :session
-      BS = :bearer_or_session
+      CONSOLE_PREFIX = "/api/v1/console/".freeze
 
-      SECRET_KINDS = %w[static gcp_auth gcp_id_token aws_auth oauth_token pg_dsn hmac ssh_key].freeze
-      CRUD = %w[index show create update destroy lookup].freeze
-
-      # The complete, intended table. A new route fails this test until its
-      # policy is chosen here.
-      EXPECTED = {
-        "api_keys" => %w[index show create destroy].index_with(B),
-        "proxies" => %w[index show create update destroy].index_with(B),
-        **SECRET_KINDS.to_h { |kind| [ "#{kind}_secrets", CRUD.index_with(BS) ] },
-        "broker_credentials" => CRUD.index_with(BS),
-        "grants" => %w[show create destroy].index_with(BS),
-        "grantee_grants" => { "index" => BS },
-        "principal_roles" => %w[index create destroy].index_with(BS),
-        "roles" => (CRUD + %w[upsert_slack_channel_permission]).index_with(BS)
-          .merge(%w[replace_slack_channel_permissions destroy_slack_channel_permission].index_with(S)),
-        "principals" => %w[index show lookup effective_config upsert_slack_channel_permission].index_with(B)
-          .merge(%w[create update].index_with(BS))
-          .merge(%w[console_index console_show destroy effective_grants replace_slack_channel_permissions
-                    destroy_slack_channel_permission].index_with(S)),
-        "oauth_apps" => CRUD.index_with(BS).merge(%w[preset credentials provider_details].index_with(S)),
-        "scheduled_tasks" => { "show" => B }
-          .merge(%w[index new edit create update destroy run slack_channel_options].index_with(S)),
-        "users" => %w[index approve disable promote demote].index_with(S),
-        "api_clients" => %w[index show create update destroy rotate_secret disable enable attach_principal
-                            detach_principal make_default_principal].index_with(S),
-        "system_settings" => %w[show update slack_external_teams replace_slack_external_teams].index_with(S),
-        "workflows" => %w[index show runs create_run].index_with(S),
-        "skills" => %w[index show create update destroy editor_candidates share unshare].index_with(S),
-        "me" => { "show" => S },
-        "personal_ssh_keys" => %w[show update destroy validate].index_with(S),
-        "integrations" => { "index" => S },
-        "oauth_providers" => { "index" => S },
-        "secrets" => %w[index show].index_with(S),
-        "secret_role_grants" => %w[index create destroy].index_with(S),
-        "slack_channels" => { "index" => S },
-        "sessions" => { "destroy" => S }
-      }.freeze
-
-      def self.routed_actions
+      def self.operator_routes
         Rails.application.routes.routes.filter_map do |route|
-          controller = route.defaults[:controller].to_s
-          next unless controller.start_with?("api/v1/")
+          path = route.path.spec.to_s.sub("(.:format)", "")
+          next unless path.start_with?("/api/v1/")
+          next if path.start_with?("/api/v1/sandbox/")
 
-          klass = "#{controller}_controller".camelize.safe_constantize
-          next unless klass && klass < Api::BaseController
-          next if klass.include?(SandboxAdminAuthentication)
+          klass = "#{route.defaults[:controller]}_controller".camelize.safe_constantize
+          [ path, route, klass ]
+        end
+      end
 
-          [ klass, route.defaults[:action].to_s ]
+      def self.routed_requests
+        operator_routes.flat_map do |path, route, klass|
+          concrete = path.gsub(/:\w+/, "x1")
+          route.verb.split("|").map { |verb| [ verb.downcase, concrete, klass, route.defaults[:action].to_s ] }
         end.uniq
       end
 
-      test "every /api/v1 action handled by Api::BaseController declares a credential policy" do
-        actions = self.class.routed_actions
-        assert_operator actions.size, :>, 100
-        missing = actions.reject { |klass, action| klass.accepted_credentials_for(action) }
-        assert_empty missing.map { |klass, action| "#{klass}##{action}" }
+      def before_callbacks(klass)
+        klass._process_action_callbacks.select { |cb| cb.kind == :before }.map(&:filter)
       end
 
-      test "the declared policies match the intended table exactly" do
-        actual = self.class.routed_actions.each_with_object({}) do |(klass, action), table|
-          name = klass.controller_path.delete_prefix("api/v1/")
-          (table[name] ||= {})[action] = klass.accepted_credentials_for(action)
+      test "every /api/v1/console action is session-only and every other /api/v1 action is bearer-only" do
+        routes = self.class.operator_routes
+        console, bearer = routes.partition { |path, _route, _klass| path.start_with?(CONSOLE_PREFIX) }
+        assert_operator console.size, :>, 80
+        assert_operator bearer.size, :>, 80
+
+        console.each do |path, route, klass|
+          label = "#{route.verb} #{path} -> #{klass}"
+          assert klass && klass < Api::BaseController, label
+          assert klass.include?(ConsoleApiAuthentication), label
+          assert_equal :session, klass.accepted_credential, label
+          assert klass.controller_path.start_with?("api/v1/console/"), label
+          callbacks = before_callbacks(klass)
+          assert_includes callbacks, :authenticate_console_session!, label
+          assert_not_includes callbacks, :authenticate_api_key!, label
         end
-        assert_equal EXPECTED.keys.sort, actual.keys.sort
-        EXPECTED.each do |controller, actions|
-          assert_equal actions.sort.to_h, actual[controller].sort.to_h, controller
+
+        bearer.each do |path, route, klass|
+          label = "#{route.verb} #{path} -> #{klass}"
+          assert klass && klass < Api::BaseController, label
+          assert_not klass.include?(ConsoleApiAuthentication), label
+          assert_not klass.include?(SandboxAdminAuthentication), label
+          assert_equal :bearer, klass.accepted_credential, label
+          assert_not klass.controller_path.start_with?("api/v1/console/"), label
+          callbacks = before_callbacks(klass)
+          assert_includes callbacks, :authenticate_api_key!, label
+          assert_not_includes callbacks, :authenticate_console_session!, label
+        end
+      end
+
+      test "every console controller is routed only under /api/v1/console" do
+        Rails.application.eager_load!
+        console_classes = Api::BaseController.descendants.select { |klass| klass.include?(ConsoleApiAuthentication) }
+        assert_operator console_classes.size, :>, 20
+        Rails.application.routes.routes.each do |route|
+          klass = "#{route.defaults[:controller]}_controller".camelize.safe_constantize
+          next unless console_classes.include?(klass)
+
+          assert route.path.spec.to_s.start_with?(CONSOLE_PREFIX), "#{klass} is routed at #{route.path.spec}"
         end
       end
 
@@ -83,36 +79,112 @@ module Api
         end.uniq
         assert_operator sandbox.size, :>=, 9
         sandbox.each do |klass|
-          names = klass._process_action_callbacks.select { |cb| cb.kind == :before }.map(&:filter)
-          assert_includes names, :authenticate_sandbox_admin!, klass.name
-          assert_not_includes names, :authenticate_request!, klass.name
+          callbacks = before_callbacks(klass)
+          assert_includes callbacks, :authenticate_sandbox_admin!, klass.name
+          assert_not_includes callbacks, :authenticate_api_key!, klass.name
+          assert_not_includes callbacks, :authenticate_console_session!, klass.name
         end
       end
 
-      test "an action without a declaration fails closed" do
+      test "every routed request refuses the other namespace's credential and anonymous callers" do
+        requests = self.class.routed_requests
+        assert_operator requests.size, :>, 160
+        ENV["CENTAUR_CONSOLE_API_CLIENTS_ENABLED"] = "true"
+        counts = -> { [ ApiKey.unscoped.count, ::Proxy.count, Principal.count, Role.count, Grant.count, ScheduledTask.count ] }
+        before = counts.call
+
+        requests.each do |verb, path, _klass, _action|
+          label = "#{verb.upcase} #{path}"
+          console = path.start_with?(CONSOLE_PREFIX)
+
+          public_send(verb, path, as: :json)
+          assert_equal 401, response.status, "#{label} anonymous: #{response.body}"
+          assert_equal "session_required", json_body.dig("error", "details", "reason"), label if console
+
+          if console
+            [ bearer_headers, bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN) ].each do |headers|
+              public_send(verb, path, headers: headers, as: :json)
+              assert_equal 403, response.status, "#{label} bearer: #{response.body}"
+              assert_equal "session_required", json_body.dig("error", "details", "reason"), label
+            end
+          else
+            public_send(verb, path, headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN), as: :json)
+            assert_equal 403, response.status, "#{label} member bearer: #{response.body}"
+            assert_equal "API key owner is not an admin", json_body.dig("error", "message"), label
+          end
+        end
+
+        sign_in_console(users(:acme_admin))
+        headers = csrf_headers
+        requests.reject { |_verb, path, _klass, _action| path.start_with?(CONSOLE_PREFIX) }.each do |verb, path, _klass, _action|
+          public_send(verb, path, headers: headers, as: :json)
+          assert_equal 403, response.status, "#{verb.upcase} #{path} admin session: #{response.body}"
+          assert_equal "bearer_required", json_body.dig("error", "details", "reason"), "#{verb.upcase} #{path}"
+        end
+
+        assert_equal before, counts.call
+      ensure
+        ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
+      end
+
+      test "a console-namespace controller without the console credential fails closed" do
         klass = Class.new(Api::BaseController) do
           def index = render(json: { data: "reached" })
         end
-        assert_nil klass.accepted_credentials_for(:index)
-        stub_const(:UndeclaredCredentialsController, klass) do
+        stub_console_const(:UnguardedController, klass) do
           with_routing do |set|
-            set.draw { get "undeclared", to: "api/v1/credential_policy_test/undeclared_credentials#index" }
-            assert_raises(Api::BaseController::MissingCredentialPolicy) do
-              get "/undeclared", headers: bearer_headers
+            set.draw { get "api/v1/console/unguarded", to: "api/v1/console/unguarded#index" }
+            assert_raises(Api::BaseController::CredentialNamespaceMismatch) do
+              get "/api/v1/console/unguarded", headers: bearer_headers
             end
 
             Rails.stub(:env, ActiveSupport::EnvironmentInquirer.new("production")) do
-              get "/undeclared", headers: bearer_headers
+              get "/api/v1/console/unguarded", headers: bearer_headers
             end
             assert_response :unauthorized
-            assert_equal "credential_policy_missing", json_body.dig("error", "details", "reason")
+            assert_equal "credential_namespace_mismatch", json_body.dig("error", "details", "reason")
             assert_no_match(/reached/, response.body)
           end
         end
       end
 
-      test "accepts_credentials rejects unknown policies" do
-        assert_raises(ArgumentError) { Class.new(Api::BaseController) { accepts_credentials :cookie } }
+      test "a bearer controller routed under /api/v1/console fails closed" do
+        with_routing do |set|
+          set.draw { get "api/v1/console/keys", to: "api/v1/api_keys#index" }
+          assert_raises(Api::BaseController::CredentialNamespaceMismatch) do
+            get "/api/v1/console/keys", headers: bearer_headers
+          end
+        end
+      end
+
+      test "a console controller routed outside /api/v1/console fails closed" do
+        sign_in_console(users(:acme_admin))
+        with_routing do |set|
+          set.draw { get "api/v1/whoami", to: "api/v1/console/me#show" }
+          assert_raises(Api::BaseController::CredentialNamespaceMismatch) { get "/api/v1/whoami" }
+        end
+      end
+
+      test "allow_active_users exists only in the console API and never admits a bearer key" do
+        assert_not Api::BaseController.respond_to?(:allow_active_users)
+        assert_not Api::BaseController.respond_to?(:allow_pending_users)
+
+        klass = Class.new(Api::V1::Console::BaseController) do
+          allow_active_users
+          def create = render(json: { data: current_user.email })
+        end
+        stub_console_const(:OpenToActiveUsersController, klass) do
+          with_routing do |set|
+            set.draw { post "api/v1/console/open", to: "api/v1/console/open_to_active_users#create" }
+            post "/api/v1/console/open", headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
+            assert_response :forbidden
+            assert_equal "session_required", json_body.dig("error", "details", "reason")
+
+            post "/api/v1/console/open", headers: bearer_headers
+            assert_response :forbidden
+            assert_equal "session_required", json_body.dig("error", "details", "reason")
+          end
+        end
       end
 
       test "a session cannot mint, list, or revoke API keys" do
@@ -151,6 +223,23 @@ module Api
         assert ::Proxy.exists?(proxy.id)
       end
 
+      test "a session cannot write the bearer API resources the console also edits" do
+        sign_in_console(users(:acme_admin))
+        principal = principals(:acme_user_bob)
+
+        assert_no_difference -> { Principal.count } do
+          post api_v1_principals_path, params: { data: { foreign_id: "from-browser" } }, headers: csrf_headers, as: :json
+        end
+        assert_bearer_required
+
+        patch api_v1_principal_path(principal.oid), params: { data: { name: "renamed" } }, headers: csrf_headers, as: :json
+        assert_bearer_required
+        assert_not_equal "renamed", principal.reload.name
+
+        get api_v1_static_secrets_path
+        assert_bearer_required
+      end
+
       test "bearer keys still mint API keys and proxies" do
         post api_v1_api_keys_path, params: { data: { name: "ci" } }, headers: bearer_headers, as: :json
         assert_response :created
@@ -168,15 +257,15 @@ module Api
         member = users(:member_user)
         pending = users(:pending_user)
 
-        post promote_api_v1_user_path(member.oid), headers: bearer_headers
+        post promote_api_v1_console_user_path(member.oid), headers: bearer_headers
         assert_session_required
         assert_not member.reload.admin?
 
-        post approve_api_v1_user_path(pending.oid), headers: bearer_headers
+        post approve_api_v1_console_user_path(pending.oid), headers: bearer_headers
         assert_session_required
         assert pending.reload.pending?
 
-        post disable_api_v1_user_path(member.oid), headers: bearer_headers
+        post disable_api_v1_console_user_path(member.oid), headers: bearer_headers
         assert_session_required
         assert member.reload.active?
       end
@@ -186,11 +275,11 @@ module Api
         client = ApiClient.create!(name: "policy-client", scopes: ApiClient::SCOPES, created_by: users(:acme_admin))
         digest = client.secret_digest
 
-        post rotate_secret_api_v1_api_client_path(client.oid), headers: bearer_headers
+        post rotate_secret_api_v1_console_api_client_path(client.oid), headers: bearer_headers
         assert_session_required
         assert_equal digest, client.reload.secret_digest
 
-        post attach_principal_api_v1_api_client_path(client.oid),
+        post attach_principal_api_v1_console_api_client_path(client.oid),
              params: { data: { principal: principals(:acme_user_bob).oid } }, headers: bearer_headers, as: :json
         assert_session_required
         assert_empty client.reload.api_client_principals
@@ -199,28 +288,28 @@ module Api
       end
 
       test "a bearer admin key cannot force-start a workflow" do
-        original = WorkflowsController.client_factory
-        WorkflowsController.client_factory = -> { flunk "the workflow API must not be reached" }
-        post runs_api_v1_workflow_path("slack_sync"), headers: bearer_headers, as: :json
+        original = Console::WorkflowsController.client_factory
+        Console::WorkflowsController.client_factory = -> { flunk "the workflow API must not be reached" }
+        post runs_api_v1_console_workflow_path("slack_sync"), headers: bearer_headers, as: :json
         assert_session_required
       ensure
-        WorkflowsController.client_factory = original
+        Console::WorkflowsController.client_factory = original
       end
 
       test "a bearer admin key cannot change system settings, delete principals, or register presets" do
         before = system_settings(:default).reload.attributes
-        patch api_v1_system_settings_path, params: { data: { default_sandbox_repo_cache: "changed" } },
+        patch api_v1_console_system_settings_path, params: { data: { default_sandbox_repo_cache: "changed" } },
               headers: bearer_headers, as: :json
         assert_session_required
         assert_equal before, system_settings(:default).reload.attributes
 
         principal = principals(:acme_user_bob)
-        delete api_v1_principal_path(principal.oid), headers: bearer_headers
+        delete api_v1_console_principal_path(principal.oid), headers: bearer_headers
         assert_session_required
         assert Principal.exists?(principal.id)
 
         assert_no_difference -> { OauthApp.count } do
-          post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: bearer_headers
+          post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: bearer_headers
         end
         assert_session_required
       end
@@ -229,65 +318,19 @@ module Api
         sign_in_console(users(:acme_admin))
         member = users(:member_user)
 
-        post promote_api_v1_user_path(member.oid), headers: csrf_headers.merge(bearer_headers)
+        post promote_api_v1_console_user_path(member.oid), headers: csrf_headers.merge(bearer_headers)
         assert_session_required
         assert_not member.reload.admin?
 
-        post promote_api_v1_user_path(member.oid), headers: csrf_headers
+        post promote_api_v1_console_user_path(member.oid), headers: csrf_headers
         assert_response :ok
         assert member.reload.admin?
       end
 
-      def self.routed_requests
-        Rails.application.routes.routes.filter_map do |route|
-          controller = route.defaults[:controller].to_s
-          next unless controller.start_with?("api/v1/")
-
-          klass = "#{controller}_controller".camelize.safe_constantize
-          next unless klass && klass < Api::BaseController
-          next if klass.include?(SandboxAdminAuthentication)
-
-          path = route.path.spec.to_s.sub("(.:format)", "").gsub(/:\w+/, "x1")
-          route.verb.split("|").map { |verb| [ verb.downcase, path, klass, route.defaults[:action].to_s ] }
-        end.flatten(1).uniq
-      end
-
-      test "a non-admin owner's key is refused on every endpoint, including allow_active_users ones" do
-        requests = self.class.routed_requests
-        assert_operator requests.size, :>, 100
-        member = users(:member_user)
-        assert member.active?
-        assert_not member.admin?
-        ENV["CENTAUR_CONSOLE_API_CLIENTS_ENABLED"] = "true"
-        requests.each do |verb, path, klass, action|
-          public_send(verb, path, headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN), as: :json)
-          expected = klass.accepted_credentials_for(action) == :session ? "session_required" : "admin_required"
-          assert_equal 403, response.status, "#{verb.upcase} #{path}: #{response.body}"
-          assert_equal expected, json_body.dig("error", "details", "reason"), "#{verb.upcase} #{path}"
-        end
-        assert_equal 0, member.scheduled_tasks.count
-      ensure
-        ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
-      end
-
-      test "allow_active_users never admits a non-admin owner's key" do
-        klass = Class.new(Api::BaseController) do
-          accepts_credentials :bearer_or_session
-          allow_active_users
-          def create = render(json: { data: current_user.email })
-        end
-        stub_const(:OpenToActiveUsersController, klass) do
-          with_routing do |set|
-            set.draw { post "open", to: "api/v1/credential_policy_test/open_to_active_users#create" }
-            post "/open", headers: bearer_headers(ConsoleApiAuthHelper::MEMBER_TOKEN)
-            assert_response :forbidden
-            assert_equal "admin_required", json_body.dig("error", "details", "reason")
-
-            post "/open", headers: bearer_headers
-            assert_response :ok
-            assert_equal users(:acme_admin).email, json_body["data"]
-          end
-        end
+      test "an admin bearer key with a session cookie still uses the bearer credential on the bearer API" do
+        sign_in_console(users(:member_user))
+        get api_v1_principals_path, headers: bearer_headers
+        assert_response :ok
       end
 
       private
@@ -302,11 +345,11 @@ module Api
         assert_equal "session_required", json_body.dig("error", "details", "reason")
       end
 
-      def stub_const(name, value)
-        self.class.const_set(name, value)
+      def stub_console_const(name, value)
+        Api::V1::Console.const_set(name, value)
         yield
       ensure
-        self.class.send(:remove_const, name) if self.class.const_defined?(name, false)
+        Api::V1::Console.send(:remove_const, name) if Api::V1::Console.const_defined?(name, false)
       end
     end
   end

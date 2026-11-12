@@ -7,8 +7,6 @@ module Api
     # The grantee is resolved by oid first, so an unknown grantee returns 404
     # rather than an empty page. Grant payloads match GrantsController#show.
     class GranteeGrantsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       def index
         grantee = resolve_grantee
         scope = grantee.grants.includes(Grant::GRANTABLE_ASSOCIATIONS).order(created_at: :asc, id: :asc)
@@ -42,7 +40,6 @@ module Api
           id: grant.oid,
           GrantsController::GRANTEE_TYPES.key(grantee.class) => grantee.oid,
           GrantsController::GRANTABLE_TYPES.key(grantable.class) => grantable.oid,
-          grantable: GrantableSummary.call(grantable),
           created_at: grant.created_at,
           updated_at: grant.updated_at
         }

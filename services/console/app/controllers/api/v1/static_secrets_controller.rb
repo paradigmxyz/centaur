@@ -1,8 +1,6 @@
 module Api
   module V1
     class StaticSecretsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       include SecretDocumentWrites
 
       def index
@@ -84,7 +82,7 @@ module Api
         # an explicitly supplied kind still replaces the existing value.
         ss_attrs[:kind] = ref.kind if ref.persisted? && !attrs.key?(:kind)
 
-        # A PATCH that omits an inline source's `secret` keeps the stored value.
+        # The console API keeps a stored inline source's `secret` a PATCH omits (SecretDocumentWrites).
         source = build_secret_source(attrs, :source, ref.source)
         rules = build_rules(attrs)
 

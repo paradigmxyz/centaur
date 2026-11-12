@@ -10,11 +10,11 @@ module Api
       end
 
       teardown do
-        OauthAppsController.registration_client_factory = -> { Oauth::DynamicRegistration.new }
+        Console::OauthAppsController.registration_client_factory = -> { Oauth::DynamicRegistration.new }
       end
 
       def registration_client(&block)
-        OauthAppsController.registration_client_factory = -> {
+        Console::OauthAppsController.registration_client_factory = -> {
           Oauth::DynamicRegistration.new(http: HttpClient.new(http: block))
         }
       end
@@ -32,14 +32,14 @@ module Api
       test "app endpoints are admin-only for every caller type" do
         app = oauth_apps(:acme_google)
         registration_client { |**| flunk "Must not register" }
-        assert_admin_only_api :get, api_v1_oauth_apps_path
-        assert_admin_only_api :get, api_v1_oauth_app_path(app.oid)
-        assert_admin_only_api :post, api_v1_oauth_apps_path, params: { data: form_body }
-        assert_admin_only_api :patch, api_v1_oauth_app_path(app.oid), params: { data: { description: "x" } }
-        assert_admin_only_api :get, credentials_api_v1_oauth_app_path(app.oid)
-        assert_admin_only_api :get, provider_details_api_v1_oauth_app_path(app.oid)
-        assert_admin_only_api :get, api_v1_oauth_providers_path
-        assert_admin_only_api :post, preset_api_v1_oauth_apps_path(provider: "mercator")
+        assert_admin_only_api :get, api_v1_console_oauth_apps_path
+        assert_admin_only_api :get, api_v1_console_oauth_app_path(app.oid)
+        assert_admin_only_api :post, api_v1_console_oauth_apps_path, params: { data: form_body }
+        assert_admin_only_api :patch, api_v1_console_oauth_app_path(app.oid), params: { data: { description: "x" } }
+        assert_admin_only_api :get, credentials_api_v1_console_oauth_app_path(app.oid)
+        assert_admin_only_api :get, provider_details_api_v1_console_oauth_app_path(app.oid)
+        assert_admin_only_api :get, api_v1_console_oauth_providers_path
+        assert_admin_only_api :post, preset_api_v1_console_oauth_apps_path(provider: "mercator")
         assert_not OauthApp.exists?(slug: "new-google")
         assert_not OauthApp.exists?(slug: "mercator")
         assert_equal "Acme Google integration", app.reload.description
@@ -49,7 +49,7 @@ module Api
         app = oauth_apps(:acme_google)
         BrokerCredential.create!(oauth_app: app, provider_subject: "s1", token_endpoint: "https://oauth2.googleapis.com/token")
         BrokerCredential.create!(oauth_app: app, provider_subject: "s2", token_endpoint: "https://oauth2.googleapis.com/token")
-        get api_v1_oauth_apps_path(limit: 200)
+        get api_v1_console_oauth_apps_path(limit: 200)
         assert_response :ok
         row = json_body["data"].find { |a| a["id"] == app.oid }
         assert_equal "google", row["provider"]
@@ -62,7 +62,7 @@ module Api
       test "oauth app detail shows config, the redirect URI, and a start URL but never the secret" do
         app = oauth_apps(:acme_google)
         app.update!(client_secret: "shh")
-        get api_v1_oauth_app_path(app.oid)
+        get api_v1_console_oauth_app_path(app.oid)
         assert_response :ok
         data = json_body["data"]
         assert_equal app.slug, data["slug"]
@@ -76,18 +76,18 @@ module Api
 
       test "the redirect and start URLs use the configured public URL" do
         ConsoleEnv.stub(:[], ->(key) { key == "PUBLIC_URL" ? "https://console.example.test" : nil }) do
-          get api_v1_oauth_app_path(oauth_apps(:acme_google).oid)
+          get api_v1_console_oauth_app_path(oauth_apps(:acme_google).oid)
         end
         assert_equal "https://console.example.test/oauth/google/callback", json_body.dig("data", "redirect_uri")
         assert_equal "https://console.example.test/oauth/google/start", json_body.dig("data", "start_url")
       end
 
       test "oauth app detail 404s for an unknown id" do
-        get api_v1_oauth_app_path("oap_missing")
+        get api_v1_console_oauth_app_path("oap_missing")
         assert_response :not_found
-        get credentials_api_v1_oauth_app_path("oap_missing")
+        get credentials_api_v1_console_oauth_app_path("oap_missing")
         assert_response :not_found
-        get provider_details_api_v1_oauth_app_path("oap_missing")
+        get provider_details_api_v1_console_oauth_app_path("oap_missing")
         assert_response :not_found
       end
 
@@ -99,7 +99,7 @@ module Api
         second = BrokerCredential.create!(oauth_app: app, provider_subject: "s2", token_endpoint: "https://oauth2.googleapis.com/token")
         BrokerCredential.create!(oauth_app: oauth_apps(:acme_slack), provider_subject: "s3", token_endpoint: "https://slack.com/api/oauth.v2.access")
 
-        get credentials_api_v1_oauth_app_path(app.oid)
+        get credentials_api_v1_console_oauth_app_path(app.oid)
         assert_response :ok
         assert_equal [ first.oid, second.oid ], json_body["data"].pluck("id")
         row = json_body["data"].first
@@ -110,12 +110,12 @@ module Api
         assert_equal 2, json_body.dig("meta", "total")
         assert_not_includes response.body, "synthetic-access"
 
-        get credentials_api_v1_oauth_app_path(oauth_apps(:acme_github).oid)
+        get credentials_api_v1_console_oauth_app_path(oauth_apps(:acme_github).oid)
         assert_equal [], json_body["data"]
       end
 
       test "providers list the registry with the custom provider's config keys" do
-        get api_v1_oauth_providers_path
+        get api_v1_console_oauth_providers_path
         assert_response :ok
         keys = json_body["data"].pluck("key")
         assert_equal Oauth::Providers.keys, keys
@@ -128,7 +128,7 @@ module Api
 
       test "shared mode is set on create and kept on edit" do
         template = oauth_apps(:acme_google)
-        write :post, api_v1_oauth_apps_path, form_body(slug: "shared-google", client_id: template.client_id,
+        write :post, api_v1_console_oauth_apps_path, form_body(slug: "shared-google", client_id: template.client_id,
           client_secret: "synthetic", shared: true, allowed_scopes: template.allowed_scopes)
         assert_response :created
         app = OauthApp.find_by!(slug: "shared-google")
@@ -136,12 +136,12 @@ module Api
         assert_equal app.oid, json_body.dig("data", "id")
 
         # The edit form omits `shared` (it is fixed after creation).
-        write :patch, api_v1_oauth_app_path(app.oid), form_body(slug: app.slug, client_id: app.client_id,
+        write :patch, api_v1_console_oauth_app_path(app.oid), form_body(slug: app.slug, client_id: app.client_id,
           allowed_scopes: app.allowed_scopes).except(:shared, :client_secret)
         assert_response :ok
         assert app.reload.shared?
 
-        write :patch, api_v1_oauth_app_path(app.oid), { shared: false }
+        write :patch, api_v1_console_oauth_app_path(app.oid), { shared: false }
         assert_response :unprocessable_entity
         assert_includes json_body.dig("error", "details", "shared"), "cannot be changed after creation"
         assert app.reload.shared?
@@ -149,7 +149,7 @@ module Api
 
       test "create builds an app with all fields" do
         assert_difference -> { OauthApp.count } => 1 do
-          write :post, api_v1_oauth_apps_path, form_body(
+          write :post, api_v1_console_oauth_apps_path, form_body(
             always_available: true, labels: { team: "comms" },
             allowed_scopes: %w[https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly]
           )
@@ -177,31 +177,31 @@ module Api
           authorization_endpoint: "https://auth.example.test/authorize", token_endpoint: "https://auth.example.test/token",
           userinfo_endpoint: "https://auth.example.test/userinfo", resource: "https://api.example.test/mcp"
         }
-        write :post, api_v1_oauth_apps_path, form_body(slug: "custom-app", provider: "custom", allowed_scopes: %w[read],
+        write :post, api_v1_console_oauth_apps_path, form_body(slug: "custom-app", provider: "custom", allowed_scopes: %w[read],
                                                         provider_config: config)
         assert_response :created
         app = OauthApp.find_by!(slug: "custom-app")
         assert_equal config.stringify_keys, app.provider_config
 
         # The SPA drops blank config fields, so a cleared endpoint is reported missing.
-        write :patch, api_v1_oauth_app_path(app.oid), { provider: "custom", provider_config: config.except(:token_endpoint) }
+        write :patch, api_v1_console_oauth_app_path(app.oid), { provider: "custom", provider_config: config.except(:token_endpoint) }
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "provider_config").any? { |m| m.include?("token_endpoint") }
         assert_equal "https://auth.example.test/token", app.reload.provider_config["token_endpoint"]
 
         # Non-custom providers are sent an empty config (the SPA drops the fields).
-        write :post, api_v1_oauth_apps_path, form_body(slug: "google-app", allowed_scopes: %w[read], provider_config: {})
+        write :post, api_v1_console_oauth_apps_path, form_body(slug: "google-app", allowed_scopes: %w[read], provider_config: {})
         assert_response :created
         assert_empty OauthApp.find_by!(slug: "google-app").provider_config
 
-        write :post, api_v1_oauth_apps_path, form_body(slug: "google-app-2", allowed_scopes: %w[read], provider_config: config)
+        write :post, api_v1_console_oauth_apps_path, form_body(slug: "google-app-2", allowed_scopes: %w[read], provider_config: config)
         assert_response :unprocessable_entity
         assert_not OauthApp.exists?(slug: "google-app-2")
       end
 
       test "create with no allowed scopes is rejected" do
         assert_no_difference -> { OauthApp.count } do
-          write :post, api_v1_oauth_apps_path, form_body(slug: "no-scopes", allowed_scopes: [])
+          write :post, api_v1_console_oauth_apps_path, form_body(slug: "no-scopes", allowed_scopes: [])
         end
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "allowed_scopes").present?
@@ -209,7 +209,7 @@ module Api
 
       test "create without a client secret is rejected" do
         assert_no_difference -> { OauthApp.count } do
-          write :post, api_v1_oauth_apps_path, form_body(client_secret: "")
+          write :post, api_v1_console_oauth_apps_path, form_body(client_secret: "")
         end
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "client_secret").present?
@@ -218,7 +218,7 @@ module Api
       test "update changes attributes and replaces lists" do
         app = oauth_apps(:acme_google)
         app.update!(client_secret: "original")
-        write :patch, api_v1_oauth_app_path(app.oid), form_body(
+        write :patch, api_v1_console_oauth_app_path(app.oid), form_body(
           slug: app.slug, description: "Renamed", client_id: "new-cid", enabled: false,
           allowed_scopes: %w[https://www.googleapis.com/auth/gmail.readonly]
         ).except(:shared, :client_secret)
@@ -236,12 +236,12 @@ module Api
         app.update!(client_secret: "original")
         base = form_body(slug: app.slug, client_id: app.client_id, allowed_scopes: app.allowed_scopes).except(:shared, :client_secret)
 
-        write :patch, api_v1_oauth_app_path(app.oid), base.merge(always_available: true)
+        write :patch, api_v1_console_oauth_app_path(app.oid), base.merge(always_available: true)
         assert_response :ok
         assert app.reload.always_available?
 
         # The SPA always sends the checkbox state, so unchecking clears the flag.
-        write :patch, api_v1_oauth_app_path(app.oid), base.merge(always_available: false)
+        write :patch, api_v1_console_oauth_app_path(app.oid), base.merge(always_available: false)
         assert_response :ok
         refute app.reload.always_available?
       end
@@ -251,15 +251,15 @@ module Api
         app.update!(client_secret: "original-secret")
         base = form_body(slug: app.slug, client_id: app.client_id, allowed_scopes: app.allowed_scopes).except(:shared)
 
-        write :patch, api_v1_oauth_app_path(app.oid), base.merge(client_secret: "")
+        write :patch, api_v1_console_oauth_app_path(app.oid), base.merge(client_secret: "")
         assert_response :ok
         assert_equal "original-secret", app.reload.client_secret
 
-        write :patch, api_v1_oauth_app_path(app.oid), base.except(:client_secret)
+        write :patch, api_v1_console_oauth_app_path(app.oid), base.except(:client_secret)
         assert_response :ok
         assert_equal "original-secret", app.reload.client_secret
 
-        write :patch, api_v1_oauth_app_path(app.oid), base.merge(client_secret: "rotated")
+        write :patch, api_v1_console_oauth_app_path(app.oid), base.merge(client_secret: "rotated")
         assert_equal "rotated", app.reload.client_secret
         assert_not_includes response.body, "rotated"
       end
@@ -270,7 +270,7 @@ module Api
           assert_equal [ "http://www.example.com/oauth/mercator/callback" ], JSON.parse(request[:body])["redirect_uris"]
           HttpClient::Response.new(status: 201, body: { client_id: "id", client_secret: "synthetic" }.to_json)
         end
-        assert_difference("OauthApp.count", 1) { post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf_headers }
+        assert_difference("OauthApp.count", 1) { post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: csrf_headers }
         assert_response :ok
         app = OauthApp.find_by!(slug: "mercator")
         assert app.shared?
@@ -279,11 +279,11 @@ module Api
         assert_not_includes response.body, "synthetic"
 
         registration_client { |**| flunk "Must reuse existing app" }
-        assert_no_difference("OauthApp.count") { post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf_headers }
+        assert_no_difference("OauthApp.count") { post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: csrf_headers }
         assert_equal "http://www.example.com/oauth/mercator/start", json_body.dig("data", "start_url")
 
         BrokerCredential.create!(oauth_app: app, provider_subject: "0x#{'ab' * 20}", token_endpoint: app.provider_strategy.token_endpoint)
-        get api_v1_integrations_path
+        get api_v1_console_integrations_path
         entry = json_body.dig("data", "apps").find { |a| a["slug"] == "mercator" }
         assert_equal app.oid, entry["id"]
         assert entry["shared"]
@@ -301,7 +301,7 @@ module Api
         end
         provider.stub(:preset, preset) do
           provider.stub(:scope_separator, ",") do
-            post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf_headers
+            post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: csrf_headers
           end
         end
         assert_response :ok
@@ -317,7 +317,7 @@ module Api
         registration_client { |**| HttpClient::Response.new(status: 201, body: { client_id: "loser", client_secret: "synthetic" }.to_json) }
         OauthApp.stub(:find_by, lookup) do
           OauthApp.stub(:create!, ->(*) { raise ActiveRecord::RecordNotUnique }) do
-            post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf
+            post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: csrf
           end
         end
         assert_response :ok
@@ -329,14 +329,14 @@ module Api
         OauthApp.create!(slug: "mercator", provider: "mercator", client_id: "id", client_secret: "synthetic",
                          allowed_scopes: [ "mercator:tools" ], shared: false, created_by: @operator)
         registration_client { |**| flunk "Must not register" }
-        post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf_headers
+        post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: csrf_headers
         assert_response :conflict
         assert_equal "The preset conflicts with an existing OAuth app. Review its configuration.", json_body.dig("error", "message")
       end
 
       test "registration failure leaves no app and reports the error" do
         registration_client { |**| raise Timeout::Error }
-        assert_no_difference("OauthApp.count") { post preset_api_v1_oauth_apps_path(provider: "mercator"), headers: csrf_headers }
+        assert_no_difference("OauthApp.count") { post preset_api_v1_console_oauth_apps_path(provider: "mercator"), headers: csrf_headers }
         assert_response :bad_gateway
         assert_equal "Could not set up the integration. Please try again or review the OAuth app configuration.",
                      json_body.dig("error", "message")
@@ -344,9 +344,9 @@ module Api
 
       test "unsupported providers cannot register" do
         registration_client { |**| flunk "Must not register" }
-        post preset_api_v1_oauth_apps_path(provider: "google"), headers: csrf_headers
+        post preset_api_v1_console_oauth_apps_path(provider: "google"), headers: csrf_headers
         assert_response :not_found
-        post preset_api_v1_oauth_apps_path(provider: "nope"), headers: csrf_headers
+        post preset_api_v1_console_oauth_apps_path(provider: "nope"), headers: csrf_headers
         assert_response :not_found
       end
 
@@ -362,7 +362,7 @@ module Api
         [ true, false, nil ].each do |claimed|
           http = expect_http_call(status: claimed.nil? ? 500 : 200, body: { claimed: claimed, wallet_address: @credential.provider_subject }.to_json)
           client = HttpClient.new(http: http)
-          HttpClient.stub(:new, client) { get provider_details_api_v1_oauth_app_path(@app.oid) }
+          HttpClient.stub(:new, client) { get provider_details_api_v1_console_oauth_app_path(@app.oid) }
           assert_response :ok
           data = json_body["data"]
           assert_equal "mercator", data["provider"]
@@ -372,7 +372,7 @@ module Api
           assert_not_includes response.body, "synthetic"
           http.verify
         end
-        @provider.stub(:details_for, ->(*) { flunk "No details on Integrations" }) { get api_v1_integrations_path }
+        @provider.stub(:details_for, ->(*) { flunk "No details on Integrations" }) { get api_v1_console_integrations_path }
         assert_response :ok
       end
 
@@ -381,7 +381,7 @@ module Api
         [ { expires_at: 1.minute.ago }, { expires_at: 1.hour.from_now, dead: true } ].each do |attrs|
           @credential.update!(attrs)
           @provider.stub(:details_for, ->(*) { flunk "No details for expired or dead credentials" }) do
-            get provider_details_api_v1_oauth_app_path(@app.oid)
+            get provider_details_api_v1_console_oauth_app_path(@app.oid)
           end
           assert_response :ok
           assert_equal @credential.oid, json_body.dig("data", "credential", "id")
@@ -391,7 +391,7 @@ module Api
 
       test "unexpected provider failure does not break the page" do
         mercator_app
-        @provider.stub(:details_for, ->(*) { raise TypeError }) { get provider_details_api_v1_oauth_app_path(@app.oid) }
+        @provider.stub(:details_for, ->(*) { raise TypeError }) { get provider_details_api_v1_console_oauth_app_path(@app.oid) }
         assert_response :ok
         assert_equal({}, json_body.dig("data", "details"))
         assert_equal @credential.oid, json_body.dig("data", "credential", "id")
@@ -401,12 +401,12 @@ module Api
         mercator_app
         secret = StaticSecret.create!(name: "mercator-wallet", broker_credential: @credential,
                                       inject_config: { "header" => "Authorization" })
-        @provider.stub(:details_for, ->(*) { { claimed: false } }) { get provider_details_api_v1_oauth_app_path(@app.oid) }
+        @provider.stub(:details_for, ->(*) { { claimed: false } }) { get provider_details_api_v1_console_oauth_app_path(@app.oid) }
         assert_equal secret.oid, json_body.dig("data", "credential", "static_secret_id")
       end
 
       test "personal apps have no provider account to describe" do
-        get provider_details_api_v1_oauth_app_path(oauth_apps(:acme_google).oid)
+        get provider_details_api_v1_console_oauth_app_path(oauth_apps(:acme_google).oid)
         assert_response :ok
         assert_equal({ "provider" => "google", "credential" => nil, "details" => {} }, json_body["data"])
       end

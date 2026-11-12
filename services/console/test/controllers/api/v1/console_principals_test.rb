@@ -11,23 +11,23 @@ module Api
 
       test "principal endpoints are admin-only for every caller type" do
         principal = principals(:acme_user_bob)
-        assert_admin_only_api :get, console_api_v1_principals_path
-        assert_admin_only_api :get, console_api_v1_principal_path(principal.oid)
-        assert_admin_only_api :get, effective_grants_api_v1_principal_path(principal.oid)
-        assert_admin_only_api :delete, api_v1_principal_path(principal.oid)
-        assert_admin_only_api :put, slack_channel_permissions_api_v1_principal_path(principal.oid),
+        assert_admin_only_api :get, api_v1_console_principals_path
+        assert_admin_only_api :get, api_v1_console_principal_path(principal.oid)
+        assert_admin_only_api :get, effective_grants_api_v1_console_principal_path(principal.oid)
+        assert_admin_only_api :delete, api_v1_console_principal_path(principal.oid)
+        assert_admin_only_api :put, slack_channel_permissions_api_v1_console_principal_path(principal.oid),
                               params: { data: { slack_channel_permissions: [] } }
-        assert_admin_only_api :post, api_v1_principal_roles_path(principal.oid),
+        assert_admin_only_api :post, api_v1_console_principal_roles_path(principal.oid),
                               params: { data: { role_id: roles(:acme_admin_role).oid } }
-        assert_admin_only_api :get, api_v1_slack_channels_path
+        assert_admin_only_api :get, api_v1_console_slack_channels_path
         assert Principal.exists?(principal.id)
         assert_not principal.reload.roles.include?(roles(:acme_admin_role))
       end
 
       test "an unknown principal oid is a 404" do
-        get console_api_v1_principal_path("prn_missing")
+        get api_v1_console_principal_path("prn_missing")
         assert_response :not_found
-        post api_v1_principal_roles_path("prn_missing"), params: { data: { role_id: roles(:acme_infra).oid } },
+        post api_v1_console_principal_roles_path("prn_missing"), params: { data: { role_id: roles(:acme_infra).oid } },
              headers: csrf_headers, as: :json
         assert_response :not_found
       end
@@ -36,11 +36,11 @@ module Api
         principal = principals(:acme_channel)
         principal.update!(name: "Platform Release Captain")
 
-        get console_api_v1_principals_path(q: "release captain", sort: "name")
+        get api_v1_console_principals_path(q: "release captain", sort: "name")
         assert_response :ok
         assert_equal [ principal.oid ], json_body["data"].map { |p| p["id"] }
 
-        get console_api_v1_principals_path(q: "c012345", sort: "name")
+        get api_v1_console_principals_path(q: "c012345", sort: "name")
         assert_equal [ principal.oid ], json_body["data"].map { |p| p["id"] }
         assert_equal 1, json_body.dig("meta", "total")
       end
@@ -50,7 +50,7 @@ module Api
         principals(:globex_user).update!(name: "Alpha")
         principals(:acme_user_alice).update!(name: "bravo")
 
-        get console_api_v1_principals_path(sort: "name")
+        get api_v1_console_principals_path(sort: "name")
         names = json_body["data"].map { |p| p["name"] }
         assert_equal [ "Alpha", "bravo", "zulu", nil, nil ], names
       end
@@ -60,13 +60,13 @@ module Api
         newer = Principal.create!(common.merge(foreign_id: "Alpha-sort", created_at: 1.day.ago))
         older = Principal.create!(common.merge(foreign_id: "zeta-sort", created_at: 2.days.ago))
 
-        get console_api_v1_principals_path(sort: "name")
+        get api_v1_console_principals_path(sort: "name")
         same = json_body["data"].select { |p| p["name"] == "same" }.map { |p| p["id"] }
         assert_equal [ older.oid, newer.oid ], same
       end
 
       test "index rejects an unknown sort" do
-        get console_api_v1_principals_path(sort: "bogus")
+        get api_v1_console_principals_path(sort: "bogus")
         assert_response :bad_request
       end
 
@@ -77,11 +77,11 @@ module Api
             foreign_id: "pagination-#{number}", kind: "user", name: "Pagination principal #{number}" }
         end)
 
-        get console_api_v1_principals_path(sort: "name")
+        get api_v1_console_principals_path(sort: "name")
         assert_equal 50, json_body["data"].size
         assert_equal({ "page" => 1, "limit" => 50, "total" => 51, "total_pages" => 2 }, json_body["meta"])
 
-        get console_api_v1_principals_path(sort: "name", page: 2)
+        get api_v1_console_principals_path(sort: "name", page: 2)
         assert_equal 1, json_body["data"].size
         assert_nil json_body.dig("data", 0, "name")
       end
@@ -90,7 +90,7 @@ module Api
         principal = principals(:acme_user_alice)
         principal.update!(slack_user_id: "U0123456789")
 
-        get console_api_v1_principal_path(principal.oid)
+        get api_v1_console_principal_path(principal.oid)
         data = json_body["data"]
         assert_equal principal.kind, data["kind"]
         assert_equal principal.slack_user_id, data["slack_user_id"]
@@ -98,6 +98,7 @@ module Api
         assert data.key?("inherited_slack_channel_permissions")
 
         get api_v1_principal_path(principal.oid), headers: bearer_headers
+        assert_response :ok
         assert_not json_body["data"].key?("kind")
         assert_not json_body["data"].key?("roles")
       end
@@ -107,7 +108,7 @@ module Api
         principal.update!(kind: "slack_dm", slack_user_id: "U0123456789", slack_channel_id: "D0123456789",
                           slack_team_id: "T0123456789", slack_email: "member@example.com")
 
-        get console_api_v1_principal_path(principal.oid)
+        get api_v1_console_principal_path(principal.oid)
         labels = json_body.dig("data", "labels")
         %w[kind slack_user_id slack_channel_id slack_team_id slack_email].each do |key|
           assert_not labels.key?(key), key
@@ -128,7 +129,7 @@ module Api
         roles(:globex_infra).update!(assign_by_default: true)
 
         assert_difference -> { Principal.count }, 1 do
-          post api_v1_principals_path,
+          post api_v1_console_principals_path,
                params: { data: { foreign_id: "C-new-console", name: "New console principal",
                                  labels: { kind: "slack_channel", team: "platform" } } },
                headers: csrf_headers, as: :json
@@ -151,7 +152,7 @@ module Api
         existing = Principal.create!(foreign_id: "duplicate-console-principal", created_by: @operator)
 
         assert_no_difference -> { Principal.count } do
-          post api_v1_principals_path, params: { data: { foreign_id: existing.foreign_id, name: "Duplicate" } },
+          post api_v1_console_principals_path, params: { data: { foreign_id: existing.foreign_id, name: "Duplicate" } },
                headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
@@ -161,7 +162,7 @@ module Api
 
       test "sandbox access is updated with a partial PATCH" do
         principal = principals(:acme_user_bob)
-        patch api_v1_principal_path(principal.oid),
+        patch api_v1_console_principal_path(principal.oid),
               params: { data: { sandbox_repo_cache: "public", sandbox_observability_enabled: false,
                                 sandbox_sessions_read_enabled: false, sandbox_workflows_read_enabled: false,
                                 sandbox_workflows_write_enabled: false } },
@@ -177,7 +178,7 @@ module Api
 
       test "replacing Slack channel permissions stores the submitted rows" do
         principal = principals(:acme_user_bob)
-        put slack_channel_permissions_api_v1_principal_path(principal.oid),
+        put slack_channel_permissions_api_v1_console_principal_path(principal.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: true, download_enabled: false, history_enabled: true },
               { channel_id: "g9876543210", upload_enabled: false, download_enabled: true, history_enabled: false }
@@ -198,7 +199,7 @@ module Api
         principal.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
         principal.slack_channel_permissions.create!(channel_id: "D0123456789", download_enabled: true)
 
-        put slack_channel_permissions_api_v1_principal_path(principal.oid),
+        put slack_channel_permissions_api_v1_console_principal_path(principal.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: false, download_enabled: true, history_enabled: false },
               { channel_id: "D0123456789", upload_enabled: true, download_enabled: false, history_enabled: false }
@@ -219,7 +220,7 @@ module Api
         dm = principal.slack_channel_permissions.create!(channel_id: "D0123456789", download_enabled: true)
         version = principal.reload.sync_config_cache_version
 
-        put slack_channel_permissions_api_v1_principal_path(principal.oid),
+        put slack_channel_permissions_api_v1_console_principal_path(principal.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: true, download_enabled: false, history_enabled: false }
             ] } },
@@ -231,7 +232,7 @@ module Api
 
       test "replacing rejects rows without any permission" do
         principal = principals(:acme_user_bob)
-        put slack_channel_permissions_api_v1_principal_path(principal.oid),
+        put slack_channel_permissions_api_v1_console_principal_path(principal.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: false, download_enabled: false, history_enabled: false }
             ] } },
@@ -244,11 +245,11 @@ module Api
         principal = principals(:acme_user_bob)
         principal.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
 
-        delete slack_channel_permission_api_v1_principal_path(principal.oid, "C0123456789"), headers: csrf_headers
+        delete slack_channel_permission_api_v1_console_principal_path(principal.oid, "C0123456789"), headers: csrf_headers
         assert_response :no_content
         assert_empty principal.slack_channel_permissions.reload
 
-        delete slack_channel_permission_api_v1_principal_path(principal.oid, "C0123456789"), headers: csrf_headers
+        delete slack_channel_permission_api_v1_console_principal_path(principal.oid, "C0123456789"), headers: csrf_headers
         assert_response :not_found
       end
 
@@ -256,7 +257,7 @@ module Api
         principal = principals(:acme_channel)
         roles(:acme_infra).slack_channel_permissions.create!(channel_id: "G9876543210", history_enabled: true)
 
-        get console_api_v1_principal_path(principal.oid)
+        get api_v1_console_principal_path(principal.oid)
         inherited = json_body.dig("data", "inherited_slack_channel_permissions")
         assert_equal [ "G9876543210" ], inherited.map { |p| p["channel_id"] }
         assert_equal true, inherited.first["history_enabled"]
@@ -276,7 +277,7 @@ module Api
           assert_difference -> { Grant.where(principal: principal).count }, -3 do
             assert_difference -> { PrincipalRole.where(principal: principal).count }, -1 do
               assert_difference -> { McpOauthRefreshToken.where(principal: principal).count }, -1 do
-                delete api_v1_principal_path(principal.oid), headers: csrf_headers
+                delete api_v1_console_principal_path(principal.oid), headers: csrf_headers
               end
             end
           end
@@ -290,20 +291,20 @@ module Api
         role = roles(:acme_admin_role)
 
         assert_difference -> { principal.principal_roles.count }, 1 do
-          post api_v1_principal_roles_path(principal.oid), params: { data: { role_id: role.oid } },
+          post api_v1_console_principal_roles_path(principal.oid), params: { data: { role_id: role.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :created
         assert_equal role.name, json_body.dig("data", "name")
 
         assert_no_difference -> { principal.principal_roles.count } do
-          post api_v1_principal_roles_path(principal.oid), params: { data: { role_id: role.oid } },
+          post api_v1_console_principal_roles_path(principal.oid), params: { data: { role_id: role.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :ok
 
         assert_difference -> { principal.principal_roles.count }, -1 do
-          delete api_v1_principal_role_path(principal.oid, role.oid), headers: csrf_headers
+          delete api_v1_console_principal_role_path(principal.oid, role.oid), headers: csrf_headers
         end
         assert_response :no_content
       end
@@ -312,7 +313,7 @@ module Api
         principal = principals(:acme_channel)
         secret = static_secrets(:github_token_inject)
 
-        get api_v1_principal_grants_path(principal.oid)
+        get api_v1_console_principal_grants_path(principal.oid)
         grant = json_body["data"].find { |g| g["id"] == grants(:acme_channel_github_token).oid }
         assert_equal({ "kind" => "static", "kind_label" => "Static", "id" => secret.oid,
                        "foreign_id" => secret.foreign_id, "name" => secret.name }, grant["grantable"])
@@ -324,7 +325,7 @@ module Api
         secret = static_secrets(:github_token_inject)
 
         assert_difference -> { principal.grants.count }, 1 do
-          post api_v1_grants_path, params: { data: { principal_id: principal.oid, static_secret_id: secret.oid } },
+          post api_v1_console_grants_path, params: { data: { principal_id: principal.oid, static_secret_id: secret.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :created
@@ -333,7 +334,7 @@ module Api
         assert_equal @operator, principal.grants.find_by!(static_secret: secret).created_by
 
         assert_no_difference -> { principal.grants.count } do
-          post api_v1_grants_path, params: { data: { principal_id: principal.oid, static_secret_id: secret.oid } },
+          post api_v1_console_grants_path, params: { data: { principal_id: principal.oid, static_secret_id: secret.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :ok
@@ -342,14 +343,14 @@ module Api
       test "granting works for a non-static secret kind" do
         principal = principals(:acme_user_bob)
         secret = pg_dsn_secrets(:acme_analytics_pg)
-        post api_v1_grants_path, params: { data: { principal_id: principal.oid, pg_dsn_secret_id: secret.oid } },
+        post api_v1_console_grants_path, params: { data: { principal_id: principal.oid, pg_dsn_secret_id: secret.oid } },
              headers: csrf_headers, as: :json
         assert_response :created
         assert principal.grants.exists?(pg_dsn_secret: secret)
       end
 
       test "granting without a secret is a validation error" do
-        post api_v1_grants_path, params: { data: { principal_id: principals(:acme_user_bob).oid } },
+        post api_v1_console_grants_path, params: { data: { principal_id: principals(:acme_user_bob).oid } },
              headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
       end
@@ -358,14 +359,14 @@ module Api
         principal = principals(:acme_channel)
         grant = grants(:acme_channel_github_token)
         assert_difference -> { principal.grants.count }, -1 do
-          delete api_v1_grant_path(grant.oid), headers: csrf_headers
+          delete api_v1_console_grant_path(grant.oid), headers: csrf_headers
         end
         assert_response :no_content
       end
 
       test "effective grants source each secret as direct or via a role" do
         principal = principals(:acme_channel)
-        get effective_grants_api_v1_principal_path(principal.oid)
+        get effective_grants_api_v1_console_principal_path(principal.oid)
         assert_response :ok
 
         direct = json_body["data"].find { |g| g["id"] == static_secrets(:github_token_inject).oid }
@@ -389,17 +390,17 @@ module Api
             created_by_id: @operator.id, created_at: now, updated_at: now }
         end)
 
-        get effective_grants_api_v1_principal_path(principal.oid, page: 2)
+        get effective_grants_api_v1_console_principal_path(principal.oid, page: 2)
         assert_equal 4, json_body["data"].size
         assert_equal({ "page" => 2, "limit" => 50, "total" => 54, "total_pages" => 2 }, json_body["meta"])
 
-        get api_v1_principal_grants_path(principal.oid, page: 2)
+        get api_v1_console_principal_grants_path(principal.oid, page: 2)
         assert_equal 3, json_body["data"].size
         assert_equal 53, json_body.dig("meta", "total")
       end
 
       test "secrets lists every kind with identifying metadata only" do
-        get api_v1_secrets_path(limit: 200)
+        get api_v1_console_secrets_path(limit: 200)
         assert_response :ok
         kinds = json_body["data"].map { |s| s["kind"] }.uniq
         assert_includes kinds, "static"
@@ -416,16 +417,16 @@ module Api
       test "secrets filters by kind and query" do
         secret = static_secrets(:acme_staging_api_key)
         secret.update!(name: "Unique Picker Name")
-        get api_v1_secrets_path(kind: "static", q: "picker NAME")
+        get api_v1_console_secrets_path(kind: "static", q: "picker NAME")
         assert_equal [ secret.oid ], json_body["data"].map { |s| s["id"] }
 
-        get api_v1_secrets_path(kind: "bogus")
+        get api_v1_console_secrets_path(kind: "bogus")
         assert_response :bad_request
       end
 
       test "secrets exclude a principal's direct grants but keep role-inherited ones" do
         principal = principals(:acme_channel)
-        get api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 200)
+        get api_v1_console_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 200)
         assert_response :ok
         ids = json_body["data"].map { |s| s["id"] }
         assert_not_includes ids, static_secrets(:github_token_inject).oid
@@ -452,7 +453,7 @@ module Api
         seen = []
         page = 1
         loop do
-          get api_v1_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 2, page: page)
+          get api_v1_console_secrets_path(exclude_grantee: "principal:#{principal.oid}", limit: 2, page: page)
           assert_response :ok
           assert_equal expected_total, json_body.dig("meta", "total")
           seen.concat(json_body["data"].map { |s| s["id"] })
@@ -466,9 +467,9 @@ module Api
       end
 
       test "secrets reject an unknown or malformed grantee" do
-        get api_v1_secrets_path(exclude_grantee: "principal:prn_missing")
+        get api_v1_console_secrets_path(exclude_grantee: "principal:prn_missing")
         assert_response :not_found
-        get api_v1_secrets_path(exclude_grantee: "user:#{users(:acme_admin).id}")
+        get api_v1_console_secrets_path(exclude_grantee: "user:#{users(:acme_admin).id}")
         assert_response :bad_request
       end
 
@@ -479,7 +480,7 @@ module Api
                                 name: "engineering", active: true, member_user_ids: [ "U0999999999" ])
 
         with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => "xoxb-test-token") do
-          get api_v1_slack_channels_path(q: "eng", exclude_owner: "principal:#{principal.oid}")
+          get api_v1_console_slack_channels_path(q: "eng", exclude_owner: "principal:#{principal.oid}")
         end
         assert_response :ok
         assert_equal "no-store", response.headers["Cache-Control"]
@@ -491,14 +492,14 @@ module Api
         )
 
         with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => "xoxb-test-token") do
-          get api_v1_slack_channels_path(exclude_owner: "principal:#{principal.oid}")
+          get api_v1_console_slack_channels_path(exclude_owner: "principal:#{principal.oid}")
         end
         assert_not_includes json_body["data"].map { |c| c["channel_id"] }, "C0123456789"
       end
 
       test "slack channels resolve names for existing rows by id" do
         with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => "xoxb-test-token") do
-          get api_v1_slack_channels_path(ids: %w[C0123456789 g9876543210 C9999999999])
+          get api_v1_console_slack_channels_path(ids: %w[C0123456789 g9876543210 C9999999999])
         end
         assert_equal({ "C0123456789" => "general", "G9876543210" => "private" },
                      json_body["data"].to_h { |c| [ c["channel_id"], c["name"] ] })
@@ -506,13 +507,13 @@ module Api
 
       test "slack channels explain a missing bot token" do
         with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => nil, "IRON_CONTROL_SLACK_BOT_TOKEN" => nil) do
-          get api_v1_slack_channels_path
+          get api_v1_console_slack_channels_path
         end
         assert_equal "SLACK_BOT_TOKEN is not configured.", json_body.dig("meta", "catalog_error")
       end
 
       test "slack channels reject a malformed owner" do
-        get api_v1_slack_channels_path(exclude_owner: "user:usr_1")
+        get api_v1_console_slack_channels_path(exclude_owner: "user:usr_1")
         assert_response :bad_request
       end
     end

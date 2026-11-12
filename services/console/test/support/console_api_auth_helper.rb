@@ -1,14 +1,14 @@
-# Helpers for /api/v1 request tests that exercise the authentication paths
-# an endpoint declares: the console session cookie (with CSRF) and/or bearer
-# API keys.
+# Helpers for /api/v1 request tests. The namespace decides the credential:
+# /api/v1/console/* takes the console session cookie (with CSRF on writes),
+# the rest of /api/v1 (outside /api/v1/sandbox) a bearer API key.
 #
-#   sign_in_console(users(:acme_admin))         # cookie session in this test
-#   get api_v1_principals_path                   # GET needs no CSRF token
-#   post api_v1_principals_path, params: {...}, headers: csrf_headers, as: :json
+#   sign_in_console(users(:acme_admin))                # cookie session in this test
+#   get api_v1_console_principals_path                 # GET needs no CSRF token
+#   post api_v1_console_principals_path, params: {...}, headers: csrf_headers, as: :json
 #   get api_v1_principals_path, headers: bearer_headers("iak_acme-ci-token")
 #
-#   assert_admin_only_api :post, api_v1_principals_path, params: { data: {} }
-#   assert_active_user_api :get, api_v1_skills_path
+#   assert_admin_only_api :post, api_v1_console_principals_path, params: { data: {} }
+#   assert_active_user_api :get, api_v1_console_skills_path
 module ConsoleApiAuthHelper
   TEST_PASSWORD = "password123456".freeze
   ADMIN_TOKEN = "iak_acme-ci-token".freeze
@@ -31,7 +31,7 @@ module ConsoleApiAuthHelper
   end
 
   def console_sign_out
-    delete api_v1_session_path, headers: csrf_headers
+    delete api_v1_console_session_path, headers: csrf_headers
     @console_csrf_token = nil
   end
 
@@ -40,10 +40,10 @@ module ConsoleApiAuthHelper
     URI.parse(location).request_uri
   end
 
-  # The session's CSRF token, as the SPA obtains it from GET /api/v1/me.
+  # The session's CSRF token, as the SPA obtains it from GET /api/v1/console/me.
   def console_csrf_token
     @console_csrf_token ||= begin
-      get api_v1_me_path
+      get api_v1_console_me_path
       JSON.parse(response.body).dig("data", "csrf_token") ||
         raise("no CSRF token: is the session signed in? (#{response.status})")
     end
@@ -73,27 +73,25 @@ module ConsoleApiAuthHelper
   end
 
   # Runs +method+ +path+ in a separate integration session per caller and
-  # asserts the admin-only contract for the endpoint's declared credential
-  # policy (Api::BaseController.accepts_credentials; pass +credential:+ to
-  # override it for a request-dependent action):
+  # asserts the admin-only contract for the credential the path's namespace
+  # takes (see #path_credential):
   #
-  # - always: anonymous 401;
-  # - bearer accepted: bad and disabled bearer 401, non-admin bearer 403;
-  #   otherwise any bearer (even an admin's) 403 session_required;
-  # - session accepted: disabled cookie 401, pending cookie 403, non-admin
-  #   cookie 403, and (for writes) admin cookie without
-  #   CSRF 403; otherwise an admin cookie 403 bearer_required.
+  # - console (session): anonymous 401 session_required; any bearer, even an
+  #   admin's, 403 session_required; disabled cookie 401, pending cookie 403,
+  #   non-admin cookie 403, and (for writes) admin cookie without CSRF 403;
+  # - bearer: anonymous, bad, and disabled bearer 401; non-admin bearer 403;
+  #   an admin's console cookie 403 bearer_required.
   #
   # Success paths are left to the caller because they have side effects.
-  def assert_admin_only_api(method, path, params: nil, credential: nil)
-    policy = credential || declared_credential_policy(method, path)
-    assert_api_denials(method, path, params: params, policy: policy)
+  def assert_admin_only_api(method, path, params: nil)
+    credential = path_credential(path)
+    assert_api_denials(method, path, params: params, credential: credential)
 
-    if accepts_bearer?(policy)
-      assert_api_status(:forbidden, method, path, params: params, reason: "admin_required",
+    if credential == :bearer
+      assert_api_status(:forbidden, method, path, params: params, message: "API key owner is not an admin",
                         headers: bearer_headers(MEMBER_TOKEN))
+      return
     end
-    return unless accepts_session?(policy)
 
     assert_api_status(:forbidden, method, path, params: params, reason: "admin_required",
                       sign_in: create_console_user, csrf: true)
@@ -103,59 +101,50 @@ module ConsoleApiAuthHelper
     end
   end
 
-  # Like assert_admin_only_api for endpoints that opt in with
-  # allow_active_users: anonymous, disabled, pending, wrong-credential, and
-  # CSRF-less writes are refused, and so are non-admin bearer keys.
-  def assert_active_user_api(method, path, params: nil, credential: nil)
-    policy = credential || declared_credential_policy(method, path)
-    assert_api_denials(method, path, params: params, policy: policy)
-    # allow_active_users widens session access only: keys need an admin owner.
-    if accepts_bearer?(policy)
-      assert_api_status(:forbidden, method, path, params: params, reason: "admin_required",
-                        headers: bearer_headers(MEMBER_TOKEN))
-    end
-    if accepts_session?(policy) && !%w[get head].include?(method.to_s)
+  # Like assert_admin_only_api for console endpoints that opt in with
+  # allow_active_users: anonymous, disabled, pending, bearer, and CSRF-less
+  # writes are refused.
+  def assert_active_user_api(method, path, params: nil)
+    assert_equal :session, path_credential(path), "allow_active_users exists only in the console API"
+    assert_api_denials(method, path, params: params, credential: :session)
+    unless %w[get head].include?(method.to_s)
       assert_api_status(:forbidden, method, path, params: params, reason: "csrf",
                         sign_in: create_console_user, csrf: false)
     end
   end
 
-  def declared_credential_policy(method, path)
-    route = Rails.application.routes.recognize_path(path.to_s.split("?").first, method: method.to_s.upcase)
-    controller = "#{route[:controller]}_controller".camelize.constantize
-    controller.accepted_credentials_for(route[:action]) ||
-      flunk("#{controller}##{route[:action]} declares no accepts_credentials")
+  # :session for /api/v1/console/*, :bearer for the rest of /api/v1.
+  def path_credential(path)
+    path = URI.parse(path.to_s).path
+    flunk "#{path} is not an /api/v1 operator path" if !path.start_with?("/api/v1/") || path.start_with?("/api/v1/sandbox/")
+
+    path.start_with?("/api/v1/console/") ? :session : :bearer
   end
 
   private
 
-  def accepts_bearer?(policy) = %i[bearer bearer_or_session].include?(policy)
-  def accepts_session?(policy) = %i[session bearer_or_session].include?(policy)
-
-  def assert_api_denials(method, path, params:, policy:)
-    assert_api_status(:unauthorized, method, path, params: params)
-    if accepts_bearer?(policy)
-      assert_api_status(:unauthorized, method, path, params: params, headers: bearer_headers("iak_bogus"))
-      assert_api_status(:unauthorized, method, path, params: params, headers: bearer_headers(DISABLED_TOKEN))
-    else
+  def assert_api_denials(method, path, params:, credential:)
+    if credential == :session
+      assert_api_status(:unauthorized, method, path, params: params, reason: "session_required")
       assert_api_status(:forbidden, method, path, params: params, reason: "session_required",
                         headers: bearer_headers(ADMIN_TOKEN))
       assert_api_status(:forbidden, method, path, params: params, reason: "session_required",
                         headers: bearer_headers("iak_bogus"))
-    end
-    if accepts_session?(policy)
       assert_api_status(:unauthorized, method, path, params: params, reason: "account_disabled",
                         sign_in: create_console_user, csrf: true, disable: true)
       assert_api_status(:forbidden, method, path, params: params, reason: "account_pending",
                         sign_in: create_console_user(status: :pending), csrf: false)
     else
+      assert_api_status(:unauthorized, method, path, params: params)
+      assert_api_status(:unauthorized, method, path, params: params, headers: bearer_headers("iak_bogus"))
+      assert_api_status(:unauthorized, method, path, params: params, headers: bearer_headers(DISABLED_TOKEN))
       assert_api_status(:forbidden, method, path, params: params, reason: "bearer_required",
                         sign_in: create_console_user(admin: true), csrf: true)
     end
   end
 
   def assert_api_status(status, method, path, params: nil, headers: {}, sign_in: nil, csrf: false,
-                        disable: false, reason: nil)
+                        disable: false, reason: nil, message: nil)
     session = open_session
     session.extend(ConsoleApiAuthHelper)
     if sign_in
@@ -168,6 +157,9 @@ module ConsoleApiAuthHelper
     assert_equal Rack::Utils.status_code(status), session.response.status, "#{label}: #{session.response.body}"
     if reason
       assert_equal reason, JSON.parse(session.response.body).dig("error", "details", "reason"), label
+    end
+    if message
+      assert_equal message, JSON.parse(session.response.body).dig("error", "message"), label
     end
   end
 end

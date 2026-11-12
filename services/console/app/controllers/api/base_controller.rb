@@ -1,264 +1,77 @@
 module Api
-  # Base for the operator JSON API under /api/v1.
+  # Base for the bearer operator API under /api/v1 (machine callers, CLIs,
+  # api-rs). Every action takes a bearer ApiKey whose owner is an active admin.
   #
-  # Credentials. Every controller declares which credential each action
-  # accepts (`accepts_credentials`):
+  # The namespace decides the credential: controllers under
+  # Api::V1::Console (/api/v1/console/*, the browser SPA) include
+  # ConsoleApiAuthentication and take the console session cookie instead;
+  # sandbox controllers use their own JWT schemes. The two never mix:
   #
-  #   :bearer             a bearer ApiKey only (machine callers, CLIs)
-  #   :session            the console session cookie only (the browser SPA)
-  #   :bearer_or_session  either one
-  #
-  # A request carrying the wrong type is refused before anything else runs (403
-  # details.reason=session_required / bearer_required); it never falls back
-  # to the other credential. An action without a declaration fails closed.
-  # Cookie-authenticated requests that are not GET/HEAD must carry the
-  # session's CSRF token in X-CSRF-Token (fetch it from GET /api/v1/me);
-  # bearer requests skip CSRF because browsers never attach them ambiently.
-  # A bearer key is accepted only when its owner is an active admin.
-  #
-  # Authorization is per endpoint. Every action is admin-only unless the
-  # controller opts in with `allow_active_users` (any active session; scope
-  # records with `owned_scope` / `require_owner_or_admin!`) or
-  # `allow_pending_users` (also pending accounts, e.g. GET /api/v1/me).
+  # - a request with the console session cookie and no Authorization header
+  #   gets 403 details.reason=bearer_required here (it never falls back);
+  # - a controller or path in the console namespace that reaches this bearer
+  #   check fails closed, so a console controller cannot silently accept keys.
   class BaseController < ActionController::API
     include ApiRequestSupport
     include ConsoleSession
-    include ActionController::RequestForgeryProtection
 
-    CSRF_SAFE_METHODS = %w[GET HEAD].freeze
-    CREDENTIAL_TYPES = %i[bearer session bearer_or_session].freeze
+    CONSOLE_CONTROLLER_PREFIX = "api/v1/console/".freeze
+    CONSOLE_PATH_PREFIX = "/api/v1/console/".freeze
 
-    # Raised (in development and test) for an action with no credential
-    # policy, so a new endpoint cannot ship without choosing one.
-    class MissingCredentialPolicy < StandardError; end
+    # Raised (in development and test) when a console-namespace request
+    # reaches the bearer check, i.e. a console controller that does not
+    # include ConsoleApiAuthentication or a misrouted path.
+    class CredentialNamespaceMismatch < StandardError; end
 
-    # The railtie only applies forgery-protection defaults to
-    # ActionController::Base; share its Origin-header check with the API.
-    self.forgery_protection_origin_check = ActionController::Base.forgery_protection_origin_check
-
-    before_action :authenticate_request!
-    before_action :require_active_account!
-    before_action :verify_session_csrf_token!
-    before_action :require_admin!
+    before_action :authenticate_api_key!
 
     rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
     attr_reader :current_api_key
 
-    # Ordered [policy, only, except] declarations; the last one matching
-    # an action wins, so a controller can declare a default and then override
-    # single actions. Subclasses inherit their parent's declarations.
-    class_attribute :accepted_credentials_rules, instance_writer: false, default: [].freeze
-
-    # Declares the credential type +policy+ (see CREDENTIAL_TYPES) for the
-    # controller's actions, or only:/except: some of them.
-    def self.accepts_credentials(policy, only: nil, except: nil)
-      unless CREDENTIAL_TYPES.include?(policy)
-        raise ArgumentError, "unknown credential policy #{policy.inspect}"
-      end
-
-      rule = [ policy, only && Array(only).map(&:to_s), except && Array(except).map(&:to_s) ]
-      self.accepted_credentials_rules = (accepted_credentials_rules + [ rule.freeze ]).freeze
-    end
-
-    # The policy for +action+: the last declaration that covers it, or nil.
-    def self.accepted_credentials_for(action)
-      action = action.to_s
-      accepted_credentials_rules.reverse.find do |_policy, only, except|
-        (only.nil? || only.include?(action)) && (except.nil? || !except.include?(action))
-      end&.first
-    end
-
-    # Opts actions into any active (approved, not disabled) session account
-    # instead of the admin-only default. Bearer keys still need an admin
-    # owner. The action must scope what it loads to the caller unless
-    # acting_admin?.
-    def self.allow_active_users(**options)
-      skip_before_action :require_admin!, **options
-    end
-
-    # Opts actions into pending accounts as well (session requests only; a
-    # pending API key owner is still rejected). Implies allow_active_users.
-    def self.allow_pending_users(**options)
-      skip_before_action :require_admin!, **options
-      skip_before_action :require_active_account!, **options
+    # :bearer here; :session for controllers that include
+    # ConsoleApiAuthentication. Read by the route-sweep test.
+    def self.accepted_credential
+      :bearer
     end
 
     def current_user
-      return current_api_key&.user if api_key_authenticated?
-
-      console_session_user if session_authenticated?
+      current_api_key&.user
     end
 
     private
 
-    # :api_key, :session, or nil before authentication.
-    attr_reader :auth_method
-
-    def api_key_authenticated?
-      auth_method == :api_key
-    end
-
-    def session_authenticated?
-      auth_method == :session
-    end
-
-    def acting_admin?
-      current_user&.admin? || false
-    end
-
-    # An Authorization header always counts as a bearer credential, even when a
-    # session cookie is also present.
-    def authenticate_request!
-      presented = presented_credential
-      policy = self.class.accepted_credentials_for(action_name)
-      return refuse_missing_credential_policy! if policy.nil?
-
-      if presented == :api_key
-        return refuse_credential(:session) if policy == :session
-
-        authenticate_api_key!
-      elsif presented == :session && policy != :bearer
-        authenticate_session!
-      elsif presented == :session
-        refuse_credential(:bearer)
-      elsif policy == :session
-        render_error(status: :unauthorized, message: "console session required",
-                     details: { reason: "session_required" })
-      else
-        render_error(status: :unauthorized, message: "invalid or missing API key")
-      end
-    end
-
-    def presented_credential
-      @presented_credential ||= if request.headers["Authorization"].present?
-        :api_key
-      elsif console_session_user
-        :session
-      else
-        :none
-      end
-    end
-
-    def refuse_credential(required)
-      if required == :session
-        render_error(status: :forbidden, message: "this endpoint requires a console session; API keys are not accepted",
-                     details: { reason: "session_required" })
-      else
-        render_error(status: :forbidden, message: "this endpoint requires a bearer API key; the console session is not accepted",
-                     details: { reason: "bearer_required" })
-      end
-    end
-
-    def refuse_missing_credential_policy!
-      message = "#{self.class.name}##{action_name} declares no accepts_credentials"
-      raise MissingCredentialPolicy, message if Rails.env.local?
-
-      Rails.logger.error(message)
-      render_error(status: :unauthorized, message: "endpoint has no credential policy",
-                   details: { reason: "credential_policy_missing" })
-    end
-
     def authenticate_api_key!
+      return refuse_credential_namespace_mismatch! if console_namespace_request?
+
+      if request.headers["Authorization"].blank? && console_session_user
+        return render_error(status: :forbidden,
+                            message: "this endpoint requires a bearer API key; the console session is not accepted " \
+                                     "(the console API is under /api/v1/console)",
+                            details: { reason: "bearer_required" })
+      end
+
       token = bearer_token
       @current_api_key = ApiKey.find_by_token(token) if token.present?
       unless current_api_key&.user&.active?
         return render_error(status: :unauthorized, message: "invalid or missing API key")
       end
-      # allow_active_users widens session access, never bearer access.
-      unless current_api_key.user.admin?
-        return render_error(status: :forbidden, message: "API key owner is not an admin",
-                            details: { reason: "admin_required" })
-      end
+      return if current_api_key.user.admin?
 
-      @auth_method = :api_key
+      render_error(status: :forbidden, message: "API key owner is not an admin")
     end
 
-    # A disabled session user is signed out on every endpoint, including the
-    # ones open to pending accounts. The flash survives the reset so the login
-    # page explains why.
-    def authenticate_session!
-      if console_session_user.disabled?
-        reset_session
-        request.flash[:alert] = ConsoleSignIn::DISABLED_MESSAGE
-        return render_error(status: :unauthorized, message: "account disabled",
-                            details: { reason: "account_disabled" })
-      end
-
-      @auth_method = :session
+    def console_namespace_request?
+      controller_path.start_with?(CONSOLE_CONTROLLER_PREFIX) || request.path.start_with?(CONSOLE_PATH_PREFIX)
     end
 
-    # Bearer owners are already required to be active. A pending session user
-    # gets 403 so the SPA can show the holding page.
-    def require_active_account!
-      return unless session_authenticated?
-      return if console_session_user.active?
+    def refuse_credential_namespace_mismatch!
+      message = "#{self.class.name}##{action_name} (#{request.path}) mixes the console and bearer credential namespaces"
+      raise CredentialNamespaceMismatch, message if Rails.env.local?
 
-      render_error(status: :forbidden, message: "account pending approval", details: { reason: "account_pending" })
-    end
-
-    def verify_session_csrf_token!
-      return unless session_authenticated?
-      return if CSRF_SAFE_METHODS.include?(request.request_method)
-      return if valid_request_origin? && any_authenticity_token_valid?
-
-      render_error(status: :forbidden, message: "invalid or missing CSRF token", details: { reason: "csrf" })
-    end
-
-    def require_admin!
-      return if acting_admin?
-
-      message = api_key_authenticated? ? "API key owner is not an admin" : "admin access required"
-      render_error(status: :forbidden, message: message, details: { reason: "admin_required" })
-    end
-
-    # One-shot handoff to the SPA of the flash set by a redirect-based flow
-    # (SSO or OAuth callback).
-    def consume_console_flash
-      flash = request.flash
-      payload = { notice: flash[:notice].presence, alert: flash[:alert].presence }.compact
-      flash.discard
-      payload
-    end
-
-    # Records an active-user endpoint may expose: everything for an acting
-    # admin, otherwise only rows whose +owner+ association/column is the caller.
-    def owned_scope(scope, owner: :user)
-      acting_admin? ? scope : scope.where(owner => current_user)
-    end
-
-    # Guard for a single record loaded by an active-user endpoint. Renders 404
-    # (not 403) so record existence is not disclosed to non-owners.
-    def require_owner_or_admin!(record, owner: :user)
-      return true if acting_admin? || record.public_send(owner) == current_user
-
-      render_error(status: :not_found, message: "not found")
-      false
-    end
-
-    # The Principal or Role named by a "principal:<oid>" / "role:<oid>" query
-    # param, or nil when the param is absent. Unknown oids are 404s.
-    def principal_or_role_param!(name)
-      raw = params[name].presence
-      return unless raw
-
-      type, oid = raw.to_s.split(":", 2)
-      case type
-      when "principal" then Principal.find_by_oid!(oid)
-      when "role" then Role.find_by_oid!(oid)
-      else raise ActionController::BadRequest, "#{name} must be principal:<oid> or role:<oid>"
-      end
-    end
-
-    # One Slack channel as the console's channel pickers show it.
-    def slack_channel_option(channel)
-      {
-        channel_id: channel.channel_id,
-        name: channel.name,
-        private: channel.private,
-        label: "##{channel.name}",
-        description: "#{channel.channel_id} · #{channel.private ? "Private" : "Public"}"
-      }
+      Rails.logger.error(message)
+      render_error(status: :unauthorized, message: "endpoint credential misconfigured",
+                   details: { reason: "credential_namespace_mismatch" })
     end
 
     def render_not_found(e)
@@ -280,10 +93,9 @@ module Api
     # its column default rather than retained from the existing record, so the
     # body always replaces the whole document. The identity column foreign_id
     # is the exception: an upsert by foreign_id sets it on the
-    # record before assignment, so an omitted or blank body value must not
-    # wipe it. Only an explicit JSON null on a record addressed by its opaque
-    # id clears it (see #explicit_foreign_id_clear?); a kind whose foreign_id
-    # is required then fails validation with a 422 rather than clearing.
+    # record before assignment, so a blank body value must not wipe them.
+    # (The console API also lets an explicit null clear it; see
+    # #explicit_foreign_id_clear?.)
     def permit_document(ref, attrs, *scalars, **filters)
       permitted = attrs.permit(:foreign_id, *scalars, **filters)
       if permitted[:foreign_id].blank? && ref.foreign_id.present? && !explicit_foreign_id_clear?(ref, attrs)
@@ -295,13 +107,10 @@ module Api
       permitted.with_defaults(columns.index_with { |c| defaults[c] })
     end
 
-    # True when the body explicitly sends `foreign_id: null` (an omitted key or
-    # a blank string does not count) to an existing record addressed by its
-    # opaque id in the URL. An upsert addressed by foreign_id keeps the
-    # URL-derived identity.
-    def explicit_foreign_id_clear?(ref, attrs)
-      ref.persisted? && params[:id].to_s == ref.oid &&
-        attrs.key?(:foreign_id) && attrs[:foreign_id].nil?
+    # The bearer API never clears foreign_id from a document write; the
+    # console secret controllers override this (ConsoleSecretDocumentWrites).
+    def explicit_foreign_id_clear?(_ref, _attrs)
+      false
     end
 
     # Resolves the target of a PUT/PATCH write so the verb behaves as an upsert.

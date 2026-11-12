@@ -1,8 +1,6 @@
 module Api
   module V1
     class GcpIdTokenSecretsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       include SecretDocumentWrites
 
       def index
@@ -51,7 +49,7 @@ module Api
           lock_secret_document!(ref)
           base = permit_document(ref, attrs, :name, :description, :audience, :header, labels: {})
 
-          # A PATCH that omits an inline keyfile's `secret` keeps the stored value.
+          # The console API keeps a stored inline keyfile's `secret` a PATCH omits (SecretDocumentWrites).
           keyfile_source = build_secret_source(attrs, :keyfile, ref.keyfile_source)
           rules_attrs = build_rules(attrs)
           validate_nested_secret_records!(

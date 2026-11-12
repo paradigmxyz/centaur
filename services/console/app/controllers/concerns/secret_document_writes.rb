@@ -1,18 +1,20 @@
 # Shared write helpers for the secret kinds the console edits (static, pg_dsn,
 # gcp_auth, gcp_id_token):
 #
+# - #lock_secret_document! row-locks the document first thing inside the write
+#   transaction, so a write never retains a value read before a concurrent
+#   rotation committed.
 # - #build_secret_source builds the replacement SecretSource from a payload key.
-#   On PATCH, an inline (control_plane) source that omits `secret` keeps the
-#   stored value, so clients never need to read plaintext back to save other
-#   edits. PUT keeps its full-replace contract and still requires `secret`.
-#   Callers take #lock_secret_document! inside their write transaction before
-#   building the source, so the retained value is the one stored when the
-#   lock was granted and a concurrent rotation is never overwritten.
 # - #validate_nested_secret_records! turns invalid nested sources and rules
-#   into a 422 (render_validation_error) instead of a silent drop or a
-#   mid-write exception. The 422 `details` keep the keys earlier versions
-#   returned (see below) and add path-style keys for every nested error
-#   ("source.config", "keyfile.secret", "rules[0].cidr").
+#   into a 422 (render_validation_error) before anything is written, instead
+#   of a mid-write exception or partial write. The 422 `details` keep the keys
+#   the bearer API has always returned (see below).
+#
+# The console API (ConsoleSecretDocumentWrites) layers its write semantics on
+# top through the hooks at the bottom: a PATCH that omits an inline
+# (control_plane) source's `secret` keeps the stored value, and 422s add
+# path-style keys for every nested error ("source.config", "keyfile.secret",
+# "rules[0].cidr"). The bearer API keeps its replace semantics and error keys.
 module SecretDocumentWrites
   extend ActiveSupport::Concern
 
@@ -25,7 +27,8 @@ module SecretDocumentWrites
     record.lock! if record.persisted?
   end
 
-  # +existing+ is the record's current source (nil on create).
+  # +existing+ is the record's current source (nil on create); it is kept
+  # only where #retain_omitted_inline_secret? allows.
   def build_secret_source(attrs, key, existing)
     return nil unless attrs.key?(key) && attrs[key].present?
 
@@ -69,11 +72,13 @@ module SecretDocumentWrites
       record.errors.add(:rules, "is invalid") if invalid_rules.any?
     end
 
-    invalid_sources.each do |name, source|
-      source.errors.each { |error| record.errors.add(:"#{name}.#{error.attribute}", error.message) }
-    end
-    invalid_rules.each do |rule, index|
-      rule.errors.each { |error| record.errors.add(:"rules[#{index}].#{error.attribute}", error.message) }
+    if nested_error_path_keys?
+      invalid_sources.each do |name, source|
+        source.errors.each { |error| record.errors.add(:"#{name}.#{error.attribute}", error.message) }
+      end
+      invalid_rules.each do |rule, index|
+        rule.errors.each { |error| record.errors.add(:"rules[#{index}].#{error.attribute}", error.message) }
+      end
     end
     raise ActiveRecord::RecordInvalid, record
   end
@@ -93,11 +98,24 @@ module SecretDocumentWrites
   end
 
   def retain_inline_secret?(source_attrs, existing)
-    request.patch? &&
+    retain_omitted_inline_secret? &&
+      request.patch? &&
       source_attrs["source_type"] == "control_plane" &&
       source_attrs["secret"].blank? &&
       existing&.persisted? &&
       existing.source_type == "control_plane" &&
       existing.secret.present?
+  end
+
+  # Hooks; ConsoleSecretDocumentWrites turns them on for the console API.
+
+  # Whether a PATCH that omits an inline source's `secret` keeps the stored value.
+  def retain_omitted_inline_secret?
+    false
+  end
+
+  # Whether 422 details add path-style keys for nested errors.
+  def nested_error_path_keys?
+    false
   end
 end

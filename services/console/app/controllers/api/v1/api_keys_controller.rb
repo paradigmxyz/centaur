@@ -1,8 +1,6 @@
 module Api
   module V1
     class ApiKeysController < Api::BaseController
-      accepts_credentials :bearer
-
       def index
         scope = current_user.api_keys.order(created_at: :asc, id: :asc)
         limit = pagination_limit

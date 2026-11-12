@@ -944,7 +944,7 @@ module Oauth
       assert_nil cred.provider_email
       assert_equal user, cred.created_by
 
-      get api_v1_integrations_path
+      get api_v1_console_integrations_path
       slack = JSON.parse(response.body).dig("data", "apps").find { |app| app["slug"] == "slack" }
       assert_equal "connected", slack.dig("connection", "status")
     end
@@ -1104,7 +1104,7 @@ module Oauth
       state = start_flow
       stub_exchange(status: 200, body: token_body)
       get oauth_callback_url(slug: "google"), params: { state: state, code: "auth-code" }
-      get api_v1_me_path
+      get api_v1_console_me_path
       assert_equal "google connected as user@example.com.", json_body.dig("data", "flash", "notice")
     end
 

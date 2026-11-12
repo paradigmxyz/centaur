@@ -319,7 +319,7 @@ module Api
         assert_equal "renamed-by-upsert", ref.reload.name
       end
 
-      test "PUT by OID clears foreign_id only for an explicit null" do
+      test "PUT by OID keeps foreign_id even for an explicit null" do
         ref = static_secrets(:acme_prod_api_key)
         data = {
           name: ref.name,
@@ -332,10 +332,11 @@ module Api
         assert_response :ok
         assert_equal "prod-api-key", ref.reload.foreign_id
 
+        # Clearing by explicit null is console-only (ConsoleSecretDocumentWrites).
         put api_v1_static_secret_url(id: ref.oid), params: { data: data.merge(foreign_id: nil) }.to_json,
                                                    headers: auth_headers
         assert_response :ok
-        assert_nil ref.reload.foreign_id
+        assert_equal "prod-api-key", ref.reload.foreign_id
       end
 
       test "POST returns 400 when the data key is missing" do

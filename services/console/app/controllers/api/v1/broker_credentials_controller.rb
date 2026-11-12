@@ -5,10 +5,8 @@ module Api
     # differences: initial values are write-only, and the rotating token blob
     # (access_token/refresh_token) is NEVER serialized back.
     class BrokerCredentialsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       def index
-        records, meta = paginated_label_search(BrokerCredential.includes(:oauth_app, :static_secret))
+        records, meta = paginated_label_search(BrokerCredential.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }
       end
 
@@ -72,21 +70,10 @@ module Api
       # token_endpoint_headers is an open map of header name => string value, so it
       # is read as an unsafe hash (the model validates the shape) and only when the
       # body supplies it, so a partial update leaves the existing headers in place.
-      # The map replaces the stored headers, except that a `null` value for a name
-      # that is already stored keeps that header's stored value: header values are
-      # write-only, so an editor can keep or rename the set without re-entering
-      # them. A `null` for a new name stays invalid.
       def apply_token_endpoint_headers(ref, attrs)
         return unless attrs.key?(:token_endpoint_headers)
         raw = attrs[:token_endpoint_headers]
-        headers = raw.respond_to?(:to_unsafe_h) ? raw.to_unsafe_h : raw
-        ref.token_endpoint_headers = keep_stored_header_values(ref.token_endpoint_headers, headers)
-      end
-
-      def keep_stored_header_values(stored, headers)
-        return headers unless headers.is_a?(Hash) && stored.is_a?(Hash)
-
-        headers.to_h { |name, value| [ name, value.nil? && stored.key?(name) ? stored[name] : value ] }
+        ref.token_endpoint_headers = raw.respond_to?(:to_unsafe_h) ? raw.to_unsafe_h : raw
       end
 
       def apply_client_secret(ref, attrs)
@@ -152,22 +139,8 @@ module Api
           dead: ref.dead,
           dead_reason: ref.dead_reason,
           failure_count: ref.failure_count,
-          # Presence of the write-only values, never the values themselves.
-          has_client_secret: ref.client_secret.present?,
-          has_refresh_token: ref.refresh_token.present?,
-          has_username: ref.username.present?,
-          has_password: ref.password.present?,
-          has_api_key: ref.api_key.present?,
-          # The client id the refresh loop uses (inherited from the OAuth app
-          # for flow-minted credentials).
-          effective_client_id: ref.effective_client_id,
           # Provenance for flow-minted credentials (nil for standalone ones).
           oauth_app_id: ref.oauth_app&.oid,
-          oauth_app: ref.oauth_app && { id: ref.oauth_app.oid, slug: ref.oauth_app.slug, provider: ref.oauth_app.provider },
-          # The grantable static secret wrapping this credential, if any.
-          static_secret: ref.static_secret && {
-            id: ref.static_secret.oid, foreign_id: ref.static_secret.foreign_id, name: ref.static_secret.name
-          },
           provider_subject: ref.provider_subject,
           provider_email: ref.provider_email,
           external_user_key: ref.external_user_key,

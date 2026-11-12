@@ -2,7 +2,7 @@ require "test_helper"
 
 # The console-wide session gates around the server-rendered login and pending
 # pages (sessions_controller_test covers the pages and their form endpoints),
-# and the SPA's sign-out endpoint, DELETE /api/v1/session.
+# and the SPA's sign-out endpoint, DELETE /api/v1/console/session.
 class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
   HTML = { "Accept" => "text/html,application/xhtml+xml" }.freeze
 
@@ -20,7 +20,7 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     user = create_console_user
     sign_in_console(user)
     user.update!(status: :disabled)
-    get api_v1_me_path
+    get api_v1_console_me_path
     assert_response :unauthorized
 
     get login_path(return_to: "/console/skills")
@@ -43,14 +43,14 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
 
   test "a pending user can sign out from the SPA endpoint" do
     sign_in_console(users(:pending_user))
-    delete api_v1_session_path, headers: csrf_headers
+    delete api_v1_console_session_path, headers: csrf_headers
     assert_response :no_content
     assert_nil session[:user_id]
   end
 
   test "SPA sign-out requires the CSRF token" do
     sign_in_console(@operator)
-    delete api_v1_session_path
+    delete api_v1_console_session_path
     assert_response :forbidden
     assert_equal @operator.id, session[:user_id]
   end
@@ -61,7 +61,7 @@ class ConsoleLoginPagesTest < ActionDispatch::IntegrationTest
     post login_path, params: { email: @operator.email, password: ConsoleApiAuthHelper::TEST_PASSWORD }
     assert_equal @operator.id, session[:user_id]
 
-    delete api_v1_session_path, headers: { "X-CSRF-Token" => token }
+    delete api_v1_console_session_path, headers: { "X-CSRF-Token" => token }
     assert_response :forbidden
     assert_equal @operator.id, session[:user_id]
   end

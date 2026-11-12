@@ -12,18 +12,18 @@ module Api
       test "role endpoints are admin-only for every caller type" do
         role = roles(:acme_infra)
         grant = grants(:acme_infra_prod_api_key)
-        assert_admin_only_api :get, api_v1_roles_path(limit: 200)
-        assert_admin_only_api :get, api_v1_role_path(role.oid)
-        assert_admin_only_api :post, api_v1_roles_path, params: { data: { foreign_id: "sneaky" } }
-        assert_admin_only_api :patch, api_v1_role_path(role.oid), params: { data: { name: "Sneaky" } }
-        assert_admin_only_api :get, api_v1_role_grants_path(role.oid, limit: 200)
-        assert_admin_only_api :post, api_v1_grants_path,
+        assert_admin_only_api :get, api_v1_console_roles_path(limit: 200)
+        assert_admin_only_api :get, api_v1_console_role_path(role.oid)
+        assert_admin_only_api :post, api_v1_console_roles_path, params: { data: { foreign_id: "sneaky" } }
+        assert_admin_only_api :patch, api_v1_console_role_path(role.oid), params: { data: { name: "Sneaky" } }
+        assert_admin_only_api :get, api_v1_console_role_grants_path(role.oid, limit: 200)
+        assert_admin_only_api :post, api_v1_console_grants_path,
                               params: { data: { role_id: role.oid,
                                                 static_secret_id: static_secrets(:acme_staging_api_key).oid } }
-        assert_admin_only_api :delete, api_v1_grant_path(grant.oid)
-        assert_admin_only_api :put, slack_channel_permissions_api_v1_role_path(role.oid),
+        assert_admin_only_api :delete, api_v1_console_grant_path(grant.oid)
+        assert_admin_only_api :put, slack_channel_permissions_api_v1_console_role_path(role.oid),
                               params: { data: { slack_channel_permissions: [] } }
-        assert_admin_only_api :delete, slack_channel_permission_api_v1_role_path(role.oid, "C0123456789")
+        assert_admin_only_api :delete, slack_channel_permission_api_v1_console_role_path(role.oid, "C0123456789")
 
         assert_not Role.exists?(foreign_id: "sneaky")
         assert_equal "Infra", role.reload.name
@@ -37,14 +37,14 @@ module Api
         extra = Array.new(201) { |i| Role.create!(foreign_id: format("picker-%03d", i), name: "Picker #{i}", created_by: @operator) }
         principal.roles << extra.last
 
-        get api_v1_roles_path(exclude_principal: principal.oid, limit: 200)
+        get api_v1_console_roles_path(exclude_principal: principal.oid, limit: 200)
         assert_response :ok
         total = Role.count - 2
         assert_equal total, json_body.dig("meta", "total")
         assert_equal 2, json_body.dig("meta", "total_pages")
         ids = json_body["data"].pluck("id")
 
-        get api_v1_roles_path(exclude_principal: principal.oid, limit: 200, page: 2)
+        get api_v1_console_roles_path(exclude_principal: principal.oid, limit: 200, page: 2)
         assert_response :ok
         ids += json_body["data"].pluck("id")
         assert_equal total, ids.uniq.size
@@ -55,35 +55,35 @@ module Api
 
       test "q searches role name and foreign_id case-insensitively and composes with exclude_principal" do
         Role.create!(foreign_id: "db-readers", name: "Warehouse 100%", created_by: @operator)
-        get api_v1_roles_path(q: "WAREHOUSE", limit: 200)
+        get api_v1_console_roles_path(q: "WAREHOUSE", limit: 200)
         assert_equal [ "db-readers" ], json_body["data"].pluck("foreign_id")
-        get api_v1_roles_path(q: "100%", limit: 200)
+        get api_v1_console_roles_path(q: "100%", limit: 200)
         assert_equal [ "db-readers" ], json_body["data"].pluck("foreign_id")
-        get api_v1_roles_path(q: "%", limit: 200)
+        get api_v1_console_roles_path(q: "%", limit: 200)
         assert_equal [ "db-readers" ], json_body["data"].pluck("foreign_id")
 
-        get api_v1_roles_path(q: "infra", exclude_principal: principals(:acme_channel).oid, limit: 200)
+        get api_v1_console_roles_path(q: "infra", exclude_principal: principals(:acme_channel).oid, limit: 200)
         assert_response :ok
         assert_equal %w[globex-infra infra], json_body["data"].pluck("foreign_id").sort
       end
 
       test "exclude_principal with an unknown principal is a 404" do
-        get api_v1_roles_path(exclude_principal: "prn_missing")
+        get api_v1_console_roles_path(exclude_principal: "prn_missing")
         assert_response :not_found
       end
 
       test "an unknown role oid is a 404" do
-        get api_v1_role_path("rol_missing")
+        get api_v1_console_role_path("rol_missing")
         assert_response :not_found
-        get api_v1_role_grants_path("rol_missing")
+        get api_v1_console_role_grants_path("rol_missing")
         assert_response :not_found
-        put slack_channel_permissions_api_v1_role_path("rol_missing"),
+        put slack_channel_permissions_api_v1_console_role_path("rol_missing"),
             params: { data: { slack_channel_permissions: [] } }, headers: csrf_headers, as: :json
         assert_response :not_found
       end
 
       test "index lists every role with identity and labels" do
-        get api_v1_roles_path(limit: 200)
+        get api_v1_console_roles_path(limit: 200)
         assert_response :ok
         role = json_body["data"].find { |r| r["id"] == roles(:acme_infra).oid }
         assert_equal "acme-infra", role["foreign_id"]
@@ -95,7 +95,7 @@ module Api
       test "show returns the role and its Slack channel permissions" do
         role = roles(:acme_infra)
         role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
-        get api_v1_role_path(role.oid)
+        get api_v1_console_role_path(role.oid)
         assert_response :ok
         assert_equal role.name, json_body.dig("data", "name")
         assert_equal [ "C0123456789" ], json_body.dig("data", "slack_channel_permissions").map { |p| p["channel_id"] }
@@ -103,7 +103,7 @@ module Api
 
       test "create persists role identity and labels without a namespace" do
         assert_difference -> { Role.count }, 1 do
-          post api_v1_roles_path,
+          post api_v1_console_roles_path,
                params: { data: { foreign_id: "payments", name: "Payments", labels: { team: "finance" },
                                  namespace: "other" } },
                headers: csrf_headers, as: :json
@@ -119,7 +119,7 @@ module Api
       end
 
       test "create accepts a blank foreign id" do
-        post api_v1_roles_path, params: { data: { foreign_id: nil, name: "No handle" } },
+        post api_v1_console_roles_path, params: { data: { foreign_id: nil, name: "No handle" } },
              headers: csrf_headers, as: :json
         assert_response :created
         assert_nil Role.find_by_oid!(json_body.dig("data", "id")).foreign_id
@@ -127,7 +127,7 @@ module Api
 
       test "create rejects an invalid role without writing" do
         assert_no_difference -> { Role.count } do
-          post api_v1_roles_path, params: { data: { foreign_id: "bad foreign id", name: "Broken" } },
+          post api_v1_console_roles_path, params: { data: { foreign_id: "bad foreign id", name: "Broken" } },
                headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
@@ -136,7 +136,7 @@ module Api
 
       test "update changes mutable fields only" do
         role = roles(:acme_infra)
-        patch api_v1_role_path(role.oid),
+        patch api_v1_console_role_path(role.oid),
               params: { data: { foreign_id: "changed", name: "Infrastructure", labels: { kind: "platform" } } },
               headers: csrf_headers, as: :json
         assert_response :ok
@@ -151,7 +151,7 @@ module Api
         role = roles(:acme_infra)
         secret = static_secrets(:acme_prod_api_key)
 
-        get api_v1_role_grants_path(role.oid, limit: 200)
+        get api_v1_console_role_grants_path(role.oid, limit: 200)
         assert_response :ok
         grant = json_body["data"].find { |g| g["id"] == grants(:acme_infra_prod_api_key).oid }
         assert_equal role.oid, grant["role_id"]
@@ -164,7 +164,7 @@ module Api
         secret = static_secrets(:acme_staging_api_key)
 
         assert_difference -> { role.grants.count }, 1 do
-          post api_v1_grants_path, params: { data: { role_id: role.oid, static_secret_id: secret.oid } },
+          post api_v1_console_grants_path, params: { data: { role_id: role.oid, static_secret_id: secret.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :created
@@ -179,7 +179,7 @@ module Api
         secret = static_secrets(:acme_prod_api_key)
 
         assert_no_difference -> { role.grants.count } do
-          post api_v1_grants_path, params: { data: { role_id: role.oid, static_secret_id: secret.oid } },
+          post api_v1_console_grants_path, params: { data: { role_id: role.oid, static_secret_id: secret.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :ok
@@ -191,7 +191,7 @@ module Api
         secret = static_secrets(:globex_prod_secret)
 
         assert_difference -> { Grant.count } => 1 do
-          post api_v1_grants_path, params: { data: { role_id: role.oid, static_secret_id: secret.oid } },
+          post api_v1_console_grants_path, params: { data: { role_id: role.oid, static_secret_id: secret.oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :created
@@ -200,7 +200,7 @@ module Api
 
       test "granting without a secret is a validation error" do
         assert_no_difference -> { Grant.count } do
-          post api_v1_grants_path, params: { data: { role_id: roles(:acme_infra).oid } },
+          post api_v1_console_grants_path, params: { data: { role_id: roles(:acme_infra).oid } },
                headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
@@ -211,7 +211,7 @@ module Api
         grant = grants(:acme_infra_prod_api_key)
 
         assert_difference -> { role.grants.count }, -1 do
-          delete api_v1_grant_path(grant.oid), headers: csrf_headers
+          delete api_v1_console_grant_path(grant.oid), headers: csrf_headers
         end
         assert_response :no_content
         assert_not Grant.exists?(grant.id)
@@ -219,19 +219,19 @@ module Api
 
       test "assignable secrets exclude every secret already granted to the role" do
         role = roles(:acme_infra)
-        get api_v1_secrets_path(exclude_grantee: "role:#{role.oid}", limit: 200)
+        get api_v1_console_secrets_path(exclude_grantee: "role:#{role.oid}", limit: 200)
         assert_response :ok
         ids = json_body["data"].map { |s| s["id"] }
         assert_not_includes ids, static_secrets(:acme_prod_api_key).oid
         assert_includes ids, static_secrets(:acme_staging_api_key).oid
 
-        get api_v1_secrets_path(exclude_grantee: "role:role_missing")
+        get api_v1_console_secrets_path(exclude_grantee: "role:role_missing")
         assert_response :not_found
       end
 
       test "replacing stores role permissions" do
         role = roles(:acme_infra)
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: true, download_enabled: false, history_enabled: true }
             ] } },
@@ -250,7 +250,7 @@ module Api
         role = roles(:acme_infra)
         role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
 
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: false, download_enabled: true, history_enabled: false }
             ] } },
@@ -268,7 +268,7 @@ module Api
         role = roles(:acme_infra)
         permission = role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
 
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { id: permission.id, channel_id: "C0123456789", upload_enabled: true },
               { id: permission.id, channel_id: "G9876543210", upload_enabled: true }
@@ -285,7 +285,7 @@ module Api
         versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
         assert_not_empty versions
 
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: false, download_enabled: true, history_enabled: false },
               { channel_id: "C2222222222", upload_enabled: true, download_enabled: false, history_enabled: true }
@@ -304,7 +304,7 @@ module Api
         permission = role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
         versions = Principal.where(id: role.principal_ids).pluck(:id, :sync_config_cache_version).to_h
 
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: true, download_enabled: false, history_enabled: false }
             ] } },
@@ -319,7 +319,7 @@ module Api
 
       test "roles keep D channel rows because they have no API-managed DMs" do
         role = roles(:acme_infra)
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "D0123456789", upload_enabled: true, download_enabled: false, history_enabled: false }
             ] } },
@@ -330,7 +330,7 @@ module Api
 
       test "replacing rejects rows without any permission" do
         role = roles(:acme_infra)
-        put slack_channel_permissions_api_v1_role_path(role.oid),
+        put slack_channel_permissions_api_v1_console_role_path(role.oid),
             params: { data: { slack_channel_permissions: [
               { channel_id: "C0123456789", upload_enabled: false, download_enabled: false, history_enabled: false }
             ] } },
@@ -346,13 +346,13 @@ module Api
         keep_permission = role.slack_channel_permissions.create!(channel_id: "G9876543210", upload_enabled: true)
 
         assert_difference -> { role.slack_channel_permissions.count }, -1 do
-          delete slack_channel_permission_api_v1_role_path(role.oid, "c0123456789"), headers: csrf_headers
+          delete slack_channel_permission_api_v1_console_role_path(role.oid, "c0123456789"), headers: csrf_headers
         end
         assert_response :no_content
         assert_raises(ActiveRecord::RecordNotFound) { delete_permission.reload }
         assert_predicate keep_permission.reload, :persisted?
 
-        delete slack_channel_permission_api_v1_role_path(role.oid, "C0123456789"), headers: csrf_headers
+        delete slack_channel_permission_api_v1_console_role_path(role.oid, "C0123456789"), headers: csrf_headers
         assert_response :not_found
       end
 
@@ -360,7 +360,7 @@ module Api
         other = roles(:acme_admin_role)
         permission = other.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
 
-        delete slack_channel_permission_api_v1_role_path(roles(:acme_infra).oid, "C0123456789"), headers: csrf_headers
+        delete slack_channel_permission_api_v1_console_role_path(roles(:acme_infra).oid, "C0123456789"), headers: csrf_headers
         assert_response :not_found
         assert_predicate permission.reload, :persisted?
       end
@@ -370,18 +370,18 @@ module Api
         role.slack_channel_permissions.create!(channel_id: "C0123456789", upload_enabled: true)
 
         with_env("CENTAUR_CONSOLE_SLACK_BOT_TOKEN" => "xoxb-test-token") do
-          get api_v1_slack_channels_path(q: "no-match", exclude_owner: "role:#{role.oid}")
+          get api_v1_console_slack_channels_path(q: "no-match", exclude_owner: "role:#{role.oid}")
           assert_response :ok
           assert_equal [], json_body["data"]
 
-          get api_v1_slack_channels_path(exclude_owner: "role:#{role.oid}")
+          get api_v1_console_slack_channels_path(exclude_owner: "role:#{role.oid}")
         end
         assert_not_includes json_body["data"].map { |c| c["channel_id"] }, "C0123456789"
         assert_includes json_body["data"].map { |c| c["channel_id"] }, "G9876543210"
       end
 
       test "role channel options 404 for an unknown role" do
-        get api_v1_slack_channels_path(exclude_owner: "role:rol_missing")
+        get api_v1_console_slack_channels_path(exclude_owner: "role:rol_missing")
         assert_response :not_found
       end
     end

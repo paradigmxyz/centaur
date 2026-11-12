@@ -1,8 +1,6 @@
 module Api
   module V1
     class GrantsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       def show
         grant = Grant.find_by_oid!(params[:id])
         render json: serialize(grant)
@@ -83,7 +81,6 @@ module Api
             id: grant.oid,
             GRANTEE_TYPES.key(grantee.class) => grantee.oid,
             GRANTABLE_TYPES.key(grantable.class) => grantable.oid,
-            grantable: GrantableSummary.call(grantable),
             created_at: grant.created_at,
             updated_at: grant.updated_at
           }

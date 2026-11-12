@@ -25,21 +25,21 @@ module Api
       end
 
       setup do
-        @original_api_client_factory = SystemSettingsController.api_client_factory
+        @original_api_client_factory = Console::SystemSettingsController.api_client_factory
         use_api_client(FakeApiClient.new)
         sign_in_console(users(:acme_admin))
       end
 
       teardown do
-        SystemSettingsController.api_client_factory = @original_api_client_factory
+        Console::SystemSettingsController.api_client_factory = @original_api_client_factory
       end
 
       def use_api_client(client)
-        SystemSettingsController.api_client_factory = -> { client }
+        Console::SystemSettingsController.api_client_factory = -> { client }
       end
 
       def patch_settings(data)
-        patch api_v1_system_settings_path, params: { data: data }, headers: csrf_headers, as: :json
+        patch api_v1_console_system_settings_path, params: { data: data }, headers: csrf_headers, as: :json
       end
 
       test "settings endpoints are admin-only for every caller type" do
@@ -47,10 +47,10 @@ module Api
         use_api_client(client)
         before = system_settings(:default).reload.default_sandbox_repo_cache
 
-        assert_admin_only_api :get, api_v1_system_settings_path
-        assert_admin_only_api :patch, api_v1_system_settings_path, params: { data: { default_sandbox_repo_cache: "all" } }
-        assert_admin_only_api :get, slack_external_teams_api_v1_system_settings_path
-        assert_admin_only_api :put, slack_external_teams_api_v1_system_settings_path,
+        assert_admin_only_api :get, api_v1_console_system_settings_path
+        assert_admin_only_api :patch, api_v1_console_system_settings_path, params: { data: { default_sandbox_repo_cache: "all" } }
+        assert_admin_only_api :get, slack_external_teams_api_v1_console_system_settings_path
+        assert_admin_only_api :put, slack_external_teams_api_v1_console_system_settings_path,
                               params: { data: { slack_external_team_ids: [ "T0PARTNER1" ] } }
 
         assert_equal before, system_settings(:default).reload.default_sandbox_repo_cache
@@ -60,7 +60,7 @@ module Api
       test "admin reads system settings with every role's default flag" do
         roles(:acme_infra).update!(assign_by_default: true)
 
-        get api_v1_system_settings_path
+        get api_v1_console_system_settings_path
         assert_response :ok
         data = json_body["data"]
         settings = system_settings(:default).reload
@@ -138,7 +138,7 @@ module Api
       test "admin sees the allowed Slack Connect workspaces" do
         use_api_client(FakeApiClient.new(team_ids: %w[T0PARTNER1 T0PARTNER2]))
 
-        get slack_external_teams_api_v1_system_settings_path
+        get slack_external_teams_api_v1_console_system_settings_path
 
         assert_response :ok
         assert_equal %w[T0PARTNER1 T0PARTNER2], json_body.dig("data", "slack_external_team_ids")
@@ -147,7 +147,7 @@ module Api
       test "reports when the Slack Connect workspaces cannot be loaded" do
         use_api_client(FakeApiClient.new(error: Errno::ECONNREFUSED.new))
 
-        get slack_external_teams_api_v1_system_settings_path
+        get slack_external_teams_api_v1_console_system_settings_path
 
         assert_response :service_unavailable
         assert_match(/could not be loaded/, json_body.dig("error", "message"))
@@ -157,7 +157,7 @@ module Api
         client = FakeApiClient.new
         use_api_client(client)
 
-        put slack_external_teams_api_v1_system_settings_path,
+        put slack_external_teams_api_v1_console_system_settings_path,
             params: { data: { slack_external_team_ids: "T0PARTNER1, t0partner2\nT0PARTNER3" } },
             headers: csrf_headers, as: :json
 
@@ -165,7 +165,7 @@ module Api
         assert_equal %w[T0PARTNER1 t0partner2 T0PARTNER3], client.replaced
         assert_equal %w[T0PARTNER1 t0partner2 T0PARTNER3], json_body.dig("data", "slack_external_team_ids")
 
-        put slack_external_teams_api_v1_system_settings_path,
+        put slack_external_teams_api_v1_console_system_settings_path,
             params: { data: { slack_external_team_ids: [ " T0A ", "", "T0B" ] } }, headers: csrf_headers, as: :json
         assert_response :ok
         assert_equal %w[T0A T0B], client.replaced
@@ -175,7 +175,7 @@ module Api
         client = FakeApiClient.new(team_ids: %w[T0PARTNER1])
         use_api_client(client)
 
-        put slack_external_teams_api_v1_system_settings_path,
+        put slack_external_teams_api_v1_console_system_settings_path,
             params: { data: { slack_external_team_ids: "" } }, headers: csrf_headers, as: :json
 
         assert_response :ok
@@ -185,7 +185,7 @@ module Api
       test "returns Slack team id validation errors from the API" do
         use_api_client(FakeApiClient.new(error: CentaurApiClient::Error.new("invalid Slack team ids: C0CHANNEL", status: 400)))
 
-        put slack_external_teams_api_v1_system_settings_path,
+        put slack_external_teams_api_v1_console_system_settings_path,
             params: { data: { slack_external_team_ids: "T0PARTNER1 C0CHANNEL" } }, headers: csrf_headers, as: :json
 
         assert_response :unprocessable_entity
@@ -195,7 +195,7 @@ module Api
       test "reports an unavailable Centaur API when saving Slack Connect workspaces" do
         use_api_client(FakeApiClient.new(error: CentaurApiClient::Error.new("boom", status: 500)))
 
-        put slack_external_teams_api_v1_system_settings_path,
+        put slack_external_teams_api_v1_console_system_settings_path,
             params: { data: { slack_external_team_ids: "T0PARTNER1" } }, headers: csrf_headers, as: :json
 
         assert_response :service_unavailable

@@ -1,8 +1,6 @@
 module Api
   module V1
     class PgDsnSecretsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       include SecretDocumentWrites
 
       def index
@@ -63,7 +61,7 @@ module Api
           # { "name", "value_from" } hashes the model stores and serializes.
           base[:settings] = Array(base[:settings]).map { |s| s.to_h.slice("name", "value", "value_from") }
 
-          # A PATCH that omits an inline DSN's `secret` keeps the stored value.
+          # The console API keeps a stored inline DSN's `secret` a PATCH omits (SecretDocumentWrites).
           dsn_source = build_secret_source(attrs, :dsn, ref.dsn_source)
           validate_nested_secret_records!(
             ref, sources: { dsn: dsn_source }, source_associations: { dsn: :dsn_source }, legacy: :association,

@@ -15,21 +15,21 @@ module Api
       end
 
       def create_credential(data)
-        post api_v1_broker_credentials_path, params: { data: data }, headers: csrf_headers, as: :json
+        post api_v1_console_broker_credentials_path, params: { data: data }, headers: csrf_headers, as: :json
       end
 
       def update_credential(cred, data)
-        patch api_v1_broker_credential_path(cred.oid), params: { data: data }, headers: csrf_headers, as: :json
+        patch api_v1_console_broker_credential_path(cred.oid), params: { data: data }, headers: csrf_headers, as: :json
       end
 
       test "credential endpoints are admin-only for every caller type" do
         cred = broker_credentials(:globex_managed_api)
-        assert_admin_only_api :get, api_v1_broker_credentials_path
-        assert_admin_only_api :get, api_v1_broker_credential_path(cred.oid)
-        assert_admin_only_api :post, api_v1_broker_credentials_path,
+        assert_admin_only_api :get, api_v1_console_broker_credentials_path
+        assert_admin_only_api :get, api_v1_console_broker_credential_path(cred.oid)
+        assert_admin_only_api :post, api_v1_console_broker_credentials_path,
                               params: { data: { foreign_id: "sneaky", token_endpoint: "https://idp.example/token", client_id: "c" } }
-        assert_admin_only_api :patch, api_v1_broker_credential_path(cred.oid), params: { data: { name: "sneaky" } }
-        assert_admin_only_api :delete, api_v1_broker_credential_path(cred.oid)
+        assert_admin_only_api :patch, api_v1_console_broker_credential_path(cred.oid), params: { data: { name: "sneaky" } }
+        assert_admin_only_api :delete, api_v1_console_broker_credential_path(cred.oid)
 
         assert BrokerCredential.exists?(cred.id)
         assert_not BrokerCredential.exists?(foreign_id: "sneaky")
@@ -37,9 +37,9 @@ module Api
       end
 
       test "an unknown credential oid is a 404" do
-        get api_v1_broker_credential_path("bcr_missing")
+        get api_v1_console_broker_credential_path("bcr_missing")
         assert_response :not_found
-        delete api_v1_broker_credential_path("bcr_missing"), headers: csrf_headers
+        delete api_v1_console_broker_credential_path("bcr_missing"), headers: csrf_headers
         assert_response :not_found
       end
 
@@ -48,7 +48,7 @@ module Api
         minted = BrokerCredential.create!(foreign_id: "minted-index", token_endpoint: "https://oauth2.googleapis.com/token",
                                           oauth_app: app, external_user_key: "user-index")
 
-        get api_v1_broker_credentials_path(limit: 200)
+        get api_v1_console_broker_credentials_path(limit: 200)
         assert_response :ok
         rows = json_body["data"].index_by { |row| row["id"] }
 
@@ -65,7 +65,7 @@ module Api
       end
 
       test "index orders credentials by creation time" do
-        get api_v1_broker_credentials_path(limit: 200)
+        get api_v1_console_broker_credentials_path(limit: 200)
         ids = json_body["data"].map { |row| row["id"] }
         assert_equal BrokerCredential.order(:created_at, :id).map(&:oid), ids
       end
@@ -75,7 +75,7 @@ module Api
         cred.update!(client_secret: "client-secret-value", refresh_token: "refresh-token-value",
                      token_endpoint_headers: { "Authorization" => "Basic header-value" })
 
-        get api_v1_broker_credential_path(cred.oid)
+        get api_v1_console_broker_credential_path(cred.oid)
         assert_response :ok
         data = json_body["data"]
         assert_equal cred.name, data["name"]
@@ -98,7 +98,7 @@ module Api
         cred = BrokerCredential.create!(foreign_id: "password-flags", grant: "password",
                                         token_endpoint: "https://idp.example/token", client_id: "cid",
                                         username: "user-value", password: "password-value")
-        get api_v1_broker_credential_path(cred.oid)
+        get api_v1_console_broker_credential_path(cred.oid)
         data = json_body["data"]
         assert data["has_username"]
         assert data["has_password"]
@@ -112,14 +112,14 @@ module Api
         cred = broker_credentials(:globex_managed_api)
         cred.update!(refresh_token: "stored-refresh-token-value", access_token: "minted-access-token-value")
 
-        get api_v1_broker_credential_path(cred.oid)
+        get api_v1_console_broker_credential_path(cred.oid)
         assert_response :ok
         assert json_body.dig("data", "has_refresh_token")
         assert_not json_body["data"].key?("refresh_token")
         assert_not_includes response.body, "stored-refresh-token-value"
         assert_not_includes response.body, "minted-access-token-value"
 
-        get api_v1_broker_credentials_path(limit: 200)
+        get api_v1_console_broker_credentials_path(limit: 200)
         assert_response :ok
         row = json_body["data"].find { |r| r["id"] == cred.oid }
         assert row["has_refresh_token"]
@@ -128,18 +128,18 @@ module Api
         assert_not_includes response.body, "minted-access-token-value"
 
         cred.update!(refresh_token: nil)
-        get api_v1_broker_credential_path(cred.oid)
+        get api_v1_console_broker_credential_path(cred.oid)
         assert_equal false, json_body.dig("data", "has_refresh_token")
       end
 
       test "show links the static secret that makes the credential grantable" do
         cred = broker_credentials(:acme_managed_gmail)
         secret = static_secrets(:acme_managed_gmail_secret)
-        get api_v1_broker_credential_path(cred.oid)
+        get api_v1_console_broker_credential_path(cred.oid)
         assert_equal({ "id" => secret.oid, "foreign_id" => secret.foreign_id, "name" => secret.name },
                      json_body.dig("data", "static_secret"))
 
-        get api_v1_broker_credential_path(broker_credentials(:globex_managed_api).oid)
+        get api_v1_console_broker_credential_path(broker_credentials(:globex_managed_api).oid)
         assert_nil json_body.dig("data", "static_secret")
       end
 
@@ -149,7 +149,7 @@ module Api
                                         token_endpoint: "https://oauth2.googleapis.com/token",
                                         oauth_app: app, provider_subject: "sub-9",
                                         provider_email: "person@example.com", external_user_key: "user-9")
-        get api_v1_broker_credential_path(cred.oid)
+        get api_v1_console_broker_credential_path(cred.oid)
         data = json_body["data"]
         assert_equal "person@example.com", data["provider_email"]
         assert_equal "sub-9", data["provider_subject"]

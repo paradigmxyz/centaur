@@ -28,7 +28,7 @@ class SecureSessionCookieTest < ActionDispatch::IntegrationTest
     cookie = login_cookie_header
     assert cookie, "expected a session cookie"
     assert_no_match(/;\s*secure/i, cookie)
-    get "/api/v1/me"
+    get "/api/v1/console/me"
     assert_response :ok
   end
 

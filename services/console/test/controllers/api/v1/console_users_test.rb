@@ -10,16 +10,16 @@ module Api
       end
 
       def post_action(action, user)
-        post public_send(:"#{action}_api_v1_user_path", user.oid), headers: csrf_headers, as: :json
+        post public_send(:"#{action}_api_v1_console_user_path", user.oid), headers: csrf_headers, as: :json
       end
 
       test "user endpoints are admin-only for every caller type" do
         target = users(:pending_user)
-        assert_admin_only_api :get, api_v1_users_path
-        assert_admin_only_api :post, approve_api_v1_user_path(target.oid)
-        assert_admin_only_api :post, disable_api_v1_user_path(users(:member_user).oid)
-        assert_admin_only_api :post, promote_api_v1_user_path(target.oid)
-        assert_admin_only_api :post, demote_api_v1_user_path(users(:globex_admin).oid)
+        assert_admin_only_api :get, api_v1_console_users_path
+        assert_admin_only_api :post, approve_api_v1_console_user_path(target.oid)
+        assert_admin_only_api :post, disable_api_v1_console_user_path(users(:member_user).oid)
+        assert_admin_only_api :post, promote_api_v1_console_user_path(target.oid)
+        assert_admin_only_api :post, demote_api_v1_console_user_path(users(:globex_admin).oid)
 
         assert target.reload.pending?
         assert_not target.admin?
@@ -28,7 +28,7 @@ module Api
       end
 
       test "the index lists every user with status, role, and the pending ones" do
-        get api_v1_users_path
+        get api_v1_console_users_path
         assert_response :ok
         rows = json_body["data"].index_by { |user| user["email"] }
 
@@ -45,15 +45,15 @@ module Api
       end
 
       test "the index filters by status" do
-        get api_v1_users_path(status: "pending")
+        get api_v1_console_users_path(status: "pending")
         assert_equal [ "pending@acme.example" ], json_body["data"].map { |user| user["email"] }
 
-        get api_v1_users_path(status: "bogus")
+        get api_v1_console_users_path(status: "bogus")
         assert_response :bad_request
       end
 
       test "the index reports linked identity providers" do
-        get api_v1_users_path
+        get api_v1_console_users_path
         rows = json_body["data"].index_by { |user| user["email"] }
         assert_equal %w[google], rows.dig("admin@acme.example", "identity_providers")   # linked via Google
         assert_equal %w[slack], rows.dig("pending@acme.example", "identity_providers")  # linked via Slack
@@ -61,7 +61,7 @@ module Api
       end
 
       test "the index flags the caller so the page can hide self-demotion" do
-        get api_v1_users_path
+        get api_v1_console_users_path
         rows = json_body["data"].index_by { |user| user["email"] }
         assert_equal true, rows.dig(users(:acme_admin).email, "current")
         assert_equal false, rows.dig(users(:globex_admin).email, "current")
@@ -117,7 +117,7 @@ module Api
         post_action(:disable, target)
         assert_response :ok
 
-        other.get api_v1_me_path
+        other.get api_v1_console_me_path
         assert_equal 401, other.response.status
       end
 
@@ -153,7 +153,7 @@ module Api
       end
 
       test "an unknown user is a 404" do
-        post approve_api_v1_user_path("usr_missing"), headers: csrf_headers, as: :json
+        post approve_api_v1_console_user_path("usr_missing"), headers: csrf_headers, as: :json
         assert_response :not_found
       end
     end

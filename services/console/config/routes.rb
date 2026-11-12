@@ -5,9 +5,11 @@ Rails.application.routes.draw do
 
   # Routes drawn here take precedence over the SPA catch-all below.
   draw :console_auth_pages
+  draw :console
   draw :console_principals
   draw :console_roles
   draw :console_secrets
+  draw :console_credentials
   draw :console_oauth_apps
   draw :console_admin
   draw :console_automation

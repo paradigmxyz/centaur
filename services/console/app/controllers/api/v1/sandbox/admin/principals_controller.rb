@@ -4,6 +4,7 @@ module Api
       module Admin
         class PrincipalsController < ::Api::V1::PrincipalsController
           include SandboxAdminAuthentication
+          include PrincipalEffectiveGrants
 
           SANDBOX_ACCESS_FLAGS = %w[
             sandbox_observability_enabled
@@ -77,6 +78,13 @@ module Api
             render json: { data: record_payload(principal) }
           rescue ActiveRecord::RecordInvalid => e
             render_validation_error(e.record)
+          end
+
+          # DELETE /api/v1/sandbox/admin/principals/:id/slack_channel_permissions/:channel_id
+          def destroy_slack_channel_permission
+            principal = Principal.find_by_oid!(params[:id])
+            principal.slack_channel_permissions.find_by!(channel_id: params[:channel_id].to_s.strip.upcase).destroy!
+            head :no_content
           end
 
           private

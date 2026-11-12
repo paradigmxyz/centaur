@@ -1,8 +1,6 @@
 module Api
   module V1
     class OauthTokenSecretsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       def index
         records, meta = paginated_label_search(OauthTokenSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }

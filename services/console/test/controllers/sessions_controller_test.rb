@@ -135,7 +135,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Signed in as #{@operator.email}.", flash[:notice]
 
     # The SPA shows the notice it hands off through /api/v1/me.
-    get api_v1_me_path
+    get api_v1_console_me_path
     assert_equal "Signed in as #{@operator.email}.", json_body.dig("data", "flash", "notice")
   end
 

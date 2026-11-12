@@ -16,16 +16,16 @@ module Api
 
       test "skill endpoints are open to active users only" do
         skill = skills(:admin_shared)
-        assert_active_user_api :get, api_v1_skills_path
-        assert_active_user_api :get, api_v1_skills_path(tab: "mine")
-        assert_active_user_api :get, api_v1_skill_path(skill.oid)
-        assert_active_user_api :get, editor_candidates_api_v1_skills_path
-        assert_active_user_api :post, api_v1_skills_path,
+        assert_active_user_api :get, api_v1_console_skills_path
+        assert_active_user_api :get, api_v1_console_skills_path(tab: "mine")
+        assert_active_user_api :get, api_v1_console_skill_path(skill.oid)
+        assert_active_user_api :get, editor_candidates_api_v1_console_skills_path
+        assert_active_user_api :post, api_v1_console_skills_path,
                                params: { data: { name: "denied-skill", description: "d", instructions: "x" } }
-        assert_active_user_api :patch, api_v1_skill_path(skill.oid), params: skill_body(skill, description: "denied")
-        assert_active_user_api :delete, api_v1_skill_path(skill.oid)
-        assert_active_user_api :post, share_api_v1_skill_path(skill.oid)
-        assert_active_user_api :post, unshare_api_v1_skill_path(skill.oid)
+        assert_active_user_api :patch, api_v1_console_skill_path(skill.oid), params: skill_body(skill, description: "denied")
+        assert_active_user_api :delete, api_v1_console_skill_path(skill.oid)
+        assert_active_user_api :post, share_api_v1_console_skill_path(skill.oid)
+        assert_active_user_api :post, unshare_api_v1_console_skill_path(skill.oid)
 
         assert_not Skill.exists?(name: "denied-skill")
         skill.reload
@@ -35,7 +35,7 @@ module Api
       end
 
       test "shows public skills by default" do
-        get api_v1_skills_path
+        get api_v1_console_skills_path
 
         assert_response :ok
         names = json_body["data"].map { |s| s["name"] }
@@ -51,7 +51,7 @@ module Api
 
       test "shows owned and editable skills on the my skills tab" do
         skills(:other_private).editors << @user
-        get api_v1_skills_path(tab: "mine")
+        get api_v1_console_skills_path(tab: "mine")
 
         assert_response :ok
         names = json_body["data"].map { |s| s["name"] }
@@ -64,14 +64,14 @@ module Api
       end
 
       test "index searches within the selected tab and hides archived skills" do
-        get api_v1_skills_path(q: "customer")
+        get api_v1_console_skills_path(q: "customer")
         assert_equal [ skills(:admin_shared).oid ], json_body["data"].map { |s| s["id"] }
 
-        get api_v1_skills_path(tab: "mine", q: "customer")
+        get api_v1_console_skills_path(tab: "mine", q: "customer")
         assert_empty json_body["data"]
 
         skills(:member_private).archive!
-        get api_v1_skills_path(tab: "mine")
+        get api_v1_console_skills_path(tab: "mine")
         assert_empty json_body["data"]
       end
 
@@ -80,7 +80,7 @@ module Api
         editor = users(:globex_admin)
         skill.editors << editor
 
-        get api_v1_skill_path(skill.oid)
+        get api_v1_console_skill_path(skill.oid)
 
         assert_response :ok
         assert_equal [ { "id" => editor.oid, "name" => editor.name.presence, "email" => editor.email } ],
@@ -90,7 +90,7 @@ module Api
       end
 
       test "cannot read another user's private skill" do
-        get api_v1_skill_path(skills(:other_private).oid)
+        get api_v1_console_skill_path(skills(:other_private).oid)
         assert_response :not_found
       end
 
@@ -98,7 +98,7 @@ module Api
         skill = skills(:member_private)
         skill.update!(content: "# Incident Triage\n\n<script>alert(1)</script> [docs](javascript:alert(1))")
 
-        get api_v1_skill_path(skill.oid)
+        get api_v1_console_skill_path(skill.oid)
 
         assert_response :ok
         data = json_body["data"]
@@ -119,29 +119,29 @@ module Api
         skill.update!(user: users(:globex_admin))
         sign_in_console(users(:acme_admin))
 
-        get api_v1_skill_path(skill.oid)
+        get api_v1_console_skill_path(skill.oid)
         assert json_body.dig("data", "viewer", "can_unshare")
         assert_not json_body.dig("data", "viewer", "can_manage")
 
-        post unshare_api_v1_skill_path(skill.oid), headers: csrf_headers
+        post unshare_api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :ok
         assert_equal "private", json_body.dig("data", "visibility")
         assert_not skill.reload.shared?
 
-        delete api_v1_skill_path(skill.oid), headers: csrf_headers
+        delete api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :not_found, "moderation does not extend to archiving"
         assert_nil skill.reload.archived_at
       end
 
       test "a non-admin cannot unshare someone else's shared skill" do
-        post unshare_api_v1_skill_path(skills(:admin_shared).oid), headers: csrf_headers
+        post unshare_api_v1_console_skill_path(skills(:admin_shared).oid), headers: csrf_headers
         assert_response :not_found
         assert skills(:admin_shared).reload.shared?
       end
 
       test "creates edits and immediately shares a skill" do
         assert_difference("Skill.count", 1) do
-          post api_v1_skills_path, params: {
+          post api_v1_console_skills_path, params: {
             data: {
               name: "release-helper",
               description: "Help with release readiness.",
@@ -158,11 +158,11 @@ module Api
         assert skill.shared?
         assert_not_nil skill.shared_at
 
-        post share_api_v1_skill_path(skill.oid), headers: csrf_headers
+        post share_api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :ok
         assert skill.reload.shared?
 
-        patch api_v1_skill_path(skill.oid), params: {
+        patch api_v1_console_skill_path(skill.oid), params: {
           data: {
             name: "release-helper",
             description: "Updated release guidance.",
@@ -179,19 +179,19 @@ module Api
       test "owner shares, unshares, and archives a skill" do
         skill = skills(:member_private)
 
-        post share_api_v1_skill_path(skill.oid), headers: csrf_headers
+        post share_api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :ok
         assert_equal "shared", json_body.dig("data", "visibility")
         assert json_body.dig("data", "viewer", "can_unshare")
 
-        post unshare_api_v1_skill_path(skill.oid), headers: csrf_headers
+        post unshare_api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :ok
         assert_equal "private", json_body.dig("data", "visibility")
 
-        delete api_v1_skill_path(skill.oid), headers: csrf_headers
+        delete api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :no_content
         assert_not_nil skill.reload.archived_at
-        get api_v1_skill_path(skill.oid)
+        get api_v1_console_skill_path(skill.oid)
         assert_response :not_found
       end
 
@@ -200,7 +200,7 @@ module Api
         editor = users(:globex_admin)
 
         assert_difference("SkillEditor.count", 1) do
-          patch api_v1_skill_path(skill.oid), params: skill_body(skill, editor_ids: [ editor.oid ]),
+          patch api_v1_console_skill_path(skill.oid), params: skill_body(skill, editor_ids: [ editor.oid ]),
                                               headers: csrf_headers, as: :json
         end
         assert_response :ok
@@ -208,7 +208,7 @@ module Api
         assert_equal [ editor.oid ], json_body.dig("data", "editors").map { |e| e["id"] }
 
         assert_difference("SkillEditor.count", -1) do
-          patch api_v1_skill_path(skill.oid), params: skill_body(skill.reload, editor_ids: []),
+          patch api_v1_console_skill_path(skill.oid), params: skill_body(skill.reload, editor_ids: []),
                                               headers: csrf_headers, as: :json
         end
         assert_response :ok
@@ -219,7 +219,7 @@ module Api
         skill = skills(:member_private)
 
         [ users(:disabled_user).oid, "usr_bogus", @user.oid ].each do |editor_id|
-          patch api_v1_skill_path(skill.oid), params: skill_body(skill, editor_ids: [ editor_id ]),
+          patch api_v1_console_skill_path(skill.oid), params: skill_body(skill, editor_ids: [ editor_id ]),
                                               headers: csrf_headers, as: :json
 
           assert_response :unprocessable_entity
@@ -232,21 +232,21 @@ module Api
         skill = skills(:other_private)
         skill.editors << @user
 
-        get api_v1_skill_path(skill.oid)
+        get api_v1_console_skill_path(skill.oid)
         assert_response :ok
         assert_equal({ "owner" => false, "can_edit" => true, "can_manage" => false, "can_unshare" => false },
                      json_body.dig("data", "viewer"))
 
-        patch api_v1_skill_path(skill.oid), params: skill_body(skill, description: "Updated by an editor.",
+        patch api_v1_console_skill_path(skill.oid), params: skill_body(skill, description: "Updated by an editor.",
                                                                       editor_ids: [ users(:globex_admin).oid ]),
                                             headers: csrf_headers, as: :json
         assert_response :ok
         assert_equal "Updated by an editor.", skill.reload.description
         assert_equal [ @user ], skill.editors.to_a
 
-        delete api_v1_skill_path(skill.oid), headers: csrf_headers
+        delete api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :not_found
-        post share_api_v1_skill_path(skill.oid), headers: csrf_headers
+        post share_api_v1_console_skill_path(skill.oid), headers: csrf_headers
         assert_response :not_found
         assert_not skill.reload.shared?
         assert_nil skill.archived_at
@@ -254,7 +254,7 @@ module Api
 
       test "a stranger cannot update another user's private skill" do
         skill = skills(:other_private)
-        patch api_v1_skill_path(skill.oid), params: skill_body(skill, description: "hijacked"),
+        patch api_v1_console_skill_path(skill.oid), params: skill_body(skill, description: "hijacked"),
                                             headers: csrf_headers, as: :json
         assert_response :not_found
         assert_equal "Private finance guidance for the owner.", skill.reload.description
@@ -262,7 +262,7 @@ module Api
 
       test "preserves separate fields when instructions are invalid" do
         assert_no_difference("Skill.count") do
-          post api_v1_skills_path, params: {
+          post api_v1_console_skills_path, params: {
             data: { name: "release-helper", description: "Help with release readiness.", instructions: "" }
           }, headers: csrf_headers, as: :json
         end
@@ -275,13 +275,13 @@ module Api
       end
 
       test "rejects an invalid or duplicate name" do
-        post api_v1_skills_path, params: {
+        post api_v1_console_skills_path, params: {
           data: { name: skills(:admin_shared).name, description: "dupe", instructions: "x" }
         }, headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
         assert_includes json_body.dig("error", "details", "name"), "is already used by another skill"
 
-        post api_v1_skills_path, params: { data: { name: "Bad Name", description: "d", instructions: "x" } },
+        post api_v1_console_skills_path, params: { data: { name: "Bad Name", description: "d", instructions: "x" } },
                                  headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "name").present?
@@ -292,16 +292,16 @@ module Api
         stale = skill.lock_version
         skill.update!(description: "Changed elsewhere.")
 
-        patch api_v1_skill_path(skill.oid), params: skill_body(skill, description: "Mine.", lock_version: stale),
+        patch api_v1_console_skill_path(skill.oid), params: skill_body(skill, description: "Mine.", lock_version: stale),
                                             headers: csrf_headers, as: :json
         assert_response :conflict
         assert_equal "stale", json_body.dig("error", "details", "reason")
-        assert_equal SkillsController::STALE_MESSAGE, json_body.dig("error", "message")
+        assert_equal Console::SkillsController::STALE_MESSAGE, json_body.dig("error", "message")
         assert_equal "Changed elsewhere.", skill.reload.description
       end
 
       test "editor candidates are other active users, filterable by name or email" do
-        get editor_candidates_api_v1_skills_path
+        get editor_candidates_api_v1_console_skills_path
         assert_response :ok
         emails = json_body["data"].map { |u| u["email"] }
         assert_includes emails, users(:globex_admin).email
@@ -310,7 +310,7 @@ module Api
         assert_not_includes emails, users(:pending_user).email
         assert_equal emails.sort, emails
 
-        get editor_candidates_api_v1_skills_path(q: users(:globex_admin).email.upcase)
+        get editor_candidates_api_v1_console_skills_path(q: users(:globex_admin).email.upcase)
         assert_equal [ users(:globex_admin).oid ], json_body["data"].map { |u| u["id"] }
       end
     end

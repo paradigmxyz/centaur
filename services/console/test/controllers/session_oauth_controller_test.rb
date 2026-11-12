@@ -88,7 +88,7 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
   test "SSO success leaves the signed-in notice for the console" do
     run_callback(sub: "notice-sub", email: "notice@example.com")
-    get api_v1_me_path
+    get api_v1_console_me_path
     assert_equal "Signed in as notice@example.com.", json_body.dig("data", "flash", "notice")
   end
 

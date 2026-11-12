@@ -21,18 +21,18 @@ module Api
         link = client.attach_principal!(principals(:acme_channel))
         digest = client.secret_digest
 
-        assert_admin_only_api :get, api_v1_api_clients_path
-        assert_admin_only_api :get, api_v1_api_client_path(client.oid)
-        assert_admin_only_api :post, api_v1_api_clients_path, params: { data: { name: "x", scopes: ApiClient::SCOPES } }
-        assert_admin_only_api :patch, api_v1_api_client_path(client.oid), params: { data: { name: "renamed" } }
-        assert_admin_only_api :delete, api_v1_api_client_path(client.oid)
-        assert_admin_only_api :post, rotate_secret_api_v1_api_client_path(client.oid)
-        assert_admin_only_api :post, disable_api_v1_api_client_path(client.oid)
-        assert_admin_only_api :post, enable_api_v1_api_client_path(client.oid)
-        assert_admin_only_api :post, attach_principal_api_v1_api_client_path(client.oid),
+        assert_admin_only_api :get, api_v1_console_api_clients_path
+        assert_admin_only_api :get, api_v1_console_api_client_path(client.oid)
+        assert_admin_only_api :post, api_v1_console_api_clients_path, params: { data: { name: "x", scopes: ApiClient::SCOPES } }
+        assert_admin_only_api :patch, api_v1_console_api_client_path(client.oid), params: { data: { name: "renamed" } }
+        assert_admin_only_api :delete, api_v1_console_api_client_path(client.oid)
+        assert_admin_only_api :post, rotate_secret_api_v1_console_api_client_path(client.oid)
+        assert_admin_only_api :post, disable_api_v1_console_api_client_path(client.oid)
+        assert_admin_only_api :post, enable_api_v1_console_api_client_path(client.oid)
+        assert_admin_only_api :post, attach_principal_api_v1_console_api_client_path(client.oid),
                               params: { data: { principal: principals(:acme_user_bob).oid } }
-        assert_admin_only_api :delete, detach_principal_api_v1_api_client_path(client.oid, link.oid)
-        assert_admin_only_api :post, make_default_principal_api_v1_api_client_path(client.oid, link.oid)
+        assert_admin_only_api :delete, detach_principal_api_v1_console_api_client_path(client.oid, link.oid)
+        assert_admin_only_api :post, make_default_principal_api_v1_console_api_client_path(client.oid, link.oid)
 
         assert_equal 1, ApiClient.count
         client.reload
@@ -44,30 +44,30 @@ module Api
         client = create_client
         ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
 
-        get api_v1_api_clients_path
+        get api_v1_console_api_clients_path
         assert_response :not_found
         assert_equal({ "error" => { "message" => "not found" } }, json_body)
-        post rotate_secret_api_v1_api_client_path(client.oid), headers: csrf_headers, as: :json
+        post rotate_secret_api_v1_console_api_client_path(client.oid), headers: csrf_headers, as: :json
         assert_response :not_found
         assert_no_difference -> { ApiClient.count } do
-          post api_v1_api_clients_path, params: { data: { name: "x", scopes: ApiClient::SCOPES } },
+          post api_v1_console_api_clients_path, params: { data: { name: "x", scopes: ApiClient::SCOPES } },
                headers: csrf_headers, as: :json
         end
         assert_response :not_found
 
         reset!
-        get api_v1_api_clients_path
+        get api_v1_console_api_clients_path
         assert_response :not_found
-        get api_v1_api_clients_path, headers: bearer_headers(MEMBER_TOKEN)
+        get api_v1_console_api_clients_path, headers: bearer_headers(MEMBER_TOKEN)
         assert_response :not_found
       end
 
       test "me offers the API Clients section only while the feature is on" do
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_equal true, json_body.dig("data", "nav", "api_clients")
 
         ENV.delete("CENTAUR_CONSOLE_API_CLIENTS_ENABLED")
-        get api_v1_me_path
+        get api_v1_console_me_path
         assert_equal false, json_body.dig("data", "nav", "api_clients")
       end
 
@@ -76,7 +76,7 @@ module Api
         client.attach_principal!(principals(:acme_channel))
         create_client(name: "other").update!(disabled_at: Time.current)
 
-        get api_v1_api_clients_path
+        get api_v1_console_api_clients_path
         assert_response :ok
         assert_equal %w[eval-runner other], json_body["data"].map { |c| c["name"] }
         first = json_body["data"].first
@@ -91,7 +91,7 @@ module Api
       test "create shows the secret once with its default principal attached" do
         principal = principals(:acme_user_alice)
 
-        post api_v1_api_clients_path, params: {
+        post api_v1_console_api_clients_path, params: {
           data: { name: "eval-runner", scopes: [ "", "sessions:read" ], principal: principal.foreign_id }
         }, headers: csrf_headers, as: :json
 
@@ -106,17 +106,17 @@ module Api
         assert_equal client.secret_digest, ApiClient.digest_secret(secret)
         assert_equal [ [ principal.oid, true ] ], json_body.dig("data", "principals").map { |l| [ l.dig("principal", "id"), l["default"] ] }
 
-        get api_v1_api_client_path(client.oid)
+        get api_v1_console_api_client_path(client.oid)
         assert_response :ok
         assert_not json_body["data"].key?("secret")
         assert_not_includes response.body, secret
 
-        get api_v1_api_clients_path
+        get api_v1_console_api_clients_path
         assert_not_includes response.body, secret
       end
 
       test "create works without a principal" do
-        post api_v1_api_clients_path, params: { data: { name: "ci", scopes: ApiClient::SCOPES } },
+        post api_v1_console_api_clients_path, params: { data: { name: "ci", scopes: ApiClient::SCOPES } },
              headers: csrf_headers, as: :json
         assert_response :created
         assert_equal [], json_body.dig("data", "principals")
@@ -125,7 +125,7 @@ module Api
 
       test "create rejects an unknown principal" do
         assert_no_difference -> { ApiClient.count } do
-          post api_v1_api_clients_path, params: {
+          post api_v1_console_api_clients_path, params: {
             data: { name: "eval-runner", scopes: ApiClient::SCOPES, principal: "prn_missing" }
           }, headers: csrf_headers, as: :json
         end
@@ -135,7 +135,7 @@ module Api
 
       test "create validates name and scopes" do
         assert_no_difference -> { ApiClient.count } do
-          post api_v1_api_clients_path, params: { data: { name: "", scopes: [ "" ] } }, headers: csrf_headers, as: :json
+          post api_v1_console_api_clients_path, params: { data: { name: "", scopes: [ "" ] } }, headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
         assert json_body.dig("error", "details", "name").present?
@@ -146,7 +146,7 @@ module Api
         client = create_client
         original = client.secret_digest
 
-        post rotate_secret_api_v1_api_client_path(client.oid), headers: csrf_headers, as: :json
+        post rotate_secret_api_v1_console_api_client_path(client.oid), headers: csrf_headers, as: :json
 
         assert_response :ok
         assert_equal "no-store", response.headers["Cache-Control"]
@@ -158,16 +158,16 @@ module Api
       test "disable and enable toggle access" do
         client = create_client
 
-        post disable_api_v1_api_client_path(client.oid), headers: csrf_headers, as: :json
+        post disable_api_v1_console_api_client_path(client.oid), headers: csrf_headers, as: :json
         assert_response :ok
         assert client.reload.disabled?
         assert_equal true, json_body.dig("data", "disabled")
         disabled_at = client.disabled_at
 
-        post disable_api_v1_api_client_path(client.oid), headers: csrf_headers, as: :json
+        post disable_api_v1_console_api_client_path(client.oid), headers: csrf_headers, as: :json
         assert_equal disabled_at, client.reload.disabled_at
 
-        post enable_api_v1_api_client_path(client.oid), headers: csrf_headers, as: :json
+        post enable_api_v1_console_api_client_path(client.oid), headers: csrf_headers, as: :json
         assert_response :ok
         assert_not client.reload.disabled?
       end
@@ -175,22 +175,22 @@ module Api
       test "attach, make default, and detach principals" do
         client = create_client
 
-        post attach_principal_api_v1_api_client_path(client.oid), params: { data: { principal: principals(:acme_channel).oid } },
+        post attach_principal_api_v1_console_api_client_path(client.oid), params: { data: { principal: principals(:acme_channel).oid } },
              headers: csrf_headers, as: :json
         assert_response :created
-        post attach_principal_api_v1_api_client_path(client.oid), params: { data: { principal: principals(:acme_user_bob).foreign_id } },
+        post attach_principal_api_v1_console_api_client_path(client.oid), params: { data: { principal: principals(:acme_user_bob).foreign_id } },
              headers: csrf_headers, as: :json
         assert_response :created
         channel, bob = client.api_client_principals.order(:id).to_a
         assert channel.default
         assert_equal bob.oid, json_body.dig("data", "id")
 
-        post make_default_principal_api_v1_api_client_path(client.oid, bob.oid), headers: csrf_headers, as: :json
+        post make_default_principal_api_v1_console_api_client_path(client.oid, bob.oid), headers: csrf_headers, as: :json
         assert_response :ok
         assert bob.reload.default
         assert_not channel.reload.default
 
-        delete detach_principal_api_v1_api_client_path(client.oid, channel.oid), headers: csrf_headers
+        delete detach_principal_api_v1_console_api_client_path(client.oid, channel.oid), headers: csrf_headers
         assert_response :no_content
         assert_equal [ bob ], client.api_client_principals.reload.to_a
       end
@@ -198,7 +198,7 @@ module Api
       test "attaching an already attached principal keeps one link" do
         client = create_client
         client.attach_principal!(principals(:acme_channel))
-        post attach_principal_api_v1_api_client_path(client.oid), params: { data: { principal: principals(:acme_channel).oid } },
+        post attach_principal_api_v1_console_api_client_path(client.oid), params: { data: { principal: principals(:acme_channel).oid } },
              headers: csrf_headers, as: :json
         assert_response :created
         assert_equal 1, client.api_client_principals.count
@@ -206,7 +206,7 @@ module Api
 
       test "attach rejects an unknown principal" do
         client = create_client
-        post attach_principal_api_v1_api_client_path(client.oid), params: { data: { principal: "nope" } },
+        post attach_principal_api_v1_console_api_client_path(client.oid), params: { data: { principal: "nope" } },
              headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
         assert_equal "No principal matches that OID or foreign ID.", json_body.dig("error", "message")
@@ -218,9 +218,9 @@ module Api
         other = create_client(name: "other")
         foreign_link = other.attach_principal!(principals(:acme_channel))
 
-        delete detach_principal_api_v1_api_client_path(client.oid, foreign_link.oid), headers: csrf_headers
+        delete detach_principal_api_v1_console_api_client_path(client.oid, foreign_link.oid), headers: csrf_headers
         assert_response :not_found
-        post make_default_principal_api_v1_api_client_path(client.oid, foreign_link.oid), headers: csrf_headers, as: :json
+        post make_default_principal_api_v1_console_api_client_path(client.oid, foreign_link.oid), headers: csrf_headers, as: :json
         assert_response :not_found
         assert ApiClientPrincipal.exists?(foreign_link.id)
       end
@@ -229,7 +229,7 @@ module Api
         client = create_client
         digest = client.secret_digest
 
-        patch api_v1_api_client_path(client.oid), params: {
+        patch api_v1_console_api_client_path(client.oid), params: {
           data: { name: "evals", scopes: [ "", "sessions:read" ] }
         }, headers: csrf_headers, as: :json
 
@@ -241,7 +241,7 @@ module Api
 
       test "update rejects an empty name" do
         client = create_client
-        patch api_v1_api_client_path(client.oid), params: { data: { name: "" } }, headers: csrf_headers, as: :json
+        patch api_v1_console_api_client_path(client.oid), params: { data: { name: "" } }, headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
         assert_equal "eval-runner", client.reload.name
       end
@@ -250,7 +250,7 @@ module Api
         client = create_client
         client.attach_principal!(principals(:acme_channel))
 
-        delete api_v1_api_client_path(client.oid), headers: csrf_headers
+        delete api_v1_console_api_client_path(client.oid), headers: csrf_headers
         assert_response :no_content
         assert_not ApiClient.exists?(client.id)
         assert_equal 0, ApiClientPrincipal.where(api_client_id: client.id).count

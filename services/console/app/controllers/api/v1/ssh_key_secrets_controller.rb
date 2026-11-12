@@ -4,8 +4,6 @@ module Api
     # secret. Personal keys (those with an owner) are readable and deletable
     # here but are written only by their owner from the Integrations page.
     class SshKeySecretsController < Api::BaseController
-      accepts_credentials :bearer_or_session
-
       def index
         records, meta = paginated_label_search(SshKeySecret.includes(:key_source))
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }

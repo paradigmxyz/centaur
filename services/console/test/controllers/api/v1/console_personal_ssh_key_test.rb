@@ -13,22 +13,22 @@ module Api
       end
 
       def save_key(name: "My SSH key", private_key: @private_key, **extra)
-        put api_v1_me_ssh_key_path, params: { data: { name: name, private_key: private_key }.merge(extra) },
+        put api_v1_console_me_ssh_key_path, params: { data: { name: name, private_key: private_key }.merge(extra) },
                                     headers: csrf_headers, as: :json
       end
 
       test "ssh key endpoints are open to active users only" do
-        assert_active_user_api :get, api_v1_me_ssh_key_path
-        assert_active_user_api :put, api_v1_me_ssh_key_path, params: { data: { name: "Mine", private_key: @private_key } }
-        assert_active_user_api :delete, api_v1_me_ssh_key_path
-        assert_active_user_api :post, validate_api_v1_me_ssh_key_path, params: { data: { private_key: @private_key } }
+        assert_active_user_api :get, api_v1_console_me_ssh_key_path
+        assert_active_user_api :put, api_v1_console_me_ssh_key_path, params: { data: { name: "Mine", private_key: @private_key } }
+        assert_active_user_api :delete, api_v1_console_me_ssh_key_path
+        assert_active_user_api :post, validate_api_v1_console_me_ssh_key_path, params: { data: { private_key: @private_key } }
         assert_equal 0, SshKeySecret.where.not(owner_id: nil).count
       end
 
       test "a member saves, views, edits, and deletes only their own key" do
         console = Principal.create!(foreign_id: "ssh-console-member", kind: "console_user",
                                     console_user: @member, created_by: users(:acme_admin))
-        get api_v1_me_ssh_key_path
+        get api_v1_console_me_ssh_key_path
         assert_response :ok
         assert_equal({ "saved" => false, "name" => "My SSH key", "public_key" => nil, "grants" => [] },
                      json_body["data"].slice("saved", "name", "public_key", "grants"))
@@ -43,7 +43,7 @@ module Api
         assert_nil users(:acme_admin).personal_ssh_key
         assert console.grants.exists?(ssh_key_secret: key)
 
-        get api_v1_me_ssh_key_path
+        get api_v1_console_me_ssh_key_path
         assert_response :ok
         data = json_body["data"]
         assert data["saved"]
@@ -61,12 +61,12 @@ module Api
         assert_equal "Renamed", key.reload.name
         assert_equal SshKey.normalize(@private_key), key.key_source.secret
 
-        delete api_v1_me_ssh_key_path, headers: csrf_headers
+        delete api_v1_console_me_ssh_key_path, headers: csrf_headers
         assert_response :no_content
         assert_nil @member.reload.personal_ssh_key
         assert_not console.grants.where.not(ssh_key_secret_id: nil).exists?
 
-        delete api_v1_me_ssh_key_path, headers: csrf_headers
+        delete api_v1_console_me_ssh_key_path, headers: csrf_headers
         assert_response :no_content, "deleting a missing key is a no-op"
       end
 
@@ -90,7 +90,7 @@ module Api
 
       test "live validation handles browser line endings without saving or echoing keys" do
         assert_no_difference "SshKeySecret.count" do
-          post validate_api_v1_me_ssh_key_path, params: { data: { private_key: @private_key.gsub("\n", "\r\n") } },
+          post validate_api_v1_console_me_ssh_key_path, params: { data: { private_key: @private_key.gsub("\n", "\r\n") } },
                                                 headers: csrf_headers, as: :json
         end
         assert_response :ok
@@ -100,7 +100,7 @@ module Api
         assert_includes response.headers["Cache-Control"], "no-store"
         assert_no_match PRIVATE_KEY_MARKER, response.body
 
-        post validate_api_v1_me_ssh_key_path, params: { data: { private_key: @public_key } },
+        post validate_api_v1_console_me_ssh_key_path, params: { data: { private_key: @public_key } },
                                               headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
         assert_includes json_body.dig("error", "message"), "public key"
@@ -123,7 +123,7 @@ module Api
         assert_no_match PRIVATE_KEY_MARKER, response.body
         assert_not_includes response.body, "not-a-real-key-body"
 
-        post validate_api_v1_me_ssh_key_path, params: { data: { private_key: broken } },
+        post validate_api_v1_console_me_ssh_key_path, params: { data: { private_key: broken } },
                                               headers: csrf_headers, as: :json
         assert_response :unprocessable_entity
         assert_no_match PRIVATE_KEY_MARKER, response.body
@@ -135,10 +135,10 @@ module Api
         assert_response :ok
 
         sign_in_console(users(:globex_admin))
-        get api_v1_me_ssh_key_path
+        get api_v1_console_me_ssh_key_path
         assert_response :ok
         assert_equal false, json_body.dig("data", "saved"), "an admin only sees their own key here"
-        delete api_v1_me_ssh_key_path, headers: csrf_headers
+        delete api_v1_console_me_ssh_key_path, headers: csrf_headers
         assert_response :no_content
         assert @member.reload.personal_ssh_key
       end
@@ -148,26 +148,26 @@ module Api
         key = @member.reload.personal_ssh_key
         sign_in_console(users(:acme_admin))
 
-        get api_v1_secrets_path(kind: "ssh_key")
+        get api_v1_console_secrets_path(kind: "ssh_key")
         assert_response :ok
         assert_includes json_body["data"].map { |s| s["name"] }, "Member key"
         assert_no_match PRIVATE_KEY_MARKER, response.body
 
-        get api_v1_ssh_key_secret_path(key.oid)
+        get api_v1_console_secret_detail_path(kind: "ssh_key", id: key.oid)
         assert_response :ok
         assert_no_match PRIVATE_KEY_MARKER, response.body
 
         principal = principals(:acme_channel)
-        post api_v1_grants_path, params: { data: { principal_id: principal.oid, ssh_key_secret_id: key.oid } },
+        post api_v1_console_grants_path, params: { data: { principal_id: principal.oid, ssh_key_secret_id: key.oid } },
              headers: csrf_headers, as: :json
         assert_response :created
-        get api_v1_principal_grants_path(principal.oid)
+        get api_v1_console_principal_grants_path(principal.oid)
         grant = json_body["data"].find { |g| g["ssh_key_secret_id"] == key.oid }
         assert_equal({ "kind" => "ssh_key", "id" => key.oid }, grant["grantable"].slice("kind", "id"))
         assert_no_match PRIVATE_KEY_MARKER, response.body
 
         sign_in_console(@member)
-        get api_v1_me_ssh_key_path
+        get api_v1_console_me_ssh_key_path
         labels = json_body.dig("data", "grants").map { |g| [ g["grantee_type"], g["label"] ] }
         assert_includes labels, [ "principal", principal.name.presence || principal.foreign_id ]
       end

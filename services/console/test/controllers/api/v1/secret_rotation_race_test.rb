@@ -28,7 +28,7 @@ module Api
 
       KINDS = {
         static: {
-          model: StaticSecret, association: :source, path: :api_v1_static_secret_path,
+          model: StaticSecret, association: :source, path: :api_v1_console_static_secret_path,
           stored: "stored-value", rotated: "rotated-value",
           build: lambda { |secret|
             StaticSecret.create!(name: "race-static", inject_config: { "header" => "X-Key" },
@@ -41,7 +41,7 @@ module Api
           renamed: ->(record) { record.name == "race-static-renamed" }
         },
         pg_dsn: {
-          model: PgDsnSecret, association: :dsn_source, path: :api_v1_pg_dsn_secret_path,
+          model: PgDsnSecret, association: :dsn_source, path: :api_v1_console_pg_dsn_secret_path,
           stored: "postgres://u:stored@db.example:5432/shop", rotated: "postgres://u:rotated@db.example:5432/shop",
           build: lambda { |secret|
             PgDsnSecret.create!(created_by: users(:acme_admin), foreign_id: "race-pg", database: "shop",
@@ -54,7 +54,7 @@ module Api
           renamed: ->(record) { record.role == "reader" }
         },
         gcp_auth: {
-          model: GcpAuthSecret, association: :keyfile_source, path: :api_v1_gcp_auth_secret_path,
+          model: GcpAuthSecret, association: :keyfile_source, path: :api_v1_console_gcp_auth_secret_path,
           stored: "{\"type\":\"service_account\",\"v\":\"stored\"}", rotated: "{\"type\":\"service_account\",\"v\":\"rotated\"}",
           build: lambda { |secret|
             GcpAuthSecret.create!(created_by: users(:acme_admin), name: "race-gcp-auth", scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
@@ -67,7 +67,7 @@ module Api
           renamed: ->(record) { record.name == "race-gcp-auth-renamed" }
         },
         gcp_id_token: {
-          model: GcpIdTokenSecret, association: :keyfile_source, path: :api_v1_gcp_id_token_secret_path,
+          model: GcpIdTokenSecret, association: :keyfile_source, path: :api_v1_console_gcp_id_token_secret_path,
           stored: "{\"type\":\"service_account\",\"v\":\"stored\"}", rotated: "{\"type\":\"service_account\",\"v\":\"rotated\"}",
           build: lambda { |secret|
             GcpIdTokenSecret.create!(created_by: users(:acme_admin), name: "race-id-token", audience: "https://race-abc123-uc.a.run.app",

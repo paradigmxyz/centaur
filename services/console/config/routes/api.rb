@@ -1,10 +1,11 @@
-# SPA-facing endpoints live in the owning area's config/routes/console_*.rb.
+# The bearer operator API (Api::BaseController: ApiKey auth) and the sandbox
+# API (sandbox JWTs). Same routes as before the console SPA; the SPA's
+# endpoints are the session-only console API in config/routes/console*.rb
+# (/api/v1/console/*). Never route a console controller here or a bearer
+# controller under /api/v1/console.
 
 namespace :api do
   namespace :v1 do
-    # Console SPA session endpoints (session cookie or bearer; see docs/API.md).
-    resource :me, only: :show, controller: :me
-    resource :session, only: :destroy
     # Each secret type is addressable by opaque oid or globally unique foreign_id.
     # The /lookup/default/... form is a temporary compatibility alias.
     resources :static_secrets, only: %i[index show create update destroy] do
@@ -87,8 +88,6 @@ namespace :api do
       resources :grants, only: %i[index], controller: :grantee_grants
     end
     resources :grants, only: %i[show create destroy]
-  resources :secrets, only: %i[index]
-  resources :slack_channels, only: %i[index]
     resources :api_keys, only: %i[index show create destroy]
     resources :proxies, only: %i[index show create update destroy]
     resources :scheduled_tasks, only: %i[show]
