@@ -24,6 +24,7 @@ const testFeature: FeatureModule = {
   routes: [
     { path: "/console/flaky", element: <FlakyPage /> },
     { path: "/console/other", element: <p>other page</p> },
+    { path: "/console/lazy", lazy: async () => ({ Component: () => <p>lazy page</p> }) },
   ],
 };
 
@@ -71,6 +72,14 @@ describe("app shell", () => {
 
     expect(await screen.findByText("upstream exploded")).toBeInTheDocument();
     expect(queryClient.getQueryData(sharedKeys.me)).toBeDefined();
+  });
+
+  it("loads a lazy route on a full page load without a HydrateFallback warning", async () => {
+    const warn = vi.spyOn(console, "warn");
+    renderShell("/console/lazy", adminMe());
+
+    expect(await screen.findByText("lazy page")).toBeInTheDocument();
+    expect(warn.mock.calls.flat().join(" ")).not.toMatch(/HydrateFallback/);
   });
 
   it("sends a pending account to the server-rendered holding page instead of rendering the shell", async () => {

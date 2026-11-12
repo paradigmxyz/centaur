@@ -17,7 +17,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { navigation } from "@/lib/api";
 import lockup from "@/assets/centaur-lockup-white.svg";
 
-function ShellLoading() {
+/**
+ * Full-page placeholder: the shell's Suspense fallback while the session
+ * loads, and the router's HydrateFallback while a lazy route loads on a full
+ * page load.
+ */
+export function ShellLoading() {
   return (
     <div role="status" className="grid min-h-svh place-items-center text-sm text-muted-foreground">
       Loading…

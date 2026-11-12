@@ -1,7 +1,7 @@
 import { createBrowserRouter, type RouteObject } from "react-router";
 
 import { features } from "@/app/registry";
-import { AppShell } from "@/app/shell/AppShell";
+import { AppShell, ShellLoading } from "@/app/shell/AppShell";
 import { Landing } from "@/app/shell/Landing";
 import { NotFound } from "@/app/shell/NotFound";
 import { RouteError } from "@/app/shell/RouteError";
@@ -12,6 +12,9 @@ export function buildRoutes(modules: FeatureModule[] = features): RouteObject[] 
     ...modules.flatMap((feature) => feature.publicRoutes ?? []),
     {
       element: <AppShell />,
+      // Shown while the matched lazy route loads on a full page load (the
+      // router's initial "hydration"); same placeholder as the shell's Suspense.
+      hydrateFallbackElement: <ShellLoading />,
       errorElement: <RouteError />,
       children: [
         {
