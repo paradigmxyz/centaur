@@ -276,11 +276,11 @@ RUN set -eux; \
     amp --version >/dev/null
 
 # ── agent-browser: download Chrome binary (runs as agent, deps already installed) ─
-# Pinned to Chrome for Testing Stable 157.0.8103.50, which fixes the exploited
-# XML-handling RCE CVE-2026-125350 (and the 157.0.8103.38 fixes for
-# CVE-2026-121030, -121035, -121071 and -121189).
+# Pinned to Chrome for Testing Stable 157.0.8103.78, which fixes the Skia RCE
+# CVE-2026-126846 (and the earlier 157.0.8103.50 fix for CVE-2026-125350 and
+# 157.0.8103.38 fixes for CVE-2026-121030, -121035, -121071 and -121189).
 # agent-browser discovers the browser at ~/.agent-browser/browsers/chrome-<version>.
-ARG CHROME_FOR_TESTING_VERSION=157.0.8103.50
+ARG CHROME_FOR_TESTING_VERSION=157.0.8103.78
 RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       set -eux; \
       dest="$HOME/.agent-browser/browsers/chrome-${CHROME_FOR_TESTING_VERSION}"; \
