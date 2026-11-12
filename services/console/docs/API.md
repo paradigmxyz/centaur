@@ -1688,7 +1688,7 @@ Assign and unassign roles on a principal. The assignment endpoints are nested un
 { "data": { "role_id": "role_..." } }
 ```
 
-Returns `201` with the assigned role's representation. Assigning an already assigned role returns `422`. An unknown principal or role returns `404`.
+Returns `201` with the assigned role's representation. Assignment is idempotent: assigning a role the principal already holds returns `200` with the same representation and changes nothing. This includes concurrent requests for the same assignment: exactly one creates it (`201`) and the others return `200`, never a uniqueness error. An unknown principal or role returns `404`.
 
 | Method   | Path | Notes |
 | -------- | ---- | ----- |

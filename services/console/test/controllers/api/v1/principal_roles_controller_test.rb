@@ -92,6 +92,70 @@ module Api
         assert_equal role.oid, json_body.dig("data", "id")
       end
 
+      attr_accessor :competitor_row
+
+      # Simulates a concurrent request that commits the same assignment between
+      # this request's existence check and its own write. The competitor uses a
+      # raw second connection, so it commits outside the test transaction just
+      # like a real concurrent request. `kind` picks the window: :validation
+      # commits it before the uniqueness validation runs (RecordInvalid);
+      # :create commits it after validation, right before the INSERT, so only
+      # the unique index catches it (RecordNotUnique).
+      def with_concurrent_assignment(kind)
+        competitor = @competitor = race_connection
+        test = self
+        racer = lambda do |record|
+          next if test.competitor_row
+
+          row = test.competitor_row = [ record.principal_id, record.role_id ]
+          competitor.exec_params(<<~SQL, row)
+            INSERT INTO principal_roles (principal_id, role_id, created_at, updated_at)
+            VALUES ($1, $2, now(), now())
+          SQL
+        end
+        PrincipalRole.set_callback(kind, :before, racer)
+        yield
+        assert competitor_row, "the concurrent assignment never ran"
+      ensure
+        PrincipalRole.skip_callback(kind, :before, racer)
+      end
+
+      def race_connection
+        config = ActiveRecord::Base.connection_db_config.configuration_hash
+        PG.connect(host: config[:host], port: config[:port], dbname: ActiveRecord::Base.lease_connection.current_database,
+                   user: config[:username], password: config[:password])
+      end
+
+      # The competitor's row is committed, so remove it once the test
+      # transaction (which may hold locks on it) has rolled back.
+      def after_teardown
+        super
+      ensure
+        if @competitor
+          if @competitor_row
+            @competitor.exec_params("DELETE FROM principal_roles WHERE principal_id = $1 AND role_id = $2", @competitor_row)
+          end
+          @competitor.close
+        end
+      end
+
+      { create: "unique index", validation: "uniqueness validation" }.each do |kind, guard|
+        test "POST losing a concurrent assignment race on the #{guard} returns the winner" do
+          principal = principals(:acme_user_bob)
+          role = roles(:acme_admin_role)
+          body = { data: { role_id: role.oid } }
+
+          with_concurrent_assignment(kind) do
+            post api_v1_principal_roles_url(principal_id: principal.oid),
+                 params: body.to_json, headers: auth_headers
+          end
+
+          assert_response :ok
+          assert_equal role.oid, json_body.dig("data", "id")
+          assert_equal 1, principal.principal_roles.where(role: role).count
+        end
+      end
+
       test "POST returns 404 for an unknown role" do
         post api_v1_principal_roles_url(principal_id: principals(:acme_channel).oid),
              params: { data: { role_id: "role_nope" } }.to_json, headers: auth_headers
