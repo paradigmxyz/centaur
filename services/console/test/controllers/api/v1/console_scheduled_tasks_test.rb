@@ -17,7 +17,7 @@ module Api
 
         assert_active_user_api :get, api_v1_scheduled_tasks_path
         assert_active_user_api :get, new_api_v1_scheduled_task_path
-        assert_active_user_api :get, api_v1_scheduled_task_path(task.oid, view: "console"), credential: :session
+        assert_active_user_api :get, edit_api_v1_scheduled_task_path(task.oid), credential: :session
         assert_active_user_api :post, api_v1_scheduled_tasks_path, params: { data: task_params }
         assert_active_user_api :patch, api_v1_scheduled_task_path(task.oid), params: { data: { name: "x" } }
         assert_active_user_api :delete, api_v1_scheduled_task_path(task.oid), params: {}
@@ -26,12 +26,12 @@ module Api
         assert task.reload.persisted?
       end
 
-      test "the execution-state lookup keeps its admin-only contract" do
+      test "the execution-state lookup keeps its admin-only, bearer-only contract" do
         task = create_task
 
         assert_admin_only_api :get, api_v1_scheduled_task_path(task.oid)
 
-        get api_v1_scheduled_task_path(task.oid)
+        get api_v1_scheduled_task_path(task.oid), headers: bearer_headers
         assert_response :ok
         assert_equal({ "id" => task.oid, "enabled" => true, "delivery_channel" => "C0123456789" }, json_body["data"])
       end
@@ -122,7 +122,7 @@ module Api
       test "the console view preserves the selected delivery channel" do
         task = create_task
 
-        get api_v1_scheduled_task_path(task.oid, view: "console")
+        get edit_api_v1_scheduled_task_path(task.oid)
 
         assert_response :ok
         data = json_body["data"]
@@ -136,7 +136,7 @@ module Api
         task = create_task
         task.update!(cron_expression: "15 6 * * 1,3,5")
 
-        get api_v1_scheduled_task_path(task.oid, view: "console")
+        get edit_api_v1_scheduled_task_path(task.oid)
 
         data = json_body["data"]
         assert_equal "custom", data["schedule_preset"]
@@ -238,7 +238,7 @@ module Api
         get api_v1_scheduled_tasks_path
         assert_equal [ own.oid ], json_body["data"].pluck("id")
 
-        get api_v1_scheduled_task_path(other_task.oid, view: "console")
+        get edit_api_v1_scheduled_task_path(other_task.oid)
         assert_response :not_found
 
         patch api_v1_scheduled_task_path(other_task.oid), params: { data: { name: "Hijacked" } },
@@ -271,7 +271,7 @@ module Api
         assert_equal [ own.oid ], json_body["data"].pluck("id")
         assert_not json_body["data"].first.key?("author_email")
 
-        get api_v1_scheduled_task_path(task.oid, view: "console")
+        get edit_api_v1_scheduled_task_path(task.oid)
         assert_response :not_found
 
         patch api_v1_scheduled_task_path(task.oid), params: { data: { name: "Renamed by admin" } },
@@ -294,7 +294,7 @@ module Api
         assert_equal "Member task", task.reload.name
 
         # The admin-only execution-state lookup still reaches any task.
-        get api_v1_scheduled_task_path(task.oid)
+        get api_v1_scheduled_task_path(task.oid), headers: bearer_headers
         assert_response :ok
         assert_equal({ "id" => task.oid, "enabled" => true, "delivery_channel" => "C0123456789" }, json_body["data"])
       end
@@ -308,7 +308,7 @@ module Api
         get api_v1_scheduled_tasks_path
         assert_not_includes json_body["data"].pluck("id"), task.oid
 
-        get api_v1_scheduled_task_path(task.oid, view: "console")
+        get edit_api_v1_scheduled_task_path(task.oid)
         assert_response :not_found
       end
 

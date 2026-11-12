@@ -7,7 +7,7 @@ namespace :api do
         post :runs, action: :create_run
       end
     end
-    resources :scheduled_tasks, only: %i[index new create update destroy] do
+    resources :scheduled_tasks, only: %i[index new edit create update destroy] do
       post :run, on: :member
       get :slack_channel_options, on: :collection
     end

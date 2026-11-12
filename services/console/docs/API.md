@@ -68,9 +68,9 @@ browser session from minting API keys or proxy tokens that outlive it.
 
 | Credential | Endpoints |
 |---|---|
-| Bearer only | `/api/v1/api_keys` (all), `/api/v1/proxies` (all) |
-| Bearer or session | every `/api/v1/<kind>_secrets` resource (static, gcp_auth, gcp_id_token, aws_auth, oauth_token, pg_dsn, hmac, ssh_key) including lookups; `/api/v1/broker_credentials` (CRUD, lookup); `/api/v1/oauth_apps` (CRUD, `lookup/:slug`); `/api/v1/principals` index/show/create/update, lookups, `effective_config`, and `POST …/slack_channel_permissions`; `/api/v1/principals/:id/roles`; `/api/v1/principals/:id/grants` and `/api/v1/roles/:id/grants`; `/api/v1/grants`; `/api/v1/roles` CRUD, lookups, and `POST …/slack_channel_permissions`; `GET /api/v1/scheduled_tasks/:id` (without `?view=console`) |
-| Session only | `/api/v1/me`, `/api/v1/me/ssh_key`, `/api/v1/session`, `/api/v1/users`, `/api/v1/api_clients`, `/api/v1/system_settings` (incl. `slack_external_teams`), `/api/v1/workflows` (incl. runs and force start), `/api/v1/scheduled_tasks` (index, new, create, update, destroy, run, `slack_channel_options`, and `GET /:id?view=console`), `/api/v1/skills`, `/api/v1/integrations`, `/api/v1/oauth_providers`, `/api/v1/oauth_apps/presets/:provider`, `/api/v1/oauth_apps/:id/credentials`, `/api/v1/oauth_apps/:id/provider_details`, `/api/v1/secrets` (index, `:kind/:id` detail, role grants), `/api/v1/slack_channels`, `DELETE /api/v1/principals/:id`, `GET /api/v1/principals/:id/effective_grants`, and `PUT`/`DELETE …/slack_channel_permissions` on principals and roles |
+| Bearer only | `/api/v1/api_keys` (all), `/api/v1/proxies` (all), `/api/v1/principals` index/show, lookups, `effective_config`, and `POST …/slack_channel_permissions`, `GET /api/v1/scheduled_tasks/:id` |
+| Bearer or session | every `/api/v1/<kind>_secrets` resource (static, gcp_auth, gcp_id_token, aws_auth, oauth_token, pg_dsn, hmac, ssh_key) including lookups; `/api/v1/broker_credentials` (CRUD, lookup); `/api/v1/oauth_apps` (CRUD, `lookup/:slug`); `POST /api/v1/principals` and `PUT`/`PATCH /api/v1/principals/:id`; `/api/v1/principals/:id/roles`; `/api/v1/principals/:id/grants` and `/api/v1/roles/:id/grants`; `/api/v1/grants`; `/api/v1/roles` CRUD, lookups, and `POST …/slack_channel_permissions` |
+| Session only | `/api/v1/me`, `/api/v1/me/ssh_key`, `/api/v1/session`, `/api/v1/users`, `/api/v1/api_clients`, `/api/v1/system_settings` (incl. `slack_external_teams`), `/api/v1/workflows` (incl. runs and force start), `/api/v1/scheduled_tasks` (index, new, `:id/edit`, create, update, destroy, run, `slack_channel_options`), `/api/v1/skills`, `/api/v1/integrations`, `/api/v1/oauth_providers`, `/api/v1/oauth_apps/presets/:provider`, `/api/v1/oauth_apps/:id/credentials`, `/api/v1/oauth_apps/:id/provider_details`, `/api/v1/secrets` (index, `:kind/:id` detail, role grants), `/api/v1/slack_channels`, `GET /api/v1/principals/console` and `GET /api/v1/principals/:id/console`, `DELETE /api/v1/principals/:id`, `GET /api/v1/principals/:id/effective_grants`, and `PUT`/`DELETE …/slack_channel_permissions` on principals and roles |
 
 The credential type is checked before anything else and never falls back to
 the other credential:
@@ -1564,15 +1564,14 @@ Returns `201`:
 | `PUT`  | `/api/v1/principals/:id/slack_channel_permissions` | Replace the direct Slack channel permissions with `data.slack_channel_permissions`. DM rows (`D…`) are API-managed: stored DM rows are kept and submitted DM rows ignored. An unchanged submission writes nothing. Returns the stored rows. |
 | `DELETE` | `/api/v1/principals/:id/slack_channel_permissions/:channel_id` | Delete one direct Slack channel permission. `204`; `404` if absent. |
 
-Optional list and fetch parameters:
+Console reads (session only) return the principal payload plus `kind`,
+`slack_user_id`, `roles` (`[{ id, foreign_id, name }]`), and
+`inherited_slack_channel_permissions` (merged from assigned roles):
 
-- `GET /api/v1/principals?q=<text>` matches `name` or `foreign_id`
-  case-insensitively.
-- `GET /api/v1/principals?sort=name` orders by `name` (unnamed last), then
-  creation time. Any other `sort` value returns `400`.
-- `view=console` on list and fetch adds `kind`, `slack_user_id`, `roles`
-  (`[{ id, foreign_id, name }]`), and `inherited_slack_channel_permissions`
-  (merged from assigned roles).
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/principals/console` | Paginated list. `q` matches `name` or `foreign_id` case-insensitively; `sort=name` orders by `name` (unnamed last), then creation time (any other `sort` returns `400`). |
+| `GET` | `/api/v1/principals/:id/console` | One principal by OID. |
 
 `GET /api/v1/principals/:id/effective_grants` returns:
 
@@ -2051,7 +2050,7 @@ When the sandbox principal is a Slack channel, the endpoints manage that channel
 | `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
 | `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`; disabled tasks return `422`. |
 
-The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key (or an admin console session), returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
+The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key, returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
 
 Responses include the task's optional cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`. Omit `--cron` when creating a manual-only task, or pass `update-task --cron ""` to remove an existing recurring schedule.
 
@@ -2066,7 +2065,7 @@ returned. Responses set `Cache-Control: no-store`.
 | ------ | ---- | ----- |
 | `GET` | `/api/v1/scheduled_tasks` | The caller's tasks, ordered by name. |
 | `GET` | `/api/v1/scheduled_tasks/new` | Defaults for a new task: daily at 9:00 PT, enabled, delivered to the caller's Slack DM when one is linked. |
-| `GET` | `/api/v1/scheduled_tasks/:id?view=console` | One task in the console shape below. Without `view=console`, this is the admin execution-state lookup above. |
+| `GET` | `/api/v1/scheduled_tasks/:id/edit` | One of the caller's tasks in the console shape below. |
 | `POST` | `/api/v1/scheduled_tasks` | Create a task authored by the caller. Returns `201`. |
 | `PUT`/`PATCH` | `/api/v1/scheduled_tasks/:id` | Update the fields sent; keep the rest. |
 | `DELETE` | `/api/v1/scheduled_tasks/:id` | Returns `204`. |

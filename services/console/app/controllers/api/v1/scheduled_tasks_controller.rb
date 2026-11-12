@@ -1,25 +1,22 @@
 module Api
   module V1
-    # GET /api/v1/scheduled_tasks/:id (no ?view) is the admin-only execution
+    # GET /api/v1/scheduled_tasks/:id is the admin-only, bearer-only execution
     # state lookup used by the workflow host: id, enabled, delivery_channel, and
-    # never the prompt. It accepts a bearer key or the session; everything
-    # else (including ?view=console) is console-session only.
+    # never the prompt.
     #
-    # Everything else backs the console Scheduled Tasks pages and is open to
-    # any active user, scoped to the tasks they authored. Any other task is a
-    # 404 for everyone, admins included.
+    # Everything else backs the console Scheduled Tasks pages: console session
+    # only, open to any active user, scoped to the tasks they authored. Any
+    # other task is a 404 for everyone, admins included.
     class ScheduledTasksController < Api::BaseController
-      accepts_credentials :bearer_or_session
-      accepts_credentials :session, only: %i[index new create update destroy run slack_channel_options]
-      accepts_credentials :session, only: :show, if: :console_view?
+      accepts_credentials :bearer, only: :show
+      accepts_credentials :session, except: :show
 
       MAX_CHANNEL_OPTIONS = 20
 
-      allow_active_users only: %i[index new show create update destroy run slack_channel_options]
+      allow_active_users except: :show
 
       before_action :disable_caching
-      before_action :require_admin_unless_console_view!, only: :show
-      before_action :set_task, only: %i[show update destroy run], if: -> { action_name != "show" || console_view? }
+      before_action :set_task, only: %i[edit update destroy run]
 
       def index
         tasks = current_user.scheduled_tasks.includes(:author, :principal).order(:name, :id).to_a
@@ -36,10 +33,13 @@ module Api
       end
 
       def show
-        return render(json: { data: console_payload(@task) }) if console_view?
-
         task = ScheduledTask.find_by_oid!(params[:id])
         render json: { data: { id: task.oid, enabled: task.enabled?, delivery_channel: task.delivery_channel } }
+      end
+
+      # The caller's own task, as the edit form shows it.
+      def edit
+        render json: { data: console_payload(@task) }
       end
 
       def create
@@ -86,17 +86,8 @@ module Api
 
       private
 
-      def console_view?
-        params[:view] == "console"
-      end
-
       def disable_caching
         response.headers["Cache-Control"] = "no-store"
-      end
-
-      # The execution-state lookup keeps its admin-only contract.
-      def require_admin_unless_console_view!
-        require_admin! unless console_view?
       end
 
       # Only the caller's own tasks; Slack channel tasks (no author) and other

@@ -13,7 +13,7 @@ module Api
 
       test "an admin session cookie authenticates GET requests without a CSRF token" do
         sign_in_console(users(:acme_admin))
-        get api_v1_principals_path
+        get console_api_v1_principals_path
         assert_response :ok
         assert json_body["data"].any?
       end
@@ -166,7 +166,7 @@ module Api
         assert_equal "pending", json_body.dig("data", "user", "status")
         assert_equal false, json_body.dig("data", "nav", "integrations")
 
-        get api_v1_principals_path
+        get console_api_v1_principals_path
         assert_response :forbidden
         assert_equal "account_pending", json_body.dig("error", "details", "reason")
       end

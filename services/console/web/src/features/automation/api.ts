@@ -66,7 +66,7 @@ export function useScheduledTask(id: string) {
   return useSuspenseQuery({
     queryKey: scheduledTaskKeys.detail(id),
     queryFn: ({ signal }) =>
-      api.get<DataEnvelope<ScheduledTask>>(`${tasksBase}/${encodeURIComponent(id)}`, { view: "console" }, signal),
+      api.get<DataEnvelope<ScheduledTask>>(`${tasksBase}/${encodeURIComponent(id)}/edit`, undefined, signal),
     select: (body) => body.data,
   });
 }

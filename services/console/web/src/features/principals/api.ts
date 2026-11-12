@@ -69,7 +69,7 @@ export function usePrincipalList(params: { q: string; page: number }) {
   return useQuery({
     queryKey: principalKeys.list(params),
     queryFn: ({ signal }) =>
-      api.get<ListEnvelope<Principal>>(base, { view: "console", sort: "name", q: params.q, page: params.page }, signal),
+      api.get<ListEnvelope<Principal>>(`${base}/console`, { sort: "name", q: params.q, page: params.page }, signal),
     placeholderData: keepPreviousData,
   });
 }
@@ -77,7 +77,7 @@ export function usePrincipalList(params: { q: string; page: number }) {
 export function usePrincipalTotal() {
   return useQuery({
     queryKey: principalKeys.list({ total: true }),
-    queryFn: ({ signal }) => api.get<ListEnvelope<Principal>>(base, { limit: 1 }, signal),
+    queryFn: ({ signal }) => api.get<ListEnvelope<Principal>>(`${base}/console`, { limit: 1 }, signal),
     select: (body) => body.meta.total,
   });
 }
@@ -85,7 +85,7 @@ export function usePrincipalTotal() {
 export function usePrincipal(id: string) {
   return useSuspenseQuery({
     queryKey: principalKeys.detail(id),
-    queryFn: ({ signal }) => api.get<DataEnvelope<Principal>>(`${base}/${id}`, { view: "console" }, signal),
+    queryFn: ({ signal }) => api.get<DataEnvelope<Principal>>(`${base}/${encodeURIComponent(id)}/console`, undefined, signal),
     select: (body) => body.data,
   });
 }

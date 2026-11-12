@@ -11,8 +11,8 @@ module Api
 
       test "principal endpoints are admin-only for every caller type" do
         principal = principals(:acme_user_bob)
-        assert_admin_only_api :get, api_v1_principals_path(view: "console")
-        assert_admin_only_api :get, api_v1_principal_path(principal.oid, view: "console")
+        assert_admin_only_api :get, console_api_v1_principals_path
+        assert_admin_only_api :get, console_api_v1_principal_path(principal.oid)
         assert_admin_only_api :get, effective_grants_api_v1_principal_path(principal.oid)
         assert_admin_only_api :delete, api_v1_principal_path(principal.oid)
         assert_admin_only_api :put, slack_channel_permissions_api_v1_principal_path(principal.oid),
@@ -25,7 +25,7 @@ module Api
       end
 
       test "an unknown principal oid is a 404" do
-        get api_v1_principal_path("prn_missing")
+        get console_api_v1_principal_path("prn_missing")
         assert_response :not_found
         post api_v1_principal_roles_path("prn_missing"), params: { data: { role_id: roles(:acme_infra).oid } },
              headers: csrf_headers, as: :json
@@ -36,11 +36,11 @@ module Api
         principal = principals(:acme_channel)
         principal.update!(name: "Platform Release Captain")
 
-        get api_v1_principals_path(q: "release captain", sort: "name", view: "console")
+        get console_api_v1_principals_path(q: "release captain", sort: "name")
         assert_response :ok
         assert_equal [ principal.oid ], json_body["data"].map { |p| p["id"] }
 
-        get api_v1_principals_path(q: "c012345", sort: "name")
+        get console_api_v1_principals_path(q: "c012345", sort: "name")
         assert_equal [ principal.oid ], json_body["data"].map { |p| p["id"] }
         assert_equal 1, json_body.dig("meta", "total")
       end
@@ -50,7 +50,7 @@ module Api
         principals(:globex_user).update!(name: "Alpha")
         principals(:acme_user_alice).update!(name: "bravo")
 
-        get api_v1_principals_path(sort: "name")
+        get console_api_v1_principals_path(sort: "name")
         names = json_body["data"].map { |p| p["name"] }
         assert_equal [ "Alpha", "bravo", "zulu", nil, nil ], names
       end
@@ -60,13 +60,13 @@ module Api
         newer = Principal.create!(common.merge(foreign_id: "Alpha-sort", created_at: 1.day.ago))
         older = Principal.create!(common.merge(foreign_id: "zeta-sort", created_at: 2.days.ago))
 
-        get api_v1_principals_path(sort: "name")
+        get console_api_v1_principals_path(sort: "name")
         same = json_body["data"].select { |p| p["name"] == "same" }.map { |p| p["id"] }
         assert_equal [ older.oid, newer.oid ], same
       end
 
       test "index rejects an unknown sort" do
-        get api_v1_principals_path(sort: "bogus")
+        get console_api_v1_principals_path(sort: "bogus")
         assert_response :bad_request
       end
 
@@ -77,27 +77,27 @@ module Api
             foreign_id: "pagination-#{number}", kind: "user", name: "Pagination principal #{number}" }
         end)
 
-        get api_v1_principals_path(sort: "name")
+        get console_api_v1_principals_path(sort: "name")
         assert_equal 50, json_body["data"].size
         assert_equal({ "page" => 1, "limit" => 50, "total" => 51, "total_pages" => 2 }, json_body["meta"])
 
-        get api_v1_principals_path(sort: "name", page: 2)
+        get console_api_v1_principals_path(sort: "name", page: 2)
         assert_equal 1, json_body["data"].size
         assert_nil json_body.dig("data", 0, "name")
       end
 
-      test "console view adds kind, roles, and the DM user id; the default view does not" do
+      test "the console endpoint adds kind, roles, and the DM user id; the bearer endpoint does not" do
         principal = principals(:acme_user_alice)
         principal.update!(slack_user_id: "U0123456789")
 
-        get api_v1_principal_path(principal.oid, view: "console")
+        get console_api_v1_principal_path(principal.oid)
         data = json_body["data"]
         assert_equal principal.kind, data["kind"]
         assert_equal principal.slack_user_id, data["slack_user_id"]
         assert_includes data["roles"].map { |r| r["id"] }, roles(:acme_infra).oid
         assert data.key?("inherited_slack_channel_permissions")
 
-        get api_v1_principal_path(principal.oid)
+        get api_v1_principal_path(principal.oid), headers: bearer_headers
         assert_not json_body["data"].key?("kind")
         assert_not json_body["data"].key?("roles")
       end
@@ -107,7 +107,7 @@ module Api
         principal.update!(kind: "slack_dm", slack_user_id: "U0123456789", slack_channel_id: "D0123456789",
                           slack_team_id: "T0123456789", slack_email: "member@example.com")
 
-        get api_v1_principal_path(principal.oid, view: "console")
+        get console_api_v1_principal_path(principal.oid)
         labels = json_body.dig("data", "labels")
         %w[kind slack_user_id slack_channel_id slack_team_id slack_email].each do |key|
           assert_not labels.key?(key), key
@@ -256,7 +256,7 @@ module Api
         principal = principals(:acme_channel)
         roles(:acme_infra).slack_channel_permissions.create!(channel_id: "G9876543210", history_enabled: true)
 
-        get api_v1_principal_path(principal.oid, view: "console")
+        get console_api_v1_principal_path(principal.oid)
         inherited = json_body.dig("data", "inherited_slack_channel_permissions")
         assert_equal [ "G9876543210" ], inherited.map { |p| p["channel_id"] }
         assert_equal true, inherited.first["history_enabled"]

@@ -22,14 +22,13 @@ module Api
         "principal_roles" => %w[index create destroy].index_with(BS),
         "roles" => (CRUD + %w[upsert_slack_channel_permission]).index_with(BS)
           .merge(%w[replace_slack_channel_permissions destroy_slack_channel_permission].index_with(S)),
-        "principals" => %w[index show create update lookup effective_config upsert_slack_channel_permission]
-          .index_with(BS)
-          .merge(%w[destroy effective_grants replace_slack_channel_permissions
+        "principals" => %w[index show lookup effective_config upsert_slack_channel_permission].index_with(B)
+          .merge(%w[create update].index_with(BS))
+          .merge(%w[console_index console_show destroy effective_grants replace_slack_channel_permissions
                     destroy_slack_channel_permission].index_with(S)),
         "oauth_apps" => CRUD.index_with(BS).merge(%w[preset credentials provider_details].index_with(S)),
-        # show is BS for the admin lookup; ?view=console is session-only (see below).
-        "scheduled_tasks" => { "show" => BS }
-          .merge(%w[index new create update destroy run slack_channel_options].index_with(S)),
+        "scheduled_tasks" => { "show" => B }
+          .merge(%w[index new edit create update destroy run slack_channel_options].index_with(S)),
         "users" => %w[index approve disable promote demote].index_with(S),
         "api_clients" => %w[index show create update destroy rotate_secret disable enable attach_principal
                             detach_principal make_default_principal].index_with(S),
@@ -75,10 +74,6 @@ module Api
         EXPECTED.each do |controller, actions|
           assert_equal actions.sort.to_h, actual[controller].sort.to_h, controller
         end
-      end
-
-      test "the scheduled task console view is session-only" do
-        assert_equal [ [ S, :console_view? ] ], ScheduledTasksController.conditional_accepted_credentials_for(:show)
       end
 
       test "sandbox admin controllers stay on sandbox token authentication" do

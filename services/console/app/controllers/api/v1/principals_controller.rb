@@ -1,17 +1,27 @@
 module Api
   module V1
     class PrincipalsController < Api::BaseController
-      accepts_credentials :bearer_or_session
+      accepts_credentials :bearer
+      accepts_credentials :bearer_or_session, only: %i[create update]
       accepts_credentials :session,
-                        only: %i[destroy effective_grants replace_slack_channel_permissions
-                                 destroy_slack_channel_permission]
+                        only: %i[console_index console_show destroy effective_grants
+                                 replace_slack_channel_permissions destroy_slack_channel_permission]
 
       include SlackChannelPermissionApi
 
-      # Optional (additive) query params used by the console: `q` matches name
-      # or foreign_id case-insensitively; `sort=name` orders by name (unnamed
-      # last) then creation time instead of the default creation order.
       def index
+        records, meta = paginated_label_search(
+          Principal.includes(:console_user, :slack_channel_permissions, roles: :slack_channel_permissions)
+        )
+        render json: { data: records.map { |p| record_payload(p) }, meta: meta }
+      end
+
+      # GET /api/v1/principals/console
+      #
+      # The console's principals list: `q` matches name or foreign_id
+      # case-insensitively, `sort=name` orders by name (unnamed last), and each
+      # record carries the identity fields and roles the page shows.
+      def console_index
         scope = Principal.includes(:console_user, :slack_channel_permissions, roles: :slack_channel_permissions)
         query = params[:q].to_s.strip
         if query.present?
@@ -19,7 +29,7 @@ module Api
           scope = scope.where("principals.name ILIKE :pattern OR principals.foreign_id ILIKE :pattern", pattern: pattern)
         end
         records, meta = paginated_label_search(scope, order: index_order)
-        render json: { data: records.map { |p| record_payload(p) }, meta: meta }
+        render json: { data: records.map { |p| console_record_payload(p) }, meta: meta }
       end
 
       # GET /api/v1/principals/:id
@@ -28,6 +38,11 @@ module Api
       def show
         principal = Principal.find_by_oid!(params[:id])
         render json: { data: record_payload(principal) }
+      end
+
+      # GET /api/v1/principals/:id/console
+      def console_show
+        render json: { data: console_record_payload(Principal.find_by_oid!(params[:id])) }
       end
 
       # GET /api/v1/principals/lookup/:foreign_id
@@ -176,22 +191,18 @@ module Api
           sandbox_workflows_write_enabled: principal.sandbox_workflows_write_enabled,
           created_at: principal.created_at,
           updated_at: principal.updated_at
-        }.merge(console_view? ? console_payload(principal) : {})
+        }
       end
 
-      # `view=console` (index/show) adds what the console pages display. The
-      # default payload deliberately omits first-class identity fields.
-      def console_view?
-        params[:view] == "console"
-      end
-
-      def console_payload(principal)
-        {
+      # The default payload deliberately omits first-class identity fields;
+      # the console endpoints add them.
+      def console_record_payload(principal)
+        record_payload(principal).merge(
           kind: principal.kind,
           slack_user_id: principal.slack_user_id,
           roles: principal.roles.sort_by(&:id).map { |role| { id: role.oid, foreign_id: role.foreign_id, name: role.name } },
           inherited_slack_channel_permissions: principal.inherited_slack_channel_permissions_payload
-        }
+        )
       end
 
       def principal_params
