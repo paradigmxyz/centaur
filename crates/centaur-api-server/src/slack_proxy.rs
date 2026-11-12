@@ -78,6 +78,16 @@ pub(crate) fn slack_proxy_router() -> Router<AppState> {
             get(get_slack_thread_replies),
         )
         .route(
+            "/api/slack/channels/{channel_id}/messages/{message_ts}/permalink",
+            get(get_slack_message_permalink),
+        )
+        .route(
+            "/api/slack/channels/{channel_id}/messages/{message_ts}/reactions/{name}",
+            post(add_slack_reaction).delete(remove_slack_reaction),
+        )
+        .route("/api/slack/users", get(get_slack_users))
+        .route("/api/slack/users/{user_id}", get(get_slack_user))
+        .route(
             "/api/slack/users/{user_id}/email",
             get(get_slack_user_email),
         )
@@ -158,6 +168,14 @@ struct SlackChannelMembersQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackUsersQuery {
+    #[serde(default)]
+    limit: Option<u16>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackFileProxyClaims {
     slack: SlackProxyClaims,
 }
@@ -225,6 +243,32 @@ struct SlackMessagesResponse {
     response_metadata: Option<SlackResponseMetadata>,
     #[serde(flatten)]
     extra: Map<String, Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackUserResponse {
+    ok: bool,
+    user: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackPermalinkResponse {
+    ok: bool,
+    channel_id: String,
+    message_ts: String,
+    permalink: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackReactionResponse {
+    ok: bool,
+    channel_id: String,
+    message_ts: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -695,6 +739,264 @@ async fn get_slack_thread_replies(
     .await?;
     let value = slack_thread_replies(client, config, &channel_id, &thread_ts, &query).await?;
     Ok(Json(value))
+}
+
+async fn get_slack_message_permalink(
+    headers: HeaderMap,
+    Path((channel_id, message_ts)): Path<(String, String)>,
+) -> Result<Json<SlackPermalinkResponse>, ApiError> {
+    let claims = authorize_slack_file_proxy(&headers)?;
+    validate_slack_channel_id(&channel_id)?;
+    validate_slack_thread_ts(&message_ts)?;
+
+    let permalink = authorized_slack_message_permalink(
+        &claims,
+        http_client(),
+        slack_proxy_config()?,
+        &channel_id,
+        &message_ts,
+    )
+    .await?;
+    Ok(Json(SlackPermalinkResponse {
+        ok: true,
+        channel_id,
+        message_ts,
+        permalink,
+    }))
+}
+
+/// Reading a message link requires the channel's History permission (or
+/// default access to a public channel the app has joined).
+async fn authorized_slack_message_permalink(
+    claims: &SlackFileProxyClaims,
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+    message_ts: &str,
+) -> Result<String, ApiError> {
+    ensure_slack_channel_allowed(
+        claims,
+        client,
+        config,
+        channel_id,
+        SlackChannelPermission::History,
+    )
+    .await?;
+    slack_message_permalink(client, config, channel_id, message_ts).await
+}
+
+async fn slack_message_permalink(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    channel_id: &str,
+    message_ts: &str,
+) -> Result<String, ApiError> {
+    let value = slack_api_post_form(
+        client,
+        config,
+        "chat.getPermalink",
+        &[
+            ("channel", channel_id.to_owned()),
+            ("message_ts", message_ts.to_owned()),
+        ],
+    )
+    .await?;
+    required_slack_string(&value, "permalink")
+}
+
+async fn add_slack_reaction(
+    headers: HeaderMap,
+    Path((channel_id, message_ts, name)): Path<(String, String, String)>,
+) -> Result<Json<SlackReactionResponse>, ApiError> {
+    handle_slack_reaction(
+        &headers,
+        SlackReactionAction::Add,
+        channel_id,
+        message_ts,
+        &name,
+    )
+    .await
+}
+
+async fn remove_slack_reaction(
+    headers: HeaderMap,
+    Path((channel_id, message_ts, name)): Path<(String, String, String)>,
+) -> Result<Json<SlackReactionResponse>, ApiError> {
+    handle_slack_reaction(
+        &headers,
+        SlackReactionAction::Remove,
+        channel_id,
+        message_ts,
+        &name,
+    )
+    .await
+}
+
+async fn handle_slack_reaction(
+    headers: &HeaderMap,
+    action: SlackReactionAction,
+    channel_id: String,
+    message_ts: String,
+    name: &str,
+) -> Result<Json<SlackReactionResponse>, ApiError> {
+    let claims = authorize_slack_file_proxy(headers)?;
+    validate_slack_channel_id(&channel_id)?;
+    validate_slack_thread_ts(&message_ts)?;
+    let name = normalize_slack_reaction_name(name)?;
+
+    let changed = authorized_slack_reaction(
+        &claims,
+        http_client(),
+        slack_proxy_config()?,
+        action,
+        &channel_id,
+        &message_ts,
+        &name,
+    )
+    .await?;
+    let (added, removed) = match action {
+        SlackReactionAction::Add => (Some(changed), None),
+        SlackReactionAction::Remove => (None, Some(changed)),
+    };
+    Ok(Json(SlackReactionResponse {
+        ok: true,
+        channel_id,
+        message_ts,
+        name,
+        added,
+        removed,
+    }))
+}
+
+/// Reacting writes to the channel, so it requires the channel's Upload
+/// permission (or default access to a public channel the app has joined).
+async fn authorized_slack_reaction(
+    claims: &SlackFileProxyClaims,
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    action: SlackReactionAction,
+    channel_id: &str,
+    message_ts: &str,
+    name: &str,
+) -> Result<bool, ApiError> {
+    ensure_slack_channel_allowed(
+        claims,
+        client,
+        config,
+        channel_id,
+        SlackChannelPermission::Upload,
+    )
+    .await?;
+    slack_reaction(client, config, action, channel_id, message_ts, name).await
+}
+
+#[derive(Clone, Copy)]
+enum SlackReactionAction {
+    Add,
+    Remove,
+}
+
+impl SlackReactionAction {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Add => "reactions.add",
+            Self::Remove => "reactions.remove",
+        }
+    }
+
+    /// The Slack error that means the reaction is already in the requested state.
+    fn noop_error(self) -> &'static str {
+        match self {
+            Self::Add => "already_reacted",
+            Self::Remove => "no_reaction",
+        }
+    }
+}
+
+/// Returns whether the reaction changed; an add or remove that is already in
+/// effect is a successful no-op.
+async fn slack_reaction(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    action: SlackReactionAction,
+    channel_id: &str,
+    message_ts: &str,
+    name: &str,
+) -> Result<bool, ApiError> {
+    let form = [
+        ("channel", channel_id.to_owned()),
+        ("timestamp", message_ts.to_owned()),
+        ("name", name.to_owned()),
+    ];
+    match slack_api_call(client, config, action.method(), &form).await? {
+        Ok(_) => Ok(true),
+        Err(error) if error == action.noop_error() => Ok(false),
+        Err(error) => Err(slack_method_error(action.method(), &error)),
+    }
+}
+
+async fn get_slack_users(
+    headers: HeaderMap,
+    Query(query): Query<SlackUsersQuery>,
+) -> Result<Json<Value>, ApiError> {
+    authorize_slack_file_proxy(&headers)?;
+    validate_slack_users_query(&query)?;
+
+    let value = slack_users_list(http_client(), slack_proxy_config()?, &query).await?;
+    Ok(Json(value))
+}
+
+async fn slack_users_list(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    query: &SlackUsersQuery,
+) -> Result<Value, ApiError> {
+    slack_api_post_form(client, config, "users.list", &slack_users_list_form(query)).await
+}
+
+fn slack_users_list_form(query: &SlackUsersQuery) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        (
+            "limit",
+            query
+                .limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        ("cursor", query.cursor.clone().unwrap_or_default()),
+    ];
+    form.retain(|(_, value)| !value.is_empty());
+    form
+}
+
+async fn get_slack_user(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<Json<SlackUserResponse>, ApiError> {
+    authorize_slack_file_proxy(&headers)?;
+    validate_slack_user_id(&user_id)?;
+
+    let user = slack_user_info(http_client(), slack_proxy_config()?, &user_id).await?;
+    Ok(Json(SlackUserResponse { ok: true, user }))
+}
+
+async fn slack_user_info(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    user_id: &str,
+) -> Result<Value, ApiError> {
+    let mut value = slack_api_post_form(
+        client,
+        config,
+        "users.info",
+        &[("user", user_id.to_owned())],
+    )
+    .await?;
+    value
+        .get_mut("user")
+        .map(Value::take)
+        .filter(Value::is_object)
+        .ok_or_else(|| ApiError::Internal("Slack users.info response missing user".to_owned()))
 }
 
 async fn get_slack_user_email(
@@ -1367,6 +1669,23 @@ async fn slack_api_post_form(
     method: &str,
     form: &[(&str, String)],
 ) -> Result<Value, ApiError> {
+    slack_api_call(client, config, method, form)
+        .await?
+        .map_err(|error| slack_method_error(method, &error))
+}
+
+fn slack_method_error(method: &str, slack_error: &str) -> ApiError {
+    ApiError::BadRequest(format!("Slack {method} failed: {slack_error}"))
+}
+
+/// Calls a Slack Web API method, retrying rate limits. The inner `Err` carries
+/// the Slack error code for callers that treat some errors as success.
+async fn slack_api_call(
+    client: &reqwest::Client,
+    config: &SlackFileProxyConfig,
+    method: &str,
+    form: &[(&str, String)],
+) -> Result<Result<Value, String>, ApiError> {
     let mut retry_count = 0;
     loop {
         let response = client
@@ -1408,11 +1727,9 @@ async fn slack_api_post_form(
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown_error");
-            return Err(ApiError::BadRequest(format!(
-                "Slack {method} failed: {slack_error}"
-            )));
+            return Ok(Err(slack_error.to_owned()));
         }
-        return Ok(value);
+        return Ok(Ok(value));
     }
 }
 
@@ -1690,6 +2007,41 @@ fn validate_slack_channel_members_query(query: &SlackChannelMembersQuery) -> Res
         validate_slack_cursor(cursor)?;
     }
     Ok(())
+}
+
+fn validate_slack_users_query(query: &SlackUsersQuery) -> Result<(), ApiError> {
+    if let Some(limit) = query.limit
+        && !(1..=1000).contains(&limit)
+    {
+        return Err(ApiError::BadRequest(
+            "Slack users limit must be between 1 and 1000".to_owned(),
+        ));
+    }
+    if let Some(cursor) = query.cursor.as_deref() {
+        validate_slack_cursor(cursor)?;
+    }
+    Ok(())
+}
+
+/// Accepts an emoji name with or without surrounding colons, such as
+/// `thumbsup`, `:+1:`, or `wave::skin-tone-2`.
+fn normalize_slack_reaction_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    let name = name
+        .strip_prefix(':')
+        .and_then(|name| name.strip_suffix(':'))
+        .unwrap_or(name);
+    if name.is_empty()
+        || name.len() > 100
+        || name
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '/')
+    {
+        return Err(ApiError::BadRequest(
+            "invalid Slack reaction name".to_owned(),
+        ));
+    }
+    Ok(name.to_owned())
 }
 
 fn validate_slack_files_list_query(query: &SlackFilesListQuery) -> Result<(), ApiError> {
@@ -2467,6 +2819,363 @@ mod tests {
             None
         );
         server.abort();
+    }
+
+    async fn spawn_slack_api(
+        app: axum::Router,
+    ) -> (SlackFileProxyConfig, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = SlackFileProxyConfig {
+            api_url: format!("http://{address}"),
+            bot_token: "test-token".to_owned(),
+            max_upload_bytes: 1,
+        };
+        (config, server)
+    }
+
+    #[tokio::test]
+    async fn user_info_returns_slack_user_object() {
+        let app = axum::Router::new().route(
+            "/users.info",
+            axum::routing::post(
+                |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                    match form["user"].as_str() {
+                        "U123456789" => axum::Json(json!({
+                            "ok": true,
+                            "user": {"id": "U123456789", "name": "person"}
+                        })),
+                        _ => axum::Json(json!({"ok": false, "error": "user_not_found"})),
+                    }
+                },
+            ),
+        );
+        let (config, server) = spawn_slack_api(app).await;
+
+        assert_eq!(
+            slack_user_info(http_client(), &config, "U123456789")
+                .await
+                .unwrap(),
+            json!({"id": "U123456789", "name": "person"})
+        );
+        assert!(matches!(
+            slack_user_info(http_client(), &config, "U987654321").await.unwrap_err(),
+            ApiError::BadRequest(message) if message == "Slack users.info failed: user_not_found"
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn users_list_passes_pagination_through() {
+        let app = axum::Router::new().route(
+            "/users.list",
+            axum::routing::post(
+                |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                    assert_eq!(form["limit"], "200");
+                    assert_eq!(form["cursor"], "cursor-1");
+                    axum::Json(json!({
+                        "ok": true,
+                        "members": [{"id": "U123456789"}],
+                        "response_metadata": {"next_cursor": "cursor-2"}
+                    }))
+                },
+            ),
+        );
+        let (config, server) = spawn_slack_api(app).await;
+        let query = SlackUsersQuery {
+            limit: Some(200),
+            cursor: Some("cursor-1".to_owned()),
+        };
+
+        let value = slack_users_list(http_client(), &config, &query)
+            .await
+            .unwrap();
+        assert_eq!(value["members"], json!([{"id": "U123456789"}]));
+        assert_eq!(value["response_metadata"]["next_cursor"], "cursor-2");
+        server.abort();
+    }
+
+    #[test]
+    fn users_list_form_omits_empty_params() {
+        let query = SlackUsersQuery {
+            limit: None,
+            cursor: None,
+        };
+        assert!(slack_users_list_form(&query).is_empty());
+    }
+
+    #[test]
+    fn validates_users_query() {
+        validate_slack_users_query(&SlackUsersQuery {
+            limit: Some(1000),
+            cursor: Some("cursor-1".to_owned()),
+        })
+        .unwrap();
+        for query in [
+            SlackUsersQuery {
+                limit: Some(0),
+                cursor: None,
+            },
+            SlackUsersQuery {
+                limit: Some(1001),
+                cursor: None,
+            },
+            SlackUsersQuery {
+                limit: None,
+                cursor: Some("bad\ncursor".to_owned()),
+            },
+        ] {
+            assert!(matches!(
+                validate_slack_users_query(&query).unwrap_err(),
+                ApiError::BadRequest(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn permalink_reads_chat_get_permalink() {
+        let app = axum::Router::new().route(
+            "/chat.getPermalink",
+            axum::routing::post(
+                |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                    assert_eq!(form["channel"], "C123456789");
+                    assert_eq!(form["message_ts"], "1700000000.000001");
+                    axum::Json(json!({
+                        "ok": true,
+                        "channel": "C123456789",
+                        "permalink": "https://example.slack.com/archives/C123456789/p1700000000000001"
+                    }))
+                },
+            ),
+        );
+        let (config, server) = spawn_slack_api(app).await;
+
+        assert_eq!(
+            slack_message_permalink(http_client(), &config, "C123456789", "1700000000.000001")
+                .await
+                .unwrap(),
+            "https://example.slack.com/archives/C123456789/p1700000000000001"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn reactions_treat_existing_state_as_noop() {
+        let app = axum::Router::new()
+            .route(
+                "/reactions.add",
+                axum::routing::post(
+                    |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                        assert_eq!(form["channel"], "C123456789");
+                        assert_eq!(form["timestamp"], "1700000000.000001");
+                        match form["name"].as_str() {
+                            "eyes" => axum::Json(json!({"ok": true})),
+                            "done" => axum::Json(json!({"ok": false, "error": "already_reacted"})),
+                            _ => axum::Json(json!({"ok": false, "error": "invalid_name"})),
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/reactions.remove",
+                axum::routing::post(
+                    |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                        match form["name"].as_str() {
+                            "eyes" => axum::Json(json!({"ok": true})),
+                            _ => axum::Json(json!({"ok": false, "error": "no_reaction"})),
+                        }
+                    },
+                ),
+            );
+        let (config, server) = spawn_slack_api(app).await;
+        let react = |action, name: &'static str| {
+            slack_reaction(
+                http_client(),
+                &config,
+                action,
+                "C123456789",
+                "1700000000.000001",
+                name,
+            )
+        };
+
+        assert!(react(SlackReactionAction::Add, "eyes").await.unwrap());
+        assert!(!react(SlackReactionAction::Add, "done").await.unwrap());
+        assert!(matches!(
+            react(SlackReactionAction::Add, "nope").await.unwrap_err(),
+            ApiError::BadRequest(message) if message == "Slack reactions.add failed: invalid_name"
+        ));
+        assert!(react(SlackReactionAction::Remove, "eyes").await.unwrap());
+        assert!(!react(SlackReactionAction::Remove, "done").await.unwrap());
+        server.abort();
+    }
+
+    #[test]
+    fn normalizes_slack_reaction_names() {
+        assert_eq!(normalize_slack_reaction_name("eyes").unwrap(), "eyes");
+        assert_eq!(normalize_slack_reaction_name(":+1:").unwrap(), "+1");
+        assert_eq!(
+            normalize_slack_reaction_name("wave::skin-tone-2").unwrap(),
+            "wave::skin-tone-2"
+        );
+        for name in ["", "::", "two words", "a/b", "a\nb"] {
+            assert!(matches!(
+                normalize_slack_reaction_name(name).unwrap_err(),
+                ApiError::BadRequest(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn permalink_requires_history_and_reactions_require_upload() {
+        // A private channel ID used only by this test: channel metadata is
+        // cached process-wide by ID.
+        const CHANNEL: &str = "G555555555";
+        const TS: &str = "1700000000.000001";
+        let slack_calls = Arc::new(AtomicUsize::new(0));
+        let counted = |calls: Arc<AtomicUsize>, body: Value| {
+            axum::routing::post(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let body = body.clone();
+                async move { axum::Json(body) }
+            })
+        };
+        let app = axum::Router::new()
+            .route(
+                "/conversations.info",
+                axum::routing::post(|| async {
+                    axum::Json(json!({
+                        "ok": true,
+                        "channel": {"id": CHANNEL, "is_private": true, "is_member": true}
+                    }))
+                }),
+            )
+            .route(
+                "/chat.getPermalink",
+                counted(
+                    slack_calls.clone(),
+                    json!({"ok": true, "permalink": "https://example.slack.com/p1"}),
+                ),
+            )
+            .route(
+                "/reactions.add",
+                counted(slack_calls.clone(), json!({"ok": true})),
+            )
+            .route(
+                "/reactions.remove",
+                counted(slack_calls.clone(), json!({"ok": true})),
+            );
+        let (config, server) = spawn_slack_api(app).await;
+        let claims = |upload: &[&str], history: &[&str]| SlackFileProxyClaims {
+            slack: SlackProxyClaims {
+                upload_channels: upload.iter().map(|id| (*id).to_owned()).collect(),
+                // Download never grants either operation.
+                download_channels: vec![CHANNEL.to_owned()],
+                history_channels: history.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        };
+        let permalink = |claims: SlackFileProxyClaims| {
+            let config = &config;
+            async move {
+                authorized_slack_message_permalink(&claims, http_client(), config, CHANNEL, TS)
+                    .await
+            }
+        };
+        let react = |claims: SlackFileProxyClaims, action| {
+            let config = &config;
+            async move {
+                authorized_slack_reaction(
+                    &claims,
+                    http_client(),
+                    config,
+                    action,
+                    CHANNEL,
+                    TS,
+                    "eyes",
+                )
+                .await
+            }
+        };
+
+        // No channel grant: everything is forbidden before Slack is called.
+        assert!(matches!(
+            permalink(claims(&[], &[])).await.unwrap_err(),
+            ApiError::Forbidden(_)
+        ));
+        for action in [SlackReactionAction::Add, SlackReactionAction::Remove] {
+            assert!(matches!(
+                react(claims(&[], &[]), action).await.unwrap_err(),
+                ApiError::Forbidden(_)
+            ));
+        }
+
+        // History grants permalinks but not reactions.
+        assert_eq!(
+            permalink(claims(&[], &[CHANNEL])).await.unwrap(),
+            "https://example.slack.com/p1"
+        );
+        for action in [SlackReactionAction::Add, SlackReactionAction::Remove] {
+            assert!(matches!(
+                react(claims(&[], &[CHANNEL]), action).await.unwrap_err(),
+                ApiError::Forbidden(_)
+            ));
+        }
+
+        // Upload grants reactions but not permalinks.
+        assert!(matches!(
+            permalink(claims(&[CHANNEL], &[])).await.unwrap_err(),
+            ApiError::Forbidden(_)
+        ));
+        for action in [SlackReactionAction::Add, SlackReactionAction::Remove] {
+            assert!(react(claims(&[CHANNEL], &[]), action).await.unwrap());
+        }
+
+        // Only the three authorized operations reached Slack.
+        assert_eq!(slack_calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[test]
+    fn proxy_routes_do_not_conflict() {
+        // axum panics while registering overlapping routes.
+        let _ = slack_proxy_router();
+    }
+
+    #[tokio::test]
+    async fn new_routes_require_jwt() {
+        let message = Path(("C123456789".to_owned(), "1700000000.000001".to_owned()));
+        assert!(matches!(
+            get_slack_message_permalink(HeaderMap::new(), message).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        let reaction = || {
+            Path((
+                "C123456789".to_owned(),
+                "1700000000.000001".to_owned(),
+                "eyes".to_owned(),
+            ))
+        };
+        assert!(matches!(
+            add_slack_reaction(HeaderMap::new(), reaction()).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            remove_slack_reaction(HeaderMap::new(), reaction()).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            get_slack_user(HeaderMap::new(), Path("U123456789".to_owned())).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        let query = Query(SlackUsersQuery {
+            limit: None,
+            cursor: None,
+        });
+        assert!(matches!(
+            get_slack_users(HeaderMap::new(), query).await,
+            Err(ApiError::Unauthorized(_))
+        ));
     }
 
     #[test]
