@@ -93,8 +93,8 @@ function OauthAppsList() {
           rowKey={(app) => app.id}
           empty="No apps."
           pagination={
-            list.data && list.data.meta.total_pages > 1
-              ? { meta: list.data.meta, unit: "app", onPageChange: setPage }
+            list.data
+              ? { meta: list.data.meta, unit: "app", onPageChange: setPage, hideSinglePage: true }
               : undefined
           }
         />

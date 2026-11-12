@@ -64,8 +64,8 @@ export function MintedCredentialsSection({ appId }: { appId: string }) {
           rowKey={(credential) => credential.id}
           empty="No credentials minted yet."
           pagination={
-            list.data && list.data.meta.total_pages > 1
-              ? { meta: list.data.meta, unit: "credential", onPageChange: setPage }
+            list.data
+              ? { meta: list.data.meta, unit: "credential", onPageChange: setPage, hideSinglePage: true }
               : undefined
           }
         />

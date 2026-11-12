@@ -134,7 +134,7 @@ script/audit-web
 ```
 
 SPA tests cover logic and secret handling only: the API client, formatting,
-local time, the secret form model, the secret field, the shell and
+local time, stale-page clamping in pagination, the secret form model, the secret field, the shell and
 navigation, and `web/src/features/secret-handling.test.tsx`, which checks that
 secret plaintext leaves the inputs and the TanStack caches after every
 secret-bearing submit and that an issued API client secret is shown once.

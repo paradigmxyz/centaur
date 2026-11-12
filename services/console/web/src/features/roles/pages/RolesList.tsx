@@ -107,8 +107,8 @@ function RolesList() {
         rowKey={(role) => role.id}
         empty="No roles yet."
         pagination={
-          list.data && list.data.meta.total_pages > 1
-            ? { meta: list.data.meta, unit: "role", onPageChange: setPage }
+          list.data
+            ? { meta: list.data.meta, unit: "role", onPageChange: setPage, hideSinglePage: true }
             : undefined
         }
       />

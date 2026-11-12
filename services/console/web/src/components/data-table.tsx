@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import { Pagination } from "@/components/pagination";
+import { isPastLastPage, Pagination, type PaginationProps } from "@/components/pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { PageMeta } from "@/lib/api";
@@ -22,8 +22,11 @@ interface DataTableProps<Row> {
   /** Shown in a full-width row when `rows` is empty. */
   empty: ReactNode;
   loading?: boolean;
-  /** Pagination footer (server meta + unit noun). */
-  pagination?: { meta: PageMeta; unit: string; onPageChange: (page: number) => void };
+  /**
+   * Pagination footer (server meta + unit noun). A response past the last
+   * page shows the loading rows while the footer moves to the last page.
+   */
+  pagination?: PaginationProps & { meta: PageMeta };
   /**
    * Fixed layout with colgroup widths from column classNames. Fixed tables keep
    * a minimum width and scroll horizontally inside the panel on narrow screens
@@ -58,6 +61,7 @@ export function DataTable<Row>({
   className,
   caption,
 }: DataTableProps<Row>) {
+  const pastLastPage = pagination !== undefined && isPastLastPage(pagination.meta);
   return (
     <div className={cn("overflow-hidden rounded-xl border bg-card shadow-xs", className)}>
       <Table className={cn("min-w-full", fixed && "table-fixed", minWidth ?? defaultMinWidth(fixed, columns.length))}>
@@ -81,7 +85,7 @@ export function DataTable<Row>({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {loading && !rows ? (
+          {(loading && !rows) || pastLastPage ? (
             <>
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={columns.length} className="sr-only">

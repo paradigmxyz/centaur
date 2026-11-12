@@ -151,8 +151,8 @@ export function RoleGrantsSection({ role }: SectionProps) {
           rowKey={(row) => row.id}
           empty="No secrets granted."
           pagination={
-            grants.data && grants.data.meta.total_pages > 1
-              ? { meta: grants.data.meta, unit: "grant", onPageChange: setPage }
+            grants.data
+              ? { meta: grants.data.meta, unit: "grant", onPageChange: setPage, hideSinglePage: true }
               : undefined
           }
         />

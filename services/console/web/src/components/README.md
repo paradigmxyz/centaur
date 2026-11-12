@@ -28,7 +28,7 @@ Sidebar, Tooltip, Skeleton, Sonner) and keep the stock focus ring.
 | `ControlTabs` | `control-tabs.tsx` | The Control tab strip. Render at the top of Control index pages; tabs come from feature `controlTabs`. |
 | `RequireAccess` | `require-access.tsx` | Page guard: `allowed={(me) => me.nav.x}`. Silently sends others to their landing page (legacy `require_admin`). The API still enforces access. |
 | `DataTable`, `Column` | `data-table.tsx` | Table panel (shadcn `Table`) with header, hover rows, skeleton loading rows, an empty row, and an optional `Pagination` footer from API `meta`. Tables with `fixed` layout or four or more columns keep a minimum width and scroll horizontally on narrow screens; override with `minWidth`. |
-| `Pagination`, `usePageParam` | `pagination.tsx` | "N units · page X of Y" with Previous/Next. `usePageParam("roles_page")` keeps several paginators on one page independent in the URL. |
+| `Pagination`, `usePageParam` | `pagination.tsx` | "N units · page X of Y" with Previous/Next. `usePageParam("roles_page")` keeps several paginators on one page independent in the URL. A response past the last page (`page > total_pages > 0`) replaces the URL's page with the last page, keeping other params; `DataTable` shows loading rows meanwhile. Pass `hideSinglePage` instead of omitting `pagination` so stale pages still clamp. |
 | `SearchBox` | `search-box.tsx` | `?q=` search form with Search/Clear; resets `page`. |
 | `EmptyState` | `empty-state.tsx` | Dashed empty box. |
 | `ErrorAlert`, `WarningAlert` | `alerts.tsx` | Red error box, amber warning box. |
@@ -87,7 +87,7 @@ Related modules outside this folder:
 ## Tests
 
 The SPA keeps tests for logic and for secret handling only: `lib/api`,
-`lib/format`, `LocalTime`, the secret form model, `SecretField`, the shell,
+`lib/format`, `LocalTime`, stale-page clamping in `Pagination`, the secret form model, `SecretField`, the shell,
 navigation, and `features/secret-handling.test.tsx` (plaintext gone from the
 inputs, the page, and both TanStack caches after each secret-bearing submit,
 and the show-once API client secret). Page behaviour is covered by the Rails

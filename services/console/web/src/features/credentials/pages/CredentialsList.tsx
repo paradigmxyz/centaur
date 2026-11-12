@@ -112,8 +112,8 @@ function CredentialsList() {
           rowKey={(credential) => credential.id}
           empty="No managed credentials."
           pagination={
-            list.data && list.data.meta.total_pages > 1
-              ? { meta: list.data.meta, unit: "credential", onPageChange: setPage }
+            list.data
+              ? { meta: list.data.meta, unit: "credential", onPageChange: setPage, hideSinglePage: true }
               : undefined
           }
         />
