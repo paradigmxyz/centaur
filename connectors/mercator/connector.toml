@@ -1,0 +1,4 @@
+description = "Mercator: find, quote and pay for external API calls through its hosted MCP service"
+
+# No declared secrets. The proxy injects the OAuth bearer for mercator.sh from
+# an operator-created token broker secret, as for the Python mercator tool.

@@ -1,0 +1,3 @@
+description = "Ashby ATS: jobs, candidates, applications, interviews, scorecards, resume URLs"
+
+secrets = [{type = "http", name = "ASHBY_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = 'Basic {{ base64 .Value ":" }}', hosts = ["api.ashbyhq.com"]}]

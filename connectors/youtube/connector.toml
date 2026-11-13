@@ -1,0 +1,5 @@
+description = "YouTube Data API and public captions: search, video and channel details, transcripts"
+
+secrets = [
+  {type = "http", name = "YOUTUBE_API_KEY", mode = "inject", inject_query_param = "key", hosts = ["www.googleapis.com"]},
+]

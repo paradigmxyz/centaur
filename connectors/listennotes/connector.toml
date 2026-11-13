@@ -1,0 +1,3 @@
+description = "Listen Notes: podcast and episode search, episode and podcast metadata, audio and transcript links"
+
+secrets = [{type = "http", name = "LISTENNOTES_KEY", mode = "inject", inject_header = "X-ListenAPI-Key", hosts = ["listen-api.listennotes.com"]}]

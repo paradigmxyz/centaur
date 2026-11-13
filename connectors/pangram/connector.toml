@@ -1,0 +1,5 @@
+description = "Pangram: AI-generated text detection and plagiarism checks"
+
+secrets = [
+  { type = "http", name = "PANGRAM_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["text.external-api.pangram.com", "plagiarism.api.pangram.com"] },
+]

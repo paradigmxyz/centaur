@@ -1,0 +1,3 @@
+description = "Artemis: latest USD prices and rolling 24-hour change for crypto assets by ticker"
+
+secrets = [{type = "http", name = "ARTEMIS_API_KEY", mode = "inject", inject_header = "X-API-Key", hosts = ["data-svc.artemisxyz.com"]}]

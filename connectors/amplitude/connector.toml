@@ -1,0 +1,6 @@
+description = "Amplitude: event segmentation, funnels, retention, user activity, realtime, chart annotations, taxonomy"
+
+secrets = [
+  {type = "http", name = "AMPLITUDE_API_KEY", match_headers = ["Authorization"], hosts = ["amplitude.com", "analytics.eu.amplitude.com"]},
+  {type = "http", name = "AMPLITUDE_SECRET_KEY", match_headers = ["Authorization"], hosts = ["amplitude.com", "analytics.eu.amplitude.com"]},
+]

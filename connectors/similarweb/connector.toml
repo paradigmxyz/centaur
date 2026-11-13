@@ -1,0 +1,3 @@
+description = "SimilarWeb: website traffic, rankings, sources, geography, keywords and app data"
+
+secrets = [{ type = "http", name = "SIMILARWEB_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.similarweb.com"] }]

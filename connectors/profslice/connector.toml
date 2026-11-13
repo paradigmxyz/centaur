@@ -1,0 +1,3 @@
+description = "Firefox Profiler: fetch and slice sampled CPU profiles from a share URL"
+
+secrets = []

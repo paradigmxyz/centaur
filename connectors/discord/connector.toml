@@ -1,0 +1,3 @@
+description = "Discord: servers, channels, message search and history, post, upload and download attachments, threads"
+
+secrets = [{type = "http", name = "DISCORD_BOT_TOKEN", mode = "inject", inject_header = "Authorization", hosts = ["discord.com"]}]

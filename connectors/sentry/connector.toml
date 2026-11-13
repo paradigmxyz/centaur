@@ -1,0 +1,5 @@
+description = "Sentry: list and search issues, read issue details, events and stacktraces, tag values"
+
+secrets = [
+  { type = "http", name = "SENTRY_AUTH_TOKEN", match_headers = ["Authorization"], hosts = ["sentry.io", "*.sentry.io"] },
+]

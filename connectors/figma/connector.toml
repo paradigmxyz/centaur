@@ -1,0 +1,5 @@
+description = "Figma: read file documents, nodes, styles, components and variables, extract a design system"
+
+secrets = [
+    {type = "http", name = "FIGMA_ACCESS_TOKEN", mode = "inject", inject_header = "X-Figma-Token", hosts = ["api.figma.com"]},
+]

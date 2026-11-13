@@ -1,0 +1,7 @@
+description = "Tenderly: transaction simulation and tracing, verified contracts, Virtual TestNets"
+
+secrets = [
+  {type = "http", name = "TENDERLY_ACCESS_KEY", match_headers = ["X-Access-Key"], hosts = ["api.tenderly.co"]},
+  {type = "http", name = "TENDERLY_ACCOUNT_SLUG", match_path = true, hosts = ["api.tenderly.co"]},
+  {type = "http", name = "TENDERLY_PROJECT_SLUG", match_path = true, hosts = ["api.tenderly.co"]},
+]
