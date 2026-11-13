@@ -1,5 +1,6 @@
 packages:
   - packages/*
+  - connectors
   - services/linearbot
   - services/slackbotv2
   - services/discordbot
