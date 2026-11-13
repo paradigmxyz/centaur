@@ -4592,6 +4592,53 @@ describe('slackbotv2', () => {
     expect(codexApi.appends).toHaveLength(1)
   })
 
+  it('starts a new turn for a steer that lands after the execution ended', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs), steeringReactionEnabled: true })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('History before a late steer.')
+    const firstMention = await sendMessage(`<@${BOT_USER_ID}> start running`, {
+      threadTs: parent.ts
+    })
+    expect(firstMention.response.status).toBe(200)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    // The execution completed in api-rs, but its render has not finalized,
+    // so the bot still treats the thread as active and only appends.
+    codexApi.nextAppendSteering = { status: 'no_active_execution' }
+    const lateText = `<@${BOT_USER_ID}> answer me after the turn ended`
+    const lateMention = await sendMessage(lateText, { threadTs: parent.ts })
+    expect(lateMention.response.status).toBe(200)
+    // The follow-up waits in the background for the first render to finalize.
+    await waitFor(() => hasLog(logs, 'slackbotv2_undelivered_steer_turn_scheduled'))
+    expect(codexApi.executes).toHaveLength(1)
+    expect(hasLog(logs, 'slackbotv2_steer_undelivered')).toBe(true)
+    expect(logData(logs, 'slackbotv2_undelivered_steer_turn_scheduled')).toMatchObject({
+      reason: 'no_active_execution'
+    })
+
+    expect(slackApi.calls.some(call =>
+      call.method === 'reactions.remove' && stringField(call.body.timestamp) === lateMention.ts
+    )).toBe(false)
+
+    codexApi.autoRespond = true
+    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('First execution complete.'))
+    await firstMention.finished()
+    await lateMention.finished()
+
+    expect(codexApi.executes).toHaveLength(2)
+    expect(JSON.stringify(codexApi.executes[1]?.body.input_lines)).toContain(
+      'answer me after the turn ended'
+    )
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 2.'), 3000)
+    expect(await threadText(parent.ts)).toContain('First execution complete.')
+    // The late message's reaction stays until its own turn renders.
+    await waitFor(() => slackApi.calls.some(call =>
+      call.method === 'reactions.remove' && stringField(call.body.timestamp) === lateMention.ts
+    ), 3000)
+  })
+
   it('keeps a steering reaction when an append retry starts an execution', async () => {
     let failNextAppend = false
     bot = createTestBot({
@@ -6518,6 +6565,8 @@ type MockSessionApi = {
   /** Slack Connect allowlist api-rs returns; null makes the lookup fail. */
   externalTeamIds: string[] | null
   holdNextExecute(): () => void
+  /** Steering outcome the next user-message append reports, as api-rs does. */
+  nextAppendSteering: Record<string, unknown> | null
   queueCreateResponse(body: Record<string, unknown>, status?: number): void
   reset(): void
   streamCount: number
@@ -6543,6 +6592,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
   let failNextExecute = false
   let failNextExecuteAfterAccept = false
   let externalTeamIds: string[] | null = []
+  let nextAppendSteering: Record<string, unknown> | null = null
   const port = await availablePort(4063)
   const closeStreams = () => {
     for (const stream of streams) stream.end()
@@ -6575,6 +6625,11 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
         return failNextEvents
       },
       idempotentExecutions,
+      takeAppendSteering() {
+        const steering = nextAppendSteering
+        nextAppendSteering = null
+        return steering
+      },
       nextEventId() {
         eventId += 1
         return eventId
@@ -6621,6 +6676,7 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
       failNextExecute = false
       failNextExecuteAfterAccept = false
       externalTeamIds = []
+      nextAppendSteering = null
       workflowEvents.length = 0
     },
     queueCreateResponse(body: Record<string, unknown>, status = 200) {
@@ -6658,6 +6714,12 @@ async function startMockCodexApi(): Promise<MockSessionApi> {
     },
     set externalTeamIds(value: string[] | null) {
       externalTeamIds = value
+    },
+    get nextAppendSteering() {
+      return nextAppendSteering
+    },
+    set nextAppendSteering(value: Record<string, unknown> | null) {
+      nextAppendSteering = value
     },
     holdNextExecute() {
       if (executeHoldRelease) throw new Error('execute is already held')
@@ -6724,6 +6786,7 @@ async function handleMockCodexRequest(
     failNextEvents: boolean
     failNextExecute: boolean
     idempotentExecutions: Map<string, string>
+    takeAppendSteering(): Record<string, unknown> | null
     nextEventId(): number
     port: number
     setFailNextEvents(value: boolean): void
@@ -6818,7 +6881,12 @@ async function handleMockCodexRequest(
   if (endpoint === 'messages') {
     const body = (await request.json()) as SlackbotV2AppendMessagesRequest
     input.appends.push({ threadKey, body })
-    await sendWebResponse(res, Response.json({ ok: true, message_ids: body.messages.map((_, index) => `msg-${index + 1}`) }))
+    const steering = input.takeAppendSteering()
+    await sendWebResponse(res, Response.json({
+      ok: true,
+      message_ids: body.messages.map((_, index) => `msg-${index + 1}`),
+      ...(steering ? { steering } : {})
+    }))
     return
   }
 

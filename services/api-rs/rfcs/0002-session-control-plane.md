@@ -214,9 +214,16 @@ Example response:
 ```json
 {
   "ok": true,
-  "message_ids": ["msg_123"]
+  "message_ids": ["msg_123"],
+  "steering": {"status": "delivered", "execution_id": "exe_123"}
 }
 ```
+
+User messages are also forwarded to the session's active execution as a steer.
+`steering.status` reports the result: `delivered`, `failed`, or
+`no_active_execution`. Anything but `delivered` means no harness saw the
+messages, so a caller that expects a reply must start a new execution.
+`steering` is omitted when the append holds no user message.
 
 Message `parts` are durable transcript data for clients and operators. The API
 stores them but does not translate them into harness-specific stdin during

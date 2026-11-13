@@ -119,6 +119,7 @@ import type {
   ProactiveDecision,
   SlackbotV2,
   SlackbotV2ApiAttachment,
+  SlackbotV2AppendSteering,
   SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2ExecuteSessionResponse,
@@ -154,6 +155,8 @@ export type {
   SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
+  SlackbotV2AppendMessagesResponse,
+  SlackbotV2AppendSteering,
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
@@ -227,6 +230,9 @@ const LATE_SLACK_FILE_PENDING_TTL_MS = 60_000
 const LATE_SLACK_FILE_CONSUMED_TTL_MS = 5 * 60_000
 const LATE_SLACK_FILE_IDLE_WAIT_MS = 90_000
 const LATE_SLACK_FILE_IDLE_POLL_MS = 500
+// The execution already ended; only the previous turn's final render remains.
+const UNDELIVERED_STEER_IDLE_WAIT_MS = 5 * 60_000
+const UNDELIVERED_STEER_IDLE_POLL_MS = 250
 const LATE_SLACK_FILE_MESSAGE_TEXT = 'Late Slack file attachment for the previous message.'
 const SLACK_BLOCK_ACTION_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000
 const SLACK_BLOCK_ACTION_LEASE_TTL_MS = 60 * 1000
@@ -1631,6 +1637,58 @@ type SyncThreadMessageInput = {
   state: StateAdapter
   steeringReactionAck?: SteeringReactionAck
   steeringReactions: SteeringReactionController
+  /**
+   * Set on the follow-up turn for a message whose steer no execution took:
+   * it waits for the thread to go idle instead of appending again.
+   */
+  undeliveredSteer?: boolean
+}
+
+/**
+ * A message appended while this thread still looks active can miss the turn:
+ * the execution may finish (turn.completed) before the render finalizes and
+ * clears activeExecution. api-rs then stores the message without any harness
+ * seeing it. Wait for the thread to go idle and give the message its own turn.
+ */
+function scheduleUndeliveredSteerTurn(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  input: SyncThreadMessageInput,
+  trace: SlackbotV2Trace,
+  fields: JsonObject = {}
+): void {
+  traceLog(input.options, 'slackbotv2_undelivered_steer_turn_scheduled', trace, fields)
+  // The follow-up turn owns the message's reaction from here on.
+  const followUp: SyncThreadMessageInput = {
+    ...input,
+    initialAssistantStatus: undefined,
+    initialAssistantStatusRequested: true,
+    initialAssistantStatusVisible: undefined,
+    undeliveredSteer: true
+  }
+  input.steeringReactionAck = undefined
+  backgroundWaitUntil(
+    (async () => {
+      const idle = await waitForThreadIdle(thread, input.options, trace, {
+        pollMs: UNDELIVERED_STEER_IDLE_POLL_MS,
+        timeoutMs: UNDELIVERED_STEER_IDLE_WAIT_MS
+      })
+      if (!idle) {
+        traceWarn(input.options, 'slackbotv2_undelivered_steer_idle_timeout', trace, {
+          waited_ms: UNDELIVERED_STEER_IDLE_WAIT_MS
+        })
+        finishSteeringReaction(followUp, trace)
+        return
+      }
+      traceLog(input.options, 'slackbotv2_undelivered_steer_turn_starting', trace)
+      await syncThreadMessageToSession(thread, message, followUp)
+    })().catch(error => {
+      traceWarn(input.options, 'slackbotv2_undelivered_steer_turn_failed', trace, {
+        error: errorMessage(error)
+      })
+      finishSteeringReaction(followUp, trace)
+    })
+  )
 }
 
 /**
@@ -1724,6 +1782,19 @@ async function syncThreadMessageToSession(
     slackUserId: slackUserIdForMessage(message),
     startedAtMs: traceStartedAtMs,
     threadId: thread.id
+  }
+  if (input.undeliveredSteer && !shouldStartExecution) {
+    if (state.activeExecution === true && !executedMessageIds.has(message.id)) {
+      // Another turn took the thread first. The message is already in the
+      // session but not in that turn, so wait for it to finish too.
+      scheduleUndeliveredSteerTurn(thread, message, input, trace, { reason: 'thread_active_again' })
+      recordForward(input.mode, 'undelivered_steer_deferred', traceStartedAtMs)
+      return
+    }
+    traceLog(input.options, 'slackbotv2_undelivered_steer_already_executed', trace)
+    finishSteeringReaction(input, trace)
+    recordForward(input.mode, 'duplicate_skipped', traceStartedAtMs)
+    return
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)
@@ -2090,13 +2161,30 @@ async function syncThreadMessageToSession(
     })
   }
 
-  const commitMessagesAppended = async (): Promise<void> => {
+  // Set when this message was meant to steer the active turn but api-rs
+  // found no execution to take it, so it needs a turn of its own.
+  let undeliveredSteer: SlackbotV2AppendSteering | undefined
+  const commitMessagesAppended = async (
+    { steering }: { steering?: SlackbotV2AppendSteering } = {}
+  ): Promise<void> => {
+    if (
+      !shouldStartExecution
+      && input.mode === 'execute'
+      && steering !== undefined
+      && steering.status !== 'delivered'
+      && messagesToAppend.some(item => item.id === message.id)
+    ) {
+      undeliveredSteer = steering
+    }
     const latest = (await thread.state) ?? {}
     const latestMessageIds = new Set(latest.forwardedMessageIds ?? [])
     for (const item of messagesToAppend) latestMessageIds.add(item.id)
     const steeringReactionAck = input.steeringReactionAck
+    // An undelivered steer keeps its reaction for the turn it will start.
     const holdSteeringReaction =
-      steeringReactionAck !== undefined && latest.activeExecution === true
+      steeringReactionAck !== undefined
+      && latest.activeExecution === true
+      && undeliveredSteer === undefined
     await thread.setState({
       ...(stickyOverridesUpdate ?? {}),
       forwardedMessageIds: Array.from(latestMessageIds).slice(-1000),
@@ -2209,6 +2297,17 @@ async function syncThreadMessageToSession(
       finishSteeringReaction(input, trace)
       recordForward(input.mode, 'error', traceStartedAtMs)
       throw error
+    }
+    if (undeliveredSteer) {
+      traceWarn(input.options, 'slackbotv2_steer_undelivered', trace, {
+        steering_execution_id: undeliveredSteer.execution_id,
+        steering_status: undeliveredSteer.status
+      })
+      scheduleUndeliveredSteerTurn(thread, message, input, trace, {
+        reason: undeliveredSteer.status
+      })
+      recordForward(input.mode, 'undelivered_steer_deferred', traceStartedAtMs)
+      return
     }
     finishSteeringReaction(input, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace)
@@ -4236,16 +4335,23 @@ async function repairLateSlackFileMessage(
 async function waitForThreadIdle(
   thread: Thread<SlackbotV2ThreadState>,
   options: SlackbotV2Options,
-  trace: SlackbotV2Trace
+  trace: SlackbotV2Trace,
+  wait: { pollMs: number; timeoutMs: number; waitingEvent?: string } = {
+    pollMs: LATE_SLACK_FILE_IDLE_POLL_MS,
+    timeoutMs: LATE_SLACK_FILE_IDLE_WAIT_MS,
+    waitingEvent: 'slackbotv2_late_file_repair_waiting_for_idle'
+  }
 ): Promise<boolean> {
   const startedAtMs = nowMs()
-  while (elapsedMs(startedAtMs) < LATE_SLACK_FILE_IDLE_WAIT_MS) {
+  while (elapsedMs(startedAtMs) < wait.timeoutMs) {
     const latest = (await thread.state) ?? {}
     if (latest.activeExecution !== true) return true
-    traceLog(options, 'slackbotv2_late_file_repair_waiting_for_idle', trace, {
-      waited_ms: elapsedMs(startedAtMs)
-    })
-    await sleep(LATE_SLACK_FILE_IDLE_POLL_MS)
+    if (wait.waitingEvent) {
+      traceLog(options, wait.waitingEvent, trace, {
+        waited_ms: elapsedMs(startedAtMs)
+      })
+    }
+    await sleep(wait.pollMs)
   }
   return false
 }

@@ -73,6 +73,21 @@ export type SlackbotV2AppendMessagesRequest = {
   messages: SlackbotV2SessionMessage[]
 }
 
+/**
+ * Whether api-rs delivered the appended user messages to an active execution.
+ * Absent from older api-rs builds and from appends without a user message.
+ */
+export type SlackbotV2AppendSteering = {
+  status: 'delivered' | 'failed' | 'no_active_execution'
+  execution_id?: string
+}
+
+export type SlackbotV2AppendMessagesResponse = {
+  ok?: boolean
+  message_ids?: string[]
+  steering?: SlackbotV2AppendSteering
+}
+
 export type SlackbotV2CreateSessionRequest = {
   harness_type: string
   metadata: JsonObject
