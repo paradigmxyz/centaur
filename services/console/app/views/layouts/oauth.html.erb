@@ -1,6 +1,6 @@
 <%# Standalone layout for the server-rendered sign-in and OAuth pages (console
     login and pending, MCP OAuth consent, the broker OAuth result). Plain CSS
-    from public/oauth-page; no asset pipeline and no JavaScript. The console UI
+    from public/assets/oauth-page; no asset pipeline and no JavaScript. The console UI
     itself is the SPA. %>
 <!DOCTYPE html>
 <html lang="en">
@@ -11,8 +11,7 @@
     <meta name="color-scheme" content="dark light">
     <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)">
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
-    <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)">
-    <link rel="icon" href="/icon-light.svg" type="image/svg+xml" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="<%= OauthPageAssets.path("oauth.css") %>">
   </head>
 

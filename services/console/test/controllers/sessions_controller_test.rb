@@ -57,7 +57,8 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
       assert_select "input[type=password][name=password][autocomplete=current-password]"
       assert_select "input[type=submit][value=?]", "Sign in"
     end
-    assert_select "link[rel=stylesheet][href^=?]", "/oauth-page/oauth.css"
+    assert_select "link[rel=stylesheet][href^=?]", "/assets/oauth-page/oauth.css"
+    assert_page_assets_under_assets_prefix
     assert_select "script", count: 0
     assert_not_includes response.body, "<div id=\"root\">"
   end
@@ -410,6 +411,7 @@ class SessionsControllerTest < ActionDispatch::IntegrationTest
     get pending_url
     assert_response :ok
     assert_select "title", "Awaiting Approval · Centaur Console"
+    assert_page_assets_under_assets_prefix
     assert_select "h1", "Awaiting approval"
     assert_select "strong", users(:pending_user).email
     assert_select "form[action=?]", logout_path do

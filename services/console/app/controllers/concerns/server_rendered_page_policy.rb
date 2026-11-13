@@ -1,6 +1,6 @@
 # Content-Security-Policy for the server-rendered sign-in and OAuth pages
 # (layouts/oauth: login, pending, MCP consent, broker OAuth result). They have
-# no JavaScript and only the plain CSS, font, and images in public/oauth-page,
+# no JavaScript and only the plain CSS, font, and images in public/assets/oauth-page,
 # so they narrow the app-wide policy (config/initializers/content_security_policy.rb)
 # to no script and no inline style. It is applied ahead of every other
 # callback so a page rendered or redirected by an earlier before_action (the

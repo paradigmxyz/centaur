@@ -66,7 +66,7 @@ on either side of a rolling deploy accept each other's forms.
   `/oauth/:slug/{start,callback}`. After sign-in `/login` returns to the
   remembered page, such as the authorize URL with its query. See
   [docs/API.md](docs/API.md#console-auth-pages). They use
-  `layouts/oauth.html.erb` and plain CSS from `public/oauth-page` (the SPA's
+  `layouts/oauth.html.erb` and plain CSS from `public/assets/oauth-page` (the SPA's
   colours, dark by default, light under `prefers-color-scheme: light`), with no
   asset pipeline or JavaScript.
 

@@ -21,7 +21,7 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   clients and pods on either side of a rolling deploy see the protocol
   behaviour they expect, and sign-in works without JavaScript. They are
   standard Rails forms with an authenticity token, using
-  `layouts/oauth.html.erb` and plain CSS in `public/oauth-page` (no
+  `layouts/oauth.html.erb` and plain CSS in `public/assets/oauth-page` (no
   JavaScript; keep its colours in step with `web/src/index.css`). Do not move
   them into the SPA, and keep their URLs, form field names, messages,
   validation order, and redirects stable. The SPA reaches `/login` and
@@ -108,7 +108,7 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 ## Content-Security-Policy
 
 Every Rails response carries an enforcing CSP; files under `public/` (SPA
-assets, `public/oauth-page`, icons, `offline.html`) are served before the
+assets, `public/assets/oauth-page`, icons, `offline.html`) are served before the
 middleware and carry none, which is why `SpaController` serves the shell.
 `test/integration/content_security_policy_test.rb` pins the exact headers.
 

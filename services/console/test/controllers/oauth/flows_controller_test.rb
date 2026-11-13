@@ -1063,7 +1063,8 @@ module Oauth
       assert_select "p", "Consent was not granted (access_denied)."
       assert_select "a[href=?]", oauth_start_path(slug: "google"), text: "Try again"
       assert_select "script", count: 0
-      assert_select "link[rel=stylesheet][href^=?]", "/oauth-page/oauth.css?v="
+      assert_select "link[rel=stylesheet][href^=?]", "/assets/oauth-page/oauth.css?v="
+      assert_page_assets_under_assets_prefix
     end
 
     test "the result page offers no retry for unknown or disabled apps" do

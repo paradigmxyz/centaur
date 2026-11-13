@@ -213,12 +213,13 @@ module Mcp
       assert_select "script", count: 0
       assert_select "link[rel=stylesheet]", count: 1 do |links|
         href = links.first["href"]
-        assert_match %r{\A/oauth-page/oauth\.css\?v=\h{12}\z}, href
+        assert_match %r{\A/assets/oauth-page/oauth\.css\?v=\h{12}\z}, href
         assert File.file?(Rails.public_path.join(URI.parse(href).path.delete_prefix("/")))
       end
       assert_select "img[alt=Centaur]" do |images|
         assert File.file?(Rails.public_path.join(URI.parse(images.first["src"]).path.delete_prefix("/")))
       end
+      assert_page_assets_under_assets_prefix
     end
 
     test "authorize returns trusted-client errors to the registered redirect_uri" do
