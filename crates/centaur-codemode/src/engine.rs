@@ -21,7 +21,10 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -47,6 +50,12 @@ const CONNECTOR_PRELUDE: &str = include_str!("js/connector.js");
 /// Hard-coded limits for the spike.
 pub const CELL_TIMEOUT: Duration = Duration::from_secs(120);
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a connector may let one request run (`timeout_ms`), for large
+/// downloads and uploads. A request that needs longer than its call or cell
+/// has left pushes both deadlines back.
+pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Time after a long request for the connector to finish its call.
+const REQUEST_GRACE: Duration = Duration::from_secs(10);
 /// Heap per realm: the cell, and each connector call while it runs.
 pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 pub const STACK_LIMIT: usize = 1024 * 1024;
@@ -222,7 +231,7 @@ impl Engine {
             files: self.files.clone(),
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
-            deadline: started + CELL_TIMEOUT,
+            deadline: Deadline::new(started + CELL_TIMEOUT),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         });
         // No newline after the opening brace, so error line numbers match the cell.
@@ -235,20 +244,20 @@ impl Engine {
                 serde_json::to_string(&connectors).expect("connector list serializes"),
             )],
             entry: Entry::Script(&code),
-            deadline: cell.deadline,
+            deadline: cell.deadline.clone(),
             libs: None,
         };
-        let outcome = tokio::time::timeout(
-            CELL_TIMEOUT + Duration::from_secs(1),
-            run_realm(&cell, realm),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(ExecError::new(format!(
+        let expired = async {
+            cell.deadline.passed().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
+        let outcome = tokio::select! {
+            outcome = run_realm(&cell, realm) => outcome,
+            () = expired => Err(ExecError::new(format!(
                 "cell timed out after {}s",
-                CELL_TIMEOUT.as_secs()
-            )))
-        })
+                started.elapsed().as_secs()
+            ))),
+        }
         .and_then(|text| {
             serde_json::from_str(&text)
                 .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
@@ -268,6 +277,48 @@ impl Engine {
     }
 }
 
+/// A deadline that long requests may push back, shared by the timers and the
+/// interrupt handler that enforce it.
+#[derive(Clone)]
+struct Deadline {
+    base: Instant,
+    /// Nanoseconds after `base`.
+    at: Arc<AtomicU64>,
+}
+
+impl Deadline {
+    fn new(at: Instant) -> Self {
+        let base = Instant::now();
+        Self {
+            base,
+            at: Arc::new(AtomicU64::new(
+                at.saturating_duration_since(base).as_nanos() as u64,
+            )),
+        }
+    }
+
+    fn get(&self) -> Instant {
+        self.base + Duration::from_nanos(self.at.load(Ordering::Relaxed))
+    }
+
+    /// Move the deadline to `at` if that is later.
+    fn extend(&self, at: Instant) {
+        let nanos = at.saturating_duration_since(self.base).as_nanos() as u64;
+        self.at.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Resolves once the deadline, as it stands then, has passed.
+    async fn passed(&self) {
+        loop {
+            let at = self.get();
+            if Instant::now() >= at {
+                return;
+            }
+            tokio::time::sleep_until(at.into()).await;
+        }
+    }
+}
+
 /// Per-cell state shared by the host functions of the cell and its calls.
 struct Cell {
     catalog: Arc<Catalog>,
@@ -278,7 +329,7 @@ struct Cell {
     files: Option<Files>,
     logs: Mutex<Vec<String>>,
     calls: Mutex<Vec<Call>>,
-    deadline: Instant,
+    deadline: Deadline,
     permits: Arc<Semaphore>,
 }
 
@@ -445,12 +496,13 @@ impl Cell {
             .acquire_owned()
             .await
             .map_err(|_| ExecError::new("cell is shutting down"))?;
-        let deadline = self.deadline.min(Instant::now() + TOOL_TIMEOUT);
-        let budget = deadline.saturating_duration_since(Instant::now());
+        let started = Instant::now();
+        let deadline = Deadline::new(self.deadline.get().min(started + TOOL_TIMEOUT));
         let realm = Realm {
             host: HostKind::Connector {
                 call: id,
                 label: &tool,
+                deadline: deadline.clone(),
             },
             prelude: connector_prelude(),
             globals: vec![("__env", environment().to_owned())],
@@ -459,17 +511,30 @@ impl Cell {
                 function,
                 args: &args,
             },
-            deadline,
+            deadline: deadline.clone(),
             libs: Some(self.catalog.libs.clone()),
         };
-        tokio::time::timeout(budget, run_realm(&self, realm))
-            .await
-            .unwrap_or_else(|_| {
-                Err(ExecError::new(format!(
-                    "{tool} timed out after {}s",
-                    budget.as_secs()
-                )))
-            })
+        tokio::select! {
+            result = run_realm(&self, realm) => result,
+            () = deadline.passed() => Err(ExecError::new(format!(
+                "{tool} timed out after {}s",
+                started.elapsed().as_secs()
+            ))),
+        }
+    }
+
+    /// Give a request of up to `timeout_ms` (bounded by `MAX_REQUEST_TIMEOUT`)
+    /// room to finish by pushing back the call's and the cell's deadlines.
+    /// Returns the timeout to set on the request, or `None` for the default.
+    fn request_timeout(&self, call_deadline: &Deadline, timeout_ms: f64) -> Option<Duration> {
+        if !timeout_ms.is_finite() || timeout_ms <= 0.0 {
+            return None;
+        }
+        let timeout = Duration::from_millis(timeout_ms as u64).min(MAX_REQUEST_TIMEOUT);
+        let until = Instant::now() + timeout + REQUEST_GRACE;
+        call_deadline.extend(until);
+        self.deadline.extend(until);
+        Some(timeout)
     }
 }
 
@@ -481,7 +546,7 @@ struct Realm<'a> {
     /// Extra JSON globals for the prelude to consume.
     globals: Vec<(&'static str, String)>,
     entry: Entry<'a>,
-    deadline: Instant,
+    deadline: Deadline,
     /// Shared modules the realm may import; `None` means no module loader.
     libs: Option<Libs>,
 }
@@ -527,7 +592,11 @@ impl rquickjs::loader::Loader for LibLoader {
 
 enum HostKind<'a> {
     Cell,
-    Connector { call: usize, label: &'a str },
+    Connector {
+        call: usize,
+        label: &'a str,
+        deadline: Deadline,
+    },
 }
 
 enum Entry<'a> {
@@ -548,9 +617,9 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
     let runtime = AsyncRuntime::new().map_err(internal)?;
     runtime.set_memory_limit(MEMORY_LIMIT).await;
     runtime.set_max_stack_size(STACK_LIMIT).await;
-    let deadline = realm.deadline;
+    let deadline = realm.deadline.clone();
     runtime
-        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
+        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline.get())))
         .await;
     // Without a loader, code in the realm cannot import modules at all.
     if let Some(libs) = realm.libs.clone() {
@@ -564,9 +633,11 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
             let caught = |error| caught(&ctx, error);
             let host = match realm.host {
                 HostKind::Cell => cell_host(&ctx, cell.clone()),
-                HostKind::Connector { call, label } => {
-                    connector_host(&ctx, cell.clone(), call, label)
-                }
+                HostKind::Connector {
+                    call,
+                    label,
+                    ref deadline,
+                } => connector_host(&ctx, cell.clone(), call, label, deadline.clone()),
             };
             let setup = (|| -> rquickjs::Result<_> {
                 let globals = ctx.globals();
@@ -886,9 +957,11 @@ fn connector_host<'js>(
     cell: Arc<Cell>,
     call: usize,
     label: &str,
+    deadline: Deadline,
 ) -> rquickjs::Result<Object<'js>> {
     let host = common_host(ctx, cell.clone(), format!("[{label}] "))?;
     let fetch_cell = cell.clone();
+    let fetch_deadline = deadline.clone();
     host.set(
         "fetch",
         Function::new(
@@ -898,8 +971,10 @@ fn connector_host<'js>(
                       url: String,
                       method: String,
                       headers: String,
+                      timeout_ms: f64,
                       body: Opt<Value<'js>>| {
                     let cell = fetch_cell.clone();
+                    let timeout = cell.request_timeout(&fetch_deadline, timeout_ms);
                     let parts = body_parts(body.0);
                     async move {
                         let parts =
@@ -909,10 +984,11 @@ fn connector_host<'js>(
                             .await
                             .map_err(|message| Exception::throw_message(&ctx, &message))?;
                         let started = Instant::now();
-                        let result = match send(&cell.http, &url, &method, &headers, body).await {
-                            Ok(response) => collect(response).await,
-                            Err(error) => Err(error),
-                        };
+                        let result =
+                            match send(&cell.http, &url, &method, &headers, timeout, body).await {
+                                Ok(response) => collect(response).await,
+                                Err(error) => Err(error),
+                            };
                         cell.record_request(
                             call,
                             &method,
@@ -1007,8 +1083,10 @@ fn connector_host<'js>(
                       path: String,
                       method: String,
                       headers: String,
+                      timeout_ms: f64,
                       body: Opt<Value<'js>>| {
                     let (cell, files) = (download_cell.clone(), files.clone());
+                    let timeout = cell.request_timeout(&deadline, timeout_ms);
                     let parts = body_parts(body.0);
                     async move {
                         let parts =
@@ -1018,10 +1096,11 @@ fn connector_host<'js>(
                             .await
                             .map_err(|message| Exception::throw_message(&ctx, &message))?;
                         let started = Instant::now();
-                        let result = match send(&cell.http, &url, &method, &headers, body).await {
-                            Ok(response) => download(&files, &path, response).await,
-                            Err(error) => Err(error),
-                        };
+                        let result =
+                            match send(&cell.http, &url, &method, &headers, timeout, body).await {
+                                Ok(response) => download(&files, &path, response).await,
+                                Err(error) => Err(error),
+                            };
                         cell.record_request(
                             call,
                             &method,
@@ -1113,6 +1192,7 @@ async fn send(
     url: &str,
     method: &str,
     headers: &str,
+    timeout: Option<Duration>,
     body: Option<Vec<u8>>,
 ) -> std::result::Result<reqwest::Response, String> {
     let parsed = reqwest::Url::parse(url).map_err(|error| format!("invalid URL: {error}"))?;
@@ -1129,6 +1209,9 @@ async fn send(
     }
     if let Some(body) = body {
         request = request.body(body);
+    }
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
     }
     request.send().await.map_err(transport)
 }
@@ -1275,6 +1358,12 @@ export async function codec(args: { text: string }, ctx: Ctx): Promise<{ b64: st
   };
 }
 
+/** GET with a request timeout. */
+export async function slow(args: { url: string; timeout_ms: number }, ctx: Ctx): Promise<{ status: number }> {
+  const res = await ctx.fetch(args.url, { timeout_ms: args.timeout_ms });
+  return { status: res.status };
+}
+
 /** Exercise the files capability. */
 export async function files(args: { base: string }, ctx: Ctx): Promise<unknown> {
   if (!ctx.files) return { capability: false };
@@ -1369,6 +1458,13 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             .route(
                 "/echo",
                 axum::routing::post(|body: String| async move { body }),
+            )
+            .route(
+                "/slow",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    "finally"
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1439,6 +1535,66 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             ]
         );
         assert_eq!(response.calls[0].requests.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_take_a_timeout() {
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let short = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.slow({{ url: {:?}, timeout_ms: 200 }});",
+                format!("{base}/slow")
+            ),
+            None,
+        )
+        .await;
+        assert!(!short.ok, "{short:?}");
+        let message = short.error.unwrap().message;
+        assert!(message.contains("timed out"), "{message}");
+        let long = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.slow({{ url: {:?}, timeout_ms: 5000 }});",
+                format!("{base}/slow")
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(long.result.unwrap(), serde_json::json!({ "status": 200 }));
+    }
+
+    #[tokio::test]
+    async fn deadlines_only_move_later() {
+        let start = Instant::now();
+        let deadline = Deadline::new(start + Duration::from_millis(50));
+        deadline.extend(start + Duration::from_millis(10));
+        assert!(deadline.get() >= start + Duration::from_millis(50));
+        deadline.extend(start + Duration::from_millis(150));
+        deadline.passed().await;
+        assert!(start.elapsed() >= Duration::from_millis(150));
+
+        // A long request pushes back both the call's and the cell's deadlines,
+        // bounded by MAX_REQUEST_TIMEOUT.
+        let (_dir, engine) = engine();
+        let cell = Cell {
+            catalog: engine.catalog.clone(),
+            allowed: Vec::new(),
+            context: "null".to_owned(),
+            http: engine.http.clone(),
+            files: None,
+            logs: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            deadline: Deadline::new(Instant::now() + CELL_TIMEOUT),
+            permits: Arc::new(Semaphore::new(1)),
+        };
+        let call = Deadline::new(Instant::now() + TOOL_TIMEOUT);
+        assert_eq!(cell.request_timeout(&call, 0.0), None);
+        assert_eq!(cell.request_timeout(&call, f64::NAN), None);
+        assert_eq!(cell.request_timeout(&call, 1e12), Some(MAX_REQUEST_TIMEOUT));
+        let floor = Instant::now() + MAX_REQUEST_TIMEOUT;
+        assert!(call.get() >= floor && cell.deadline.get() >= floor);
     }
 
     #[test]
@@ -1570,7 +1726,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             files: None,
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
-            deadline: Instant::now() + CELL_TIMEOUT,
+            deadline: Deadline::new(Instant::now() + CELL_TIMEOUT),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         });
         for tool in ["demo.echo", "demo.nope", "nope", "other.echo"] {

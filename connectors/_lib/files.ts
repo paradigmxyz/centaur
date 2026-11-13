@@ -51,7 +51,14 @@ export function dispositionFilename(header: string | undefined): string | undefi
   return plain ? (plain[2] ?? plain[1]).trim() : undefined;
 }
 
-/** Download `url` to `path`; throws `<label> returned HTTP <status>: <body>` on a non-2xx response. */
+/** How long a file download may take by default; `init.timeout_ms` overrides it. */
+export const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Download `url` to `path`; throws `<label> returned HTTP <status>: <body>` on a non-2xx
+ * response. Files can be large, so the transfer may take up to `DOWNLOAD_TIMEOUT_MS` unless
+ * `init.timeout_ms` says otherwise.
+ */
 export async function downloadTo(
   ctx: Ctx,
   url: string,
@@ -60,7 +67,7 @@ export async function downloadTo(
   init?: RequestInit,
 ): Promise<SavedFile> {
   const files = requireFiles(ctx, label);
-  const res = await files.download(url, path, init);
+  const res = await files.download(url, path, { timeout_ms: DOWNLOAD_TIMEOUT_MS, ...init });
   if (!res.ok || !res.path) {
     throw new Error(`${label} returned HTTP ${res.status}: ${(res.body ?? "").slice(0, 1000)}`);
   }

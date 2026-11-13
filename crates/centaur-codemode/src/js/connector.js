@@ -35,13 +35,15 @@
     }
     return JSON.stringify(headers);
   };
+  // 0 means the default (the call's remaining time, at most 60 s).
+  const requestTimeout = (init) => Math.max(0, Number(init.timeout_ms ?? 0) || 0);
 
   const fetch = async (url, init = {}) => {
     const method = String(init.method ?? "GET").toUpperCase();
     const body = requestBody(init.body);
     const raw = body === undefined
-      ? await host.fetch(String(url), method, requestHeaders(init))
-      : await host.fetch(String(url), method, requestHeaders(init), body);
+      ? await host.fetch(String(url), method, requestHeaders(init), requestTimeout(init))
+      : await host.fetch(String(url), method, requestHeaders(init), requestTimeout(init), body);
     return new Response(raw.status, JSON.parse(raw.headers), raw.body);
   };
 
@@ -55,8 +57,8 @@
       const method = String(init.method ?? "GET").toUpperCase();
       const body = requestBody(init.body);
       const raw = body === undefined
-        ? await host.filesDownload(String(url), String(path), method, requestHeaders(init))
-        : await host.filesDownload(String(url), String(path), method, requestHeaders(init), body);
+        ? await host.filesDownload(String(url), String(path), method, requestHeaders(init), requestTimeout(init))
+        : await host.filesDownload(String(url), String(path), method, requestHeaders(init), requestTimeout(init), body);
       const ok = raw.status >= 200 && raw.status < 300;
       return Object.freeze({ ...raw, ok, headers: JSON.parse(raw.headers) });
     },

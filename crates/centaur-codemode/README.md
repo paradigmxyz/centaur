@@ -108,6 +108,9 @@ Cells never get file access; they pass paths between tools.
 - `download(url, path, init?)` streams a 2xx body to disk in the host, past the
   10 MiB response limit and without the bytes entering the realm. A non-2xx
   response saves nothing and returns the start of its body.
+- Transfers can take a while: `RequestInit.timeout_ms` (up to 10 minutes)
+  sets one request's timeout, body included, and pushes back the call's and
+  the cell's deadlines to fit. `downloadTo` defaults to 5 minutes.
 - A `fetch` body may be a list of parts (strings, bytes, `{ file: path }`) the
   host joins, so uploads send files the realm never reads.
 
@@ -141,7 +144,9 @@ sandbox, so connectors may route on it but nothing authorizes from it.
 Cell 120 s (busy loops are interrupted), tool call 60 s, 64 MiB heap and 1 MiB
 stack per realm (the cell and each running call), 1000 calls and 8 concurrent
 calls per cell, 10 MiB result, 10 MiB per HTTP response, 100 MiB per file
-(read, written, downloaded or sent as a request body).
+(read, written, downloaded or sent as a request body). A request may ask for
+up to 10 minutes with `timeout_ms`, which extends its call and cell (plus 10 s
+for the call to finish).
 
 ## Cost of a realm per call
 

@@ -24,6 +24,13 @@ export interface RequestInit {
   headers?: Record<string, string | undefined>;
   /** One part, or parts sent in order (for example a multipart body around a `{ file }`). */
   body?: BodyPart | BodyPart[];
+  /**
+   * How long this request may take, body included, up to 600000 (10 minutes). By default a
+   * request gets the call's remaining time (a call has 60 s). A longer timeout extends the
+   * call's and the cell's deadlines to fit, so set it only for transfers that need it, such as
+   * large downloads and uploads.
+   */
+  timeout_ms?: number;
 }
 
 /** A file the runtime read or wrote. */
@@ -58,7 +65,8 @@ export interface Files {
   stat(path: string): Promise<FileInfo | null>;
   /**
    * Request `url` and stream a 2xx body straight to `path`, without the 10 MiB response limit
-   * or passing the bytes through the realm. Recorded like `fetch`.
+   * or passing the bytes through the realm. Recorded like `fetch`. Pass `init.timeout_ms` for
+   * files that may take longer than the call's remaining time to transfer.
    */
   download(url: string, path: string, init?: RequestInit): Promise<Download>;
 }
