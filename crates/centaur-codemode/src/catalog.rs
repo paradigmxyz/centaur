@@ -8,6 +8,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use eyre::{Result, WrapErr, bail, eyre};
@@ -54,9 +55,10 @@ pub struct Connector {
     pub description: String,
     #[serde(skip)]
     pub dir: PathBuf,
-    /// Compiled ES module source.
+    /// QuickJS bytecode for the compiled ES module, built once per load and
+    /// loaded into a fresh runtime for every call.
     #[serde(skip)]
-    pub js: String,
+    pub bytecode: Arc<[u8]>,
     pub functions: Vec<Function>,
     /// `.d.ts` text for the module, with the `ctx` parameter removed.
     pub declarations: String,
@@ -141,14 +143,41 @@ fn load_connector(dir: &Path) -> Result<Connector> {
     if compiled.functions.is_empty() {
         bail!("index.ts exports no functions");
     }
+    let bytecode = bytecode(&name, compiled.js)?;
     Ok(Connector {
         name,
         description: manifest.description.trim().to_owned(),
         dir: dir.to_owned(),
-        js: compiled.js,
+        bytecode,
         functions: compiled.functions,
         declarations: compiled.declarations,
     })
+}
+
+/// Compile the module to QuickJS bytecode. The module name appears in stack
+/// traces from connector code.
+fn bytecode(name: &str, js: String) -> Result<Arc<[u8]>> {
+    let runtime = rquickjs::Runtime::new()?;
+    let context = rquickjs::Context::full(&runtime)?;
+    context.with(|ctx| {
+        let module = rquickjs::Module::declare(ctx.clone(), format!("connector:{name}"), js)
+            .map_err(|error| eyre!("{}", describe_js_error(&ctx, error)))?;
+        let bytes = module
+            .write(rquickjs::module::WriteOptions::default())
+            .map_err(|error| eyre!("{}", describe_js_error(&ctx, error)))?;
+        Ok(Arc::from(bytes))
+    })
+}
+
+fn describe_js_error(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
+    use rquickjs::CatchResultExt;
+    match Err::<(), _>(error).catch(ctx) {
+        Err(rquickjs::CaughtError::Exception(exception)) => exception
+            .message()
+            .unwrap_or_else(|| "invalid module".to_owned()),
+        Err(other) => other.to_string(),
+        Ok(()) => String::new(),
+    }
 }
 
 struct Compiled {

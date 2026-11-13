@@ -42,7 +42,30 @@ A cell is the body of an async function; its return value is the result.
 | `files.read/readText/write` | The principal's scratch directory (relative paths only). |
 | `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder` | As usual; logs are returned. |
 
-Cells get no `fetch`: the network is reachable only through connectors.
+Cells get no `fetch` and no module loader: the network is reachable only
+through connectors.
+
+## Security invariants
+
+1. Rust is the only trust boundary. The call record, policy checks and limits
+   live in the host; nothing a JS realm reports is trusted.
+2. Every host function a realm receives is safe for code in that realm to call
+   with any arguments. Hiding a binding is tidiness, not protection.
+3. Cells and connectors never share a realm. Every tool call runs in a fresh
+   QuickJS runtime; arguments and results cross as JSON text, bytes through
+   `files`.
+4. A connector's `fetch` is bound to its call, so each upstream request is
+   recorded against the call that made it, at the point of I/O (method, URL
+   without query string, status, duration).
+5. `invoke` checks every tool against the principal's allowlist; refusals are
+   recorded.
+6. Time, memory, call count and call concurrency are bounded per cell,
+   including work done inside connectors.
+
+Not yet enforced: `ctx.secret` reads any uppercase environment variable rather
+than only the connector's declared secrets. Deployment must keep real
+credentials out of the runner's environment (placeholders only) and egress
+limited to the principal's iron-proxy.
 
 ## Connectors
 
@@ -61,7 +84,7 @@ Type-check with `npx -p typescript tsc -p connectors`.
 
 | Route | Body / query | Result |
 |---|---|---|
-| `POST /exec` | `{code, principal: {id, email?, name?, oauth[]}, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls, ms}` |
+| `POST /exec` | `{code, principal: {id, email?, name?, oauth[]}, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls: [{tool, ok, error?, ms, requests: [{method, url, status?, error?, ms}]}], ms}` |
 | `GET /catalog?tools=a,b` | | `{connectors, brief}` |
 | `POST /search` | `{query, limit?, tools?}` | `{results: [{tool, signature, doc, score}]}` |
 | `GET`/`PUT /files/{path}` | bytes | bytes / `{path, bytes}` |
@@ -72,5 +95,21 @@ Type-check with `npx -p typescript tsc -p connectors`.
 ## Limits (hard-coded)
 
 Cell 120 s (busy loops are interrupted), tool call 60 s, 64 MiB heap and 1 MiB
-stack per cell, 10 MiB result, 10 MiB per HTTP response, 100 MiB per file.
-Each cell runs in a fresh QuickJS runtime and context.
+stack per realm (the cell and each running call), 1000 calls and 8 concurrent
+calls per cell, 10 MiB result, 10 MiB per HTTP response, 100 MiB per file.
+
+## Cost of a realm per call
+
+Connectors and the preludes are compiled to QuickJS bytecode once; each call
+creates a runtime and context, loads both modules and runs on its own task.
+Release build, x86_64:
+
+| | Shared realm | Realm per call |
+|---|---|---|
+| 100 sequential no-I/O calls in one cell | 6 ms | about 62 ms (0.6 ms/call) |
+| 100 parallel no-I/O calls in one cell | 6 ms | about 14 ms |
+| 6 parallel calls to a local mock API | 13.7 ms p50 | 6.7 ms p50 |
+
+Of the 0.6 ms, creating a context with every intrinsic is about 0.15 ms and
+loading and evaluating connector bytecode about 0.2 ms. Against upstream APIs
+that take 50–500 ms the difference is noise.
