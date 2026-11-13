@@ -14,6 +14,7 @@ module Api
 
         PRESET_CONFLICT_MESSAGE = "The preset conflicts with an existing OAuth app. Review its configuration.".freeze
         PRESET_FAILED_MESSAGE = "Could not set up the integration. Please try again or review the OAuth app configuration.".freeze
+        PRESET_INPUT_MESSAGE = "Enter a valid %s MCP URL.".freeze
 
         def index
           records, meta = paginated_apps
@@ -52,19 +53,23 @@ module Api
 
         # POST /api/v1/console/oauth_apps/presets/:provider
         #
-        # Sets up a provider preset (registering an OAuth client with the provider
-        # when the preset's app doesn't exist yet) and returns the consent start
-        # URL to send the admin to.
+        # Sets up a preset (registering an OAuth client with the provider when
+        # the preset's app doesn't exist yet) and returns the consent start URL
+        # to send the admin to. A preset with inputs (e.g. Runlayer's tenant MCP
+        # URL) reads them from `data`.
         def preset
-          provider = Oauth::Providers.fetch(params[:provider])
-          return render_error(status: :not_found, message: "no preset for this provider") unless OauthPresetSetup.supported?(provider)
+          source = Oauth::Presets.fetch(params[:provider])
+          return render_error(status: :not_found, message: "no preset for this provider") unless source
 
+          input = params.fetch(:data, {}).permit(:resource_url).to_h
           app = OauthPresetSetup.new(
-            provider: provider, user: current_user,
+            preset: source, user: current_user, input: input,
             redirect_uri_for: method(:oauth_callback_redirect_uri),
             registration_client: registration_client_factory.call
           ).call
           render json: { data: { id: app.oid, slug: app.slug, start_url: oauth_start_url(app.slug) } }
+        rescue OauthPresetSetup::InvalidInput
+          render_error(status: :unprocessable_entity, message: format(PRESET_INPUT_MESSAGE, source.display_name))
         rescue OauthPresetSetup::Conflict
           render_error(status: :conflict, message: PRESET_CONFLICT_MESSAGE)
         rescue Broker::ExchangeError, ActiveRecord::RecordInvalid

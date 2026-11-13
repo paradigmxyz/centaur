@@ -5,19 +5,39 @@ import { toast } from "sonner";
 
 import { ErrorAlert } from "@/components/alerts";
 import { AppLink } from "@/components/app-link";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { PageHeader } from "@/components/page-header";
 import { RequireAccess } from "@/components/require-access";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { errorMessage, navigation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-import { setupPreset, useIntegrations, type IntegrationApp, type IntegrationPreset, type IntegrationUsage } from "../api";
+import {
+  disconnectIntegration,
+  setupPreset,
+  useIntegrations,
+  type DisconnectOutcome,
+  type IntegrationApp,
+  type IntegrationPreset,
+  type IntegrationUsage,
+} from "../api";
 import { ProviderTile } from "../provider-logo";
 
 const USAGE_TEXT: Record<IntegrationUsage, string> = {
   shared: "Shared with your agents.",
   always_available: "Used automatically whenever you ask the bot.",
   direct_messages: "Used only in your DMs with the bot.",
+};
+
+const OWNER_ONLY_TEXT = "Your own connection: it is never shared with anyone else.";
+
+const DISCONNECT_TEXT: Record<DisconnectOutcome, (slug: string) => string> = {
+  revoked: (slug) => `${slug} disconnected.`,
+  local_only: (slug) =>
+    `${slug} disconnected from Centaur. The provider offers no revocation endpoint; revoke access there if needed.`,
+  failed: (slug) => `${slug} disconnected from Centaur. Remote revocation failed; revoke the connection with the provider too.`,
 };
 
 export default function IntegrationsPage() {
@@ -93,7 +113,20 @@ function SshKeyCard({ configured }: { configured: boolean }) {
 }
 
 function AppCard({ app }: { app: IntegrationApp }) {
+  const queryClient = useQueryClient();
   const needsReconnect = app.connection?.status === "needs_reconnect";
+  const connectionId = app.connection?.id;
+  const disconnect = async () => {
+    if (!connectionId) return;
+    try {
+      const outcome = await disconnectIntegration(queryClient, connectionId);
+      const message = DISCONNECT_TEXT[outcome](app.slug);
+      if (outcome === "failed") toast.warning(message);
+      else toast.success(message);
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  };
   return (
     <Card label={app.slug}>
       <div className="flex items-center gap-3">
@@ -110,11 +143,14 @@ function AppCard({ app }: { app: IntegrationApp }) {
           {app.description}
         </p>
       )}
-      <p className="text-xs text-muted-foreground">{USAGE_TEXT[app.usage]}</p>
-      <div className="mt-auto flex items-center justify-between gap-3 pt-1">
+      <p className="text-xs text-muted-foreground">
+        {USAGE_TEXT[app.usage]}
+        {app.owner_only && ` ${OWNER_ONLY_TEXT}`}
+      </p>
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-1">
         {app.connection ? (
           <>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex gap-2">
               {app.shared && (
                 <Button asChild variant="secondary">
                   <Link to={`/console/oauth_apps/${app.id}`}>Manage</Link>
@@ -123,10 +159,19 @@ function AppCard({ app }: { app: IntegrationApp }) {
               <Button asChild variant="secondary">
                 <a href={app.start_url}>Reconnect</a>
               </Button>
+              {app.connection.can_disconnect && (
+                <ConfirmDialog
+                  title={`Disconnect ${app.slug}?`}
+                  description="Centaur stops using this connection right away and asks the provider to revoke its tokens. Connect again at any time."
+                  confirmLabel="Disconnect"
+                  onConfirm={disconnect}
+                  trigger={<Button variant="outline">Disconnect</Button>}
+                />
+              )}
             </div>
             <span
               className={cn(
-                "flex items-center gap-1.5 text-xs",
+                "ml-auto flex items-center gap-1.5 text-xs",
                 needsReconnect ? "text-warning" : "text-success",
               )}
             >
@@ -147,10 +192,12 @@ function AppCard({ app }: { app: IntegrationApp }) {
 function PresetCard({ preset }: { preset: IntegrationPreset }) {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
+  const [input, setInput] = useState<Record<string, string>>({});
+  const missingInput = preset.inputs.some((field) => !(input[field.name] ?? "").trim());
   const connect = async () => {
     setPending(true);
     try {
-      const body = await setupPreset(queryClient, preset.provider);
+      const body = await setupPreset(queryClient, preset.provider, input);
       navigation.assign(body.data.start_url);
     } catch (error) {
       toast.error(errorMessage(error));
@@ -165,8 +212,25 @@ function PresetCard({ preset }: { preset: IntegrationPreset }) {
         <h2 className="text-sm font-semibold">{preset.display_name}</h2>
       </div>
       {preset.description && <p className="text-xs text-muted-foreground">{preset.description}</p>}
+      {preset.inputs.map((field) => {
+        const id = `preset-${preset.provider}-${field.name}`;
+        return (
+          <div key={field.name} className="grid gap-1.5">
+            <Label htmlFor={id} className="text-xs">
+              {field.label}
+            </Label>
+            <Input
+              id={id}
+              type={field.type}
+              placeholder={field.placeholder ?? undefined}
+              value={input[field.name] ?? ""}
+              onChange={(event) => setInput((current) => ({ ...current, [field.name]: event.target.value }))}
+            />
+          </div>
+        );
+      })}
       <div className="mt-auto pt-1">
-        <Button type="button" variant="outline" onClick={connect} disabled={pending}>
+        <Button type="button" variant="outline" onClick={connect} disabled={pending || missingInput}>
           Connect
         </Button>
       </div>
