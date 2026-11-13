@@ -1,0 +1,380 @@
+/*
+ * Styles for the server-rendered pages (layouts/oauth.html.erb), served from
+ * public/ with no asset pipeline. Colours mirror web/src/index.css.
+ */
+
+@font-face {
+  font-family: "Geist Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("geist-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  color-scheme: dark;
+  --radius: 0.5rem;
+  --background: oklch(0.135 0.004 285.9);
+  --foreground: oklch(0.967 0.001 286.375);
+  --card: oklch(0.172 0.005 285.9);
+  --muted: oklch(0.21 0.006 285.9);
+  --muted-foreground: oklch(0.715 0.013 286.067);
+  --secondary: oklch(0.235 0.006 285.9);
+  --primary: oklch(0.765 0.177 151.5);
+  --primary-foreground: oklch(0.2 0.045 152);
+  --destructive: oklch(0.704 0.191 22.216);
+  --warning: oklch(0.828 0.165 80);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.765 0.177 151.5);
+  --logo-filter: none;
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.141 0.005 285.823);
+    --card: oklch(1 0 0);
+    --muted: oklch(0.967 0.001 286.375);
+    --muted-foreground: oklch(0.53 0.016 285.938);
+    --secondary: oklch(0.967 0.001 286.375);
+    --primary: oklch(0.5 0.147 150.5);
+    --primary-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --warning: oklch(0.555 0.163 48.998);
+    --border: oklch(0.92 0.004 286.32);
+    --input: oklch(0.88 0.006 286.286);
+    --ring: oklch(0.627 0.17 149.214);
+    /* The Centaur lockup is white; invert it on the light theme. */
+    --logo-filter: invert(1);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--primary) 30%, transparent);
+}
+
+.oauth-main {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  min-height: 100vh;
+  min-height: 100svh;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 4rem 1.5rem;
+}
+
+.oauth-main::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: 28rem;
+  pointer-events: none;
+  background: radial-gradient(ellipse at top, color-mix(in oklab, var(--primary) 14%, transparent), transparent 70%);
+}
+
+.oauth-column {
+  width: 100%;
+  max-width: 24rem;
+}
+
+.oauth-header {
+  margin-bottom: 2rem;
+  text-align: center;
+}
+
+.oauth-logo {
+  display: block;
+  width: auto;
+  height: 2rem;
+  margin: 0 auto;
+  filter: var(--logo-filter);
+}
+
+.oauth-logo-small {
+  display: block;
+  width: auto;
+  height: 1.5rem;
+  margin-bottom: 1.25rem;
+  filter: var(--logo-filter);
+}
+
+.oauth-subtitle {
+  margin: 1rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+
+.oauth-card {
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--card);
+  padding: 1.5rem;
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 5%), 0 4px 6px -4px rgb(0 0 0 / 5%);
+}
+
+.oauth-client-name {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.oauth-client-host {
+  margin: 0.125rem 0 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.oauth-details {
+  margin: 1.25rem 0 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--muted) 30%, transparent);
+  padding: 1rem;
+  font-size: 0.875rem;
+}
+
+.oauth-details > div + div {
+  margin-top: 0.75rem;
+}
+
+.oauth-details dt {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.oauth-details dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+.oauth-form {
+  margin: 1.5rem 0 0;
+}
+
+.oauth-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.oauth-button {
+  display: inline-flex;
+  width: 100%;
+  min-height: 2.25rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  text-decoration: none;
+  transition: background-color 150ms, border-color 150ms, color 150ms, box-shadow 150ms;
+}
+
+.oauth-button:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+.oauth-button-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.oauth-button-primary:hover {
+  background: color-mix(in oklab, var(--primary) 90%, transparent);
+}
+
+.oauth-button-outline {
+  border-color: var(--input);
+  background: color-mix(in oklab, var(--input) 30%, transparent);
+  color: var(--foreground);
+}
+
+.oauth-button-outline:hover {
+  background: var(--secondary);
+}
+
+.oauth-result-heading {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.75rem;
+}
+
+.oauth-result-heading.is-error {
+  color: var(--destructive);
+}
+
+.oauth-result-heading.is-denied {
+  color: var(--warning);
+}
+
+.oauth-result-message {
+  margin: 0.5rem 0 0;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+
+.oauth-result-retry {
+  margin-top: 1.25rem;
+}
+
+.oauth-header h1.oauth-subtitle {
+  font-weight: 400;
+}
+
+.oauth-center {
+  text-align: center;
+}
+
+.oauth-strong {
+  color: var(--foreground);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.oauth-notice,
+.oauth-alert {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.oauth-notice {
+  margin-bottom: 1.5rem;
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+
+.oauth-alert {
+  margin-bottom: 1.25rem;
+  border-color: color-mix(in oklab, var(--destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+  color: var(--destructive);
+}
+
+.oauth-stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.oauth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.oauth-divider::before,
+.oauth-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: var(--border);
+}
+
+.oauth-login-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.oauth-login-form .oauth-button {
+  margin-top: 0.5rem;
+}
+
+.oauth-label {
+  display: block;
+  margin-bottom: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.oauth-input {
+  display: block;
+  width: 100%;
+  min-height: 2.25rem;
+  border: 1px solid var(--input);
+  border-radius: calc(var(--radius) - 2px);
+  background: color-mix(in oklab, var(--input) 30%, transparent);
+  padding: 0.375rem 0.75rem;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.875rem;
+  transition: border-color 150ms, box-shadow 150ms;
+}
+
+.oauth-input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.oauth-input:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+.oauth-button-form {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: light) {
+  .oauth-input {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oauth-input,
+  .oauth-button {
+    transition: none;
+  }
+}

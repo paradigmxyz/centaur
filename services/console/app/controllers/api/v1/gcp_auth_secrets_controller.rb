@@ -1,6 +1,8 @@
 module Api
   module V1
     class GcpAuthSecretsController < Api::BaseController
+      include SecretDocumentWrites
+
       def index
         records, meta = paginated_label_search(GcpAuthSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }
@@ -50,17 +52,26 @@ module Api
       # Builds the whole credential graph in memory and saves once so the
       # cross-record validations (exactly_one_credential) see the keyfile source.
       def assign_and_save!(ref, attrs)
-        base = permit_document(ref, attrs, :name, :description, :subject,
-                               labels: {}, credentials_provider: {}, scopes: [])
-
-        keyfile_attrs = if attrs.key?(:keyfile) && attrs[:keyfile].present?
-          attrs.require(:keyfile).permit(:source_type, :secret, config: {})
-        end
-
-        keyfile_source = keyfile_attrs ? SecretSource.new(keyfile_attrs.to_h) : nil
-        rules_attrs = build_rules(attrs)
-
         GcpAuthSecret.transaction do
+          # Lock (and reload) first so a retained inline keyfile is read after
+          # any concurrent rotation of this secret commits.
+          lock_secret_document!(ref)
+          base = permit_document(ref, attrs, :name, :description, :subject,
+                                 labels: {}, credentials_provider: {}, scopes: [])
+
+          # The console API keeps a stored inline keyfile's `secret` a PATCH omits (SecretDocumentWrites).
+          keyfile_source = build_secret_source(attrs, :keyfile, ref.keyfile_source)
+          rules_attrs = build_rules(attrs)
+          validate_nested_secret_records!(
+            ref, sources: { keyfile: keyfile_source }, rules: rules_attrs,
+            source_associations: { keyfile: :keyfile_source }, legacy: :association,
+            prepare: lambda {
+              ref.assign_attributes(base)
+              ref.keyfile_source = keyfile_source
+              ref.rules = rules_attrs
+            }
+          )
+
           with_sync_config_replacement_guard(ref, base, keyfile_source: keyfile_source, rules: rules_attrs) do
             ref.assign_attributes(base)
             ref.keyfile_source = keyfile_source

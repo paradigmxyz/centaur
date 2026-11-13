@@ -28,20 +28,72 @@ It is a Rails application backed by Postgres. It provides a JSON API, an operato
 
 Operators manage credentials, principals, roles, and grants through the API or the console. Each `iron-proxy` instance signs in with its own token, fetches the configuration for its assigned principal, and adds the granted credentials to matching outbound requests.
 
+## Console UI
+
+The operator console is a React SPA in [`web/`](web/) (Vite, TypeScript,
+shadcn/ui on Tailwind CSS, React Router, TanStack Query) that uses the same
+JSON API. The login, pending-approval, MCP OAuth consent, and broker OAuth
+result pages stay server-rendered by Rails, so installed MCP clients keep the
+behaviour they were built against, sign-in works without JavaScript, and pods
+on either side of a rolling deploy accept each other's forms.
+
+- **Serving.** `pnpm -C web build` writes content-hashed assets to
+  `public/spa` (URLs under `/spa/`) and the HTML shell to
+  `spa-shell/index.html`. The shell is kept outside `public/` because the
+  static file server would serve it without the Content-Security-Policy.
+  `SpaController` returns it (`no-cache`) for any browser `GET`/`HEAD`
+  navigation no Rails route claims, and React Router renders the page,
+  including not-found. `/api`, `/rails`, `/spa`, `/assets`, `/.well-known`,
+  `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`, and `/pending` never
+  get the shell; unknown paths there return the JSON 404. See
+  `lib/spa_request.rb` and `config/routes/spa.rb`.
+- **Data.** The SPA calls only the console API, `/api/v1/console/*`, with the
+  console session cookie (`web/src/lib/api.ts` refuses any other path). It
+  reads the session, CSRF token, nav flags, and one-shot flash from
+  `GET /api/v1/console/me` and sends `X-CSRF-Token` on every write. A `401`
+  sends the browser to `/login?return_to=<current page>` and a pending account
+  to `/pending` (full page loads); sign-out is `DELETE /api/v1/console/session`.
+  See [docs/API.md](docs/API.md#console-api).
+- **Rails-owned browser routes**, answering with redirects or JSON:
+  `/auth/:provider/{start,callback}` (SSO), `/oauth/:slug/{start,callback}`
+  (broker OAuth consent), `/mcp/oauth/{authorize,token,register}` and the
+  `/.well-known` metadata (MCP OAuth), `/launch` (PWA protocol handler), and
+  `/manifest` / `/service-worker` (PWA files from `config/pwa`).
+- **Server-rendered pages.** `GET /login` (SSO buttons and the password form),
+  `POST /login`, and `DELETE /logout` (standard Rails forms with an
+  authenticity token), `GET /pending`, the MCP consent page
+  (`GET`/`POST /mcp/oauth/authorize`), and the failure page of
+  `/oauth/:slug/{start,callback}`. After sign-in `/login` returns to the
+  remembered page, such as the authorize URL with its query. See
+  [docs/API.md](docs/API.md#console-auth-pages). They use
+  `layouts/oauth.html.erb` and plain CSS from `public/assets/oauth-page` (the SPA's
+  colours, dark by default, light under `prefers-color-scheme: light`), with no
+  asset pipeline or JavaScript.
+
 ## Local Development
 
 Console runs on stock PostgreSQL 16, including managed services such as RDS
-and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`, and
-Overmind or Foreman, then run:
+and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`,
+Node.js with pnpm (the versions CI uses are in
+`.github/workflows/console-ci.yml`), and Overmind or Foreman, then run:
 
 ```bash
 just dev
 ```
 
-This starts a persistent `postgres:16` container named
-`centaur-console-postgres`, exposes it on `127.0.0.1:55432`, prepares the Rails
-database, and starts the web and CSS processes. Database files are retained in
-the `centaur-console-postgres-data` Docker volume between runs.
+This installs the gem and SPA dependencies, starts a persistent `postgres:16`
+container named `centaur-console-postgres`, exposes it on `127.0.0.1:55432`,
+prepares the Rails database, and starts Rails (`:3000`) and the Vite dev server
+(`:5173`). Browse `http://localhost:5173`; Vite proxies the API and the
+Rails-owned browser routes to Rails. Database files are
+retained in the `centaur-console-postgres-data` Docker volume between runs.
+
+To test the SPA as Rails serves it in production, run `just web-build` and
+browse `http://localhost:3000`.
+
+`just ci` (or `bin/ci`) runs the full local CI sequence: RuboCop, the gem
+audit, Brakeman, the SPA's typecheck, lint, tests, and build, the Rails tests,
+and seed validation.
 
 To use an existing PostgreSQL server instead, set
 `CENTAUR_CONSOLE_DB_HOST`, `CENTAUR_CONSOLE_DB_PORT`,
@@ -52,7 +104,8 @@ To use an existing PostgreSQL server instead, set
 
 All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
 
-For local development, sign in through the normal login form at
+For local development, sign in through the normal login page at
+`http://localhost:5173/login` (Vite proxies it to Rails) or
 `http://localhost:3000/login` with the seeded initial user's
 `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
 credentials, the same as every other environment.
@@ -141,6 +194,12 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1`. All resource endpoints authenticate with an API key sent as a bearer token (`Authorization: Bearer iak_...`). `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+`iron-control` exposes a JSON API under `/api/v1` in three namespaces, each taking exactly one credential:
 
-See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync).
+- `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and does not accept the console session cookie.
+- `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie only (`403 session_required` for any bearer key), with the session's CSRF token on writes. Endpoints are admin-only unless documented otherwise.
+- `/api/v1/sandbox/*` takes the sandbox entitlement JWT that `iron-proxy` injects.
+
+`iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
+
+See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync), plus the session-only [Console API](docs/API.md#console-api).

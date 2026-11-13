@@ -4,10 +4,6 @@ source "https://rubygems.org"
 # Rails 8.1.4 cannot validate foreign keys in extension schemas outside the search path.
 # Fixed upstream by rails/rails#58875; 8.1.4.1 is used with a test-helper backport.
 gem "rails", "~> 8.1.4", "!= 8.1.4"
-# The modern asset pipeline for Rails [https://github.com/rails/propshaft]
-gem "propshaft"
-# Tailwind CSS, compiled by a standalone binary into app/assets/builds.
-gem "tailwindcss-rails", "4.7.0"
 # Use pg as the database for Active Record
 gem "pg", "~> 1.7"
 # Opaque ID encoding (bigint <-> short string) for externally-exposed IDs
@@ -18,12 +14,6 @@ gem "json_schemer", "~> 2.3"
 gem "nokogiri", "~> 1.19"
 # Use the Puma web server [https://github.com/puma/puma]
 gem "puma", ">= 5.0"
-# Use JavaScript with ESM import maps [https://github.com/rails/importmap-rails]
-gem "importmap-rails"
-# Hotwire's SPA-like page accelerator [https://turbo.hotwired.dev]
-gem "turbo-rails"
-# Hotwire's modest JavaScript framework [https://stimulus.hotwired.dev]
-gem "stimulus-rails"
 # Build JSON APIs with ease [https://github.com/rails/jbuilder]
 gem "jbuilder"
 # Collapse multi-line request logs into a single JSON event [https://github.com/roidrage/lograge]
@@ -85,8 +75,5 @@ group :development do
 end
 
 group :test do
-  # Use system testing [https://guides.rubyonrails.org/testing.html#system-testing]
-  gem "capybara"
   gem "minitest-mock", "~> 5.27", require: false
-  gem "selenium-webdriver"
 end

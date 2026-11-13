@@ -8,6 +8,8 @@ require "minitest/mock"
 require "open3"
 require "tmpdir"
 
+Dir[File.expand_path("support/**/*.rb", __dir__)].each { |file| require file }
+
 # Backport rails/rails#58875: Rails 8.1.4 casts an unqualified table name to
 # regclass when validating fixture foreign keys, so tables outside the search
 # path fail. Remove after upgrading to a Rails release that includes the fix.
@@ -53,6 +55,11 @@ module SyntheticSshKey
       [ File.read(path), File.read("#{path}.pub").split.first(2).join(" ") ]
     end
   end
+end
+
+class ActionDispatch::IntegrationTest
+  include ConsoleApiAuthHelper
+  include QueryCountHelper
 end
 
 module ActiveSupport

@@ -1,74 +1,36 @@
+# Base class for the console's browser-facing endpoints outside the JSON API
+# (login, SSO, OAuth consent, MCP OAuth, PWA launch). The console UI itself is
+# the SPA served by SpaController.
 class ApplicationController < ActionController::Base
   # Only allow modern browsers supporting webp images, web push, badges, import maps, CSS nesting, and CSS :has.
   allow_browser versions: :modern
 
-  # Changes to the importmap will invalidate the etag for HTML responses
-  stale_when_importmap_changes
+  include ConsoleSession
+  include ConsoleSignIn
+  include OauthAppUrls
 
-  # UI-wide 404 for record lookups (find_by_oid! and friends), so console
-  # controllers don't each hand-roll a rescue. Mirrors Api::BaseController.
+  # 404 for record lookups (find_by_oid! and friends).
   rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
-  helper_method :current_user, :acting_admin?, :descoped?, :password_login_enabled?
-  helper_method :public_base_url, :oauth_callback_redirect_uri
-
-  # The public origin the console is reached at. Derived from the request by
-  # default; CENTAUR_CONSOLE_PUBLIC_URL overrides it for deployments behind
-  # proxies whose Host header doesn't match the public origin. Shared by the
-  # OAuth flow controller (the redirect URI it sends the IdP) and the console
-  # (the redirect URI / start-URL template it shows operators), so the two never
-  # drift.
-  def public_base_url
-    ConsoleEnv["PUBLIC_URL"].presence || request.base_url
-  end
-
-  # The OAuth callback redirect URI registered with the IdP for an app:
-  # "<public base>/oauth/<slug>/callback". One per app, keyed by its slug.
-  def oauth_callback_redirect_uri(slug)
-    URI.join(public_base_url, "/oauth/#{slug}/callback").to_s
-  end
-
-  # Gate every UI route behind a console session by default. Controllers that
-  # must stay reachable while signed out (e.g. the login form) skip this. API
-  # controllers descend from ActionController::API, not this class, so they keep
-  # their own ApiKey/proxy-token auth and are unaffected.
+  # Require a console session by default. Endpoints that must stay reachable
+  # while signed out (the login form, SSO, MCP OAuth) skip this. API controllers descend from
+  # Api::BaseController, not this class, and authenticate on their own.
   before_action :require_login
-  # A signed-in user must also be approved (active) to use the console. The login
-  # and pending controllers skip this so pending users can reach the holding page
-  # and sign out.
+  # A signed-in user must also be approved (active) to use the console. The
+  # login, SSO, and MCP OAuth controllers skip this and apply their own status
+  # checks.
   before_action :require_active_account
+
   private
 
-  # The signed-in operator for cookie-session (console) requests, or nil. Distinct
-  # from Api::BaseController#current_user, which resolves a User from an API key.
   def current_user
-    @current_user ||= User.find_by(id: session[:user_id]) if session[:user_id]
+    console_session_user
   end
 
-  # Whether this admin has temporarily descoped themselves to operator
-  # permissions ("view as operator"). Self-healing: the flag is dropped if the
-  # user is no longer an admin, so it can never outlive the privileges it pauses.
-  def descoped?
-    return false unless session[:descoped]
-    return true if current_user&.admin?
-
-    session.delete(:descoped)
-    false
-  end
-
-  def password_login_enabled?
-    ConsoleAuth.password_login_enabled?
-  end
-
-  # The permission check console gates use instead of current_user.admin?: a
-  # real admin who is not currently descoped. Keeping current_user untouched
-  # means audit trails and data displays still see the true account.
   def acting_admin?
-    current_user&.admin? && !descoped?
+    current_user&.admin? || false
   end
 
-  # before_action gate for console pages: bounce anonymous requests to the login
-  # form rather than rendering the page.
   def require_login
     return if current_user
 
@@ -88,10 +50,8 @@ class ApplicationController < ActionController::Base
     end
   end
 
-  # Guard for admin-only controllers (the Control section and user
-  # management). Not a global gate. Bounces non-admins to their default section.
-  # Keep this redirect silent: direct/admin-default URLs are not
-  # actionable errors for non-admin operators, especially on a fresh visit.
+  # Guard for admin-only endpoints (shared OAuth app consent). Not a global
+  # gate. Bounces non-admins to their default section, silently.
   def require_admin
     redirect_to default_console_landing_path unless acting_admin?
   end
@@ -102,55 +62,16 @@ class ApplicationController < ActionController::Base
     acting_admin? ? console_principals_path : console_integrations_path
   end
 
-  # Establishes the console cookie session and sends the user to the right
-  # post-login page. Password login re-renders for disabled accounts; SSO login
-  # redirects because it is returning from an external provider.
-  def sign_in_console_user(user, disabled: :redirect, destination: nil)
-    if user.disabled?
-      if disabled == :render
-        flash.now[:alert] = "Your account is disabled."
-        return render :new, status: :unprocessable_entity
-      end
+  def sign_in_console_user(user)
+    return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE if user.disabled?
 
-      return redirect_to login_path, alert: "Your account is disabled."
-    end
-
-    return_to = session[:return_to]
-    reset_session
-    session[:user_id] = user.id
-    session[:return_to] = return_to if return_to.present?
-    if user.active?
-      redirect_to(destination.presence || post_login_redirect_path, notice: "Signed in as #{user.email}.")
-    else
-      redirect_to pending_path, notice: "Your account is awaiting approval."
-    end
-  end
-
-  def post_login_redirect_path
-    path = session.delete(:return_to).to_s
-    return default_console_landing_path unless path.start_with?("/") && !path.start_with?("//")
-    path
+    redirect_to establish_console_session!(user)
   end
 
   def store_return_to_for_login
     return unless request.request_method == "GET"
 
-    session[:return_to] = request.fullpath
-  end
-
-  def safe_console_return_path(default: default_console_landing_path)
-    raw = params[:return_to].presence || params[:next].presence
-    return default if raw.blank?
-
-    uri = URI.parse(raw.to_s)
-    return default if uri.scheme.present? || uri.host.present?
-
-    path = uri.path.presence
-    return default unless path == "/" || path&.start_with?("/console")
-
-    uri.to_s
-  rescue URI::InvalidURIError
-    default
+    remember_console_return_path(request.fullpath)
   end
 
   def render_not_found(e)

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Centaur Console</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#09090b" />
+    <link rel="icon" href="/icon-dark.svg" type="image/svg+xml" data-console-favicon />
+    <link rel="apple-touch-icon" href="/pwa-icon-192.png" />
+    <!-- No inline scripts: the Content-Security-Policy is script-src 'self'.
+         vite.config.ts injects theme-boot.js (pre-paint theme) at the end of head. -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

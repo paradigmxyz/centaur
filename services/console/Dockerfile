@@ -1,14 +1,31 @@
 # syntax=docker/dockerfile:1
 # check=error=true
 
-# This Dockerfile is designed for production, not development. Build'n'run by hand:
-# docker build -t iron_control .
+# This Dockerfile is designed for production, not development. It builds from
+# the repository root so the console SPA (services/console/web) can install from
+# the pnpm workspace lockfile. Build'n'run by hand from the repo root:
+# docker build -t iron_control -f services/console/Dockerfile .
 # docker run -d -p 80:80 -e RAILS_MASTER_KEY=<value from config/master.key> --name iron_control iron_control
 
 # For a containerized dev environment, see Dev Containers: https://guides.rubyonrails.org/getting_started_with_devcontainer.html
 
 # Make sure RUBY_VERSION matches the Ruby version in .ruby-version
 ARG RUBY_VERSION=3.4.12
+ARG NODE_VERSION=24
+
+# Build the console SPA: hashed assets into services/console/public/spa and
+# the shell into services/console/spa-shell (served only by SpaController).
+FROM docker.io/library/node:$NODE_VERSION-slim AS web
+WORKDIR /repo
+RUN npm install -g pnpm@10.34.9
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
+COPY services/console/web/package.json services/console/web/package.json
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --filter @centaur/console-web --frozen-lockfile
+COPY services/console/web/ services/console/web/
+RUN pnpm -C services/console/web build
+
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 
 # Rails app lives here
@@ -36,26 +53,24 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Install application gems
-COPY vendor/* ./vendor/
-COPY Gemfile Gemfile.lock ./
+COPY services/console/vendor/ ./vendor/
+COPY services/console/Gemfile services/console/Gemfile.lock ./
 
 RUN bundle install && \
     rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
     # -j 1 disable parallel compilation to avoid a QEMU bug: https://github.com/rails/bootsnap/issues/495
     bundle exec bootsnap precompile -j 1 --gemfile
 
-# Copy application code
-COPY . .
+# Copy application code and the built SPA
+COPY services/console/ .
+RUN rm -rf web
+COPY --from=web /repo/services/console/public/spa public/spa
+COPY --from=web /repo/services/console/spa-shell spa-shell
 
-# Precompile bootsnap code for faster boot times.
+# Precompile bootsnap code for faster boot times. The UI is the prebuilt SPA
+# above; there is no Rails asset pipeline to precompile.
 # -j 1 disable parallel compilation to avoid a QEMU bug: https://github.com/rails/bootsnap/issues/495
 RUN bundle exec bootsnap precompile -j 1 app/ lib/
-
-# Precompiling assets for production without requiring secret RAILS_MASTER_KEY
-RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
-
-
-
 
 # Final stage for app image
 FROM base

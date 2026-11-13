@@ -77,7 +77,8 @@ Ownership by tree:
 - `services/iron-proxy/`: credential-injecting proxy image and startup config.
 - `services/workflow-python/`: Python workflow compatibility host; durability
   remains in `api-rs`.
-- `services/console/`: operator UI and credential-control API.
+- `services/console/`: credential-control API (Rails) and the operator UI, a
+  React SPA in `services/console/web/`.
 - `tools/`: independently packaged agent-facing CLI plugins.
 - `workflows/`: discoverable workflow definitions.
 - `contrib/chart/`: Helm wiring, policies, probes, and service configuration.
