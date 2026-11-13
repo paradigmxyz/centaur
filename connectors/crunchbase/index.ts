@@ -149,7 +149,7 @@ type Raw = Record<string, any>;
 function headers(ctx: Ctx): Record<string, string> {
   const out: Record<string, string> = { accept: "application/json" };
   // Behind iron-proxy the key is injected on the wire; locally it comes from the env.
-  const key = ctx.secret("CRUNCHBASE_API_KEY");
+  const key = ctx.env.CRUNCHBASE_API_KEY;
   if (key) out["X-cb-user-key"] = key;
   return out;
 }

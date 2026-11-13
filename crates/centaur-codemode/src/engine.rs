@@ -66,6 +66,18 @@ fn compile_prelude(name: &str, source: String) -> Vec<u8> {
     })
 }
 
+/// `ctx.env`: the process environment as JSON, read once. Sandboxes and
+/// runners hold no real credentials, only configuration and placeholders.
+fn environment() -> &'static str {
+    static ENV: OnceLock<String> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let vars: BTreeMap<String, String> = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        serde_json::to_string(&vars).expect("environment serializes")
+    })
+}
+
 /// Load and evaluate a prelude module. SAFETY: the bytecode comes from
 /// `compile_prelude` in this process, never from untrusted input.
 fn load_prelude<'js>(
@@ -404,6 +416,7 @@ impl Cell {
                         .set("__host", connector_host(&ctx, cell.clone(), id, &label)?)?;
                     ctx.globals()
                         .set("__principal", ctx.json_parse(cell.principal.as_str())?)?;
+                    ctx.globals().set("__env", ctx.json_parse(environment())?)?;
                     let (prelude, prelude_done) = load_prelude(&ctx, connector_prelude())?;
                     // SAFETY: the bytecode was written by this process from
                     // the same QuickJS build (Catalog::load), never read from
@@ -761,7 +774,7 @@ fn cell_host<'js>(ctx: &Ctx<'js>, cell: Arc<Cell>) -> rquickjs::Result<Object<'j
 }
 
 /// A connector call's host: the common functions plus `fetch` bound to this
-/// call and `secret`.
+/// call.
 fn connector_host<'js>(
     ctx: &Ctx<'js>,
     cell: Arc<Cell>,
@@ -803,20 +816,6 @@ fn connector_host<'js>(
                 },
             ),
         )?,
-    )?;
-
-    host.set(
-        "secret",
-        Function::new(ctx.clone(), |name: String| -> Option<String> {
-            let valid = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-            valid
-                .then(|| std::env::var(&name).ok())
-                .flatten()
-                .filter(|value| !value.is_empty())
-        })?,
     )?;
 
     Ok(host)
@@ -988,6 +987,11 @@ export async function boom(args: {}, ctx: Ctx): Promise<{}> {
 export async function get(args: { url: string }, ctx: Ctx): Promise<{ status: number; body: string }> {
   const res = await ctx.fetch(args.url);
   return { status: res.status, body: await res.text() };
+}
+
+/** Read an environment variable. */
+export async function env(args: { name: string }, ctx: Ctx): Promise<{ value: string | null; frozen: boolean }> {
+  return { value: ctx.env[args.name] ?? null, frozen: Object.isFrozen(ctx.env) };
 }
 
 /** What the connector realm sees of globals a cell may have touched. */
@@ -1167,6 +1171,21 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
                 .iter()
                 .all(|call| !call.ok && call.requests.is_empty())
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_read_the_environment_and_cells_do_not() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"return { connector: await tools.demo.env({ name: "PATH" }), cell: typeof env };"#,
+            None,
+        )
+        .await;
+        let result = response.result.unwrap();
+        assert_eq!(result["connector"]["value"], std::env::var("PATH").unwrap());
+        assert_eq!(result["connector"]["frozen"], true);
+        assert_eq!(result["cell"], "undefined");
     }
 
     #[tokio::test(flavor = "multi_thread")]

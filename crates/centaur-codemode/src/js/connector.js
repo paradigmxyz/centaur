@@ -3,8 +3,10 @@
 (() => {
   const { host, toBytes, sleep, files } = globalThis.__common;
   const principal = globalThis.__principal;
+  const env = Object.freeze({ ...globalThis.__env });
   delete globalThis.__common;
   delete globalThis.__principal;
+  delete globalThis.__env;
 
   class Response {
     #body;
@@ -34,7 +36,7 @@
 
   return Object.freeze({
     fetch,
-    secret: (name) => host.secret(String(name)) ?? undefined,
+    env,
     principal: Object.freeze({ ...principal, oauth: Object.freeze([...(principal.oauth ?? [])]) }),
     files,
     sleep,

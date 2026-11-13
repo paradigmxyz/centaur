@@ -36,10 +36,12 @@ export interface Files {
 export interface Ctx {
   fetch(url: string, init?: RequestInit): Promise<Response>;
   /**
-   * The environment value for a secret, if set. Behind iron-proxy this is a
-   * placeholder the proxy swaps on the wire; inject-mode secrets need none.
+   * The runner's environment, read once at startup: configuration such as API
+   * base URLs or database proxy endpoints. It never holds real credentials;
+   * where a credential variable is set it is a placeholder iron-proxy swaps on
+   * the wire, and inject-mode credentials need no variable at all.
    */
-  secret(name: string): string | undefined;
+  readonly env: Readonly<Record<string, string | undefined>>;
   readonly principal: Principal;
   readonly files: Files;
   sleep(ms: number): Promise<void>;

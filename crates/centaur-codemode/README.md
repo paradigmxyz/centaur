@@ -27,10 +27,11 @@ $B serve --listen 127.0.0.1:8790           # HTTP API
 `--connectors a:b` sets connector roots (later roots shadow earlier ones;
 default `connectors`), `--tools slack,crunchbase` limits what a cell sees, and
 `exec --oauth slack` marks the principal as holding a live Slack OAuth
-credential (direct Slack access). Credentials come from the environment
-(`CRUNCHBASE_API_KEY`, `SLACK_BOT_TOKEN`, `CENTAUR_API_URL`, ...) or, behind
-iron-proxy, are injected on the wire. `HTTPS_PROXY` is honored;
-`--ca-file` adds the proxy CA.
+credential (direct Slack access). Connectors read configuration from the
+environment as `ctx.env` (`CENTAUR_API_URL`, ...). Behind iron-proxy,
+credentials are injected on the wire; for local testing only, a connector may
+read a real key from the environment (`CRUNCHBASE_API_KEY`, `SLACK_BOT_TOKEN`).
+`HTTPS_PROXY` is honored; `--ca-file` adds the proxy CA.
 
 ## Cells
 
@@ -62,10 +63,10 @@ through connectors.
 6. Time, memory, call count and call concurrency are bounded per cell,
    including work done inside connectors.
 
-Not yet enforced: `ctx.secret` reads any uppercase environment variable rather
-than only the connector's declared secrets. Deployment must keep real
-credentials out of the runner's environment (placeholders only) and egress
-limited to the principal's iron-proxy.
+Deployment invariant: the runner's environment holds no real credentials, only
+configuration (API base URLs, database proxy endpoints) and placeholders that
+iron-proxy swaps on the wire. Connectors read it as `ctx.env`; cells cannot.
+Egress is limited to the principal's iron-proxy.
 
 ## Connectors
 

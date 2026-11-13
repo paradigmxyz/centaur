@@ -87,7 +87,7 @@ function encode(params: Params): string {
 }
 
 function token(ctx: Ctx): string {
-  const value = ctx.secret("SLACK_BOT_TOKEN");
+  const value = ctx.env.SLACK_BOT_TOKEN;
   if (!value) throw new Error("SLACK_BOT_TOKEN is not set for direct Slack access");
   return value;
 }
@@ -124,13 +124,13 @@ async function slackPost(ctx: Ctx, method: string, params: Params): Promise<Raw>
 }
 
 function centaurBase(ctx: Ctx): string {
-  return (ctx.secret("CENTAUR_API_URL") ?? DEFAULT_CENTAUR_API).replace(/\/+$/, "");
+  return (ctx.env.CENTAUR_API_URL || DEFAULT_CENTAUR_API).replace(/\/+$/, "");
 }
 
 function centaurHeaders(ctx: Ctx, extra: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = { accept: "application/json", ...extra };
   // Behind iron-proxy the API credential is injected for the API host.
-  const bearer = ctx.secret("CENTAUR_API_BEARER_TOKEN");
+  const bearer = ctx.env.CENTAUR_API_BEARER_TOKEN;
   if (bearer) headers.authorization = `Bearer ${bearer}`;
   return headers;
 }
