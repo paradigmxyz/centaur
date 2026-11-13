@@ -1,4 +1,6 @@
 import type { Ctx } from "../centaur";
+import { query, readJson } from "../_lib/http";
+import { num, str, type Raw } from "../_lib/values";
 
 const BASE = "https://api.crunchbase.com/v4/data";
 
@@ -144,8 +146,6 @@ export interface Suggestion {
   short_description: string | null;
 }
 
-type Raw = Record<string, any>;
-
 function headers(ctx: Ctx): Record<string, string> {
   const out: Record<string, string> = { accept: "application/json" };
   // Behind iron-proxy the key is injected on the wire; locally it comes from the env.
@@ -162,20 +162,9 @@ async function request(ctx: Ctx, path: string, init: { method?: string; body?: u
     headers: h,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Crunchbase returned HTTP ${res.status}: ${text.slice(0, 2000)}`);
-  return JSON.parse(text);
+  return readJson(res, "Crunchbase");
 }
 
-function query(params: Record<string, string | number | undefined>): string {
-  const parts = Object.entries(params)
-    .filter(([, value]) => value !== undefined && value !== "")
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-  return parts.length ? `?${parts.join("&")}` : "";
-}
-
-const str = (value: any): string | null => (typeof value === "string" ? value : null);
-const num = (value: any): number | null => (typeof value === "number" ? value : null);
 const link = (value: any): string | null => str(value?.value);
 
 function identifier(raw: Raw | null | undefined): Identifier | null {

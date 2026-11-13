@@ -1,7 +1,8 @@
 //! Connector discovery and compilation.
 //!
 //! A connector is a directory holding `connector.toml` and `index.ts`. Every
-//! exported function in `index.ts` is a tool. Loading strips TypeScript to
+//! exported function in `index.ts` is a tool. Helpers shared by connectors
+//! live in `_lib/*.ts` next to them and are imported as `../_lib/<name>`. Loading strips TypeScript to
 //! JavaScript for QuickJS and emits declarations (without `tsc`) so the brief
 //! can show typed signatures.
 
@@ -26,6 +27,9 @@ use serde::{Deserialize, Serialize};
 
 const MANIFEST: &str = "connector.toml";
 const ENTRY: &str = "index.ts";
+const LIB_DIR: &str = "_lib";
+/// Types only; there is no runtime module behind it.
+const TYPES_MODULE: &str = "../centaur";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,14 +71,40 @@ pub struct Connector {
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     pub connectors: BTreeMap<String, Connector>,
+    /// Shared helper modules by name (`_lib/<name>.ts`), as bytecode.
+    pub libs: Arc<BTreeMap<String, Arc<[u8]>>>,
 }
 
 impl Catalog {
     /// Load every connector under `roots`. Later roots shadow earlier ones by
     /// connector name, matching overlay order.
     pub fn load(roots: &[PathBuf]) -> Result<Self> {
-        let mut connectors = BTreeMap::new();
+        // Phase 1: strip types and collect imports. Later roots shadow
+        // earlier ones, for connectors and shared modules alike.
+        let mut connectors: BTreeMap<String, (Connector, String)> = BTreeMap::new();
+        let mut libs: BTreeMap<String, String> = BTreeMap::new();
+        let mut imports: Vec<(String, Vec<Import>)> = Vec::new();
         for root in roots {
+            let lib_dir = root.join(LIB_DIR);
+            if lib_dir.is_dir() {
+                let mut files: Vec<PathBuf> = std::fs::read_dir(&lib_dir)?
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "ts"))
+                    .collect();
+                files.sort();
+                for file in files {
+                    let name = file
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .ok_or_else(|| eyre!("{} has no UTF-8 name", file.display()))?
+                        .to_owned();
+                    let source = std::fs::read_to_string(&file)?;
+                    let compiled = compile_lib(&source, &file)
+                        .wrap_err_with(|| format!("loading {}", file.display()))?;
+                    imports.push((file.display().to_string(), compiled.imports));
+                    libs.insert(name, compiled.js);
+                }
+            }
             let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
                 .wrap_err_with(|| format!("reading connector root {}", root.display()))?
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -82,9 +112,12 @@ impl Catalog {
                 .collect();
             dirs.sort();
             for dir in dirs {
-                let connector = load_connector(&dir)
+                let (connector, connector_imports, js) = load_connector(&dir)
                     .wrap_err_with(|| format!("loading connector {}", dir.display()))?;
-                if let Some(previous) = connectors.insert(connector.name.clone(), connector) {
+                imports.push((dir.display().to_string(), connector_imports));
+                if let Some((previous, _)) =
+                    connectors.insert(connector.name.clone(), (connector, js))
+                {
                     tracing::info!(
                         connector = %previous.name,
                         shadowed = %previous.dir.display(),
@@ -93,7 +126,30 @@ impl Catalog {
                 }
             }
         }
-        Ok(Self { connectors })
+        for (module, imports) in &imports {
+            for import in imports {
+                check_import(import, &libs).wrap_err_with(|| format!("in {module}"))?;
+            }
+        }
+        // Phase 2: bytecode. QuickJS resolves imports even when only
+        // compiling, so every module compiles with the shared modules' JS
+        // available.
+        let lib_bytecode = libs
+            .iter()
+            .map(|(name, js)| Ok((name.clone(), bytecode(&format!("lib:{name}"), js, &libs)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let connectors = connectors
+            .into_values()
+            .map(|(mut connector, js)| {
+                connector.bytecode = bytecode(&format!("connector:{}", connector.name), &js, &libs)
+                    .wrap_err_with(|| format!("compiling connector {}", connector.name))?;
+                Ok((connector.name.clone(), connector))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        Ok(Self {
+            connectors,
+            libs: Arc::new(lib_bytecode),
+        })
     }
 
     /// Connectors visible for an allowlist; `None` means all.
@@ -122,7 +178,60 @@ impl Catalog {
     }
 }
 
-fn load_connector(dir: &Path) -> Result<Connector> {
+/// The shared module an import names, if it names one: `../_lib/<name>` from
+/// a connector, `./<name>` from another shared module.
+pub fn lib_name(specifier: &str) -> Option<&str> {
+    let name = specifier
+        .strip_prefix("../_lib/")
+        .or_else(|| specifier.strip_prefix("./"))?;
+    let name = name
+        .strip_suffix(".ts")
+        .or_else(|| name.strip_suffix(".js"))
+        .unwrap_or(name);
+    (!name.is_empty() && !name.contains('/')).then_some(name)
+}
+
+#[derive(Debug)]
+struct Import {
+    specifier: String,
+    type_only: bool,
+}
+
+fn check_import(import: &Import, libs: &BTreeMap<String, String>) -> Result<()> {
+    if import.specifier == TYPES_MODULE {
+        if !import.type_only {
+            bail!("`{TYPES_MODULE}` holds types only; use `import type`");
+        }
+        return Ok(());
+    }
+    match lib_name(&import.specifier) {
+        Some(name) if libs.contains_key(name) => Ok(()),
+        Some(name) => bail!(
+            "imports `{}`, but there is no _lib/{name}.ts",
+            import.specifier
+        ),
+        None => bail!(
+            "imports `{}`; connectors may import only `{TYPES_MODULE}` (types) and `../_lib/<name>`",
+            import.specifier
+        ),
+    }
+}
+
+fn imports(program: &oxc::ast::ast::Program<'_>) -> Vec<Import> {
+    program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::ImportDeclaration(import) => Some(Import {
+                specifier: import.source.value.as_str().unwrap_or_default().to_owned(),
+                type_only: import.import_kind.is_type(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn load_connector(dir: &Path) -> Result<(Connector, Vec<Import>, String)> {
     let name = dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -143,30 +252,67 @@ fn load_connector(dir: &Path) -> Result<Connector> {
     if compiled.functions.is_empty() {
         bail!("index.ts exports no functions");
     }
-    let bytecode = bytecode(&name, compiled.js)?;
-    Ok(Connector {
+    let connector = Connector {
         name,
         description: manifest.description.trim().to_owned(),
         dir: dir.to_owned(),
-        bytecode,
+        bytecode: Arc::from([]),
         functions: compiled.functions,
         declarations: compiled.declarations,
-    })
+    };
+    Ok((connector, compiled.imports, compiled.js))
 }
 
-/// Compile the module to QuickJS bytecode. The module name appears in stack
-/// traces from connector code.
-fn bytecode(name: &str, js: String) -> Result<Arc<[u8]>> {
+/// Compile a module to QuickJS bytecode, in its own runtime so each shared
+/// module is declared once. The module name appears in stack traces and is
+/// what imports resolve against.
+fn bytecode(module_name: &str, js: &str, libs: &BTreeMap<String, String>) -> Result<Arc<[u8]>> {
     let runtime = rquickjs::Runtime::new()?;
+    runtime.set_loader(SourceResolver(libs.clone()), SourceLoader(libs.clone()));
     let context = rquickjs::Context::full(&runtime)?;
     context.with(|ctx| {
-        let module = rquickjs::Module::declare(ctx.clone(), format!("connector:{name}"), js)
+        let module = rquickjs::Module::declare(ctx.clone(), module_name, js)
             .map_err(|error| eyre!("{}", describe_js_error(&ctx, error)))?;
         let bytes = module
             .write(rquickjs::module::WriteOptions::default())
             .map_err(|error| eyre!("{}", describe_js_error(&ctx, error)))?;
         Ok(Arc::from(bytes))
     })
+}
+
+/// Compile-time resolution of shared modules, from their stripped JS.
+struct SourceResolver(BTreeMap<String, String>);
+
+impl rquickjs::loader::Resolver for SourceResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &rquickjs::Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        match lib_name(name) {
+            Some(lib) if self.0.contains_key(lib) => Ok(format!("lib:{lib}")),
+            _ => Err(rquickjs::Error::new_resolving(base, name)),
+        }
+    }
+}
+
+struct SourceLoader(BTreeMap<String, String>);
+
+impl rquickjs::loader::Loader for SourceLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &rquickjs::Ctx<'js>,
+        name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<rquickjs::Module<'js, rquickjs::module::Declared>> {
+        let js = name
+            .strip_prefix("lib:")
+            .and_then(|lib| self.0.get(lib))
+            .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+        rquickjs::Module::declare(ctx.clone(), name, js.as_str())
+    }
 }
 
 fn describe_js_error(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
@@ -184,6 +330,50 @@ struct Compiled {
     js: String,
     functions: Vec<Function>,
     declarations: String,
+    imports: Vec<Import>,
+}
+
+struct CompiledLib {
+    js: String,
+    imports: Vec<Import>,
+}
+
+/// A shared module: TypeScript stripped, no export rules or declarations.
+fn compile_lib(source: &str, path: &Path) -> Result<CompiledLib> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    if !parsed.diagnostics.is_empty() {
+        bail!("{}", render(parsed.diagnostics, source));
+    }
+    let mut program = parsed.program;
+    let imports = imports(&program);
+    let js = strip_types(&allocator, &mut program, source, path)?;
+    Ok(CompiledLib { js, imports })
+}
+
+fn strip_types<'a>(
+    allocator: &'a Allocator,
+    program: &mut oxc::ast::ast::Program<'a>,
+    source: &str,
+    path: &Path,
+) -> Result<String> {
+    let semantic = SemanticBuilder::new().build(program);
+    if !semantic.diagnostics.is_empty() {
+        bail!("{}", render(semantic.diagnostics, source));
+    }
+    let scoping = semantic.semantic.into_scoping();
+    let transformed = Transformer::new(allocator, path, &TransformOptions::default())
+        .build_with_scoping(scoping, program);
+    if !transformed.diagnostics.is_empty() {
+        bail!("{}", render(transformed.diagnostics, source));
+    }
+    Ok(Codegen::new()
+        .with_options(CodegenOptions {
+            comments: CommentOptions::disabled(),
+            ..CodegenOptions::default()
+        })
+        .build(program)
+        .code)
 }
 
 fn compile(source: &str, path: &Path) -> Result<Compiled> {
@@ -196,6 +386,7 @@ fn compile(source: &str, path: &Path) -> Result<Compiled> {
     let mut program = parsed.program;
 
     let functions = exported_functions(&program, source)?;
+    let imports = imports(&program);
 
     let mut dts = IsolatedDeclarations::new(
         &allocator,
@@ -232,28 +423,13 @@ fn compile(source: &str, path: &Path) -> Result<Compiled> {
         .build(&dts.program)
         .code;
 
-    let semantic = SemanticBuilder::new().build(&program);
-    if !semantic.diagnostics.is_empty() {
-        bail!("{}", render(semantic.diagnostics, source));
-    }
-    let scoping = semantic.semantic.into_scoping();
-    let transformed = Transformer::new(&allocator, path, &TransformOptions::default())
-        .build_with_scoping(scoping, &mut program);
-    if !transformed.diagnostics.is_empty() {
-        bail!("{}", render(transformed.diagnostics, source));
-    }
-    let js = Codegen::new()
-        .with_options(CodegenOptions {
-            comments: CommentOptions::disabled(),
-            ..CodegenOptions::default()
-        })
-        .build(&program)
-        .code;
+    let js = strip_types(&allocator, &mut program, source, path)?;
 
     Ok(Compiled {
         js,
         functions,
         declarations,
+        imports,
     })
 }
 
@@ -392,6 +568,67 @@ function helper(x: number): number { return x + 1; }
                 );
             }
         }
+    }
+
+    fn load_one(index: &str, libs: &[(&str, &str)]) -> Result<Catalog> {
+        let dir = tempfile::tempdir().unwrap();
+        let connector = dir.path().join("demo");
+        std::fs::create_dir_all(&connector).unwrap();
+        std::fs::write(connector.join(MANIFEST), "description = \"Demo\"\n").unwrap();
+        std::fs::write(connector.join(ENTRY), index).unwrap();
+        std::fs::create_dir_all(dir.path().join(LIB_DIR)).unwrap();
+        for (name, source) in libs {
+            std::fs::write(dir.path().join(LIB_DIR).join(format!("{name}.ts")), source).unwrap();
+        }
+        Catalog::load(&[dir.path().to_owned()])
+    }
+
+    const USES_LIB: &str = r#"
+import type { Ctx } from "../centaur";
+import { twice } from "../_lib/math";
+/** Doubles. */
+export async function f(args: { n: number }, ctx: Ctx): Promise<{ n: number }> { return { n: twice(args.n) }; }
+"#;
+
+    #[test]
+    fn shared_modules_compile_and_may_import_each_other() {
+        let catalog = load_one(
+            USES_LIB,
+            &[
+                ("math", "import { one } from \"./one\";\nexport const twice = (n: number): number => n * 2 * one;"),
+                ("one", "export const one = 1;"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(catalog.libs.len(), 2);
+        assert!(!catalog.connectors["demo"].declarations.contains("_lib"));
+    }
+
+    #[test]
+    fn rejects_imports_other_than_types_and_shared_modules() {
+        let missing = load_one(USES_LIB, &[]).unwrap_err();
+        assert!(
+            format!("{missing:#}").contains("no _lib/math.ts"),
+            "{missing:#}"
+        );
+
+        let node = USES_LIB.replace("../_lib/math", "node:fs");
+        let error = load_one(&node, &[]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("may import only"),
+            "{error:#}"
+        );
+
+        let value_import = USES_LIB.replace("import type { Ctx }", "import { Ctx }");
+        let error = load_one(
+            &value_import,
+            &[("math", "export const twice = (n: number): number => n;")],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("use `import type`"),
+            "{error:#}"
+        );
     }
 
     #[test]

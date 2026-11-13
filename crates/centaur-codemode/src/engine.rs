@@ -6,7 +6,8 @@
 //!    limits live here; nothing a JS realm reports is trusted.
 //! 2. Every host function a realm receives is safe for code in that realm to
 //!    call with any arguments. Cells get `invoke`, `log`, `sleep` and UTF-8
-//!    helpers; they get no `fetch` and no module loader.
+//!    helpers; they get no `fetch` and no module loader. Connector realms can
+//!    import only the catalog's shared `_lib` modules.
 //! 3. Cells and connectors never share a realm. Every tool call runs in a
 //!    fresh QuickJS runtime; arguments and results cross as JSON text.
 //! 4. A connector's `fetch` is bound to its call, so every upstream request
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, lib_name};
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
 const CELL_PRELUDE: &str = include_str!("js/cell.js");
@@ -209,6 +210,7 @@ impl Engine {
             )],
             entry: Entry::Script(&code),
             deadline: cell.deadline,
+            libs: None,
         };
         let outcome = tokio::time::timeout(
             CELL_TIMEOUT + Duration::from_secs(1),
@@ -363,6 +365,7 @@ impl Cell {
                 args: &args,
             },
             deadline,
+            libs: Some(self.catalog.libs.clone()),
         };
         tokio::time::timeout(budget, run_realm(&self, realm))
             .await
@@ -384,6 +387,47 @@ struct Realm<'a> {
     globals: Vec<(&'static str, String)>,
     entry: Entry<'a>,
     deadline: Instant,
+    /// Shared modules the realm may import; `None` means no module loader.
+    libs: Option<Libs>,
+}
+
+type Libs = Arc<BTreeMap<String, Arc<[u8]>>>;
+
+/// Resolves `../_lib/<name>` (from a connector) and `./<name>` (from a shared
+/// module) to `lib:<name>`, and nothing else.
+struct LibResolver(Libs);
+
+impl rquickjs::loader::Resolver for LibResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        _base: &str,
+        name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<String> {
+        match lib_name(name) {
+            Some(lib) if self.0.contains_key(lib) => Ok(format!("lib:{lib}")),
+            _ => Err(rquickjs::Error::new_resolving(_base, name)),
+        }
+    }
+}
+
+struct LibLoader(Libs);
+
+impl rquickjs::loader::Loader for LibLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    ) -> rquickjs::Result<Module<'js, rquickjs::module::Declared>> {
+        let bytecode = name
+            .strip_prefix("lib:")
+            .and_then(|lib| self.0.get(lib))
+            .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+        // SAFETY: written by Catalog::load in this process, never read from input.
+        unsafe { Module::load(ctx.clone(), bytecode) }
+    }
 }
 
 enum HostKind<'a> {
@@ -413,7 +457,12 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
     runtime
         .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
         .await;
-    // No module loader is set, so code in the realm cannot import modules.
+    // Without a loader, code in the realm cannot import modules at all.
+    if let Some(libs) = realm.libs.clone() {
+        runtime
+            .set_loader(LibResolver(libs.clone()), LibLoader(libs))
+            .await;
+    }
     let context = AsyncContext::full(&runtime).await.map_err(internal)?;
     context
         .async_with(async |ctx| {
@@ -774,10 +823,16 @@ mod tests {
 
     const CONNECTOR: &str = r#"
 import type { Ctx } from "../centaur";
+import { loud } from "../_lib/text";
 
 /** Echo the args with the calling context's thread key. */
 export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string; thread_key: string | null }> {
   return { text: args.text, thread_key: ctx.context?.thread_key ?? null };
+}
+
+/** Uses a shared module. */
+export async function shout(args: { text: string }, ctx: Ctx): Promise<{ text: string }> {
+  return { text: loud(args.text) };
 }
 
 /** Always fails. */
@@ -808,6 +863,13 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         std::fs::create_dir_all(&connector).unwrap();
         std::fs::write(connector.join("connector.toml"), "description = \"Demo\"\n").unwrap();
         std::fs::write(connector.join("index.ts"), CONNECTOR).unwrap();
+        let lib = dir.path().join("connectors").join("_lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("text.ts"),
+            "export const loud = (text: string): string => text.toUpperCase() + \"!\";",
+        )
+        .unwrap();
         let catalog = Catalog::load(&[dir.path().join("connectors")]).unwrap();
         let context_file = dir.path().join("sandbox.json");
         std::fs::write(
@@ -998,6 +1060,24 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             "cells see the calling context"
         );
         assert_eq!(result["frozen"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_import_shared_modules_and_cells_cannot() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"const { text } = await tools.demo.shout({ text: "hi" });
+               let imported;
+               try { await import("../_lib/text"); imported = true; } catch { imported = false; }
+               return { text, imported };"#,
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "text": "HI!", "imported": false })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

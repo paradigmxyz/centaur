@@ -57,7 +57,9 @@ through connectors.
 2. Every host function a realm receives is safe for code in that realm to call
    with any arguments. Hiding a binding is tidiness, not protection.
 3. Cells and connectors never share a realm. Every tool call runs in a fresh
-   QuickJS runtime; arguments and results cross as JSON text.
+   QuickJS runtime; arguments and results cross as JSON text. Cell realms
+   have no module loader; connector realms can import only shared `_lib`
+   modules.
 4. A connector's `fetch` is bound to its call, so each upstream request is
    recorded against the call that made it, at the point of I/O (method, URL
    without query string, status, duration).
@@ -76,8 +78,14 @@ Egress is limited to the principal's iron-proxy.
 ```text
 connectors/<name>/connector.toml   description + secrets (same schema as [tool.centaur])
 connectors/<name>/index.ts         every exported async function is a tool
+connectors/_lib/<name>.ts          helpers shared by connectors (not by cells)
 connectors/centaur.d.ts            Ctx, Response, CallingContext types
 ```
+
+Connectors may import only `../centaur` (with `import type`) and
+`../_lib/<name>`; shared modules may import each other as `./<name>`. Anything
+else fails at load. Exported signatures should use types declared in the
+connector itself, since the brief shows each connector's declarations alone.
 
 Exported functions take `(args, ctx: Ctx)`, need explicit parameter and return
 types (TypeScript `isolatedDeclarations`), and a JSDoc comment, which becomes

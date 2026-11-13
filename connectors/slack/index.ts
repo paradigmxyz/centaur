@@ -1,4 +1,6 @@
-import type { Ctx } from "../centaur";
+import type { Ctx, Response } from "../centaur";
+import { encode, readJson, type Params } from "../_lib/http";
+import { bool, num, str, type Raw } from "../_lib/values";
 
 const SLACK = "https://slack.com/api";
 const DEFAULT_CENTAUR_API = "http://api:8000";
@@ -60,20 +62,10 @@ export interface SearchMatch {
   permalink: string | null;
 }
 
-type Raw = Record<string, any>;
-type Params = Record<string, string | number | boolean | undefined | null>;
-
 // Routing only: iron-proxy injects the user token and the API checks grants either way.
 function access(ctx: Ctx): Access {
   const credentials = ctx.context?.sandbox?.oauth_credentials ?? [];
   return credentials.some((c) => c.provider === "slack" && c.status === "live") ? "direct" : "centaur";
-}
-
-function encode(params: Params): string {
-  return Object.entries(params)
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
-    .join("&");
 }
 
 function token(ctx: Ctx): string {
@@ -82,7 +74,7 @@ function token(ctx: Ctx): string {
   return value;
 }
 
-async function slackResult(res: Awaited<ReturnType<Ctx["fetch"]>>, method: string): Promise<Raw> {
+async function slackResult(res: Response, method: string): Promise<Raw> {
   const text = await res.text();
   if (!res.ok) {
     const retry = res.headers["retry-after"];
@@ -137,15 +129,10 @@ async function centaur(
     headers: centaurHeaders(ctx, init.contentType ? { "content-type": init.contentType } : {}),
     body: init.body,
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Centaur API ${path} returned HTTP ${res.status}: ${text.slice(0, 1000)}`);
-  return JSON.parse(text);
+  return readJson(res, `Centaur API ${path}`);
 }
 
 const seg = (value: string): string => encodeURIComponent(value.trim());
-const str = (value: any): string | null => (typeof value === "string" && value !== "" ? value : null);
-const num = (value: any): number | null => (typeof value === "number" ? value : null);
-const bool = (value: any): boolean | null => (typeof value === "boolean" ? value : null);
 const nextCursor = (raw: Raw): string | null => str(raw.response_metadata?.next_cursor);
 
 /** Slack ts, YYYY-MM-DD (UTC midnight) or ISO time to a Slack ts. */
