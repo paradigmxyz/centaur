@@ -1,0 +1,6 @@
+description = "Slack: search messages, read channels, threads and users, download and upload files, post and react"
+
+# No declared secrets. Credentials come from platform grants, as for the Python
+# slack tool: a principal with a live Slack OAuth credential reaches slack.com
+# with its user token (SLACK_BOT_TOKEN, swapped by iron-proxy); everyone else
+# goes through Centaur's principal-scoped /api/slack/* routes.

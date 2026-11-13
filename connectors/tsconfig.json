@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "isolatedDeclarations": true,
+    "declaration": true,
+    "skipLibCheck": true
+  },
+  "include": ["centaur.d.ts", "*/index.ts"]
+}
