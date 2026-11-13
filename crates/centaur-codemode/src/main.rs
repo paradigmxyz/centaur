@@ -4,13 +4,11 @@
 //! ```text
 //! centaur-codemode exec  [-e CODE | -]   run one cell and print the JSON response
 //! centaur-codemode brief                 print the typed catalog an agent reads
-//! centaur-codemode search QUERY          rank connector functions
 //! centaur-codemode serve                 HTTP API for api-rs
 //! ```
 
 mod catalog;
 mod engine;
-mod search;
 mod server;
 
 use std::{io::Read, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -43,9 +41,6 @@ struct Common {
         global = true
     )]
     roots: Vec<PathBuf>,
-    /// Scratch directory behind `files` and `ctx.files`.
-    #[arg(long, env = "CENTAUR_CODEMODE_FILES_DIR", global = true)]
-    files_dir: Option<PathBuf>,
     /// Extra PEM roots to trust, such as the iron-proxy CA.
     #[arg(long, env = "CENTAUR_CODEMODE_CA_FILE", global = true)]
     ca_file: Option<PathBuf>,
@@ -71,12 +66,6 @@ enum Command {
     },
     /// Print the typed catalog an agent reads before writing a cell.
     Brief,
-    /// Rank connector functions for a query.
-    Search {
-        query: Vec<String>,
-        #[arg(long, default_value_t = 8)]
-        limit: usize,
-    },
     /// Serve the HTTP API.
     Serve {
         #[arg(
@@ -110,11 +99,6 @@ async fn run(cli: Cli) -> Result<()> {
     match command {
         Command::Brief => {
             print!("{}", catalog.brief(allowed));
-            Ok(())
-        }
-        Command::Search { query, limit } => {
-            let results = search::search(&catalog, allowed, &query.join(" "), limit);
-            println!("{}", serde_json::to_string_pretty(&results)?);
             Ok(())
         }
         Command::Exec { code, result_only } => {
@@ -165,10 +149,6 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn engine(common: &Common, catalog: Arc<Catalog>) -> Result<Engine> {
-    let files_dir = match &common.files_dir {
-        Some(dir) => dir.clone(),
-        None => std::env::temp_dir().join("centaur-codemode").join("files"),
-    };
     if catalog.connectors.is_empty() {
         bail!(
             "no connectors found under {}",
@@ -183,5 +163,5 @@ fn engine(common: &Common, catalog: Arc<Catalog>) -> Result<Engine> {
     let context_file = common.context_file.clone().or_else(|| {
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".centaur/sandbox.json"))
     });
-    Engine::new(catalog, files_dir, common.ca_file.as_deref(), context_file)
+    Engine::new(catalog, common.ca_file.as_deref(), context_file)
 }

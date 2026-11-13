@@ -1,7 +1,7 @@
 // Connector realm, fresh for every call. Evaluates to the `ctx` passed to the
 // connector function. `host.fetch` is bound by the host to this call.
 (() => {
-  const { host, toBytes, sleep, files, context } = globalThis.__common;
+  const { host, toBytes, sleep, context } = globalThis.__common;
   const env = Object.freeze({ ...globalThis.__env });
   delete globalThis.__common;
   delete globalThis.__env;
@@ -36,7 +36,6 @@
     fetch,
     env,
     context,
-    files,
     sleep,
   });
 })();

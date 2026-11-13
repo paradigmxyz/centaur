@@ -13,7 +13,6 @@ cargo build -p centaur-codemode
 B=target/debug/centaur-codemode
 
 $B brief                                   # typed catalog an agent reads
-$B search funding rounds by investor       # BM25 over connector functions
 $B exec <<'EOF'                            # run a cell, print the JSON response
 const [orgs, chans] = await Promise.allSettled([
   tools.crunchbase.search_organizations({ query: "stripe", limit: 3 }),
@@ -45,7 +44,6 @@ A cell is the body of an async function; its return value is the result.
 | Global | Meaning |
 |---|---|
 | `tools.<connector>.<fn>(args)` | Call a connector function; the runtime passes `ctx`. |
-| `files.read/readText/write` | The principal's scratch directory (relative paths only). |
 | `context` | The calling context (sandbox context file), as connectors see it in `ctx.context`; `null` outside a session. |
 | `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder` | As usual; logs are returned. |
 
@@ -59,8 +57,7 @@ through connectors.
 2. Every host function a realm receives is safe for code in that realm to call
    with any arguments. Hiding a binding is tidiness, not protection.
 3. Cells and connectors never share a realm. Every tool call runs in a fresh
-   QuickJS runtime; arguments and results cross as JSON text, bytes through
-   `files`.
+   QuickJS runtime; arguments and results cross as JSON text.
 4. A connector's `fetch` is bound to its call, so each upstream request is
    recorded against the call that made it, at the point of I/O (method, URL
    without query string, status, duration).
@@ -79,12 +76,12 @@ Egress is limited to the principal's iron-proxy.
 ```text
 connectors/<name>/connector.toml   description + secrets (same schema as [tool.centaur])
 connectors/<name>/index.ts         every exported async function is a tool
-connectors/centaur.d.ts            Ctx, Response, Files, Principal types
+connectors/centaur.d.ts            Ctx, Response, CallingContext types
 ```
 
 Exported functions take `(args, ctx: Ctx)`, need explicit parameter and return
 types (TypeScript `isolatedDeclarations`), and a JSDoc comment, which becomes
-the description in the brief and search. Return objects, not bare arrays.
+the description in the brief. Return objects, not bare arrays.
 Type-check with `npx -p typescript tsc -p connectors`.
 
 ## HTTP API
@@ -93,8 +90,6 @@ Type-check with `npx -p typescript tsc -p connectors`.
 |---|---|---|
 | `POST /exec` | `{code, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls: [{tool, ok, error?, ms, requests: [{method, url, status?, error?, ms}]}], ms}` |
 | `GET /catalog?tools=a,b` | | `{connectors, brief}` |
-| `POST /search` | `{query, limit?, tools?}` | `{results: [{tool, signature, doc, score}]}` |
-| `GET`/`PUT /files/{path}` | bytes | bytes / `{path, bytes}` |
 | `GET /healthz` | | `{ok, connectors}` |
 
 The calling context is informational: the agent can write the file in a
@@ -104,7 +99,7 @@ sandbox, so connectors may route on it but nothing authorizes from it.
 
 Cell 120 s (busy loops are interrupted), tool call 60 s, 64 MiB heap and 1 MiB
 stack per realm (the cell and each running call), 1000 calls and 8 concurrent
-calls per cell, 10 MiB result, 10 MiB per HTTP response, 100 MiB per file.
+calls per cell, 10 MiB result, 10 MiB per HTTP response.
 
 ## Cost of a realm per call
 

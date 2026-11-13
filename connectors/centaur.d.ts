@@ -54,13 +54,6 @@ export interface CallingContext {
   [key: string]: unknown;
 }
 
-/** The principal's scratch directory. Paths are relative, without `..`. */
-export interface Files {
-  read(path: string): Promise<Uint8Array>;
-  readText(path: string): Promise<string>;
-  write(path: string, data: string | Uint8Array): Promise<{ path: string; bytes: number }>;
-}
-
 export interface Ctx {
   fetch(url: string, init?: RequestInit): Promise<Response>;
   /**
@@ -72,6 +65,5 @@ export interface Ctx {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** The calling context, read once per cell; `null` outside a Centaur session. */
   readonly context: Readonly<CallingContext> | null;
-  readonly files: Files;
   sleep(ms: number): Promise<void>;
 }

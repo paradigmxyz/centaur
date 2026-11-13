@@ -2,8 +2,8 @@
 //!
 //! A connector is a directory holding `connector.toml` and `index.ts`. Every
 //! exported function in `index.ts` is a tool. Loading strips TypeScript to
-//! JavaScript for QuickJS and emits declarations (without `tsc`) so cells and
-//! search can show typed signatures.
+//! JavaScript for QuickJS and emits declarations (without `tsc`) so the brief
+//! can show typed signatures.
 
 use std::{
     collections::BTreeMap,

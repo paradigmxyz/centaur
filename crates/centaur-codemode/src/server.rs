@@ -4,19 +4,14 @@
 
 use axum::{
     Json, Router,
-    body::Bytes,
-    extract::{DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    extract::{Query, State},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{
-    engine::{Engine, ExecRequest, MAX_FILE_BYTES},
-    search::search,
-};
+use crate::engine::{Engine, ExecRequest};
 
 #[derive(Clone)]
 struct AppState {
@@ -27,15 +22,8 @@ pub fn router(engine: Engine) -> Router {
     Router::new()
         .route("/exec", post(exec))
         .route("/catalog", get(catalog))
-        .route("/search", post(search_tools))
-        .route("/files/{*path}", get(read_file).put(write_file))
         .route("/healthz", get(healthz))
-        .layer(DefaultBodyLimit::max(MAX_FILE_BYTES))
         .with_state(AppState { engine })
-}
-
-fn error(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
 async fn exec(State(state): State<AppState>, Json(request): Json<ExecRequest>) -> Response {
@@ -65,55 +53,6 @@ async fn catalog(State(state): State<AppState>, Query(query): Query<ToolsQuery>)
         "brief": catalog.brief(allowed.as_deref()),
     }))
     .into_response()
-}
-
-#[derive(Deserialize)]
-struct SearchRequest {
-    query: String,
-    #[serde(default = "default_limit")]
-    limit: usize,
-    #[serde(default)]
-    tools: Option<Vec<String>>,
-}
-
-fn default_limit() -> usize {
-    8
-}
-
-async fn search_tools(
-    State(state): State<AppState>,
-    Json(request): Json<SearchRequest>,
-) -> Response {
-    let results = search(
-        state.engine.catalog(),
-        request.tools.as_deref(),
-        &request.query,
-        request.limit.min(50),
-    );
-    Json(json!({ "results": results })).into_response()
-}
-
-async fn read_file(State(state): State<AppState>, Path(path): Path<String>) -> Response {
-    match state.engine.files().read(&path).await {
-        Ok(bytes) => (
-            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-            bytes,
-        )
-            .into_response(),
-        Err(err) => error(StatusCode::NOT_FOUND, format!("{err:#}")),
-    }
-}
-
-async fn write_file(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-    body: Bytes,
-) -> Response {
-    let len = body.len();
-    match state.engine.files().write(&path, body.to_vec()).await {
-        Ok(()) => Json(json!({ "path": path, "bytes": len })).into_response(),
-        Err(err) => error(StatusCode::BAD_REQUEST, format!("{err:#}")),
-    }
 }
 
 async fn healthz(State(state): State<AppState>) -> Response {

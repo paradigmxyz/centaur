@@ -5,19 +5,19 @@
 //! 1. Rust is the only trust boundary. The call record, policy checks and
 //!    limits live here; nothing a JS realm reports is trusted.
 //! 2. Every host function a realm receives is safe for code in that realm to
-//!    call with any arguments. Cells get `invoke`, `files`, `log`, `sleep` and
-//!    UTF-8 helpers; they get no `fetch` and no module loader.
+//!    call with any arguments. Cells get `invoke`, `log`, `sleep` and UTF-8
+//!    helpers; they get no `fetch` and no module loader.
 //! 3. Cells and connectors never share a realm. Every tool call runs in a
 //!    fresh QuickJS runtime; arguments and results cross as JSON text.
 //! 4. A connector's `fetch` is bound to its call, so every upstream request
 //!    is recorded against the call that made it, at the point of I/O.
-//! 5. `invoke` checks the tool against the principal's allowlist.
+//! 5. `invoke` checks the tool against the cell's allowlist.
 //! 6. Time, memory, call count and call concurrency are bounded per cell,
 //!    including the work connectors do.
 
 use std::{
     collections::BTreeMap,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -32,11 +32,477 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
-use crate::catalog::{Catalog, Connector};
+use crate::catalog::Catalog;
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
 const CELL_PRELUDE: &str = include_str!("js/cell.js");
 const CONNECTOR_PRELUDE: &str = include_str!("js/connector.js");
+
+/// Hard-coded limits for the spike.
+pub const CELL_TIMEOUT: Duration = Duration::from_secs(120);
+pub const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Heap per realm: the cell, and each connector call while it runs.
+pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+pub const STACK_LIMIT: usize = 1024 * 1024;
+pub const MAX_CALLS_PER_CELL: usize = 1000;
+pub const MAX_CONCURRENT_CALLS: usize = 8;
+pub const MAX_RESULT_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_FETCH_BYTES: usize = 10 * 1024 * 1024;
+const MAX_LOG_LINES: usize = 1000;
+const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExecRequest {
+    pub code: String,
+    /// Connectors the cell may use; `None` means every loaded connector.
+    /// Credentials are not this runtime's concern: iron-proxy injects them.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+}
+
+/// A failed cell or tool call.
+#[derive(Debug, Serialize)]
+pub struct ExecError {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    /// The tool whose failure the cell did not catch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+}
+
+impl ExecError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            stack: None,
+            tool: None,
+        }
+    }
+}
+
+/// One tool call, recorded by the host.
+#[derive(Clone, Debug, Serialize)]
+pub struct CallRecord {
+    pub tool: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub ms: u64,
+    pub requests: Vec<RequestRecord>,
+}
+
+/// One upstream HTTP request made by a connector call. The query string is
+/// dropped, since some APIs carry keys there.
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestRecord {
+    pub method: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExecResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Json>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ExecError>,
+    pub logs: Vec<String>,
+    pub calls: Vec<CallRecord>,
+    pub ms: u64,
+}
+
+#[derive(Clone)]
+pub struct Engine {
+    catalog: Arc<Catalog>,
+    http: reqwest::Client,
+    context_file: Option<PathBuf>,
+}
+
+impl Engine {
+    /// `context_file` is the sandbox context file (`~/.centaur/sandbox.json`),
+    /// read once per cell and given to cells as `context` and to connectors
+    /// as `ctx.context`.
+    pub fn new(
+        catalog: Arc<Catalog>,
+        ca_file: Option<&Path>,
+        context_file: Option<PathBuf>,
+    ) -> Result<Self> {
+        let mut builder = reqwest::Client::builder()
+            .timeout(TOOL_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10));
+        if let Some(path) = ca_file {
+            let pem = std::fs::read(path)
+                .wrap_err_with(|| format!("reading CA bundle {}", path.display()))?;
+            for certificate in reqwest::Certificate::from_pem_bundle(&pem)? {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        Ok(Self {
+            catalog,
+            http: builder.build()?,
+            context_file,
+        })
+    }
+
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// The calling context for one cell. Informational: written by the
+    /// platform but readable and writable by agents in a sandbox, so it may
+    /// choose a route, never authorize anything. `null` when absent.
+    async fn calling_context(&self) -> String {
+        let Some(path) = &self.context_file else {
+            return "null".to_owned();
+        };
+        match tokio::fs::read(path).await {
+            Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
+                Ok(context @ Json::Object(_)) => context.to_string(),
+                _ => {
+                    tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
+                    "null".to_owned()
+                }
+            },
+            Err(_) => "null".to_owned(),
+        }
+    }
+
+    pub async fn exec(&self, request: ExecRequest) -> ExecResponse {
+        let started = Instant::now();
+        let allowed: Vec<String> = self
+            .catalog
+            .visible(request.tools.as_deref())
+            .map(|connector| connector.name.clone())
+            .collect();
+        let connectors: BTreeMap<&str, Vec<&str>> = self
+            .catalog
+            .visible(request.tools.as_deref())
+            .map(|connector| {
+                let functions = connector.functions.iter().map(|f| f.name.as_str());
+                (connector.name.as_str(), functions.collect())
+            })
+            .collect();
+        let cell = Arc::new(Cell {
+            catalog: self.catalog.clone(),
+            allowed,
+            context: self.calling_context().await,
+            http: self.http.clone(),
+            logs: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            deadline: started + CELL_TIMEOUT,
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
+        });
+        // No newline after the opening brace, so error line numbers match the cell.
+        let code = format!("(async () => {{{}\n}})()", request.code);
+        let realm = Realm {
+            host: HostKind::Cell,
+            prelude: cell_prelude(),
+            globals: vec![(
+                "__connectors",
+                serde_json::to_string(&connectors).expect("connector list serializes"),
+            )],
+            entry: Entry::Script(&code),
+            deadline: cell.deadline,
+        };
+        let outcome = tokio::time::timeout(
+            CELL_TIMEOUT + Duration::from_secs(1),
+            run_realm(&cell, realm),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(ExecError::new(format!(
+                "cell timed out after {}s",
+                CELL_TIMEOUT.as_secs()
+            )))
+        })
+        .and_then(|text| {
+            serde_json::from_str(&text)
+                .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
+        });
+        let (result, error) = match outcome {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(error)),
+        };
+        ExecResponse {
+            ok: error.is_none(),
+            result,
+            error,
+            logs: std::mem::take(&mut *cell.logs.lock().expect("log lock")),
+            calls: cell.finished_calls(),
+            ms: started.elapsed().as_millis() as u64,
+        }
+    }
+}
+
+/// Per-cell state shared by the host functions of the cell and its calls.
+struct Cell {
+    catalog: Arc<Catalog>,
+    allowed: Vec<String>,
+    /// The sandbox context file as JSON text, or `null`.
+    context: String,
+    http: reqwest::Client,
+    logs: Mutex<Vec<String>>,
+    calls: Mutex<Vec<Call>>,
+    deadline: Instant,
+    permits: Arc<Semaphore>,
+}
+
+struct Call {
+    tool: String,
+    started: Instant,
+    ended: Option<(Instant, Result<(), String>)>,
+    requests: Vec<RequestRecord>,
+}
+
+impl Cell {
+    fn log(&self, line: String) {
+        let mut logs = self.logs.lock().expect("log lock");
+        if logs.len() < MAX_LOG_LINES {
+            logs.push(truncate(line, MAX_LOG_LINE_BYTES));
+        }
+    }
+
+    fn finished_calls(&self) -> Vec<CallRecord> {
+        let now = Instant::now();
+        let calls = self.calls.lock().expect("calls lock");
+        calls
+            .iter()
+            .map(|call| {
+                let (ended, result) = call.ended.clone().unwrap_or_else(|| {
+                    let unfinished = "unfinished: the cell ended before this call settled";
+                    (now, Err(unfinished.to_owned()))
+                });
+                CallRecord {
+                    tool: call.tool.clone(),
+                    ok: result.is_ok(),
+                    error: result.err(),
+                    ms: ended.duration_since(call.started).as_millis() as u64,
+                    requests: call.requests.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn record_request(&self, call: usize, request: RequestRecord) {
+        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
+            call.requests.push(request);
+        }
+    }
+
+    /// The `invoke` host function: record, check policy, run, record.
+    async fn invoke(self: Arc<Self>, tool: String, args: String) -> Result<String, ExecError> {
+        let id = {
+            let mut calls = self.calls.lock().expect("calls lock");
+            if calls.len() >= MAX_CALLS_PER_CELL {
+                return Err(ExecError::new(format!(
+                    "a cell may make at most {MAX_CALLS_PER_CELL} tool calls"
+                )));
+            }
+            calls.push(Call {
+                tool: tool.clone(),
+                started: Instant::now(),
+                ended: None,
+                requests: Vec::new(),
+            });
+            calls.len() - 1
+        };
+        // Each call runs on its own task, so connector work from parallel
+        // calls runs on separate threads instead of the cell's.
+        let result = tokio::spawn(self.clone().call(tool.clone(), args, id))
+            .await
+            .unwrap_or_else(|error| Err(ExecError::new(format!("{tool} failed: {error}"))));
+        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(id) {
+            let status = result.as_ref().map(|_| ()).map_err(|e| e.message.clone());
+            call.ended = Some((Instant::now(), status));
+        }
+        result
+    }
+
+    /// Run one connector function in its own realm.
+    async fn call(
+        self: Arc<Self>,
+        tool: String,
+        args: String,
+        id: usize,
+    ) -> Result<String, ExecError> {
+        let (name, function) = tool
+            .split_once('.')
+            .ok_or_else(|| ExecError::new(format!("unknown tool {tool:?}")))?;
+        let connector = self
+            .allowed
+            .iter()
+            .any(|allowed| allowed == name)
+            .then(|| self.catalog.connectors.get(name))
+            .flatten()
+            .filter(|connector| connector.functions.iter().any(|f| f.name == function))
+            .ok_or_else(|| ExecError::new(format!("unknown or unavailable tool {tool:?}")))?;
+        let _permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ExecError::new("cell is shutting down"))?;
+        let deadline = self.deadline.min(Instant::now() + TOOL_TIMEOUT);
+        let budget = deadline.saturating_duration_since(Instant::now());
+        let realm = Realm {
+            host: HostKind::Connector {
+                call: id,
+                label: &tool,
+            },
+            prelude: connector_prelude(),
+            globals: vec![("__env", environment().to_owned())],
+            entry: Entry::Function {
+                bytecode: &connector.bytecode,
+                function,
+                args: &args,
+            },
+            deadline,
+        };
+        tokio::time::timeout(budget, run_realm(&self, realm))
+            .await
+            .unwrap_or_else(|_| {
+                Err(ExecError::new(format!(
+                    "{tool} timed out after {}s",
+                    budget.as_secs()
+                )))
+            })
+    }
+}
+
+/// One fresh QuickJS runtime: a cell, or one connector call.
+struct Realm<'a> {
+    host: HostKind<'a>,
+    /// Prelude module bytecode; a connector prelude's default export is `ctx`.
+    prelude: &'static [u8],
+    /// Extra JSON globals for the prelude to consume.
+    globals: Vec<(&'static str, String)>,
+    entry: Entry<'a>,
+    deadline: Instant,
+}
+
+enum HostKind<'a> {
+    Cell,
+    Connector { call: usize, label: &'a str },
+}
+
+enum Entry<'a> {
+    /// A script evaluating to a promise (the wrapped cell).
+    Script(&'a str),
+    /// `function(args, ctx)` exported by a connector module.
+    Function {
+        bytecode: &'a [u8],
+        function: &'a str,
+        args: &'a str,
+    },
+}
+
+/// Run a realm to completion and return its result as JSON text. Pending host
+/// futures (unsettled calls, cancelled timers) drop with the runtime.
+async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecError> {
+    let internal = |error: rquickjs::Error| ExecError::new(format!("runtime error: {error}"));
+    let runtime = AsyncRuntime::new().map_err(internal)?;
+    runtime.set_memory_limit(MEMORY_LIMIT).await;
+    runtime.set_max_stack_size(STACK_LIMIT).await;
+    let deadline = realm.deadline;
+    runtime
+        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
+        .await;
+    // No module loader is set, so code in the realm cannot import modules.
+    let context = AsyncContext::full(&runtime).await.map_err(internal)?;
+    context
+        .async_with(async |ctx| {
+            let caught = |error| caught(&ctx, error);
+            let host = match realm.host {
+                HostKind::Cell => cell_host(&ctx, cell.clone()),
+                HostKind::Connector { call, label } => {
+                    connector_host(&ctx, cell.clone(), call, label)
+                }
+            };
+            let setup = (|| -> rquickjs::Result<_> {
+                let globals = ctx.globals();
+                globals.set("__host", host?)?;
+                globals.set("__context", ctx.json_parse(cell.context.as_str())?)?;
+                for (name, json) in &realm.globals {
+                    globals.set(*name, ctx.json_parse(json.as_str())?)?;
+                }
+                // SAFETY: prelude and connector bytecode is written by this
+                // process from the same QuickJS build, never read from input.
+                unsafe { Module::load(ctx.clone(), realm.prelude)? }.eval()
+            })();
+            let (prelude, done) = setup.catch(&ctx).map_err(caught)?;
+            done.into_future::<()>().await.catch(&ctx).map_err(caught)?;
+
+            let promise: Promise = match realm.entry {
+                Entry::Script(code) => ctx.eval(code).catch(&ctx).map_err(caught)?,
+                Entry::Function {
+                    bytecode,
+                    function,
+                    args,
+                } => {
+                    let module = unsafe { Module::load(ctx.clone(), bytecode) }
+                        .and_then(|module| module.eval())
+                        .catch(&ctx)
+                        .map_err(caught)?;
+                    module
+                        .1
+                        .into_future::<()>()
+                        .await
+                        .catch(&ctx)
+                        .map_err(caught)?;
+                    (|| {
+                        let entry: Function = module.0.get(function)?;
+                        let ctx_arg: Object = prelude.get("default")?;
+                        entry.call((ctx.json_parse(args)?, ctx_arg))
+                    })()
+                    .catch(&ctx)
+                    .map_err(caught)?
+                }
+            };
+            let value: Value = promise.into_future().await.catch(&ctx).map_err(caught)?;
+            let text = ctx
+                .json_stringify(value)
+                .catch(&ctx)
+                .map_err(caught)?
+                .map(|text| text.to_string())
+                .transpose()
+                .map_err(internal)?
+                .unwrap_or_else(|| "null".to_owned());
+            if text.len() > MAX_RESULT_BYTES {
+                return Err(ExecError::new(format!(
+                    "result is {} bytes, over the {MAX_RESULT_BYTES}-byte limit",
+                    text.len()
+                )));
+            }
+            Ok(text)
+        })
+        .await
+}
+
+fn caught<'js>(ctx: &Ctx<'js>, error: CaughtError<'js>) -> ExecError {
+    match error {
+        CaughtError::Exception(exception) => ExecError {
+            message: exception
+                .message()
+                .unwrap_or_else(|| "uncaught exception".to_owned()),
+            stack: exception.stack().filter(|stack| !stack.is_empty()),
+            tool: exception.get::<_, Option<String>>("tool").ok().flatten(),
+        },
+        CaughtError::Value(value) => ExecError::new(
+            ctx.json_stringify(value)
+                .ok()
+                .flatten()
+                .and_then(|text| text.to_string().ok())
+                .unwrap_or_else(|| "uncaught non-Error value".to_owned()),
+        ),
+        CaughtError::Error(error) => ExecError::new(error.to_string()),
+    }
+}
 
 /// The preludes as ES modules, compiled to bytecode once per process: parsing
 /// them from source on every call costs more than the rest of a call.
@@ -79,560 +545,6 @@ fn environment() -> &'static str {
     })
 }
 
-/// Load and evaluate a prelude module. SAFETY: the bytecode comes from
-/// `compile_prelude` in this process, never from untrusted input.
-fn load_prelude<'js>(
-    ctx: &Ctx<'js>,
-    bytecode: &[u8],
-) -> rquickjs::Result<(Module<'js, rquickjs::module::Evaluated>, Promise<'js>)> {
-    unsafe { Module::load(ctx.clone(), bytecode)? }.eval()
-}
-
-/// Hard-coded limits for the spike.
-pub const CELL_TIMEOUT: Duration = Duration::from_secs(120);
-pub const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
-/// Heap per realm: the cell, and each connector call while it runs.
-pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-pub const STACK_LIMIT: usize = 1024 * 1024;
-pub const MAX_CALLS_PER_CELL: usize = 1000;
-pub const MAX_CONCURRENT_CALLS: usize = 8;
-pub const MAX_RESULT_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_FETCH_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
-const MAX_LOG_LINES: usize = 1000;
-const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ExecRequest {
-    pub code: String,
-    /// Connectors the cell may use; `None` means every loaded connector.
-    /// Credentials are not this runtime's concern: iron-proxy injects them.
-    #[serde(default)]
-    pub tools: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExecError {
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stack: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool: Option<String>,
-}
-
-/// One tool call, recorded by the host.
-#[derive(Clone, Debug, Serialize)]
-pub struct CallRecord {
-    pub tool: String,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub ms: u64,
-    pub requests: Vec<RequestRecord>,
-}
-
-/// One upstream HTTP request made by a connector call. The query string is
-/// dropped, since some APIs carry keys there.
-#[derive(Clone, Debug, Serialize)]
-pub struct RequestRecord {
-    pub method: String,
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub ms: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ExecResponse {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ExecError>,
-    pub logs: Vec<String>,
-    pub calls: Vec<CallRecord>,
-    pub ms: u64,
-}
-
-#[derive(Clone)]
-pub struct Engine {
-    catalog: Arc<Catalog>,
-    http: reqwest::Client,
-    files: Files,
-    context_file: Option<PathBuf>,
-}
-
-impl Engine {
-    /// `context_file` is the sandbox context file (`~/.centaur/sandbox.json`),
-    /// read once per cell and given to connectors as `ctx.context`.
-    pub fn new(
-        catalog: Arc<Catalog>,
-        files_dir: PathBuf,
-        ca_file: Option<&Path>,
-        context_file: Option<PathBuf>,
-    ) -> Result<Self> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(TOOL_TIMEOUT)
-            .connect_timeout(Duration::from_secs(10));
-        if let Some(path) = ca_file {
-            let pem = std::fs::read(path)
-                .wrap_err_with(|| format!("reading CA bundle {}", path.display()))?;
-            for certificate in reqwest::Certificate::from_pem_bundle(&pem)? {
-                builder = builder.add_root_certificate(certificate);
-            }
-        }
-        std::fs::create_dir_all(&files_dir)
-            .wrap_err_with(|| format!("creating files dir {}", files_dir.display()))?;
-        Ok(Self {
-            catalog,
-            http: builder.build()?,
-            files: Files::new(files_dir)?,
-            context_file,
-        })
-    }
-
-    /// The calling context for one cell. Informational: written by the
-    /// platform but readable and writable by agents in a sandbox, so it may
-    /// choose a route, never authorize anything. `null` when absent.
-    async fn calling_context(&self) -> String {
-        let Some(path) = &self.context_file else {
-            return "null".to_owned();
-        };
-        match tokio::fs::read(path).await {
-            Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
-                Ok(context @ Json::Object(_)) => context.to_string(),
-                _ => {
-                    tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
-                    "null".to_owned()
-                }
-            },
-            Err(_) => "null".to_owned(),
-        }
-    }
-
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
-    }
-
-    pub fn files(&self) -> &Files {
-        &self.files
-    }
-
-    pub async fn exec(&self, request: ExecRequest) -> ExecResponse {
-        let started = Instant::now();
-        let cell = Arc::new(Cell {
-            catalog: self.catalog.clone(),
-            allowed: self
-                .catalog
-                .visible(request.tools.as_deref())
-                .map(|connector| connector.name.clone())
-                .collect(),
-            context: self.calling_context().await,
-            http: self.http.clone(),
-            files: self.files.clone(),
-            logs: Mutex::new(Vec::new()),
-            calls: Mutex::new(Vec::new()),
-            deadline: started + CELL_TIMEOUT,
-            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
-        });
-        let outcome = match tokio::time::timeout(
-            CELL_TIMEOUT + Duration::from_secs(1),
-            run_cell(cell.clone(), &request.code),
-        )
-        .await
-        {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(error)) => Outcome::failed(format!("{error:#}")),
-            Err(_) => Outcome::failed(format!("cell timed out after {}s", CELL_TIMEOUT.as_secs())),
-        };
-        ExecResponse {
-            ok: outcome.error.is_none(),
-            result: outcome.result,
-            error: outcome.error,
-            logs: std::mem::take(&mut *cell.logs.lock().expect("log lock")),
-            calls: cell.finished_calls(),
-            ms: started.elapsed().as_millis() as u64,
-        }
-    }
-}
-
-/// Per-cell state shared by the host functions of the cell and its calls.
-struct Cell {
-    catalog: Arc<Catalog>,
-    allowed: Vec<String>,
-    /// The sandbox context file as JSON text, or `null`.
-    context: String,
-    http: reqwest::Client,
-    files: Files,
-    logs: Mutex<Vec<String>>,
-    calls: Mutex<Vec<Call>>,
-    deadline: Instant,
-    permits: Arc<Semaphore>,
-}
-
-struct Call {
-    tool: String,
-    started: Instant,
-    ended: Option<(Instant, Result<(), String>)>,
-    requests: Vec<RequestRecord>,
-}
-
-/// A failed tool call, as the cell sees it.
-struct Failure {
-    message: String,
-    stack: Option<String>,
-}
-
-impl Failure {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            stack: None,
-        }
-    }
-}
-
-impl Cell {
-    fn log(&self, line: String) {
-        let mut logs = self.logs.lock().expect("log lock");
-        if logs.len() >= MAX_LOG_LINES {
-            return;
-        }
-        logs.push(truncate(line, MAX_LOG_LINE_BYTES));
-    }
-
-    fn finished_calls(&self) -> Vec<CallRecord> {
-        let now = Instant::now();
-        self.calls
-            .lock()
-            .expect("calls lock")
-            .iter()
-            .map(|call| {
-                let (ended, result) = match &call.ended {
-                    Some((ended, result)) => (*ended, result.clone()),
-                    None => (
-                        now,
-                        Err("unfinished: the cell ended before this call settled".to_owned()),
-                    ),
-                };
-                CallRecord {
-                    tool: call.tool.clone(),
-                    ok: result.is_ok(),
-                    error: result.err(),
-                    ms: ended.duration_since(call.started).as_millis() as u64,
-                    requests: call.requests.clone(),
-                }
-            })
-            .collect()
-    }
-
-    fn record_request(&self, call: usize, request: RequestRecord) {
-        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
-            call.requests.push(request);
-        }
-    }
-
-    /// The `invoke` host function: policy, record, run, record.
-    async fn invoke(self: Arc<Self>, tool: String, args: String) -> Result<String, Failure> {
-        let id = {
-            let mut calls = self.calls.lock().expect("calls lock");
-            if calls.len() >= MAX_CALLS_PER_CELL {
-                return Err(Failure::new(format!(
-                    "a cell may make at most {MAX_CALLS_PER_CELL} tool calls"
-                )));
-            }
-            calls.push(Call {
-                tool: tool.clone(),
-                started: Instant::now(),
-                ended: None,
-                requests: Vec::new(),
-            });
-            calls.len() - 1
-        };
-        // Each call runs on its own task, so connector work from parallel
-        // calls runs on separate threads instead of the cell's.
-        let result = match tokio::spawn(self.clone().dispatch(tool.clone(), args, id)).await {
-            Ok(result) => result,
-            Err(error) => Err(Failure::new(format!("{tool} failed: {error}"))),
-        };
-        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(id) {
-            call.ended = Some((
-                Instant::now(),
-                result.as_ref().map(|_| ()).map_err(|f| f.message.clone()),
-            ));
-        }
-        result
-    }
-
-    async fn dispatch(
-        self: Arc<Self>,
-        tool: String,
-        args: String,
-        id: usize,
-    ) -> Result<String, Failure> {
-        let tool = tool.as_str();
-        let (name, function) = tool
-            .split_once('.')
-            .ok_or_else(|| Failure::new(format!("unknown tool {tool:?}")))?;
-        let connector = self
-            .allowed
-            .iter()
-            .any(|allowed| allowed == name)
-            .then(|| self.catalog.connectors.get(name))
-            .flatten()
-            .filter(|connector| connector.functions.iter().any(|f| f.name == function))
-            .ok_or_else(|| Failure::new(format!("unknown or unavailable tool {tool:?}")))?;
-        let _permit = self
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| Failure::new("cell is shutting down"))?;
-        let deadline = self.deadline.min(Instant::now() + TOOL_TIMEOUT);
-        let budget = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(
-            budget,
-            self.clone()
-                .run_call(connector, function, args, id, deadline),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(Failure::new(format!(
-                "{tool} timed out after {}s",
-                budget.as_secs()
-            ))),
-        }
-    }
-
-    /// Run one connector function in a fresh runtime.
-    async fn run_call(
-        self: Arc<Self>,
-        connector: &Connector,
-        function: &str,
-        args: String,
-        id: usize,
-        deadline: Instant,
-    ) -> Result<String, Failure> {
-        let internal = |error: rquickjs::Error| Failure::new(format!("runtime error: {error}"));
-        let runtime = AsyncRuntime::new().map_err(internal)?;
-        runtime.set_memory_limit(MEMORY_LIMIT).await;
-        runtime.set_max_stack_size(STACK_LIMIT).await;
-        runtime
-            .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
-            .await;
-        let context = AsyncContext::full(&runtime).await.map_err(internal)?;
-        let bytecode = connector.bytecode.clone();
-        let label = format!("{}.{function}", connector.name);
-        let cell = self.clone();
-        let result = context
-            .async_with(async |ctx| {
-                let setup = (|| -> rquickjs::Result<_> {
-                    ctx.globals()
-                        .set("__host", connector_host(&ctx, cell.clone(), id, &label)?)?;
-                    ctx.globals()
-                        .set("__context", ctx.json_parse(cell.context.as_str())?)?;
-                    ctx.globals().set("__env", ctx.json_parse(environment())?)?;
-                    let (prelude, prelude_done) = load_prelude(&ctx, connector_prelude())?;
-                    // SAFETY: the bytecode was written by this process from
-                    // the same QuickJS build (Catalog::load), never read from
-                    // untrusted input.
-                    let module = unsafe { Module::load(ctx.clone(), &bytecode)? };
-                    let (module, evaluated) = module.eval()?;
-                    Ok((prelude, prelude_done, module, evaluated))
-                })();
-                let (prelude, prelude_done, module, evaluated) =
-                    setup.catch(&ctx).map_err(|error| failure(&ctx, error))?;
-                for done in [prelude_done, evaluated] {
-                    done.into_future::<()>()
-                        .await
-                        .catch(&ctx)
-                        .map_err(|error| failure(&ctx, error))?;
-                }
-                let entry = (|| -> rquickjs::Result<(Object<'_>, Function<'_>)> {
-                    Ok((prelude.get("default")?, module.get(function)?))
-                })();
-                let (connector_ctx, entry) =
-                    entry.catch(&ctx).map_err(|error| failure(&ctx, error))?;
-                let call = (|| -> rquickjs::Result<Promise<'_>> {
-                    let args = ctx.json_parse(args.as_str())?;
-                    entry.call((args, connector_ctx))
-                })();
-                let promise = call.catch(&ctx).map_err(|error| failure(&ctx, error))?;
-                let value: Value = promise
-                    .into_future()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|error| failure(&ctx, error))?;
-                let text = ctx
-                    .json_stringify(value)
-                    .catch(&ctx)
-                    .map_err(|error| failure(&ctx, error))?
-                    .map(|text| text.to_string())
-                    .transpose()
-                    .map_err(internal)?
-                    .unwrap_or_else(|| "null".to_owned());
-                if text.len() > MAX_RESULT_BYTES {
-                    return Err(Failure::new(format!(
-                        "result is {} bytes, over the {MAX_RESULT_BYTES}-byte limit",
-                        text.len()
-                    )));
-                }
-                Ok(text)
-            })
-            .await;
-        // Pending host futures (such as cancelled timers) drop with the runtime.
-        drop(context);
-        drop(runtime);
-        result
-    }
-}
-
-async fn run_cell(cell: Arc<Cell>, code: &str) -> Result<Outcome> {
-    let runtime = AsyncRuntime::new()?;
-    runtime.set_memory_limit(MEMORY_LIMIT).await;
-    runtime.set_max_stack_size(STACK_LIMIT).await;
-    let deadline = cell.deadline;
-    runtime
-        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
-        .await;
-    // No module loader: the cell cannot import connector modules.
-    let context = AsyncContext::full(&runtime).await?;
-    let connectors: BTreeMap<&str, Vec<&str>> = cell
-        .allowed
-        .iter()
-        .filter_map(|name| cell.catalog.connectors.get(name))
-        .map(|connector| {
-            (
-                connector.name.as_str(),
-                connector
-                    .functions
-                    .iter()
-                    .map(|f| f.name.as_str())
-                    .collect(),
-            )
-        })
-        .collect();
-    let connectors = serde_json::to_string(&connectors)?;
-    // No newline after the opening brace, so error line numbers match the cell.
-    let code = format!("(async () => {{{code}\n}})()");
-    let outcome = context
-        .async_with(async |ctx| {
-            let prelude = (|| -> rquickjs::Result<Promise<'_>> {
-                ctx.globals().set("__host", cell_host(&ctx, cell.clone())?)?;
-                ctx.globals()
-                    .set("__connectors", ctx.json_parse(connectors.as_str())?)?;
-                ctx.globals()
-                    .set("__context", ctx.json_parse(cell.context.as_str())?)?;
-                Ok(load_prelude(&ctx, cell_prelude())?.1)
-            })();
-            let prelude = match prelude.catch(&ctx) {
-                Ok(prelude) => prelude,
-                Err(error) => return Outcome::caught(&ctx, error),
-            };
-            if let Err(error) = prelude.into_future::<()>().await.catch(&ctx) {
-                return Outcome::caught(&ctx, error);
-            }
-            let promise = match ctx.eval::<Promise, _>(code.as_str()).catch(&ctx) {
-                Ok(promise) => promise,
-                Err(error) => return Outcome::caught(&ctx, error),
-            };
-            match promise.into_future::<Value>().await.catch(&ctx) {
-                Ok(value) => match ctx.json_stringify(value).catch(&ctx) {
-                    Ok(text) => {
-                        let text = text
-                            .and_then(|text| text.to_string().ok())
-                            .unwrap_or_else(|| "null".to_owned());
-                        if text.len() > MAX_RESULT_BYTES {
-                            Outcome::failed(format!(
-                                "result is {} bytes, over the {MAX_RESULT_BYTES}-byte limit; write large data with files.write and return the path",
-                                text.len()
-                            ))
-                        } else {
-                            match serde_json::from_str(&text) {
-                                Ok(result) => Outcome::ok(result),
-                                Err(error) => Outcome::failed(format!(
-                                    "result is not JSON-serializable: {error}"
-                                )),
-                            }
-                        }
-                    }
-                    Err(error) => Outcome::caught(&ctx, error),
-                },
-                Err(error) => Outcome::caught(&ctx, error),
-            }
-        })
-        .await;
-    // Pending calls and timers drop with the runtime; the result is settled.
-    drop(context);
-    drop(runtime);
-    Ok(outcome)
-}
-
-fn failure<'js>(ctx: &Ctx<'js>, error: CaughtError<'js>) -> Failure {
-    match error {
-        CaughtError::Exception(exception) => Failure {
-            message: exception
-                .message()
-                .unwrap_or_else(|| "uncaught exception".to_owned()),
-            stack: exception.stack().filter(|stack| !stack.is_empty()),
-        },
-        CaughtError::Value(value) => Failure::new(
-            ctx.json_stringify(value)
-                .ok()
-                .flatten()
-                .and_then(|text| text.to_string().ok())
-                .unwrap_or_else(|| "uncaught non-Error value".to_owned()),
-        ),
-        CaughtError::Error(error) => Failure::new(error.to_string()),
-    }
-}
-
-struct Outcome {
-    result: Option<serde_json::Value>,
-    error: Option<ExecError>,
-}
-
-impl Outcome {
-    fn ok(result: serde_json::Value) -> Self {
-        Self {
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    fn failed(message: String) -> Self {
-        Self {
-            result: None,
-            error: Some(ExecError {
-                message,
-                stack: None,
-                tool: None,
-            }),
-        }
-    }
-
-    fn caught<'js>(ctx: &Ctx<'js>, error: CaughtError<'js>) -> Self {
-        let tool = match &error {
-            CaughtError::Exception(exception) => {
-                exception.get::<_, Option<String>>("tool").ok().flatten()
-            }
-            _ => None,
-        };
-        let Failure { message, stack } = failure(ctx, error);
-        Self {
-            result: None,
-            error: Some(ExecError {
-                message,
-                stack,
-                tool,
-            }),
-        }
-    }
-}
-
 fn truncate(mut line: String, max: usize) -> String {
     if line.len() > max {
         let mut end = max;
@@ -661,14 +573,6 @@ impl<'js> IntoJs<'js> for FetchOut {
     }
 }
 
-struct Bytes(Vec<u8>);
-
-impl<'js> IntoJs<'js> for Bytes {
-    fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-        Ok(ArrayBuffer::new(ctx.clone(), self.0)?.into_value())
-    }
-}
-
 fn copy_bytes(array: &TypedArray<'_, u8>) -> Vec<u8> {
     // SAFETY: the slice is copied before any JavaScript runs.
     unsafe { array.as_bytes() }
@@ -676,18 +580,13 @@ fn copy_bytes(array: &TypedArray<'_, u8>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn reject<T>(ctx: &Ctx<'_>, message: impl AsRef<str>) -> rquickjs::Result<T> {
-    Err(Exception::throw_message(ctx, message.as_ref()))
-}
-
-/// Host functions every realm gets: logs, sleep, files, UTF-8.
+/// Host functions every realm gets: logs, sleep, UTF-8.
 fn common_host<'js>(
     ctx: &Ctx<'js>,
     cell: Arc<Cell>,
-    log_prefix: Option<String>,
+    log_prefix: String,
 ) -> rquickjs::Result<Object<'js>> {
     let host = Object::new(ctx.clone())?;
-
     host.set(
         "sleep",
         Function::new(
@@ -698,57 +597,17 @@ fn common_host<'js>(
             }),
         )?,
     )?;
-
-    let log_cell = cell.clone();
     host.set(
         "log",
         Function::new(ctx.clone(), move |level: String, line: String| {
-            let mut prefix = log_prefix.clone().unwrap_or_default();
-            if level != "log" {
-                prefix.push_str(&format!("[{level}] "));
-            }
-            log_cell.log(format!("{prefix}{line}"));
+            let level = if level == "log" {
+                String::new()
+            } else {
+                format!("[{level}] ")
+            };
+            cell.log(format!("{log_prefix}{level}{line}"));
         })?,
     )?;
-
-    let files = cell.files.clone();
-    host.set(
-        "fileRead",
-        Function::new(
-            ctx.clone(),
-            Async(move |ctx: Ctx<'js>, path: String| {
-                let files = files.clone();
-                async move {
-                    match files.read(&path).await {
-                        Ok(bytes) => Ok(Bytes(bytes)),
-                        Err(error) => reject(&ctx, format!("files.read({path:?}): {error:#}")),
-                    }
-                }
-            }),
-        )?,
-    )?;
-
-    let files = cell.files.clone();
-    host.set(
-        "fileWrite",
-        Function::new(
-            ctx.clone(),
-            Async(
-                move |ctx: Ctx<'js>, path: String, data: TypedArray<'js, u8>| {
-                    let files = files.clone();
-                    let data = copy_bytes(&data);
-                    async move {
-                        let len = data.len();
-                        match files.write(&path, data).await {
-                            Ok(()) => Ok(len as f64),
-                            Err(error) => reject(&ctx, format!("files.write({path:?}): {error:#}")),
-                        }
-                    }
-                },
-            ),
-        )?,
-    )?;
-
     host.set(
         "utf8Decode",
         Function::new(ctx.clone(), |data: TypedArray<'js, u8>| {
@@ -761,13 +620,12 @@ fn common_host<'js>(
             TypedArray::<u8>::new(ctx, text.into_bytes())
         })?,
     )?;
-
     Ok(host)
 }
 
 /// The cell's host: the common functions plus `invoke`.
 fn cell_host<'js>(ctx: &Ctx<'js>, cell: Arc<Cell>) -> rquickjs::Result<Object<'js>> {
-    let host = common_host(ctx, cell.clone(), None)?;
+    let host = common_host(ctx, cell.clone(), String::new())?;
     host.set(
         "invoke",
         Function::new(
@@ -775,17 +633,16 @@ fn cell_host<'js>(ctx: &Ctx<'js>, cell: Arc<Cell>) -> rquickjs::Result<Object<'j
             Async(move |ctx: Ctx<'js>, tool: String, args: String| {
                 let cell = cell.clone();
                 async move {
-                    match cell.invoke(tool.clone(), args).await {
-                        Ok(json) => Ok(json),
-                        Err(failure) => {
-                            let exception = Exception::from_message(ctx.clone(), &failure.message)?;
-                            exception.as_object().set("tool", tool)?;
-                            if let Some(stack) = failure.stack {
-                                exception.as_object().set("connector_stack", stack)?;
-                            }
-                            Err(ctx.throw(exception.into_value()))
-                        }
+                    let failure = match cell.invoke(tool.clone(), args).await {
+                        Ok(json) => return Ok(json),
+                        Err(failure) => failure,
+                    };
+                    let exception = Exception::from_message(ctx.clone(), &failure.message)?;
+                    exception.as_object().set("tool", tool)?;
+                    if let Some(stack) = failure.stack {
+                        exception.as_object().set("connector_stack", stack)?;
                     }
+                    Err(ctx.throw(exception.into_value()))
                 }
             }),
         )?,
@@ -801,8 +658,7 @@ fn connector_host<'js>(
     call: usize,
     label: &str,
 ) -> rquickjs::Result<Object<'js>> {
-    let host = common_host(ctx, cell.clone(), Some(format!("[{label}] ")))?;
-
+    let host = common_host(ctx, cell.clone(), format!("[{label}] "))?;
     host.set(
         "fetch",
         Function::new(
@@ -828,16 +684,12 @@ fn connector_host<'js>(
                                 ms: started.elapsed().as_millis() as u64,
                             },
                         );
-                        match result {
-                            Ok(out) => Ok(out),
-                            Err(message) => reject(&ctx, message),
-                        }
+                        result.map_err(|message| Exception::throw_message(&ctx, &message))
                     }
                 },
             ),
         )?,
     )?;
-
     Ok(host)
 }
 
@@ -916,71 +768,6 @@ async fn fetch(
     })
 }
 
-/// The principal's scratch directory. Paths are relative and must stay inside
-/// it after symlinks resolve.
-#[derive(Clone, Debug)]
-pub struct Files {
-    root: Arc<PathBuf>,
-}
-
-impl Files {
-    fn new(root: PathBuf) -> Result<Self> {
-        Ok(Self {
-            root: Arc::new(root.canonicalize()?),
-        })
-    }
-
-    fn relative(&self, path: &str) -> Result<PathBuf> {
-        let relative = Path::new(path);
-        if path.is_empty()
-            || !relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)))
-        {
-            eyre::bail!("path must be relative, without `.` or `..` segments");
-        }
-        Ok(self.root.join(relative))
-    }
-
-    fn contained(&self, path: &Path) -> Result<()> {
-        if path.starts_with(self.root.as_path()) {
-            Ok(())
-        } else {
-            eyre::bail!("path resolves outside the files directory")
-        }
-    }
-
-    pub async fn read(&self, path: &str) -> Result<Vec<u8>> {
-        let full = tokio::fs::canonicalize(self.relative(path)?).await?;
-        self.contained(&full)?;
-        let metadata = tokio::fs::metadata(&full).await?;
-        if !metadata.is_file() {
-            eyre::bail!("not a regular file");
-        }
-        if metadata.len() as usize > MAX_FILE_BYTES {
-            eyre::bail!("file is over the {MAX_FILE_BYTES}-byte limit");
-        }
-        Ok(tokio::fs::read(&full).await?)
-    }
-
-    pub async fn write(&self, path: &str, data: Vec<u8>) -> Result<()> {
-        if data.len() > MAX_FILE_BYTES {
-            eyre::bail!("data is over the {MAX_FILE_BYTES}-byte limit");
-        }
-        let full = self.relative(path)?;
-        let parent = full.parent().expect("joined path has a parent");
-        tokio::fs::create_dir_all(parent).await?;
-        self.contained(&tokio::fs::canonicalize(parent).await?)?;
-        if let Ok(metadata) = tokio::fs::symlink_metadata(&full).await
-            && metadata.file_type().is_symlink()
-        {
-            eyre::bail!("refusing to write through a symlink");
-        }
-        tokio::fs::write(&full, data).await?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,11 +778,6 @@ import type { Ctx } from "../centaur";
 /** Echo the args with the calling context's thread key. */
 export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string; thread_key: string | null }> {
   return { text: args.text, thread_key: ctx.context?.thread_key ?? null };
-}
-
-/** Save text to the scratch directory. */
-export async function save(args: { path: string; text: string }, ctx: Ctx): Promise<{ path: string; bytes: number }> {
-  return ctx.files.write(args.path, args.text);
 }
 
 /** Always fails. */
@@ -1033,13 +815,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
         )
         .unwrap();
-        let engine = Engine::new(
-            Arc::new(catalog),
-            dir.path().join("files"),
-            None,
-            Some(context_file),
-        )
-        .unwrap();
+        let engine = Engine::new(Arc::new(catalog), None, Some(context_file)).unwrap();
         (dir, engine)
     }
 
@@ -1181,7 +957,6 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             allowed: vec!["other".to_owned()],
             context: "null".to_owned(),
             http: engine.http.clone(),
-            files: engine.files.clone(),
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             deadline: Instant::now() + CELL_TIMEOUT,
@@ -1234,45 +1009,6 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         assert_eq!(error.tool.as_deref(), Some("demo.boom"));
         assert!(!response.calls[0].ok);
         assert_eq!(response.calls[0].error.as_deref(), Some("kaboom"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn files_stay_inside_the_scratch_directory() {
-        let (dir, engine) = engine();
-        let response = exec(
-            &engine,
-            r#"await tools.demo.save({ path: "a/b.txt", text: "hi" });
-               return await files.readText("a/b.txt");"#,
-            None,
-        )
-        .await;
-        assert_eq!(response.result.unwrap(), "hi");
-
-        for path in ["../x", "/etc/passwd", "a/../../x", ""] {
-            let response = exec(
-                &engine,
-                &format!("return await files.read({path:?});"),
-                None,
-            )
-            .await;
-            assert!(!response.ok, "{path} should be rejected");
-        }
-
-        std::os::unix::fs::symlink("/etc", dir.path().join("files").join("etc")).unwrap();
-        let response = exec(
-            &engine,
-            r#"return await files.readText("etc/hostname");"#,
-            None,
-        )
-        .await;
-        assert!(
-            response
-                .error
-                .unwrap()
-                .message
-                .contains("outside the files directory"),
-            "symlinks out of the scratch directory are refused"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

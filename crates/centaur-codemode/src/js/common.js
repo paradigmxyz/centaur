@@ -41,12 +41,6 @@
   };
   const log = (level) => (...values) => host.log(level, values.map(format).join(" "));
 
-  const files = Object.freeze({
-    read: async (path) => new Uint8Array(await host.fileRead(String(path))),
-    readText: async (path) => host.utf8Decode(new Uint8Array(await host.fileRead(String(path)))),
-    write: async (path, data) => ({ path: String(path), bytes: await host.fileWrite(String(path), toBytes(data)) }),
-  });
-
   globalThis.TextEncoder = TextEncoder;
   globalThis.TextDecoder = TextDecoder;
   globalThis.setTimeout = setTimeout;
@@ -65,6 +59,6 @@
   const context = deepFreeze(globalThis.__context ?? null);
   delete globalThis.__context;
 
-  globalThis.__common = { host, toBytes, sleep, files, context };
+  globalThis.__common = { host, toBytes, sleep, context };
   delete globalThis.__host;
 })();

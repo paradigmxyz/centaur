@@ -1,7 +1,6 @@
 import type { Ctx } from "../centaur";
 
 const SLACK = "https://slack.com/api";
-const FILES_HOST = "files.slack.com";
 const DEFAULT_CENTAUR_API = "http://api:8000";
 
 /**
@@ -49,17 +48,6 @@ export interface User {
   tz: string | null;
   is_bot: boolean;
   deleted: boolean;
-}
-
-export interface FileInfo {
-  id: string;
-  name: string | null;
-  title: string | null;
-  mimetype: string | null;
-  size: number | null;
-  user: string | null;
-  permalink: string | null;
-  url_private_download: string | null;
 }
 
 export interface SearchMatch {
@@ -219,24 +207,6 @@ function user(raw: Raw): User {
   };
 }
 
-function fileInfo(raw: Raw): FileInfo {
-  return {
-    id: raw.id,
-    name: str(raw.name),
-    title: str(raw.title),
-    mimetype: str(raw.mimetype),
-    size: num(raw.size),
-    user: str(raw.user),
-    permalink: str(raw.permalink),
-    url_private_download: str(raw.url_private_download ?? raw.url_private),
-  };
-}
-
-function requireChannel(channelId: string | undefined, what: string): string {
-  if (!channelId) throw new Error(`${what} through the Centaur API needs \`channel\` (the conversation the file is shared in)`);
-  return channelId;
-}
-
 /** Which path Slack calls take for this caller (see `Access`). */
 export async function get_access(args: {}, ctx: Ctx): Promise<{ access: Access; thread_key: string | null }> {
   return { access: access(ctx), thread_key: ctx.context?.thread_key ?? null };
@@ -383,41 +353,6 @@ export async function user_details(args: { user: string }, ctx: Ctx): Promise<{ 
 }
 
 /**
- * Download a Slack file (F…) into the scratch directory and return its path. `channel` is the
- * conversation the file is shared in, required through the Centaur API. `path` defaults to
- * `slack/<file id>/<file name>`. Read it back with `files.read` or hand it to another tool.
- */
-export async function download_file(
-  args: { file: string; channel?: string; path?: string },
-  ctx: Ctx,
-): Promise<{ path: string; bytes: number; content_type: string | null; file: FileInfo }> {
-  let info: FileInfo;
-  let res: Awaited<ReturnType<Ctx["fetch"]>>;
-  if (access(ctx) === "centaur") {
-    const channelId = requireChannel(args.channel, "download_file");
-    const raw = await centaur(ctx, `/api/slack/files/${seg(args.file)}/info`, { channel_id: channelId });
-    info = fileInfo(raw.file ?? {});
-    res = await ctx.fetch(
-      `${centaurBase(ctx)}/api/slack/files/${seg(args.file)}/download?${encode({ channel_id: channelId })}`,
-      { headers: centaurHeaders(ctx) },
-    );
-  } else {
-    info = fileInfo((await slackGet(ctx, "files.info", { file: args.file.trim() })).file ?? {});
-    const url = info.url_private_download;
-    if (!url) throw new Error(`file ${args.file} has no download URL`);
-    if (!url.startsWith(`https://${FILES_HOST}/`)) {
-      throw new Error(`file ${args.file} downloads from ${url}, not https://${FILES_HOST}; refusing to send the token there`);
-    }
-    res = await ctx.fetch(url, { headers: { authorization: `Bearer ${token(ctx)}` } });
-  }
-  if (!res.ok) throw new Error(`downloading ${args.file} returned HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`);
-  const bytes = await res.bytes();
-  const name = (info.name ?? args.file).replace(/[\/\\]/g, "_");
-  const written = await ctx.files.write(args.path ?? `slack/${args.file}/${name}`, bytes);
-  return { path: written.path, bytes: written.bytes, content_type: res.headers["content-type"] ?? null, file: info };
-}
-
-/**
  * Write: post a message. `channel` is a conversation ID or a user ID (U…) to DM them from the
  * bot; `text` is Slack mrkdwn; `thread_ts` replies in a thread. Direct access only.
  */
@@ -454,39 +389,4 @@ export async function add_reaction(
     if (String((error as Error).message).includes("already_reacted")) return { changed: false };
     throw error;
   }
-}
-
-/**
- * Write: upload a file from the scratch directory (`path`, for example one written by
- * `download_file` or `files.write`) and share it into `channel`, optionally in a thread.
- */
-export async function upload_file(
-  args: { channel: string; path: string; filename?: string; title?: string; initial_comment?: string; thread_ts?: string },
-  ctx: Ctx,
-): Promise<{ file_ids: string[] }> {
-  const bytes = await ctx.files.read(args.path);
-  const filename = args.filename ?? args.path.split("/").pop() ?? "file";
-  if (access(ctx) === "centaur") {
-    const raw = await centaur(
-      ctx, "/api/slack/files/upload",
-      {
-        channel_id: args.channel.trim(), filename, title: args.title, initial_comment: args.initial_comment,
-        thread_ts: args.thread_ts,
-      },
-      { method: "POST", body: bytes, contentType: "application/octet-stream" },
-    );
-    return { file_ids: raw.file?.id ? [raw.file.id] : [] };
-  }
-  const target = await slackPost(ctx, "files.getUploadURLExternal", { filename, length: bytes.length });
-  const put = await ctx.fetch(target.upload_url, {
-    method: "POST", headers: { "content-type": "application/octet-stream" }, body: bytes,
-  });
-  if (!put.ok) throw new Error(`Slack upload returned HTTP ${put.status}: ${(await put.text()).slice(0, 500)}`);
-  const done = await slackPost(ctx, "files.completeUploadExternal", {
-    files: JSON.stringify([{ id: target.file_id, title: args.title ?? filename }]),
-    channel_id: args.channel.trim(),
-    initial_comment: args.initial_comment,
-    thread_ts: args.thread_ts,
-  });
-  return { file_ids: (done.files ?? []).map((f: Raw) => f.id) };
 }
