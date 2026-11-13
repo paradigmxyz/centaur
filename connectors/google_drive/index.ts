@@ -1,4 +1,5 @@
 import type { Ctx, Response } from "../centaur";
+import { downloadTo, multipart, outputPath, requireFiles } from "../_lib/files";
 import { query, readJson } from "../_lib/http";
 
 // Results are Google Drive v3 resources as the API sends them (`camelCase`,
@@ -92,15 +93,21 @@ export interface Permission {
   [field: string]: unknown;
 }
 
-/** Bytes of a file or export, base64-encoded for transport. */
-export interface Download {
-  name: string;
+/** A file a connector function saved for the caller. */
+export interface SavedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
+}
+
+/** A downloaded or exported Drive file, saved under the files root. */
+export interface Download extends SavedFile {
+  /** MIME type of the saved file: Drive's, or the export format's for an export. */
   mime_type: string;
+  /** Drive's name for the file, with the export format's extension for an export. */
+  name: string;
   web_view_link?: string;
-  /** Decoded size in bytes; the runtime caps a result at 10 MiB. */
-  size: number;
-  /** Standard-alphabet base64 of the bytes. */
-  content_base64: string;
 }
 
 /** The outcome of `setup_channel_permissions`. */
@@ -181,30 +188,10 @@ function exportMimeType(exportFormat: string): string {
   return mimeType;
 }
 
-/** UTF-8 bytes of a string, without a TextEncoder in the connector realm. */
-function utf8(ctx: Ctx, text: string): Uint8Array {
-  return ctx.base64.decode(ctx.base64.encode(text));
-}
-
-function concat(parts: Uint8Array[]): Uint8Array {
-  let length = 0;
-  for (const part of parts) length += part.length;
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-async function downloadUrl(ctx: Ctx, url: string, label: string): Promise<Uint8Array> {
-  const res = await ctx.fetch(url, { headers: authHeaders(ctx) });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${label} returned HTTP ${res.status}: ${text.slice(0, 1000)}`);
-  }
-  return res.bytes();
+/** The last segment of a path, for defaulting an upload's name. */
+function pathName(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "upload.bin";
 }
 
 async function fileMetadata(ctx: Ctx, fileId: string, fields: string): Promise<any> {
@@ -214,35 +201,18 @@ async function fileMetadata(ctx: Ctx, fileId: string, fields: string): Promise<a
   );
 }
 
-async function fileBytes(
-  ctx: Ctx,
-  fileId: string,
-  fields: string,
-): Promise<{ metadata: any; bytes: Uint8Array }> {
-  const metadata = await fileMetadata(ctx, fileId, fields);
-  const res = await ctx.fetch(
-    `${base(ctx)}/files/${encodeURIComponent(driveId(fileId))}${query({ alt: "media", supportsAllDrives: true })}`,
-    { headers: authHeaders(ctx) },
-  );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Google Drive download returned HTTP ${res.status}: ${text.slice(0, 1000)}`);
-  }
-  return { metadata, bytes: await res.bytes() };
-}
-
 function downloadResult(
-  metadata: { name?: string; mimeType?: string; webViewLink?: string },
+  metadata: { name?: string; webViewLink?: string },
+  saved: SavedFile,
   mimeType: string,
-  bytes: Uint8Array,
-  ctx: Ctx,
+  name: string,
 ): Download {
   return {
-    name: metadata.name || "",
-    mime_type: metadata.mimeType || mimeType,
-    web_view_link: metadata.webViewLink,
-    size: bytes.length,
-    content_base64: ctx.base64.encode(bytes),
+    path: saved.path,
+    bytes: saved.bytes,
+    mime_type: mimeType,
+    name,
+    ...(metadata.webViewLink ? { web_view_link: metadata.webViewLink } : {}),
   };
 }
 
@@ -337,49 +307,59 @@ export async function get_file(args: { file_id: string }, ctx: Ctx): Promise<{ f
 }
 
 /**
- * Download a binary file's bytes as base64 (`content_base64`). Google Docs, Sheets and Slides have
- * no binary form: use `export_file` for those. The runtime caps an HTTP response at 10 MiB and a
- * result at 10 MiB, so files above roughly 7.5 MiB fail (base64 costs a third more).
+ * Download a binary file to `path` in the sandbox (default `downloads/google_drive/<Drive name>`)
+ * and return the saved file: `path`, `bytes`, `mime_type`, plus Drive's `name` and `web_view_link`.
+ * Google Docs, Sheets and Slides have no binary form: use `export_file` for those.
  */
 export async function download_file(
-  args: { file_id: string },
+  args: { file_id: string; path?: string },
   ctx: Ctx,
 ): Promise<Download> {
-  const { metadata, bytes } = await fileBytes(ctx, args.file_id, "name,mimeType,webViewLink");
-  return downloadResult(metadata, "application/octet-stream", bytes, ctx);
+  const fileId = driveId(args.file_id);
+  const metadata = await fileMetadata(ctx, fileId, "name,mimeType,webViewLink");
+  const name = metadata.name || fileId;
+  const saved = await downloadTo(
+    ctx,
+    `${base(ctx)}/files/${encodeURIComponent(fileId)}${query({ alt: "media", supportsAllDrives: true })}`,
+    outputPath(args.path, "google_drive", name),
+    "Google Drive download",
+    { headers: authHeaders(ctx) },
+  );
+  return downloadResult(metadata, saved, metadata.mimeType || "application/octet-stream", name);
 }
 
 /**
- * Upload a file from base64 content into My Drive or a folder, optionally converting it to a
- * native Google Sheet (`convert_to_sheets`, for CSV and Excel uploads). `mime_type` defaults to
- * `application/octet-stream`; pass the real type so Drive can preview and convert it. Returns the
- * new file's id, name and web link.
+ * Upload a file from the sandbox into My Drive or a folder, optionally converting it to a native
+ * Google Sheet (`convert_to_sheets`, for CSV and Excel uploads). `path` names the file to send; the
+ * runtime streams its bytes to Drive without reading them into the cell. `name` defaults to the
+ * path's last segment; `mime_type` defaults to `application/octet-stream`, so pass the real type
+ * for Drive to preview and convert it. Returns the new file's id, name and web link.
  */
 export async function upload_file(
   args: {
-    content_base64: string;
-    name: string;
+    path: string;
+    name?: string;
     folder_id?: string;
     mime_type?: string;
     convert_to_sheets?: boolean;
   },
   ctx: Ctx,
 ): Promise<{ id: string; name: string; webViewLink?: string }> {
-  const bytes = ctx.base64.decode(args.content_base64);
-  const metadata: Record<string, unknown> = { name: args.name };
+  const files = requireFiles(ctx, "google_drive.upload_file");
+  if (!(await files.stat(args.path))) {
+    throw new Error(`google_drive.upload_file: no such file: ${args.path}`);
+  }
+  const metadata: Record<string, unknown> = { name: args.name || pathName(args.path) };
   if (args.folder_id) metadata.parents = [args.folder_id];
   if (args.convert_to_sheets) metadata.mimeType = "application/vnd.google-apps.spreadsheet";
   const contentType = args.mime_type || "application/octet-stream";
-  const boundary = "centaur-code-mode-boundary";
-  const body = concat([
-    utf8(
-      ctx,
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
-        `${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`,
-    ),
-    bytes,
-    utf8(ctx, `\r\n--${boundary}--\r\n`),
-  ]);
+  const { body, content_type } = multipart(
+    [
+      { content_type: "application/json; charset=UTF-8", body: JSON.stringify(metadata) },
+      { content_type: contentType, body: { file: args.path } },
+    ],
+    "related",
+  );
 
   const res = await ctx.fetch(
     `${uploadBase(ctx)}/files${query({
@@ -389,11 +369,7 @@ export async function upload_file(
     })}`,
     {
       method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": `multipart/related; boundary=${boundary}`,
-        ...authHeaders(ctx),
-      },
+      headers: { accept: "application/json", "content-type": content_type, ...authHeaders(ctx) },
       body,
     },
   );
@@ -462,43 +438,49 @@ export async function get_revision(
 }
 
 /**
- * Export a Google Doc, Sheet or Slides deck to another format, returned as base64
- * (`content_base64`). `export_format` is one of `txt`, `pdf`, `docx`, `html`, `csv`, `xlsx`,
- * `pptx`, `md`; the format must suit the file type (csv/xlsx for Sheets, pptx for Slides, docx/pdf
- * for Docs). The runtime's 10 MiB result cap means exports above roughly 7.5 MiB fail.
+ * Export a Google Doc, Sheet or Slides deck to another format and save it to `path`
+ * (default `downloads/google_drive/<name>.<format>`), returning the saved file's `path`, `bytes`,
+ * `mime_type`, `name` and Drive's `web_view_link`. `export_format` is one of `txt`, `pdf`, `docx`,
+ * `html`, `csv`, `xlsx`, `pptx`, `md`; the format must suit the file type (csv/xlsx for Sheets,
+ * pptx for Slides, docx/pdf for Docs).
  */
 export async function export_file(
-  args: { file_id: string; export_format?: string },
+  args: { file_id: string; export_format?: string; path?: string },
   ctx: Ctx,
 ): Promise<Download> {
   const exportFormat = args.export_format ?? "txt";
   const mimeType = exportMimeType(exportFormat);
-  const metadata = await fileMetadata(ctx, args.file_id, "name,mimeType,webViewLink");
-  const bytes = await downloadUrl(
+  const fileId = driveId(args.file_id);
+  const metadata = await fileMetadata(ctx, fileId, "name,mimeType,webViewLink");
+  const name = `${(metadata.name || fileId).replace(/\.[^./]*$/, "")}.${exportFormat}`;
+  const saved = await downloadTo(
     ctx,
-    `${base(ctx)}/files/${encodeURIComponent(driveId(args.file_id))}/export${query({ mimeType })}`,
+    `${base(ctx)}/files/${encodeURIComponent(fileId)}/export${query({ mimeType })}`,
+    outputPath(args.path, "google_drive", name),
     "Google Drive export",
+    { headers: authHeaders(ctx) },
   );
-  const result = downloadResult(metadata, mimeType, bytes, ctx);
-  return { ...result, name: `${result.name.replace(/\.[^./]*$/, "")}.${exportFormat}` };
+  return downloadResult(metadata, saved, mimeType, name);
 }
 
 /**
- * Export an earlier revision of a Google Doc, Sheet or Slides deck as base64 (`content_base64`),
- * using the revision's own `exportLinks` (`export_format`: txt, pdf, docx, html, csv, xlsx, pptx,
- * md). Throws when that revision cannot be exported in the requested format; see `get_revision`
- * for the formats it offers.
+ * Export an earlier revision of a Google Doc, Sheet or Slides deck to `path` (default
+ * `downloads/google_drive/<name>-revision-<revision_id>.<format>`), using the revision's own
+ * `exportLinks` (`export_format`: txt, pdf, docx, html, csv, xlsx, pptx, md). Throws when that
+ * revision cannot be exported in the requested format; see `get_revision` for the formats it
+ * offers.
  */
 export async function export_revision(
-  args: { file_id: string; revision_id: string; export_format?: string },
+  args: { file_id: string; revision_id: string; export_format?: string; path?: string },
   ctx: Ctx,
 ): Promise<Download> {
   const exportFormat = args.export_format ?? "pdf";
   const mimeType = exportMimeType(exportFormat);
-  const metadata = await fileMetadata(ctx, args.file_id, "name,mimeType,webViewLink");
+  const fileId = driveId(args.file_id);
+  const metadata = await fileMetadata(ctx, fileId, "name,mimeType,webViewLink");
   const revision: Revision = await request(
     ctx,
-    `/files/${encodeURIComponent(driveId(args.file_id))}/revisions/${encodeURIComponent(args.revision_id)}${query({ fields: REVISION_FIELDS })}`,
+    `/files/${encodeURIComponent(fileId)}/revisions/${encodeURIComponent(args.revision_id)}${query({ fields: REVISION_FIELDS })}`,
   );
   const exportUrl = (revision.exportLinks || {})[mimeType];
   if (!exportUrl) {
@@ -512,51 +494,53 @@ export async function export_revision(
       }`,
     );
   }
+  const stem = (metadata.name || fileId).replace(/\.[^./]*$/, "");
+  const name = `${stem}-revision-${args.revision_id}.${exportFormat}`;
   // Export links are pre-signed: they carry no bearer token, and iron-proxy only
   // injects OAuth for the googleapis.com hosts.
-  const bytes = await downloadUrl(ctx, exportUrl, "Google Drive revision export");
-  const result = downloadResult(metadata, mimeType, bytes, ctx);
-  return { ...result, name: `${result.name.replace(/\.[^./]*$/, "")}-revision-${args.revision_id}.${exportFormat}` };
+  const saved = await downloadTo(
+    ctx,
+    exportUrl,
+    outputPath(args.path, "google_drive", name),
+    "Google Drive revision export",
+    { headers: authHeaders(ctx) },
+  );
+  return downloadResult(metadata, saved, mimeType, name);
 }
 
 /**
- * Download an earlier revision of a binary (non-Google-native) file as base64
- * (`content_base64`). Native Docs, Sheets and Slides have no binary revision: use
- * `export_revision` for those.
+ * Download an earlier revision of a binary (non-Google-native) file to `path` (default
+ * `downloads/google_drive/<name>-revision-<revision_id><ext>`). Native Docs, Sheets and Slides
+ * have no binary revision: use `export_revision` for those.
  */
 export async function download_revision(
-  args: { file_id: string; revision_id: string },
+  args: { file_id: string; revision_id: string; path?: string },
   ctx: Ctx,
 ): Promise<Download> {
-  const metadata = await fileMetadata(ctx, args.file_id, "name,mimeType,webViewLink");
+  const fileId = driveId(args.file_id);
+  const metadata = await fileMetadata(ctx, fileId, "name,mimeType,webViewLink");
   const revision: Revision = await request(
     ctx,
-    `/files/${encodeURIComponent(driveId(args.file_id))}/revisions/${encodeURIComponent(args.revision_id)}${query({ fields: REVISION_FIELDS })}`,
+    `/files/${encodeURIComponent(fileId)}/revisions/${encodeURIComponent(args.revision_id)}${query({ fields: REVISION_FIELDS })}`,
   );
-  const mimeType = revision.mimeType || metadata.mimeType || "";
+  const mimeType = revision.mimeType || metadata.mimeType || "application/octet-stream";
   if (mimeType.startsWith("application/vnd.google-apps.")) {
     throw new Error(
       "Google Docs, Sheets and Slides revisions must be downloaded with export_revision",
     );
   }
-  const bytes = await ctx
-    .fetch(
-      `${base(ctx)}/files/${encodeURIComponent(driveId(args.file_id))}/revisions/${encodeURIComponent(args.revision_id)}${query({ alt: "media" })}`,
-      { headers: authHeaders(ctx) },
-    )
-    .then(async (res) => {
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(
-          `Google Drive revision download returned HTTP ${res.status}: ${text.slice(0, 1000)}`,
-        );
-      }
-      return res.bytes();
-    });
-  const stem = (revision.originalFilename || metadata.name || args.file_id).replace(/\.[^./]*$/, "");
+  const source = revision.originalFilename || metadata.name || fileId;
+  const stem = source.replace(/\.[^./]*$/, "");
   const extension = (revision.originalFilename || metadata.name || "").match(/\.[^./]*$/)?.[0] || "";
-  const result = downloadResult(metadata, mimeType, bytes, ctx);
-  return { ...result, name: `${stem}-revision-${args.revision_id}${extension}` };
+  const name = `${stem}-revision-${args.revision_id}${extension}`;
+  const saved = await downloadTo(
+    ctx,
+    `${base(ctx)}/files/${encodeURIComponent(fileId)}/revisions/${encodeURIComponent(args.revision_id)}${query({ alt: "media" })}`,
+    outputPath(args.path, "google_drive", name),
+    "Google Drive revision download",
+    { headers: authHeaders(ctx) },
+  );
+  return downloadResult(metadata, saved, mimeType, name);
 }
 
 /**

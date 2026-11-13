@@ -1,4 +1,5 @@
-import type { Ctx } from "../centaur";
+import type { Ctx, Files } from "../centaur";
+import { outputPath, requireFiles, saveBytes } from "../_lib/files";
 import { query, readJson, type Params } from "../_lib/http";
 
 // Results are Gmail's own resources, passed through: messages, payload/parts, labels. Envelopes
@@ -8,7 +9,12 @@ import { query, readJson, type Params } from "../_lib/http";
 // Authorization header on the wire; the connector itself sends no credentials unless
 // GOOGLE_ACCESS_TOKEN is set (local testing only).
 
-const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+const DEFAULT_GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+
+/** Gmail's REST base under `/users/me`; `GMAIL_API_URL` overrides it (local mock testing only). */
+function gmailBase(ctx: Ctx): string {
+  return (ctx.env.GMAIL_API_URL || DEFAULT_GMAIL).replace(/\/+$/, "");
+}
 
 /** Headers fetched for the metadata-format messages `search_messages` returns. */
 const DEFAULT_METADATA_HEADERS = ["Subject", "From", "To", "Cc", "Date", "Message-ID"];
@@ -64,12 +70,12 @@ export interface Label {
   [field: string]: unknown;
 }
 
-/** A file attached to an outgoing message, as base64. */
+/** A file attached to an outgoing message, named by a path in the sandbox. */
 export interface AttachmentInput {
-  /** File name shown to the recipient, for example `report.pdf`. */
-  filename: string;
-  /** File bytes, base64 in either alphabet, with or without padding. */
-  content_base64: string;
+  /** Path of the file to attach, relative to the files root or absolute inside it. */
+  path: string;
+  /** File name shown to the recipient, for example `report.pdf`. Defaults to the path's last segment. */
+  filename?: string;
   /** Defaults to `application/octet-stream`. */
   mime_type?: string;
 }
@@ -81,6 +87,19 @@ export interface AttachmentRef {
   mimeType: string;
   size: number;
   attachmentId: string;
+}
+
+/** A file a connector function saved for the caller. */
+export interface SavedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
+}
+
+/** A received attachment saved to a file, with Gmail's attachment id. */
+export interface DownloadedAttachment extends SavedFile {
+  attachment_id: string;
 }
 
 function headers(ctx: Ctx): Record<string, string> {
@@ -98,7 +117,7 @@ async function gmail(
 ): Promise<any> {
   const requestHeaders = headers(ctx);
   if (options.body !== undefined) requestHeaders["content-type"] = "application/json";
-  const res = await ctx.fetch(`${GMAIL}${path}${query(options.params ?? {})}`, {
+  const res = await ctx.fetch(`${gmailBase(ctx)}${path}${query(options.params ?? {})}`, {
     method: options.method ?? (options.body === undefined ? "GET" : "POST"),
     headers: requestHeaders,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -208,19 +227,27 @@ function contentPart(ctx: Ctx, contentType: string, body: string): string {
   ].join("\r\n");
 }
 
-function attachmentPart(ctx: Ctx, file: AttachmentInput): string {
-  const name = file.filename.replace(/[\r\n]+/g, " ").trim();
+/** The last segment of a path, for defaulting an attachment's filename. */
+function pathName(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "attachment.bin";
+}
+
+/** Gmail rejects a raw message over 25 MB, attachments included. */
+const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
+
+function attachmentPart(ctx: Ctx, file: AttachmentInput, data: Uint8Array): string {
+  const name = (file.filename || pathName(file.path)).replace(/[\r\n]+/g, " ").trim();
   const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
   const disposition = /[^\x20-\x7e]/.test(name)
     ? `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`
     : `attachment; filename="${ascii}"`;
-  const data = wrap76(ctx.base64.encode(ctx.base64.decode(file.content_base64)));
   return [
     `Content-Type: ${file.mime_type ?? "application/octet-stream"}; name="${ascii}"`,
     "Content-Transfer-Encoding: base64",
     `Content-Disposition: ${disposition}`,
     "",
-    data,
+    wrap76(ctx.base64.encode(data)),
   ].join("\r\n");
 }
 
@@ -237,7 +264,7 @@ interface OutgoingMessage {
 }
 
 /** RFC 2822 (MIME) text for a message; the caller base64urls it. */
-function buildMessage(ctx: Ctx, input: OutgoingMessage): string {
+async function buildMessage(ctx: Ctx, input: OutgoingMessage, what: string): Promise<string> {
   const head: string[] = [`To: ${addressList(ctx, input.to)}`];
   if (input.cc) head.push(`Cc: ${addressList(ctx, input.cc)}`);
   if (input.bcc) head.push(`Bcc: ${addressList(ctx, input.bcc)}`);
@@ -265,9 +292,23 @@ function buildMessage(ctx: Ctx, input: OutgoingMessage): string {
   }
 
   if (input.attachments?.length) {
+    const files: Files = requireFiles(ctx, what);
+    let total = 0;
+    for (const file of input.attachments) {
+      const info = await files.stat(file.path);
+      if (!info) throw new Error(`${what}: no such attachment file: ${file.path}`);
+      total += info.bytes;
+    }
+    if (total > MAX_MESSAGE_BYTES) {
+      throw new Error(
+        `${what}: attachments total ${total} bytes; Gmail rejects a message over ${MAX_MESSAGE_BYTES}`,
+      );
+    }
     const mixed = boundary();
     const chunks = [`--${mixed}`, content];
-    for (const file of input.attachments) chunks.push(`--${mixed}`, attachmentPart(ctx, file));
+    for (const file of input.attachments) {
+      chunks.push(`--${mixed}`, attachmentPart(ctx, file, await files.read(file.path)));
+    }
     chunks.push(`--${mixed}--`);
     content = [
       `Content-Type: multipart/mixed; boundary="${mixed}"`,
@@ -389,20 +430,28 @@ export async function get_message_body(
 }
 
 /**
- * Download one attachment of a received message by its `attachmentId` from `get_message_body`.
- * Returns the bytes as `data_base64` (standard alphabet) and `size`; a response is capped at
- * 10 MiB, so very large attachments fail instead of truncating.
+ * Save one attachment of a received message to `path` (default
+ * `downloads/gmail/<attachment_id>.bin`) by the `attachmentId` from `get_message_body`, and return
+ * its `path`, `bytes` and `attachment_id`. Gmail sends attachment bytes base64url-encoded in JSON,
+ * so the runtime decodes and writes them without the bytes reaching the caller. Pass `path` with
+ * the MIME type's extension (`attachment` in `get_message_body` has `filename` and `mimeType`).
  */
 export async function get_attachment(
-  args: { message_id: string; attachment_id: string },
+  args: { message_id: string; attachment_id: string; path?: string },
   ctx: Ctx,
-): Promise<{ attachment_id: string; size: number; data_base64: string }> {
+): Promise<DownloadedAttachment> {
+  requireFiles(ctx, "gmail.get_attachment");
   const body = await gmail(
     ctx,
     `/messages/${seg(args.message_id)}/attachments/${seg(args.attachment_id)}`,
   );
-  const bytes = ctx.base64.decode(body.data ?? "");
-  return { attachment_id: args.attachment_id, size: bytes.length, data_base64: ctx.base64.encode(bytes) };
+  const saved = await saveBytes(
+    ctx,
+    outputPath(args.path, "gmail", `${args.attachment_id}.bin`),
+    ctx.base64.decode(body.data ?? ""),
+    "gmail.get_attachment",
+  );
+  return { attachment_id: args.attachment_id, path: saved.path, bytes: saved.bytes };
 }
 
 /**
@@ -419,8 +468,9 @@ export async function list_labels(args: {}, ctx: Ctx): Promise<{ labels: Label[]
  * Send an email: `body` is the plain-text body, and `html` (optional) makes the message
  * multipart/alternative with `body` as its text fallback. `to`/`cc`/`bcc` are RFC 5322 address
  * lists (`Ana <a@b.com>, b@c.com`); subject and display names are RFC 2047 encoded when not
- * ASCII. Attachments are supplied inline as base64. Returns the sent message (id, threadId,
- * labelIds).
+ * ASCII. Attachments are `{ path }` entries naming files in the sandbox: the runtime reads each
+ * one into the MIME message (Gmail takes the bytes inside the raw message), refusing when they
+ * total more than Gmail's 25 MB limit. Returns the sent message (id, threadId, labelIds).
  */
 export async function send_message(
   args: {
@@ -434,14 +484,14 @@ export async function send_message(
   },
   ctx: Ctx,
 ): Promise<{ message: GmailMessage }> {
-  const raw = b64url(ctx, buildMessage(ctx, args));
+  const raw = b64url(ctx, await buildMessage(ctx, args, "gmail.send_message"));
   return { message: await gmail(ctx, "/messages", { body: { raw } }) };
 }
 
 /**
  * Reply in the original message's thread: recipient is the original `From`, the subject gets a
  * `Re: ` prefix unless it has one, and `In-Reply-To`/`References` carry the original `Message-ID`.
- * Same `html`/`attachments` support as `send_message`.
+ * Same `html`/`attachments` support as `send_message`: each attachment is a `path` in the sandbox.
  */
 export async function reply(
   args: {
@@ -464,14 +514,18 @@ export async function reply(
   if (!to) throw new Error(`message ${args.message_id} has no From header to reply to`);
   const raw = b64url(
     ctx,
-    buildMessage(ctx, {
-      to,
-      subject: subject.toLowerCase().startsWith("re:") ? subject : `Re: ${subject}`,
-      body: args.body,
-      html: args.html,
-      attachments: args.attachments,
-      inReplyTo: messageId,
-    }),
+    await buildMessage(
+      ctx,
+      {
+        to,
+        subject: subject.toLowerCase().startsWith("re:") ? subject : `Re: ${subject}`,
+        body: args.body,
+        html: args.html,
+        attachments: args.attachments,
+        inReplyTo: messageId,
+      },
+      "gmail.reply",
+    ),
   );
   return {
     message: await gmail(ctx, "/messages", {

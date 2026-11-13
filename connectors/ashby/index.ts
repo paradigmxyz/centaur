@@ -1,4 +1,5 @@
 import type { Ctx } from "../centaur";
+import { downloadTo, outputPath, safeFilename } from "../_lib/files";
 
 // Ashby's API is one POST endpoint per operation: a JSON body to
 // `https://api.ashbyhq.com/<endpoint>` (for example `job.list`) answers
@@ -530,8 +531,7 @@ export async function candidate_tags(args: {}, ctx: Ctx): Promise<{ tags: Candid
 
 /**
  * Download URL for a file handle (a resume, for example). The URL is short-lived; `url` is null when
- * Ashby returns none. Building the URL is all a connector can do — downloading the bytes is the
- * caller's job.
+ * Ashby returns none. Use `download_file` to save the bytes.
  */
 export async function file_url(
   args: { file_handle: string },
@@ -549,16 +549,14 @@ export async function file_url(
 /**
  * Download URL for a candidate's resume: the first file handle whose type is "Resume" or whose name
  * contains "resume", resolved through `file_url`. `url` is null when the candidate has no resume.
+ * Use `download_resume` to save the bytes.
  */
 export async function resume_url(
   args: { candidate_id: string },
   ctx: Ctx,
 ): Promise<{ url: string | null }> {
   const found = await one<Candidate>(ctx, "candidate.info", { id: args.candidate_id }, "candidate");
-  const handles: FileHandle[] = Array.isArray(found.fileHandles) ? found.fileHandles : [];
-  const resume = handles.find(
-    (handle) => handle.type === "Resume" || (handle.name ?? "").toLowerCase().includes("resume"),
-  );
+  const resume = resumeHandle(found);
   if (!resume?.handle) return { url: null };
   const file = await one<{ url?: string }>(
     ctx,
@@ -567,6 +565,90 @@ export async function resume_url(
     "file",
   );
   return { url: file.url ?? null };
+}
+
+/** The candidate's resume file handle: the first typed "Resume" or named like one. */
+function resumeHandle(candidate: Candidate): FileHandle | undefined {
+  const handles: FileHandle[] = Array.isArray(candidate.fileHandles) ? candidate.fileHandles : [];
+  return handles.find(
+    (handle) => handle.type === "Resume" || (handle.name ?? "").toLowerCase().includes("resume"),
+  );
+}
+
+/** A file saved under the files root, with the signed URL it came from. */
+export interface DownloadedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
+  filename: string;
+  url: string;
+}
+
+/** Save one short-lived signed Ashby URL to `requested` (or `downloads/ashby/<filename>`). */
+async function saveFile(
+  ctx: Ctx,
+  url: string,
+  requested: string | undefined,
+  named: string | undefined,
+  label: string,
+): Promise<DownloadedFile> {
+  const fromUrl = url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "file";
+  const filename = safeFilename(named || fromUrl);
+  const saved = await downloadTo(ctx, url, outputPath(requested, "ashby", filename), label);
+  return { ...saved, filename, url };
+}
+
+/**
+ * Download a file handle's bytes (an uploaded resume or attachment) to disk through Ashby's
+ * short-lived signed URL, resolving it with `file_url`. `path` says where to save it (relative to
+ * the files root or absolute inside it; default `downloads/ashby/<filename>`, from the handle's name
+ * or the URL). Returns the saved file's absolute `path`, `bytes`, `mime_type`, `filename` and the
+ * signed `url` it downloaded from.
+ */
+export async function download_file(
+  args: { file_handle: string; path?: string },
+  ctx: Ctx,
+): Promise<{ file: DownloadedFile }> {
+  const handle = await one<{ url?: string; name?: string }>(
+    ctx,
+    "file.info",
+    { fileHandle: args.file_handle },
+    "file",
+  );
+  if (!handle.url) throw new Error(`Ashby returned no download URL for file handle ${args.file_handle}`);
+  return { file: await saveFile(ctx, handle.url, args.path, handle.name, "Ashby file download") };
+}
+
+/**
+ * Download a candidate's resume to disk, resolving the first resume file handle with `resume_url`.
+ * `path` says where to save it (relative to the files root or absolute inside it; default
+ * `downloads/ashby/<filename>`). Returns the saved file's absolute `path`, `bytes`, `mime_type`,
+ * `filename` and the signed `url` it downloaded from; fails when the candidate has no resume.
+ */
+export async function download_resume(
+  args: { candidate_id: string; path?: string },
+  ctx: Ctx,
+): Promise<{ file: DownloadedFile }> {
+  const candidate = await one<Candidate>(ctx, "candidate.info", { id: args.candidate_id }, "candidate");
+  const resume = resumeHandle(candidate);
+  if (!resume?.handle) throw new Error(`Ashby candidate ${args.candidate_id} has no resume file`);
+  const handle = await one<{ url?: string; name?: string }>(
+    ctx,
+    "file.info",
+    { fileHandle: resume.handle },
+    "file",
+  );
+  if (!handle.url) throw new Error(`Ashby returned no download URL for resume ${resume.handle}`);
+  return {
+    file: await saveFile(
+      ctx,
+      handle.url,
+      args.path,
+      resume.name || handle.name,
+      "Ashby resume download",
+    ),
+  };
 }
 
 /**

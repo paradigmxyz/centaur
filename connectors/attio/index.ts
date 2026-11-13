@@ -1,4 +1,5 @@
-import type { Ctx } from "../centaur";
+import type { BodyPart, Ctx } from "../centaur";
+import { multipart, requireFiles, safeFilename } from "../_lib/files";
 import { query, type Params } from "../_lib/http";
 
 // Attio's REST API answers `{ data, pagination? }` envelopes; results here are
@@ -230,7 +231,8 @@ export interface AttioResponse {
 interface FormFile {
   filename: string;
   content_type: string;
-  bytes: Uint8Array;
+  /** A file in the sandbox, sent by the runtime without being read into the realm. */
+  path: string;
 }
 
 interface Form {
@@ -242,50 +244,6 @@ interface RequestOptions {
   query?: Params;
   json?: unknown;
   form?: Form;
-}
-
-/** UTF-8 bytes; `TextEncoder` exists at runtime but not in the `es2023` type lib. */
-function utf8(text: string): Uint8Array {
-  const out: number[] = [];
-  for (let i = 0; i < text.length; i += 1) {
-    let code = text.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
-      const next = text.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
-        i += 1;
-      }
-    }
-    if (code < 0x80) out.push(code);
-    else if (code < 0x800) out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    else if (code < 0x10000) out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-    else out.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-  }
-  return new Uint8Array(out);
-}
-
-function multipart(form: Form, boundary: string): Uint8Array {
-  const parts: Uint8Array[] = [];
-  for (const [name, value] of form.fields) {
-    parts.push(utf8(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
-  }
-  parts.push(
-    utf8(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${form.file.filename}"\r\n` +
-        `Content-Type: ${form.file.content_type}\r\n\r\n`,
-    ),
-  );
-  parts.push(form.file.bytes);
-  parts.push(utf8(`\r\n--${boundary}--\r\n`));
-  let length = 0;
-  for (const part of parts) length += part.length;
-  const body = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    body.set(part, offset);
-    offset += part.length;
-  }
-  return body;
 }
 
 /** `Retry-After` as seconds: a delta-seconds number or an HTTP date. */
@@ -335,14 +293,22 @@ async function request(
   // Behind iron-proxy the token is injected on the wire; locally it comes from the env.
   const key = ctx.env.ATTIO_API_KEY;
   if (key) headers.authorization = `Bearer ${key}`;
-  let body: string | Uint8Array | undefined;
+  let body: string | BodyPart[] | undefined;
   if (options.json !== undefined) {
     headers["content-type"] = "application/json";
     body = JSON.stringify(options.json);
   } else if (options.form) {
-    const boundary = `----centaur${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
-    headers["content-type"] = `multipart/form-data; boundary=${boundary}`;
-    body = multipart(options.form, boundary);
+    const form = multipart([
+      ...options.form.fields.map(([name, value]) => ({ name, body: value })),
+      {
+        name: "file",
+        filename: options.form.file.filename,
+        content_type: options.form.file.content_type,
+        body: { file: options.form.file.path },
+      },
+    ]);
+    headers["content-type"] = form.content_type;
+    body = form.body;
   }
   const url = (ctx.env.ATTIO_API_URL || DEFAULT_BASE).replace(/\/+$/, "") + path + query(options.query ?? {});
 
@@ -858,24 +824,26 @@ export async function list_workspace_members(args: {}, ctx: Ctx): Promise<{ memb
 }
 
 /**
- * Write: attach a file to a record by sending its bytes. Pass the content base64-encoded in
- * `content_base64` (there is no local filesystem here), plus the filename to show in Attio and its MIME
- * type (`content_type`, default `application/octet-stream`). Attio accepts files up to 50 MB.
- * `parent_folder_id` files it in an Attio folder.
+ * Write: attach a file to a record by sending it from disk. `path` is a file in the sandbox (the
+ * runtime streams it as the multipart body), `filename` is the name to show in Attio (default: the
+ * path's last segment) and `content_type` its MIME type (default `application/octet-stream`).
+ * Attio accepts files up to 50 MB. `parent_folder_id` files it in an Attio folder.
  */
 export async function upload_file(
   args: {
     object_slug: string;
     record_id: string;
-    filename: string;
-    content_base64: string;
+    path: string;
+    filename?: string;
     content_type?: string;
     parent_folder_id?: string;
   },
   ctx: Ctx,
 ): Promise<{ file: AttioFile }> {
-  const bytes = ctx.base64.decode(args.content_base64);
-  if (!bytes.length) throw new Error("content_base64 decoded to no bytes");
+  const files = requireFiles(ctx, "attio.upload_file");
+  const info = await files.stat(args.path);
+  if (!info) throw new Error(`No such file: ${args.path}`);
+  if (!info.bytes) throw new Error(`File is empty: ${args.path}`);
   const fields: [string, string][] = [
     ["object", args.object_slug],
     ["record_id", args.record_id],
@@ -885,9 +853,9 @@ export async function upload_file(
     form: {
       fields,
       file: {
-        filename: args.filename,
+        filename: safeFilename(args.filename ?? args.path.split(/[\\/]/).filter(Boolean).pop() ?? "file"),
         content_type: args.content_type || "application/octet-stream",
-        bytes,
+        path: args.path,
       },
     },
   });

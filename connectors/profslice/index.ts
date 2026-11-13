@@ -1,4 +1,5 @@
 import type { Ctx } from "../centaur";
+import { downloadTo, outputPath, requireFiles, safeFilename } from "../_lib/files";
 
 // A Firefox Profiler profile is one JSON document: `meta`, `threads` (each with
 // samples, markers, stack/frame/func tables and a string table) and `shared`.
@@ -7,8 +8,30 @@ import type { Ctx } from "../centaur";
 
 const STORAGE_BASE = "https://storage.googleapis.com/profile-store";
 const ALLOWED_HOSTS = ["share.firefox.dev", "profiler.firefox.com", "storage.googleapis.com"];
-/** Responses are capped at 10 MiB by the runtime, decompressed size included. */
-const SIZE_NOTE = "profiles over ~10 MiB (decompressed) cannot be fetched here";
+/** Downloads and decompressed profiles are capped at 10 MiB by the runtime. */
+const SIZE_NOTE = "profiles over ~10 MiB (decompressed) cannot be read here";
+
+/** A profile saved to a file. */
+export interface SavedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
+}
+
+/**
+ * Where a profile comes from: a share URL, or a file in the sandbox such as one `fetch_profile`
+ * saved. Pass exactly one of `url` and `path`.
+ */
+export interface ProfileSource {
+  /**
+   * Share or download URL. Accepted hosts: share.firefox.dev, profiler.firefox.com and
+   * storage.googleapis.com.
+   */
+  url?: string;
+  /** A profile file: plain JSON, or gzip compressed (`.json`, `.json.gz`; detected by content). */
+  path?: string;
+}
 
 /** Profile metadata (`meta`). `interval` is the sampling interval in ms. */
 export interface ProfileMeta {
@@ -172,19 +195,16 @@ function isGzip(bytes: Uint8Array): boolean {
   return bytes.length > 1 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 }
 
-/** Download a profile and parse it; gzipped payloads are decompressed with `ctx.gunzip`. */
-async function loadProfile(ctx: Ctx, url: string): Promise<FirefoxProfile> {
-  const source = downloadUrl(url);
-  const res = await ctx.fetch(source, { headers: { "user-agent": "profslice/0.1.0" } });
-  if (!res.ok) {
-    throw new Error(`profile download returned HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  }
+/**
+ * Parse a profile document from `source` (a URL or path, for error messages); gzipped payloads
+ * are decompressed with `ctx.gunzip`.
+ */
+function parseProfile(ctx: Ctx, bytes: Uint8Array, source: string): FirefoxProfile {
   // `ctx.fetch` already decodes a gzip Content-Encoding; profiles are often
   // also stored as a gzip file, which shows up as the magic bytes.
-  let bytes = await res.bytes();
-  if (isGzip(bytes)) bytes = ctx.gunzip(bytes);
+  const data = isGzip(bytes) ? ctx.gunzip(bytes) : bytes;
   // No TextDecoder here: round-trip through the host's UTF-8 codec.
-  const text = ctx.base64.decodeText(ctx.base64.encode(bytes));
+  const text = ctx.base64.decodeText(ctx.base64.encode(data));
   try {
     const profile = JSON.parse(text) as FirefoxProfile;
     if (!profile || typeof profile !== "object" || !Array.isArray(profile.threads)) {
@@ -193,10 +213,38 @@ async function loadProfile(ctx: Ctx, url: string): Promise<FirefoxProfile> {
     return profile;
   } catch {
     throw new Error(
-      `${source} did not return a Firefox Profiler profile (an HTML page or a truncated body); ` +
-        `short share links only work when they redirect straight to a downloadable profile. ${SIZE_NOTE}`,
+      `${source} did not contain a Firefox Profiler profile (JSON with a threads array, plain or ` +
+        `gzip compressed; an HTML page or a truncated body looks the same); short share links only ` +
+        `work when they redirect straight to a downloadable profile. ${SIZE_NOTE}`,
     );
   }
+}
+
+/** Load a profile from a `url` or a saved file `path`; `what` names the call in file errors. */
+async function loadProfile(ctx: Ctx, args: ProfileSource, what: string): Promise<FirefoxProfile> {
+  const url = (args.url ?? "").trim();
+  const path = (args.path ?? "").trim();
+  if (url && path) throw new Error("pass url or path, not both");
+  if (path) {
+    const files = requireFiles(ctx, what);
+    if (!(await files.stat(path))) throw new Error(`no such file: ${path}`);
+    return parseProfile(ctx, await files.read(path), path);
+  }
+  if (!url) throw new Error("url (a share link) or path (a saved profile file) is required");
+  const source = downloadUrl(url);
+  const res = await ctx.fetch(source, { headers: { "user-agent": "profslice/0.1.0" } });
+  if (!res.ok) {
+    throw new Error(`profile download returned HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+  return parseProfile(ctx, await res.bytes(), source);
+}
+
+/** `<storage id>.json` for a download URL; the analysis functions detect gzip by content. */
+function profileFilename(url: string): string {
+  const path = url.split(/[?#]/)[0];
+  const segment = path.slice(path.lastIndexOf("/") + 1).replace(/:download$/, "");
+  const stem = segment.replace(/\.gz$/i, "").replace(/\.json$/i, "");
+  return `${safeFilename(stem || "profile")}.json`;
 }
 
 function categoryMap(meta: ProfileMeta): Map<number, string> {
@@ -557,25 +605,40 @@ export async function resolve_url(args: { url: string }, ctx: Ctx): Promise<{ do
 }
 
 /**
- * Download and parse a whole profile (gzip compressed or plain JSON) and return it unchanged:
- * `meta`, `threads`, `shared`. Use it to inspect the raw document; for anything but small profiles
- * prefer the analysis functions, which return slices. Accepted hosts: share.firefox.dev,
- * profiler.firefox.com and storage.googleapis.com. Local files cannot be read.
+ * Download a whole profile (gzip compressed or plain JSON) and save it unchanged to a file: the
+ * document keeps `meta`, `threads` and `shared` as the profiler wrote them. `path` is where to
+ * save it, relative to the files root or absolute inside it (default
+ * `downloads/profslice/<storage id>.json`); the file limit is 100 MiB. The bytes are saved as
+ * served, so a gzip-compressed profile stays gzip compressed even under a `.json` name (the
+ * analysis functions detect it by content). Returns the saved file's `path`, `bytes` and
+ * `mime_type`. Hand that `path` to the analysis functions instead of the URL
+ * to avoid downloading it again. Accepted hosts: share.firefox.dev, profiler.firefox.com and
+ * storage.googleapis.com.
  */
 export async function fetch_profile(
-  args: { url: string },
+  args: { url: string; path?: string },
   ctx: Ctx,
-): Promise<{ profile: FirefoxProfile }> {
-  return { profile: await loadProfile(ctx, args.url) };
+): Promise<SavedFile> {
+  const source = downloadUrl(args.url);
+  const saved = await downloadTo(
+    ctx,
+    source,
+    outputPath(args.path, "profslice", profileFilename(source)),
+    "profile download",
+    { headers: { "user-agent": "profslice/0.1.0" } },
+  );
+  const result: SavedFile = { path: saved.path, bytes: saved.bytes };
+  if (saved.mime_type) result.mime_type = saved.mime_type;
+  return result;
 }
 
 /**
  * Profile metadata and totals: `product`, `platform`, `interval_ms` (sampling interval), profile
  * `version`, thread and sample/marker counts, and the category names. The cheapest call for a
- * first look.
+ * first look. `url` or `path` as in `fetch_profile`.
  */
 export async function profile_info(
-  args: { url: string },
+  args: ProfileSource,
   ctx: Ctx,
 ): Promise<{
   product: string;
@@ -587,7 +650,7 @@ export async function profile_info(
   total_markers: number;
   categories: (string | undefined)[];
 }> {
-  const profile = await loadProfile(ctx, args.url);
+  const profile = await loadProfile(ctx, args, "profslice.profile_info");
   const meta = profile.meta ?? { interval: 0 };
   const threads = profile.threads ?? [];
   return {
@@ -605,13 +668,14 @@ export async function profile_info(
 /**
  * Every thread with its id, name, process, main-thread flag, sample and marker counts, first/last
  * sample time (ms from profile start), duration and total CPU time (`cpu_delta_total_ns`, ns).
- * Use `tid` or the thread name as `thread` in the other functions.
+ * Use `tid` or the thread name as `thread` in the other functions. `url` or `path` as in
+ * `fetch_profile`.
  */
 export async function threads(
-  args: { url: string },
+  args: ProfileSource,
   ctx: Ctx,
 ): Promise<{ threads: ThreadSummary[] }> {
-  return { threads: threadSummaries(await loadProfile(ctx, args.url)) };
+  return { threads: threadSummaries(await loadProfile(ctx, args, "profslice.threads")) };
 }
 
 /**
@@ -621,13 +685,19 @@ export async function threads(
  * `end_time_ms`, which are often in the millions. Each sample has `time_ms`, `stack` (function
  * names, leaf first, up to `max_depth` frames, default 10), `weight` and `cpu_delta_ns` where the
  * platform provides it.
- * `limit` caps samples (default 100) and returns `truncated`.
+ * `limit` caps samples (default 100) and returns `truncated`. `url` or `path` as in
+ * `fetch_profile`.
  */
 export async function samples(
-  args: { url: string; thread?: string | number; time_range?: string; max_depth?: number; limit?: number },
+  args: ProfileSource & {
+    thread?: string | number;
+    time_range?: string;
+    max_depth?: number;
+    limit?: number;
+  },
   ctx: Ctx,
 ): Promise<{ samples: Sample[]; truncated: boolean }> {
-  const profile = await loadProfile(ctx, args.url);
+  const profile = await loadProfile(ctx, args, "profslice.samples");
   const thread = selectThread(profile, args.thread);
   const all = getSamples(profile, thread, parseTimeRange(args.time_range), checkDepth(args.max_depth, 10));
   const limit = checkLimit(args.limit, 100);
@@ -639,11 +709,10 @@ export async function samples(
  * `category`, `start_ms`, `end_ms`/`duration_ms` for intervals, `phase` and the marker's `data`
  * payload. `marker_type` matches the marker name or its `data.type` (case-insensitive substring);
  * `category` matches the category name; `time_range` is as in `samples`. `limit` caps markers
- * (default 100) and returns `truncated`.
+ * (default 100) and returns `truncated`. `url` or `path` as in `fetch_profile`.
  */
 export async function markers(
-  args: {
-    url: string;
+  args: ProfileSource & {
     thread?: string | number;
     marker_type?: string;
     category?: string;
@@ -652,7 +721,7 @@ export async function markers(
   },
   ctx: Ctx,
 ): Promise<{ markers: Marker[]; truncated: boolean }> {
-  const profile = await loadProfile(ctx, args.url);
+  const profile = await loadProfile(ctx, args, "profslice.markers");
   const thread = selectThread(profile, args.thread);
   const all = getMarkers(
     profile,
@@ -670,11 +739,11 @@ export async function markers(
  * Hot functions (`by: "function"`, default) or hot stacks (`by: "stack"`), most self samples
  * first. Each entry has `self_samples`/`self_weight` (leaf), `total_samples`/`total_weight`
  * (anywhere in the stack) and both percentages of all samples in the thread and range. `top`
- * caps entries (default 20); `thread` and `time_range` are as in `samples`.
+ * caps entries (default 20); `thread` and `time_range` are as in `samples`, `url` or `path` as in
+ * `fetch_profile`.
  */
 export async function hotspots(
-  args: {
-    url: string;
+  args: ProfileSource & {
     thread?: string | number;
     time_range?: string;
     by?: "function" | "stack";
@@ -682,7 +751,7 @@ export async function hotspots(
   },
   ctx: Ctx,
 ): Promise<{ hotspots: Hotspot[] }> {
-  const profile = await loadProfile(ctx, args.url);
+  const profile = await loadProfile(ctx, args, "profslice.hotspots");
   const thread = selectThread(profile, args.thread);
   const top = args.top === undefined ? 20 : args.top;
   if (!Number.isInteger(top) || top < 1) throw new Error("top must be a positive integer");
@@ -694,15 +763,20 @@ export async function hotspots(
 /**
  * Time-bucketed sample counts for one thread: per `bucket` (`100ms`, `1s`, `2m`; default `1s`)
  * the start/end time, sample count, summed weight, summed CPU time (ns) and up to three most
- * sampled leaf functions. `thread` and `time_range` are as in `samples`.
+ * sampled leaf functions. `thread` and `time_range` are as in `samples`, `url` or `path` as in
+ * `fetch_profile`.
  */
 export async function timeline(
-  args: { url: string; thread?: string | number; time_range?: string; bucket?: string },
+  args: ProfileSource & {
+    thread?: string | number;
+    time_range?: string;
+    bucket?: string;
+  },
   ctx: Ctx,
 ): Promise<{ buckets: TimelineBucket[] }> {
   const bucketMs = parseMillis(args.bucket ?? "1s", "bucket size");
   if (bucketMs <= 0) throw new Error("bucket size must be positive");
-  const profile = await loadProfile(ctx, args.url);
+  const profile = await loadProfile(ctx, args, "profslice.timeline");
   const thread = selectThread(profile, args.thread);
   return { buckets: computeTimeline(profile, thread, parseTimeRange(args.time_range), bucketMs) };
 }

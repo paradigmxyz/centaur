@@ -1,4 +1,5 @@
 import type { Ctx, Response, RequestInit } from "../centaur";
+import { downloadTo, outputPath, requireFiles } from "../_lib/files";
 import { query, readJson } from "../_lib/http";
 
 // The DocSend tool drives a remote Chromium (Browserbase or browser-use cloud)
@@ -11,8 +12,6 @@ import { query, readJson } from "../_lib/http";
 const DEFAULT_BASE = "https://api.browserbase.com";
 const DEFAULT_SESSION_TIMEOUT_SECONDS = 600;
 const MAX_SESSION_TIMEOUT_SECONDS = 1800;
-// Tool results are capped at 10 MiB and base64 inflates bytes by 4/3.
-const MAX_DOWNLOAD_BYTES = 6 * 1024 * 1024;
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
 const METADATA_LIMIT_BYTES = 512;
 
@@ -40,12 +39,14 @@ export interface DownloadRecord {
   [field: string]: unknown;
 }
 
-/** A downloaded file, base64. */
+/** A download record's file, saved under the files root. */
 export interface DownloadContent {
   download_id: string;
   filename: string;
-  size_bytes: number;
-  content_base64: string;
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
 }
 
 function base(ctx: Ctx): string {
@@ -102,10 +103,22 @@ async function browserbaseError(res: Response): Promise<Error> {
   return new Error(`Browserbase API error ${res.status}${suffix}`);
 }
 
-async function request(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Response> {
-  const headers: Record<string, string | undefined> = { accept: "application/json", ...init.headers };
-  // Behind iron-proxy the key is injected on the wire; locally it comes from the env.
+/**
+ * Browserbase auth headers: behind iron-proxy the key is injected on the wire; locally it comes
+ * from the environment.
+ */
+function apiHeaders(ctx: Ctx, extra: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
   if (ctx.env.BROWSERBASE_API_KEY) headers["x-bb-api-key"] = ctx.env.BROWSERBASE_API_KEY;
+  return headers;
+}
+
+async function request(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Response> {
+  const headers: Record<string, string | undefined> = {
+    accept: "application/json",
+    ...apiHeaders(ctx),
+    ...init.headers,
+  };
   const res = await ctx.fetch(base(ctx) + path, { ...init, headers });
   if (!res.ok) throw await browserbaseError(res);
   return res;
@@ -222,37 +235,27 @@ export async function list_downloads(
 }
 
 /**
- * One download record's bytes, base64-encoded, with `filename` and `size_bytes`.
- * Capped at 6 MiB (base64 in a JSON result is capped at 10 MiB); larger files
- * fail. Write it with the caller's file tools.
+ * Download one download record's file into the files root (no result-size cap: the
+ * runtime streams it to disk). `path` says where to save it (relative to the files
+ * root or absolute inside it); the default is
+ * `downloads/docsend/<download_id>`, because Browserbase names the file in the
+ * response header rather than in the record. Returns the saved file's absolute
+ * `path`, `bytes` and `mime_type`; `list_downloads` has the record's own filename.
  */
 export async function download_content(
-  args: { download_id: string },
+  args: { download_id: string; path?: string },
   ctx: Ctx,
 ): Promise<DownloadContent> {
   const downloadId = args.download_id;
   if (!SESSION_ID_RE.test(downloadId)) throw new Error("Invalid Browserbase download ID");
-  const res = await request(ctx, `/v1/downloads/${encodeURIComponent(downloadId)}`, {
-    headers: { accept: "application/octet-stream" },
-  });
-  const disclosure = res.headers["content-disposition"] ?? "";
-  const named = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disclosure);
-  let filename = downloadId;
-  if (named) {
-    try {
-      filename = decodeURIComponent(named[1].trim());
-    } catch {
-      filename = named[1].trim();
-    }
-  }
-  const bytes = await res.bytes();
-  if (bytes.length > MAX_DOWNLOAD_BYTES) {
-    throw new Error(`Downloaded file exceeds the ${MAX_DOWNLOAD_BYTES / (1024 * 1024)} MiB limit`);
-  }
-  return {
-    download_id: downloadId,
-    filename,
-    size_bytes: bytes.length,
-    content_base64: ctx.base64.encode(bytes),
-  };
+  requireFiles(ctx, "docsend.download_content");
+  const saved = await downloadTo(
+    ctx,
+    `${base(ctx)}/v1/downloads/${encodeURIComponent(downloadId)}`,
+    outputPath(args.path, "docsend", downloadId),
+    "Browserbase download",
+    { headers: apiHeaders(ctx, { accept: "application/octet-stream" }) },
+  );
+  const filename = saved.path.split("/").filter(Boolean).pop() ?? downloadId;
+  return { download_id: downloadId, filename, ...saved };
 }

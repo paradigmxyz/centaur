@@ -1,4 +1,5 @@
 import type { Ctx } from "../centaur";
+import { downloadTo, multipart, outputPath, requireFiles, safeFilename } from "../_lib/files";
 import { readJson } from "../_lib/http";
 
 // Reducto document extraction, the HTTP core of tools/research/archiver: upload
@@ -12,8 +13,6 @@ const JOB_POLL_INTERVAL_SECONDS = 2;
 // A tool call is capped at 60 s, so waiting inside one call is bounded.
 const DEFAULT_WAIT_SECONDS = 50;
 const MAX_WAIT_SECONDS = 55;
-const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
-const MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024;
 
 // Public export endpoints, one per Google editor type.
 const GOOGLE_EXPORT_FORMATS: Record<string, string> = {
@@ -105,6 +104,17 @@ export interface UploadedFile {
   file_id: string;
   filename: string;
   size_bytes: number;
+}
+
+/** A file saved under the files root, with the Google IDs it came from. */
+export interface ExportedFile {
+  file_id: string;
+  link_type: string;
+  filename: string;
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
 }
 
 /** An accepted async job. */
@@ -244,38 +254,36 @@ export async function submit_extract(
 }
 
 /**
- * Upload one document (PDF, image, Word, PowerPoint or Excel) to Reducto.
- * `content_base64` is the file's bytes; `filename` drives Reducto's type
- * detection, `content_type` defaults to application/octet-stream. Uploads are
- * capped at 8 MiB so the base64 argument fits a cell. Returns the `file_id` for
- * `submit_parse`/`submit_extract`.
+ * Upload one document (PDF, image, Word, PowerPoint or Excel) to Reducto. `path`
+ * is a file in the sandbox (the runtime streams it as the multipart body, so it
+ * never enters the realm); `filename` drives Reducto's type detection (default:
+ * the path's last segment), `content_type` defaults to application/octet-stream.
+ * Returns the `file_id` for `submit_parse`/`submit_extract`.
  */
 export async function upload(
-  args: { filename: string; content_base64: string; content_type?: string },
+  args: { path: string; filename?: string; content_type?: string },
   ctx: Ctx,
 ): Promise<UploadedFile> {
-  const bytes = ctx.base64.decode(args.content_base64);
-  if (bytes.length > MAX_UPLOAD_BYTES) {
-    throw new Error(`Upload exceeds the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB limit`);
-  }
-  const filename = args.filename.replace(/[\r\n"\\]/g, "_");
-  const contentType = args.content_type ?? "application/octet-stream";
-  // Math.random is enough: the boundary only has to miss the payload.
-  const boundary = `----CentaurCodeMode${Date.now()}${Math.floor(Math.random() * 1e9)}`;
-  const body = concatBytes([
-    `--${boundary}\r\n`,
-    `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n`,
-    `Content-Type: ${contentType}\r\n\r\n`,
-    bytes,
-    `\r\n--${boundary}--\r\n`,
+  const files = requireFiles(ctx, "archiver.upload");
+  const info = await files.stat(args.path);
+  if (!info) throw new Error(`No such file: ${args.path}`);
+  if (!info.bytes) throw new Error(`File is empty: ${args.path}`);
+  const filename = safeFilename(args.filename ?? args.path.split(/[\\/]/).filter(Boolean).pop() ?? "file");
+  const form = multipart([
+    {
+      name: "file",
+      filename,
+      content_type: args.content_type ?? "application/octet-stream",
+      body: { file: args.path },
+    },
   ]);
   const res = await ctx.fetch(`${base(ctx)}/upload`, {
     method: "POST",
-    headers: headers(ctx, { "content-type": `multipart/form-data; boundary=${boundary}` }),
-    body,
+    headers: headers(ctx, { "content-type": form.content_type }),
+    body: form.body,
   });
   const response = await readJson(res, "Reducto");
-  return { file_id: String(response.file_id), filename: args.filename, size_bytes: bytes.length };
+  return { file_id: String(response.file_id), filename, size_bytes: info.bytes };
 }
 
 /**
@@ -368,26 +376,22 @@ export async function extract_metadata(
 /**
  * Export a publicly shared Google Doc, Slides, Sheets or Drive file with
  * Google's plain-HTTP export endpoints (`docs.google.com/.../export`,
- * `drive.google.com/uc?export=download`). `url` is any Google Docs or Drive
- * URL; `title` names the file (default: the link type) and `export_format`
- * overrides the default (document→pdf, presentation→pptx, spreadsheets→xlsx).
- * Returns the bytes as base64 with a suggested `filename` and `size_bytes` —
- * pass `content_base64` to `upload` to parse it. Public sharing is required:
- * Google answers with HTML for private documents, Drive folders cannot be listed
- * without OAuth, and files over 8 MiB are refused. Google-native files only
- * export this way; authenticated `gog` downloads are not available here.
+ * `drive.google.com/uc?export=download`), saving it under the files root.
+ * `url` is any Google Docs or Drive URL; `title` names the file (default: the
+ * link type), `export_format` overrides the default (document→pdf,
+ * presentation→pptx, spreadsheets→xlsx) and `path` says where to save it
+ * (relative to the files root or absolute inside it; default
+ * `downloads/archiver/<filename>`). Returns the saved file's absolute `path`,
+ * `bytes`, `mime_type` and `filename` — pass `path` to `upload` to parse it.
+ * Public sharing is required: Google answers with HTML for private documents
+ * (reported as an error), Drive folders cannot be listed without OAuth, and
+ * Google-native files only export this way; authenticated `gog` downloads are
+ * not available here.
  */
 export async function google_export(
-  args: { url: string; title?: string; export_format?: string },
+  args: { url: string; title?: string; export_format?: string; path?: string },
   ctx: Ctx,
-): Promise<{
-  file_id: string;
-  link_type: string;
-  filename: string;
-  content_type: string;
-  size_bytes: number;
-  content_base64: string;
-}> {
+): Promise<ExportedFile> {
   const parsed = parseGoogleUrl(args.url);
   if (!parsed) throw new Error("Not a recognised Google Docs or Drive URL");
   const [fileId, linkType] = parsed;
@@ -402,56 +406,28 @@ export async function google_export(
     format = args.export_format ?? GOOGLE_EXPORT_FORMATS[linkType];
     url = GOOGLE_EXPORT_URLS[linkType].replace("{file_id}", fileId).replace("{fmt}", format);
   }
-  const res = await ctx.fetch(url, { headers: { accept: "*/*" } });
-  if (res.status === 401 || res.status === 403) throw new Error(`Access denied (HTTP ${res.status})`);
-  if (res.status === 404) throw new Error("Document not found (HTTP 404)");
-  if (!res.ok) throw new Error(`Google export failed with status ${res.status}`);
-  const contentType = res.headers["content-type"] ?? "";
-  if (contentType.includes("text/html")) {
+  const title = args.title ?? linkType;
+  const filename = safeFilename(`${slugify(title)}__${fileId.slice(0, 10)}.${format || fileExtension(title)}`);
+  const saved = await downloadTo(
+    ctx,
+    url,
+    outputPath(args.path, "archiver", filename),
+    "Google export",
+    { headers: { accept: "*/*" } },
+  );
+  if ((saved.mime_type ?? "").includes("text/html")) {
     throw new Error(
-      "Google returned HTML instead of the file: the document is not publicly shared, or Drive requires the large-file confirmation",
+      `Google returned HTML instead of the file (saved at ${saved.path}): the document is not publicly ` +
+        "shared, or Drive requires the large-file confirmation",
     );
   }
-  const bytes = await res.bytes();
-  if (bytes.length > MAX_DOWNLOAD_BYTES) {
-    throw new Error(`Exported file exceeds the ${MAX_DOWNLOAD_BYTES / (1024 * 1024)} MiB limit`);
-  }
-  const named = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(res.headers["content-disposition"] ?? "");
-  let filename = "";
-  if (named) {
-    filename = named[1].trim().replace(/[<>:"/\\|?*]/g, "_");
-  }
-  const title = args.title ?? linkType;
-  if (!filename) filename = `${slugify(title)}__${fileId.slice(0, 10)}.${format || fileExtension(title)}`;
-  return {
-    file_id: fileId,
-    link_type: linkType,
-    filename,
-    content_type: contentType || "application/octet-stream",
-    size_bytes: bytes.length,
-    content_base64: ctx.base64.encode(bytes),
-  };
+  return { file_id: fileId, link_type: linkType, filename, ...saved };
 }
 
 /** The extension of a Drive filename, without the dot; `bin` when there is none. */
 function fileExtension(name: string): string {
   const match = /\.([A-Za-z0-9]{1,8})$/.exec(name);
   return match ? match[1].toLowerCase() : "bin";
-}
-
-/** Join strings and byte arrays into one body. */
-function concatBytes(parts: (string | Uint8Array)[]): Uint8Array {
-  const encoder = new TextEncoder();
-  const pieces = parts.map((part) => (typeof part === "string" ? encoder.encode(part) : part));
-  let total = 0;
-  for (const piece of pieces) total += piece.length;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const piece of pieces) {
-    out.set(piece, offset);
-    offset += piece.length;
-  }
-  return out;
 }
 
 // SHA-256, to record the content hash the python manifest stores. The cell

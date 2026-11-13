@@ -1,4 +1,5 @@
-import type { Ctx } from "../centaur";
+import type { Ctx, Files } from "../centaur";
+import { downloadTo, outputPath, requireFiles, safeFilename } from "../_lib/files";
 
 // Veo 3 video generation through the Generative Language REST API
 // (`models/{model}:predictLongRunning` + operation polling). Video generation
@@ -22,6 +23,20 @@ export interface ModelInfo {
   name: string;
   id: string;
   description: string;
+}
+
+/** An input image or video in the sandbox, sent inline in the request. */
+export interface InputFile {
+  /** Path of the file in the sandbox, relative to the files root or absolute inside it. */
+  path: string;
+  /** Such as `image/png` or `video/mp4`; defaults from the path's extension, then the field's type. */
+  mime_type?: string;
+}
+
+/** A style or asset reference image. */
+export interface ReferenceImage extends InputFile {
+  /** `asset` (default) or `style`. */
+  reference_type?: string;
 }
 
 /** A video Gemini produced or accepted as input. */
@@ -87,14 +102,16 @@ export interface OperationStatus {
   error?: string;
 }
 
-/** A downloaded video, inline as base64 when it fits the caller's byte budget. */
+/** A video downloaded to a file. */
 export interface DownloadedVideo {
+  /** The download URL used, with `:download?alt=media`. */
   uri: string;
-  mime_type?: string;
-  /** Raw video size in bytes. */
+  /** Absolute path of the saved video in the sandbox. */
+  path: string;
+  /** Size of the saved file in bytes. */
   bytes: number;
-  /** Base64 (standard alphabet) of the video; present when `bytes` fits `max_bytes`. */
-  data_base64?: string;
+  /** Such as `video/mp4`, from the response's Content-Type. */
+  mime_type?: string;
 }
 
 function base(ctx: Ctx): string {
@@ -113,16 +130,46 @@ function modelId(model: string | undefined): string {
   return MODELS[key] !== undefined ? MODELS[key] : key;
 }
 
-/** `data:` URIs and line-wrapped base64 are accepted; the string is passed through otherwise. */
-function base64Body(value: string): string {
-  const trimmed = value.trim();
-  const comma = trimmed.startsWith("data:") ? trimmed.indexOf(",") : -1;
-  return (comma >= 0 ? trimmed.slice(comma + 1) : trimmed).replace(/[\s\r\n]+/g, "");
+/** The last segment of a path. */
+function basename(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1) || "file";
 }
 
-/** Veo takes image and video inputs as `{ bytesBase64Encoded, mimeType }` inline blobs. */
-function blob(data: string, mime_type: string | undefined, fallback: string): Record<string, string> {
-  return { bytesBase64Encoded: base64Body(data), mimeType: mime_type || fallback };
+/** `image/png` and friends, from a file extension. */
+function mimeForPath(path: string): string | undefined {
+  const name = basename(path).toLowerCase();
+  const dot = name.lastIndexOf(".");
+  const known: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+  };
+  return dot > 0 ? known[name.slice(dot)] : undefined;
+}
+
+/**
+ * Read an input file and inline it as the `{ bytesBase64Encoded, mimeType }` blob Veo takes for
+ * image and video inputs. The bytes must be in the JSON request, so the file is read and encoded
+ * here.
+ */
+async function inlineBlob(
+  ctx: Ctx,
+  files: Files,
+  file: InputFile,
+  fallback_mime: string,
+  what: string,
+): Promise<Record<string, string>> {
+  const path = (file.path ?? "").trim();
+  if (!path) throw new Error(`${what}: path is required (a file in the sandbox)`);
+  if (!(await files.stat(path))) throw new Error(`${what}: no such file: ${path}`);
+  const mime_type = file.mime_type || mimeForPath(path) || fallback_mime;
+  return { bytesBase64Encoded: ctx.base64.encode(await files.read(path)), mimeType: mime_type };
 }
 
 /** Gemini answers errors as `{ error: { code, message, status } }`; surface its message. */
@@ -177,9 +224,10 @@ function status(operation: VeoOperation): OperationStatus {
  * more. `model`: `full` (default, veo-3.1-generate-preview, highest quality) or `fast`
  * (veo-3.1-fast-generate-preview); a full Gemini model ID also works.
  * `aspect_ratio`: `16:9` (default), `9:16` or `1:1`. `resolution`: `720p` (default), `1080p` or
- * `4k`. `image` is an optional first frame as base64 (standard alphabet; `data:` URI prefix
- * accepted) with `mime_type` (default `image/png`); `reference_images` are optional style or
- * asset references (`reference_type`: `asset` default, or `style`).
+ * `4k`. `image` is an optional first frame, as a file in the sandbox (`path` plus an optional
+ * `mime_type`, default `image/png`); `reference_images` are optional style or asset references
+ * (`reference_type`: `asset` default, or `style`). Input images go inline in the request, so they
+ * count against its size.
  */
 export async function start_video_generation(
   args: {
@@ -187,47 +235,54 @@ export async function start_video_generation(
     model?: string;
     aspect_ratio?: string;
     resolution?: string;
-    image?: { data: string; mime_type?: string };
-    reference_images?: { data: string; mime_type?: string; reference_type?: string }[];
+    image?: InputFile;
+    reference_images?: ReferenceImage[];
   },
   ctx: Ctx,
 ): Promise<{ operation: VeoOperation }> {
   if (!args.prompt || !args.prompt.trim()) throw new Error("prompt is required");
   const instance: Record<string, unknown> = { prompt: args.prompt };
-  if (args.image) instance.image = blob(args.image.data, args.image.mime_type, "image/png");
   const parameters: Record<string, unknown> = {};
   if (args.aspect_ratio) parameters.aspectRatio = args.aspect_ratio;
   if (args.resolution) parameters.resolution = args.resolution;
   const references = args.reference_images ?? [];
-  if (references.length) {
-    parameters.referenceImages = references.map((reference) => ({
-      image: blob(reference.data, reference.mime_type, "image/png"),
-      referenceType: reference.reference_type || "asset",
-    }));
+  if (args.image || references.length) {
+    const files = requireFiles(ctx, "veo3.start_video_generation");
+    if (args.image) {
+      instance.image = await inlineBlob(ctx, files, args.image, "image/png", "image");
+    }
+    const referenceImages: { image: Record<string, string>; referenceType: string }[] = [];
+    for (const reference of references) {
+      referenceImages.push({
+        image: await inlineBlob(ctx, files, reference, "image/png", "reference image"),
+        referenceType: reference.reference_type || "asset",
+      });
+    }
+    if (referenceImages.length) parameters.referenceImages = referenceImages;
   }
   return start(ctx, modelId(args.model), { instances: [instance], parameters });
 }
 
 /**
- * Start extending an existing video with what happens next. `video` is the clip's bytes in
- * base64 (standard alphabet; `data:` prefix accepted) with `mime_type` (default `video/mp4`);
- * it goes inline in the request, so keep it small — the Gemini API may refuse large inputs or
- * refuse video input for some models, and its error is surfaced as thrown. `prompt` describes
- * the continuation. Returns the long-running operation to poll with `operation_status`.
+ * Start extending an existing video with what happens next. `video` is the clip's file in the
+ * sandbox (`path` plus an optional `mime_type`, default `video/mp4`); it goes inline in the
+ * request, so keep it small — the Gemini API may refuse large inputs or refuse video input for
+ * some models, and its error is surfaced as thrown. `prompt` describes the continuation. Returns
+ * the long-running operation to poll with `operation_status`.
  */
 export async function start_video_extension(
   args: {
-    video: string;
+    video: InputFile;
     prompt: string;
-    mime_type?: string;
     model?: string;
   },
   ctx: Ctx,
 ): Promise<{ operation: VeoOperation }> {
-  if (!args.video || !args.video.trim()) throw new Error("video is required (base64 video bytes)");
   if (!args.prompt || !args.prompt.trim()) throw new Error("prompt is required");
+  const files = requireFiles(ctx, "veo3.start_video_extension");
+  const blob = await inlineBlob(ctx, files, args.video, "video/mp4", "video");
   return start(ctx, modelId(args.model), {
-    instances: [{ prompt: args.prompt, video: blob(args.video, args.mime_type, "video/mp4") }],
+    instances: [{ prompt: args.prompt, video: blob }],
   });
 }
 
@@ -275,25 +330,36 @@ function downloadUri(uri: string): string {
   return `${trimmed}:download?alt=media`;
 }
 
+/** `<file id>.mp4` from a download URI, such as `…/files/abc:download?alt=media`. */
+function videoFilename(uri: string): string {
+  const path = uri.split(/[?#]/)[0];
+  const segment = path.slice(path.lastIndexOf("/") + 1).replace(/:download$/, "");
+  const stem = segment.replace(/\.(mp4|mov|webm)$/i, "");
+  return `${safeFilename(stem || "video")}.mp4`;
+}
+
 /**
- * Download a generated video from the `video_uri` of a finished operation. The bytes come back
- * as base64 (`data_base64`) when the video is at most `max_bytes` (default 7000000, the largest
- * that stays inside the runtime's 10 MiB result cap); otherwise only the size and URI are
- * returned, which the caller can hand to another service. A single HTTP response is capped at
- * 10 MiB, so larger videos cannot be fetched here.
+ * Download a generated video from the `video_uri` of a finished operation straight to a file:
+ * `path` is where to save it, relative to the files root or absolute inside it (default
+ * `downloads/veo3/<file id>.mp4`). The runtime streams the body, so the video never passes
+ * through the realm and may be up to 100 MiB. Returns the download `uri`, the saved `path`, its
+ * `bytes` and `mime_type`.
  */
 export async function download_video(
-  args: { uri: string; max_bytes?: number },
+  args: { uri: string; path?: string },
   ctx: Ctx,
 ): Promise<DownloadedVideo> {
   if (!args.uri || !args.uri.trim()) throw new Error("uri is required (the operation's video_uri)");
   const uri = downloadUri(args.uri);
-  const res = await ctx.fetch(uri, { headers: headers(ctx) });
-  if (!res.ok) throw new Error(`Video download returned HTTP ${res.status}: ${(await res.text()).slice(0, 1000)}`);
-  const bytes = await res.bytes();
-  const result: DownloadedVideo = { uri, bytes: bytes.length };
-  if (res.headers["content-type"]) result.mime_type = res.headers["content-type"].split(";")[0].trim();
-  if (bytes.length <= (args.max_bytes ?? 7000000)) result.data_base64 = ctx.base64.encode(bytes);
+  const saved = await downloadTo(
+    ctx,
+    uri,
+    outputPath(args.path, "veo3", videoFilename(uri)),
+    "Veo video download",
+    { headers: headers(ctx) },
+  );
+  const result: DownloadedVideo = { uri, path: saved.path, bytes: saved.bytes };
+  if (saved.mime_type) result.mime_type = saved.mime_type;
   return result;
 }
 

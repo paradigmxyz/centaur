@@ -1,4 +1,5 @@
 import type { Ctx, Response } from "../centaur";
+import { downloadTo, multipart, outputPath, requireFiles, safeFilename } from "../_lib/files";
 import { query } from "../_lib/http";
 
 // Discord's own REST objects are passed through; the interfaces list the
@@ -99,13 +100,15 @@ export interface Invite {
   [field: string]: unknown;
 }
 
-/** A downloaded attachment: metadata plus base64 bytes. */
+/** An attachment saved under the files root, with the URL it came from. */
 export interface DownloadedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
   url: string;
+  /** The attachment's filename. */
   filename: string;
-  content_type: string | null;
-  size: number;
-  content_base64: string;
 }
 
 function apiBase(ctx: Ctx): string {
@@ -204,45 +207,10 @@ async function findChannel(ctx: Ctx, channel: string): Promise<Channel> {
   throw new Error(`Channel not found: ${channel}`);
 }
 
-function utf8(text: string): Uint8Array {
-  const bytes: number[] = [];
-  for (let index = 0; index < text.length; index++) {
-    let code = text.charCodeAt(index);
-    if (code < 0x80) {
-      bytes.push(code);
-    } else if (code < 0x800) {
-      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    } else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
-      const next = text.charCodeAt(++index);
-      code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
-      bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-    } else {
-      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-    }
-  }
-  return new Uint8Array(bytes);
-}
-
-function quoted(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]/g, " ");
-}
-
-function multipart(boundary: string, payloadJson: string, filename: string, contentType: string, file: Uint8Array): Uint8Array {
-  const head = utf8(
-    `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="payload_json"\r\n` +
-      `Content-Type: application/json\r\n\r\n` +
-      `${payloadJson}\r\n` +
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="files[0]"; filename="${quoted(filename)}"\r\n` +
-      `Content-Type: ${contentType}\r\n\r\n`,
-  );
-  const tail = utf8(`\r\n--${boundary}--\r\n`);
-  const body = new Uint8Array(head.length + file.length + tail.length);
-  body.set(head, 0);
-  body.set(file, head.length);
-  body.set(tail, head.length + file.length);
-  return body;
+/** The last segment of a path, for naming a saved or uploaded file. */
+function basename(path: string): string {
+  const segment = path.split(/[\\/]/).filter(Boolean).pop() ?? "";
+  return safeFilename(segment || "file");
 }
 
 interface ParsedUrl {
@@ -439,36 +407,41 @@ export async function post_message(
 }
 
 /**
- * Upload one file to a channel. `content_base64` holds the file bytes (standard base64; use
- * `ctx.base64` or a shell to encode them), `filename` is the name Discord shows, `content_type`
- * defaults to `application/octet-stream`, `content` is optional message text, and
- * `reply_to_message_id` replies to a message. Returns the created message.
+ * Upload one file to a channel. `path` is a file in the sandbox (the bytes stay on disk and the
+ * runtime sends them as the multipart body); `filename` is the name Discord shows (default: the
+ * path's last segment), `content_type` defaults to `application/octet-stream`, `content` is
+ * optional message text, and `reply_to_message_id` replies to a message. Returns the created
+ * message.
  */
 export async function upload_file(
   args: {
     channel: string;
-    filename: string;
-    content_base64: string;
+    path: string;
+    filename?: string;
     content?: string;
     content_type?: string;
     reply_to_message_id?: string;
   },
   ctx: Ctx,
 ): Promise<{ message: Message }> {
+  const files = requireFiles(ctx, "discord.upload_file");
+  const info = await files.stat(args.path);
+  if (!info) throw new Error(`No such file: ${args.path}`);
   const channel = await findChannel(ctx, args.channel);
   const payload: Record<string, unknown> = {};
   if (args.content) payload.content = args.content;
   if (args.reply_to_message_id) payload.message_reference = { message_id: args.reply_to_message_id };
-  const boundary = `----centaur${Date.now().toString(16)}`;
-  const body = multipart(
-    boundary,
-    JSON.stringify(payload),
-    args.filename,
-    args.content_type || "application/octet-stream",
-    ctx.base64.decode(args.content_base64),
-  );
+  const { body, content_type } = multipart([
+    { name: "payload_json", content_type: "application/json", body: JSON.stringify(payload) },
+    {
+      name: "files[0]",
+      filename: args.filename ? safeFilename(args.filename) : basename(args.path),
+      content_type: args.content_type || "application/octet-stream",
+      body: { file: args.path },
+    },
+  ]);
   const headers = authHeaders(ctx);
-  headers["content-type"] = `multipart/form-data; boundary=${boundary}`;
+  headers["content-type"] = content_type;
   const res = await ctx.fetch(`${apiBase(ctx)}/channels/${channel.id}/messages`, {
     method: "POST",
     headers,
@@ -478,53 +451,73 @@ export async function upload_file(
 }
 
 /**
- * Download a Discord CDN attachment URL and return its bytes base64-encoded. Only
+ * Download a Discord CDN attachment URL and save it under the files root. Only
  * `https://cdn.discordapp.com/...` and `https://media.discordapp.net/...` are accepted (the
  * message `attachments[].url` values); Discord CDN links are pre-signed, so no auth is sent.
- * Responses are capped at the runtime's 10 MiB body limit.
+ * `path` says where to save it (relative to the files root or absolute inside it; default
+ * `downloads/discord/<attachment filename>`) and the result is the saved file's absolute `path`,
+ * `bytes`, `mime_type` and `filename`.
  */
-export async function download_url(args: { url: string }, ctx: Ctx): Promise<{ file: DownloadedFile }> {
-  const parsed = parseHttpsUrl(args.url);
+export async function download_url(
+  args: { url: string; path?: string },
+  ctx: Ctx,
+): Promise<{ file: DownloadedFile }> {
+  return { file: await saveAttachment(ctx, args.url, args.path) };
+}
+
+/** Download one allowlisted CDN URL to `requested` (or a default name under `downloads/discord`). */
+async function saveAttachment(
+  ctx: Ctx,
+  url: string,
+  requested: string | undefined,
+  named?: string,
+): Promise<DownloadedFile> {
+  const parsed = parseHttpsUrl(url);
   if (!parsed || !CDN_HOSTS.includes(parsed.host)) {
     throw new Error(
       "Discord downloads only accept https Discord CDN URLs " +
-        `(cdn.discordapp.com / media.discordapp.net); refusing ${JSON.stringify(args.url)}`,
+        `(cdn.discordapp.com / media.discordapp.net); refusing ${JSON.stringify(url)}`,
     );
   }
-  const res = await ctx.fetch(args.url, { headers: { "user-agent": USER_AGENT } });
-  if (!res.ok) throw new Error(`Discord download failed (${res.status}) for ${args.url}`);
-  const bytes = await res.bytes();
-  return {
-    file: {
-      url: args.url,
-      filename: parsed.path.split("/").pop() || "download",
-      content_type: res.headers["content-type"] || null,
-      size: bytes.length,
-      content_base64: ctx.base64.encode(bytes),
-    },
-  };
+  const filename = safeFilename(named || parsed.path.split("/").filter(Boolean).pop() || "download");
+  const saved = await downloadTo(ctx, url, outputPath(requested, "discord", filename), "Discord download", {
+    headers: { "user-agent": USER_AGENT },
+  });
+  return { ...saved, url, filename };
 }
 
 /**
- * Download every attachment on one message (channel name, `#name` or ID plus `message_id`) and
- * return each file's metadata with base64 bytes. Attachments without a URL are skipped; each file
- * is subject to the same CDN host allowlist and 10 MiB body limit as `download_url`.
+ * Download every attachment on one message (channel name, `#name` or ID plus `message_id`),
+ * saving each under the files root. Attachments without a URL are skipped; each is subject to the
+ * same CDN host allowlist as `download_url`. `path` is where to save: the exact file when the
+ * message has one attachment, a directory when it has several (default `downloads/discord` with
+ * each attachment's own filename). Returns each saved file's absolute `path`, `bytes`, `mime_type`,
+ * `filename` and source `url`.
  */
 export async function download_message_attachments(
-  args: { channel: string; message_id: string },
+  args: { channel: string; message_id: string; path?: string },
   ctx: Ctx,
 ): Promise<{ files: DownloadedFile[] }> {
+  requireFiles(ctx, "discord.download_message_attachments");
   const channel = await findChannel(ctx, args.channel);
   const message = (await request(
     ctx,
     "GET",
     `/channels/${channel.id}/messages/${encodeURIComponent(args.message_id)}`,
   )) as Message;
+  const attachments = (message.attachments || []).filter((attachment) => attachment.url);
+  const directory = args.path?.replace(/\/+$/, "");
   const files: DownloadedFile[] = [];
-  for (const attachment of message.attachments || []) {
-    if (!attachment.url) continue;
-    const result = await download_url({ url: attachment.url }, ctx);
-    files.push({ ...result.file, filename: attachment.filename || result.file.filename });
+  for (const attachment of attachments) {
+    const named = attachment.filename || undefined;
+    let target: string | undefined;
+    if (directory) {
+      target =
+        attachments.length > 1
+          ? `${directory}/${safeFilename(named || "file")}`
+          : directory;
+    }
+    files.push(await saveAttachment(ctx, attachment.url, target, named));
   }
   return { files };
 }

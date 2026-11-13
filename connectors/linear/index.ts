@@ -1,4 +1,5 @@
 import type { Ctx } from "../centaur";
+import { downloadTo, outputPath, safeFilename } from "../_lib/files";
 import { readJson } from "../_lib/http";
 
 // Results are Linear's own GraphQL objects, passed through. The interfaces list
@@ -822,15 +823,26 @@ export async function issue(args: { id: string }, ctx: Ctx): Promise<{ issue: Is
   return { issue: found };
 }
 
+/** A Linear-hosted asset saved under the files root. */
+export interface SavedAsset {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type: string;
+}
+
 /**
  * Download a Linear-hosted asset (an embedded screenshot or uploaded file) by its
- * `https://uploads.linear.app/...` URL and return the bytes base64-encoded with their mime type.
- * Only that host is accepted; results over the 10 MiB response limit fail.
+ * `https://uploads.linear.app/...` URL, saving it under the files root. `path` says where to save
+ * it (relative to the files root or absolute inside it; default
+ * `downloads/linear/<URL filename>`). Only that host is accepted. Returns the saved file's
+ * absolute `path`, `bytes` and `mime_type`; there is no result-size limit because the bytes never
+ * enter the realm.
  */
 export async function fetch_asset(
-  args: { url: string },
+  args: { url: string; path?: string },
   ctx: Ctx,
-): Promise<{ data: string; mime_type: string; byte_length: number }> {
+): Promise<SavedAsset> {
   const url = args.url.trim();
   if (!url.startsWith(UPLOADS_PREFIX)) {
     throw new Error(`fetch_asset only retrieves ${UPLOADS_PREFIX}... URLs; got ${JSON.stringify(args.url)}`);
@@ -838,13 +850,18 @@ export async function fetch_asset(
   const headers: Record<string, string> = {};
   // Behind iron-proxy the key is injected for uploads.linear.app; locally it comes from the env.
   if (ctx.env.LINEAR_API_KEY) headers.authorization = ctx.env.LINEAR_API_KEY;
-  const res = await ctx.fetch(url, { headers });
-  if (!res.ok) throw new Error(`Linear asset returned HTTP ${res.status}: ${(await res.text()).slice(0, 1000)}`);
-  const bytes = await res.bytes();
+  const named = url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "asset";
+  const saved = await downloadTo(
+    ctx,
+    url,
+    outputPath(args.path, "linear", safeFilename(named)),
+    "Linear asset",
+    { headers },
+  );
   return {
-    data: ctx.base64.encode(bytes),
-    mime_type: (res.headers["content-type"] ?? "application/octet-stream").split(";")[0].trim(),
-    byte_length: bytes.length,
+    path: saved.path,
+    bytes: saved.bytes,
+    mime_type: (saved.mime_type ?? "application/octet-stream").split(";")[0].trim(),
   };
 }
 

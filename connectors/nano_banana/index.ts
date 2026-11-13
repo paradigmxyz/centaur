@@ -1,9 +1,10 @@
 import type { Ctx } from "../centaur";
+import { extensionFor, outputPath, requireFiles, saveBytes } from "../_lib/files";
 
 // Gemini image generation through the Generative Language REST API
 // (`generateContent`). Generated images come back inline from Gemini as base64,
-// so they are returned to the cell as `{ mime_type, data }` instead of being
-// written to a file: the caller decides what to do with the bytes.
+// so they are decoded in the realm and written to files under the files root:
+// the caller gets paths and passes paths back in to edit them.
 
 const DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -21,21 +22,30 @@ export interface ModelInfo {
   id: string;
 }
 
-/** A generated image. */
+/** A file this connector saved. */
+export interface SavedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
+}
+
+/** A generated image, saved to a file. */
 export interface GeneratedImage {
+  /** Absolute path of the saved image in the sandbox. */
+  path: string;
+  bytes: number;
   /** Such as `image/png` or `image/jpeg`. */
   mime_type: string;
-  /** Base64 in the standard alphabet, exactly as Gemini returned it. */
-  data: string;
   /** True for intermediate "thinking" images Gemini emits before the final one. */
   thought?: boolean;
 }
 
-/** One `generateContent` call: the images it produced plus any text it wrote. */
+/** One `generateContent` call: the images it saved plus any text it wrote. */
 export interface ImageGenerationResult {
   /** The model that answered (Gemini's `modelVersion`). */
   model: string;
-  /** Base64 images in candidate order; empty when the model answered with text only. */
+  /** Saved images in candidate order; empty when the model answered with text only. */
   images: GeneratedImage[];
   /** Text parts of the candidate, in order (often the model's caption or refusal). */
   text: string[];
@@ -81,11 +91,43 @@ function modelId(model: string | undefined): string {
   return MODELS[key] !== undefined ? MODELS[key] : key;
 }
 
-/** `data:` URIs and line-wrapped base64 are accepted; both alphabets pass through. */
-function base64Body(value: string): string {
-  const trimmed = value.trim();
-  const comma = trimmed.startsWith("data:") ? trimmed.indexOf(",") : -1;
-  return (comma >= 0 ? trimmed.slice(comma + 1) : trimmed).replace(/[\s\r\n]+/g, "");
+/** The last segment of a path. */
+function basename(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1) || "file";
+}
+
+/** Split `name.ext`; an extension needs a dot after the first character. */
+function splitExtension(name: string): { stem: string; ext: string } {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? { stem: name.slice(0, dot), ext: name.slice(dot) } : { stem: name, ext: "" };
+}
+
+/** `image/png` and friends, from a file extension. */
+function mimeForPath(path: string): string | undefined {
+  const ext = splitExtension(basename(path)).ext.toLowerCase();
+  const known: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+  };
+  return known[ext];
+}
+
+/**
+ * Where the image at `index` goes: the requested `path` for the first one (later ones get a
+ * `-2`, `-3` suffix), otherwise `downloads/nano_banana/<stem>-<n>.<ext>`.
+ */
+function imagePath(requested: string | undefined, index: number, mime_type: string, stem: string): string {
+  if (!requested) {
+    return outputPath(undefined, "nano_banana", `${stem}-${index + 1}.${extensionFor(mime_type)}`);
+  }
+  if (index === 0) return requested;
+  const slash = requested.lastIndexOf("/");
+  const parts = splitExtension(basename(requested));
+  return `${requested.slice(0, slash + 1)}${parts.stem}-${index + 1}${parts.ext}`;
 }
 
 /** Gemini answers errors as `{ error: { code, message, status } }`; surface its message. */
@@ -119,6 +161,8 @@ async function generateImage(
   ctx: Ctx,
   model: string,
   parts: Part[],
+  requested_path: string | undefined,
+  stem: string,
   aspect_ratio: string | undefined,
   image_size: string | undefined,
 ): Promise<ImageGenerationResult> {
@@ -142,10 +186,16 @@ async function generateImage(
   for (const part of (candidate.content?.parts ?? []) as Part[]) {
     if (part.text) result.text.push(part.text);
     if (part.inlineData?.data) {
-      const image: GeneratedImage = {
-        mime_type: part.inlineData.mimeType || "image/png",
-        data: part.inlineData.data,
-      };
+      const mime_type = part.inlineData.mimeType || "image/png";
+      // Gemini inlines the image as base64 in its JSON; the file itself goes to disk.
+      const saved: SavedFile = await saveBytes(
+        ctx,
+        imagePath(requested_path, result.images.length, mime_type, stem),
+        ctx.base64.decode(part.inlineData.data),
+        "nano_banana (saving the generated image)",
+        mime_type,
+      );
+      const image: GeneratedImage = { path: saved.path, bytes: saved.bytes, mime_type };
       if (part.thought) image.thought = true;
       result.images.push(image);
     }
@@ -157,19 +207,24 @@ async function generateImage(
 }
 
 /**
- * Generate an image from a text prompt. Returns the images inline as base64 (`images[].data`
- * with `images[].mime_type`) plus any text Gemini wrote; `prompt_feedback.blockReason` or
- * `finish_reason` explains a refusal, and `images` is empty when Gemini answered with text only.
+ * Generate an image from a text prompt and save it as a file. Returns the `model` that answered,
+ * the saved `images` (`path`, `bytes`, `mime_type`; `thought` marks intermediate "thinking"
+ * images) and any `text` Gemini wrote; `prompt_feedback.blockReason` or `finish_reason` explains a
+ * refusal, and `images` is empty when Gemini answered with text only. `path` is where to save the
+ * first image, relative to the files root or absolute inside it (default
+ * `downloads/nano_banana/image-1.<ext>`); further images get `-2`, `-3` names beside it.
  *
  * `model`: `flash` (fast, default, gemini-2.5-flash-image) or `pro`
  * (gemini-3-pro-image-preview, higher quality, up to 4K); a full Gemini model ID also works.
  * `aspect_ratio`: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 or 21:9.
  * `image_size`: 1K (default), 2K or 4K; larger than 1K is pro-model territory.
- * The whole response must fit the runtime's 10 MiB result cap, base64 included.
+ * The image arrives inline in Gemini's JSON, so a single response must stay inside the runtime's
+ * 10 MiB response limit; the saved file may be up to 100 MiB.
  */
 export async function generate(
   args: {
     prompt: string;
+    path?: string;
     model?: string;
     aspect_ratio?: string;
     image_size?: string;
@@ -177,20 +232,31 @@ export async function generate(
   ctx: Ctx,
 ): Promise<ImageGenerationResult> {
   if (!args.prompt || !args.prompt.trim()) throw new Error("prompt is required");
-  return generateImage(ctx, modelId(args.model), [{ text: args.prompt }], args.aspect_ratio, args.image_size);
+  requireFiles(ctx, "nano_banana.generate");
+  return generateImage(
+    ctx,
+    modelId(args.model),
+    [{ text: args.prompt }],
+    args.path,
+    "image",
+    args.aspect_ratio,
+    args.image_size,
+  );
 }
 
 /**
- * Edit (or re-style) an image with a text prompt. `image` is the input file's bytes in base64
- * (standard alphabet; a `data:` URI prefix is accepted), `mime_type` defaults to `image/png`
- * (use `image/jpeg`, `image/gif` or `image/webp` for those). Returns the edited image(s) inline
- * as base64 plus any text, like `generate`; `model`, `aspect_ratio` and `image_size` mean the
- * same as there.
+ * Edit (or re-style) an image with a text prompt. `image` is the input file's path in the
+ * sandbox (read and inlined into the Gemini request); `mime_type` defaults from the path's
+ * extension, then `image/png` (use `image/jpeg`, `image/gif` or `image/webp` types for those).
+ * The edited image is saved to `path` (default `downloads/nano_banana/edited-<input name>.<ext>`),
+ * and the result has the same shape as `generate`'s; `model`, `aspect_ratio` and `image_size`
+ * mean the same as there.
  */
 export async function edit(
   args: {
     image: string;
     prompt: string;
+    path?: string;
     mime_type?: string;
     model?: string;
     aspect_ratio?: string;
@@ -198,15 +264,21 @@ export async function edit(
   },
   ctx: Ctx,
 ): Promise<ImageGenerationResult> {
-  if (!args.image || !args.image.trim()) throw new Error("image is required (base64 image bytes)");
+  if (!args.image || !args.image.trim()) throw new Error("image is required (path of the image to edit)");
   if (!args.prompt || !args.prompt.trim()) throw new Error("prompt is required");
+  const files = requireFiles(ctx, "nano_banana.edit");
+  if (!(await files.stat(args.image))) throw new Error(`no such file: ${args.image}`);
+  const mime_type = args.mime_type || mimeForPath(args.image) || "image/png";
   const imagePart: Part = {
-    inlineData: { mimeType: args.mime_type || "image/png", data: base64Body(args.image) },
+    // Gemini takes the input image inline as base64, so the file is read and encoded here.
+    inlineData: { mimeType: mime_type, data: ctx.base64.encode(await files.read(args.image)) },
   };
   return generateImage(
     ctx,
     modelId(args.model),
     [imagePart, { text: args.prompt }],
+    args.path,
+    `edited-${splitExtension(basename(args.image)).stem}`,
     args.aspect_ratio,
     args.image_size,
   );
