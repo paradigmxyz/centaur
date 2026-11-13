@@ -1,0 +1,8 @@
+[project]
+name = "e2e"
+description = "Fixture persona for the e2e selection scenarios"
+version = "0.1.0"
+
+[tool.centaur]
+type = "persona"
+prompt = "PROMPT.md"

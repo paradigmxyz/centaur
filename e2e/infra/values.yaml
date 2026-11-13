@@ -40,6 +40,19 @@ apiRs:
     KUBERNETES_IRON_PROXY_SSH_ENABLED: "true"
   sandboxWarmPoolSize: 0
   workflowHostSandbox: false
+  # The fixture persona e2e/tests/selection.test.ts selects. e2e/stack.sh
+  # creates this ConfigMap from e2e/fixtures/personas/e2e; it is mounted for
+  # api-rs only, so no deployed image ships the persona.
+  extraToolDirs: [/app/e2e-tools]
+  extraVolumes:
+    - name: e2e-personas
+      configMap:
+        name: centaur-e2e-personas
+        items:
+          - { key: PROMPT.md, path: personas/e2e/PROMPT.md }
+          - { key: pyproject.toml, path: personas/e2e/pyproject.toml }
+  extraVolumeMounts:
+    - { name: e2e-personas, mountPath: /app/e2e-tools, readOnly: true }
 
 proxySync:
   replicaCount: 1
@@ -59,7 +72,7 @@ slackbotv2:
   # DEFAULTS_CHANNEL in e2e/fakes/slack-fixture.ts; e2e/tests/selection.test.ts
   # expects these defaults.
   channelDefaults:
-    CE2E00002: { persona: eng, harness: claude, model: sonnet, reasoning: high }
+    CE2E00002: { persona: e2e, harness: claude, model: sonnet, reasoning: high }
   steeringReactionEnabled: true
 
 networkPolicy:

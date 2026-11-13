@@ -294,7 +294,7 @@ spec:
             - name: RUST_LOG
               value: info
             - name: TOOL_DIRS
-              value: {{ join ":" $toolDirs | quote }}
+              value: {{ concat $toolDirs .Values.apiRs.extraToolDirs | join ":" | quote }}
 {{- if gt (len $publicToolDirs) 0 }}
             - name: KUBERNETES_PUBLIC_TOOL_DIRS
               value: {{ join ":" $publicToolDirs | quote }}
@@ -720,14 +720,23 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.apiRs.resources | nindent 12 }}
-{{- if $useOverlayRepoCache }}
+{{- if or $useOverlayRepoCache .Values.apiRs.extraVolumeMounts }}
           volumeMounts:
+{{- if $useOverlayRepoCache }}
             - name: repo-cache
               mountPath: {{ .Values.repoCache.hostPath | quote }}
               readOnly: true
 {{- end }}
-{{- if $useOverlayRepoCache }}
+{{- with .Values.apiRs.extraVolumeMounts }}
+{{ toYaml . | nindent 12 }}
+{{- end }}
+{{- end }}
+{{- if or $useOverlayRepoCache .Values.apiRs.extraVolumes }}
       volumes:
+{{- with .Values.apiRs.extraVolumes }}
+{{ toYaml . | nindent 8 }}
+{{- end }}
+{{- if $useOverlayRepoCache }}
         - name: repo-cache
 {{- if $repoCacheUsePvc }}
           persistentVolumeClaim:
@@ -737,6 +746,7 @@ spec:
           hostPath:
             path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
+{{- end }}
 {{- end }}
 {{- end }}
 ---

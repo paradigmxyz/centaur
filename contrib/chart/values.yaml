@@ -823,6 +823,13 @@ apiRs:
     timeoutSeconds: 5
   terminationGracePeriodSeconds: 35
   extraEnv: {}
+  # Extra volumes and mounts for the api-rs container, and extra tool dirs
+  # appended to its TOOL_DIRS, e.g. to discover personas from a mounted
+  # ConfigMap. Extra tool dirs are read by api-rs only; sandboxes do not
+  # mount them.
+  extraVolumes: []
+  extraVolumeMounts: []
+  extraToolDirs: []
   resources: {}
   # PriorityClass for the api-rs control plane pod itself. Pair with
   # Guaranteed-QoS resources so runaway sandboxes are evicted before the
