@@ -2,10 +2,17 @@
 // connector function. `host.fetch` is bound by the host to this call.
 (() => {
   const { host, toBytes, sleep, files } = globalThis.__common;
-  const principal = globalThis.__principal;
+  const deepFreeze = (value) => {
+    if (value && typeof value === "object") {
+      for (const key of Object.keys(value)) deepFreeze(value[key]);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const context = deepFreeze(globalThis.__context ?? null);
   const env = Object.freeze({ ...globalThis.__env });
   delete globalThis.__common;
-  delete globalThis.__principal;
+  delete globalThis.__context;
   delete globalThis.__env;
 
   class Response {
@@ -37,7 +44,7 @@
   return Object.freeze({
     fetch,
     env,
-    principal: Object.freeze({ ...principal, oauth: Object.freeze([...(principal.oauth ?? [])]) }),
+    context,
     files,
     sleep,
   });

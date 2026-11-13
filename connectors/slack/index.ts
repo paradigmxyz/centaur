@@ -5,9 +5,9 @@ const FILES_HOST = "files.slack.com";
 const DEFAULT_CENTAUR_API = "http://api:8000";
 
 /**
- * How Slack is reached. `direct`: slack.com with the principal's linked Slack user token (the
- * principal has a live `slack` OAuth credential). `centaur`: Centaur's API, scoped to the
- * principal's channel grants. Every function picks the path automatically.
+ * How Slack is reached, chosen from the calling context. `direct`: slack.com with the linked
+ * Slack user token, when the caller has a live `slack` OAuth credential. `centaur`: Centaur's
+ * API, scoped to the caller's channel grants. Every function picks the path automatically.
  */
 export type Access = "direct" | "centaur";
 
@@ -33,7 +33,7 @@ export interface Channel {
   num_members: number | null;
   topic: string | null;
   purpose: string | null;
-  /** Only through the Centaur API: the principal's grants on this channel. */
+  /** Only through the Centaur API: the caller's grants on this channel. */
   can_read_history: boolean | null;
   can_upload: boolean | null;
   can_download: boolean | null;
@@ -75,8 +75,10 @@ export interface SearchMatch {
 type Raw = Record<string, any>;
 type Params = Record<string, string | number | boolean | undefined | null>;
 
+// Routing only: iron-proxy injects the user token and the API checks grants either way.
 function access(ctx: Ctx): Access {
-  return ctx.principal.oauth.includes("slack") ? "direct" : "centaur";
+  const credentials = ctx.context?.sandbox?.oauth_credentials ?? [];
+  return credentials.some((c) => c.provider === "slack" && c.status === "live") ? "direct" : "centaur";
 }
 
 function encode(params: Params): string {
@@ -235,9 +237,9 @@ function requireChannel(channelId: string | undefined, what: string): string {
   return channelId;
 }
 
-/** Which path Slack calls take for this principal (see `Access`). */
-export async function get_access(args: {}, ctx: Ctx): Promise<{ access: Access; principal: string }> {
-  return { access: access(ctx), principal: ctx.principal.id };
+/** Which path Slack calls take for this caller (see `Access`). */
+export async function get_access(args: {}, ctx: Ctx): Promise<{ access: Access; thread_key: string | null }> {
+  return { access: access(ctx), thread_key: ctx.context?.thread_key ?? null };
 }
 
 /**
@@ -250,7 +252,7 @@ export async function search_messages(
   ctx: Ctx,
 ): Promise<{ total: number; matches: SearchMatch[]; page: number | null; pages: number | null }> {
   if (access(ctx) !== "direct") {
-    throw new Error("search_messages needs a linked Slack user token (direct access); this principal reaches Slack through the Centaur API");
+    throw new Error("search_messages needs a linked Slack user token (direct access); this caller reaches Slack through the Centaur API");
   }
   const raw = await slackGet(ctx, "search.messages", {
     query: args.query, sort: args.sort, sort_dir: args.sort_dir, count: args.count, page: args.page,
@@ -274,7 +276,7 @@ export async function search_messages(
 
 /**
  * Conversations. `readable_only` keeps those whose history can be read (the bot's memberships
- * directly; the principal's history grants through Centaur). `query` filters by name
+ * directly; the caller's history grants through Centaur). `query` filters by name
  * (case-insensitive). Follow `next_cursor` as `cursor` for more; `limit` at most 200.
  */
 export async function channels(

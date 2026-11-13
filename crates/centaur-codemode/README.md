@@ -25,9 +25,13 @@ $B serve --listen 127.0.0.1:8790           # HTTP API
 ```
 
 `--connectors a:b` sets connector roots (later roots shadow earlier ones;
-default `connectors`), `--tools slack,crunchbase` limits what a cell sees, and
-`exec --oauth slack` marks the principal as holding a live Slack OAuth
-credential (direct Slack access). Connectors read configuration from the
+default `connectors`) and `--tools slack,crunchbase` limits what a cell sees.
+There is no principal argument: which principal a runner serves, and so which
+credentials iron-proxy injects, is set by where it runs. `--context-file`
+(default `$CENTAUR_SANDBOX_CONTEXT_FILE` or `~/.centaur/sandbox.json`) is the
+sandbox context file, read once per cell and given to connectors as
+`ctx.context` for routing decisions such as Slack's direct or Centaur path.
+Connectors read configuration from the
 environment as `ctx.env` (`CENTAUR_API_URL`, ...). Behind iron-proxy,
 credentials are injected on the wire; for local testing only, a connector may
 read a real key from the environment (`CRUNCHBASE_API_KEY`, `SLACK_BOT_TOKEN`).
@@ -85,13 +89,14 @@ Type-check with `npx -p typescript tsc -p connectors`.
 
 | Route | Body / query | Result |
 |---|---|---|
-| `POST /exec` | `{code, principal: {id, email?, name?, oauth[]}, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls: [{tool, ok, error?, ms, requests: [{method, url, status?, error?, ms}]}], ms}` |
+| `POST /exec` | `{code, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls: [{tool, ok, error?, ms, requests: [{method, url, status?, error?, ms}]}], ms}` |
 | `GET /catalog?tools=a,b` | | `{connectors, brief}` |
 | `POST /search` | `{query, limit?, tools?}` | `{results: [{tool, signature, doc, score}]}` |
 | `GET`/`PUT /files/{path}` | bytes | bytes / `{path, bytes}` |
 | `GET /healthz` | | `{ok, connectors}` |
 
-`serve --principal <id>` refuses `/exec` for any other principal.
+The calling context is informational: the agent can write the file in a
+sandbox, so connectors may route on it but nothing authorizes from it.
 
 ## Limits (hard-coded)
 

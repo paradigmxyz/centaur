@@ -29,6 +29,7 @@ use rquickjs::{
     prelude::{Async, Opt},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
 use crate::catalog::{Catalog, Connector};
@@ -101,23 +102,11 @@ pub const MAX_FILE_BYTES: usize = 100 * 1024 * 1024;
 const MAX_LOG_LINES: usize = 1000;
 const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Principal {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Live OAuth providers, e.g. `["slack", "google"]`.
-    #[serde(default)]
-    pub oauth: Vec<String>,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecRequest {
     pub code: String,
-    pub principal: Principal,
-    /// Connectors this principal may use; `None` means every loaded connector.
+    /// Connectors the cell may use; `None` means every loaded connector.
+    /// Credentials are not this runtime's concern: iron-proxy injects them.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
 }
@@ -172,10 +161,18 @@ pub struct Engine {
     catalog: Arc<Catalog>,
     http: reqwest::Client,
     files: Files,
+    context_file: Option<PathBuf>,
 }
 
 impl Engine {
-    pub fn new(catalog: Arc<Catalog>, files_dir: PathBuf, ca_file: Option<&Path>) -> Result<Self> {
+    /// `context_file` is the sandbox context file (`~/.centaur/sandbox.json`),
+    /// read once per cell and given to connectors as `ctx.context`.
+    pub fn new(
+        catalog: Arc<Catalog>,
+        files_dir: PathBuf,
+        ca_file: Option<&Path>,
+        context_file: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
             .timeout(TOOL_TIMEOUT)
             .connect_timeout(Duration::from_secs(10));
@@ -192,7 +189,27 @@ impl Engine {
             catalog,
             http: builder.build()?,
             files: Files::new(files_dir)?,
+            context_file,
         })
+    }
+
+    /// The calling context for one cell. Informational: written by the
+    /// platform but readable and writable by agents in a sandbox, so it may
+    /// choose a route, never authorize anything. `null` when absent.
+    async fn calling_context(&self) -> String {
+        let Some(path) = &self.context_file else {
+            return "null".to_owned();
+        };
+        match tokio::fs::read(path).await {
+            Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
+                Ok(context @ Json::Object(_)) => context.to_string(),
+                _ => {
+                    tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
+                    "null".to_owned()
+                }
+            },
+            Err(_) => "null".to_owned(),
+        }
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -212,7 +229,7 @@ impl Engine {
                 .visible(request.tools.as_deref())
                 .map(|connector| connector.name.clone())
                 .collect(),
-            principal: serde_json::to_string(&request.principal).expect("principal serializes"),
+            context: self.calling_context().await,
             http: self.http.clone(),
             files: self.files.clone(),
             logs: Mutex::new(Vec::new()),
@@ -245,7 +262,8 @@ impl Engine {
 struct Cell {
     catalog: Arc<Catalog>,
     allowed: Vec<String>,
-    principal: String,
+    /// The sandbox context file as JSON text, or `null`.
+    context: String,
     http: reqwest::Client,
     files: Files,
     logs: Mutex<Vec<String>>,
@@ -415,7 +433,7 @@ impl Cell {
                     ctx.globals()
                         .set("__host", connector_host(&ctx, cell.clone(), id, &label)?)?;
                     ctx.globals()
-                        .set("__principal", ctx.json_parse(cell.principal.as_str())?)?;
+                        .set("__context", ctx.json_parse(cell.context.as_str())?)?;
                     ctx.globals().set("__env", ctx.json_parse(environment())?)?;
                     let (prelude, prelude_done) = load_prelude(&ctx, connector_prelude())?;
                     // SAFETY: the bytecode was written by this process from
@@ -968,9 +986,9 @@ mod tests {
     const CONNECTOR: &str = r#"
 import type { Ctx } from "../centaur";
 
-/** Echo the args with who called. */
-export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string; principal: string; oauth: readonly string[] }> {
-  return { text: args.text, principal: ctx.principal.id, oauth: ctx.principal.oauth };
+/** Echo the args with the calling context's thread key. */
+export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string; thread_key: string | null }> {
+  return { text: args.text, thread_key: ctx.context?.thread_key ?? null };
 }
 
 /** Save text to the scratch directory. */
@@ -1007,7 +1025,19 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         std::fs::write(connector.join("connector.toml"), "description = \"Demo\"\n").unwrap();
         std::fs::write(connector.join("index.ts"), CONNECTOR).unwrap();
         let catalog = Catalog::load(&[dir.path().join("connectors")]).unwrap();
-        let engine = Engine::new(Arc::new(catalog), dir.path().join("files"), None).unwrap();
+        let context_file = dir.path().join("sandbox.json");
+        std::fs::write(
+            &context_file,
+            r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
+        )
+        .unwrap();
+        let engine = Engine::new(
+            Arc::new(catalog),
+            dir.path().join("files"),
+            None,
+            Some(context_file),
+        )
+        .unwrap();
         (dir, engine)
     }
 
@@ -1015,11 +1045,6 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         engine
             .exec(ExecRequest {
                 code: code.to_owned(),
-                principal: Principal {
-                    id: "prn_test".to_owned(),
-                    oauth: vec!["slack".to_owned()],
-                    ..Principal::default()
-                },
                 tools,
             })
             .await
@@ -1048,7 +1073,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         assert!(response.ok, "{response:?}");
         assert_eq!(
             response.result.unwrap(),
-            serde_json::json!({ "a": { "text": "a", "principal": "prn_test", "oauth": ["slack"] }, "b": "b" })
+            serde_json::json!({ "a": { "text": "a", "thread_key": "slack:T1:C1:1.2" }, "b": "b" })
         );
         assert_eq!(response.logs, vec!["done a"]);
         assert_eq!(response.calls.len(), 2);
@@ -1152,7 +1177,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         let cell = Arc::new(Cell {
             catalog: engine.catalog.clone(),
             allowed: vec!["other".to_owned()],
-            principal: "{}".to_owned(),
+            context: "null".to_owned(),
             http: engine.http.clone(),
             files: engine.files.clone(),
             logs: Mutex::new(Vec::new()),

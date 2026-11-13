@@ -1,8 +1,6 @@
 //! HTTP API for api-rs. In a deployment only api pods reach this port
-//! (NetworkPolicy); a runner started with `--principal` refuses requests for
-//! any other principal.
-
-use std::sync::Arc;
+//! (NetworkPolicy). Which principal a runner serves is set by where it runs
+//! and which iron-proxy it sits behind, not by anything in a request.
 
 use axum::{
     Json, Router,
@@ -23,10 +21,9 @@ use crate::{
 #[derive(Clone)]
 struct AppState {
     engine: Engine,
-    principal: Option<Arc<str>>,
 }
 
-pub fn router(engine: Engine, principal: Option<String>) -> Router {
+pub fn router(engine: Engine) -> Router {
     Router::new()
         .route("/exec", post(exec))
         .route("/catalog", get(catalog))
@@ -34,10 +31,7 @@ pub fn router(engine: Engine, principal: Option<String>) -> Router {
         .route("/files/{*path}", get(read_file).put(write_file))
         .route("/healthz", get(healthz))
         .layer(DefaultBodyLimit::max(MAX_FILE_BYTES))
-        .with_state(AppState {
-            engine,
-            principal: principal.map(Arc::from),
-        })
+        .with_state(AppState { engine })
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -45,14 +39,6 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 async fn exec(State(state): State<AppState>, Json(request): Json<ExecRequest>) -> Response {
-    if let Some(expected) = &state.principal
-        && request.principal.id != **expected
-    {
-        return error(
-            StatusCode::FORBIDDEN,
-            "this runner serves a different principal",
-        );
-    }
     Json(state.engine.exec(request).await).into_response()
 }
 

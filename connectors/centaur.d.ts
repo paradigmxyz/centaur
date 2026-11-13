@@ -18,12 +18,40 @@ export interface RequestInit {
   body?: string | Uint8Array | ArrayBuffer;
 }
 
-export interface Principal {
-  readonly id: string;
-  readonly email?: string;
-  readonly name?: string;
-  /** Live OAuth providers, such as "slack" or "google". */
-  readonly oauth: readonly string[];
+export interface OAuthCredential {
+  slug: string;
+  /** Such as "slack" or "google". */
+  provider: string;
+  /** "live" when usable. */
+  status: string;
+  provider_email?: string | null;
+  scopes?: string[];
+}
+
+/** Console's `GET /api/v1/sandbox/permissions` data for the calling principal. */
+export interface SandboxPermissions {
+  principal_id: string;
+  principal: { id: string; foreign_id: string; name: string };
+  capabilities: Record<string, boolean>;
+  oauth_credentials: OAuthCredential[];
+  connected_tools?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * The sandbox context file (`~/.centaur/sandbox.json`) that the platform writes for the
+ * session. Informational: route on it, never authorize anything with it; iron-proxy and
+ * Console enforce access.
+ */
+export interface CallingContext {
+  version?: number;
+  thread_key?: string | null;
+  harness?: string | null;
+  persona?: string | null;
+  /** `null` when Console could not be reached; `sandbox_error` says why. */
+  sandbox?: SandboxPermissions | null;
+  sandbox_error?: string;
+  [key: string]: unknown;
 }
 
 /** The principal's scratch directory. Paths are relative, without `..`. */
@@ -42,7 +70,8 @@ export interface Ctx {
    * the wire, and inject-mode credentials need no variable at all.
    */
   readonly env: Readonly<Record<string, string | undefined>>;
-  readonly principal: Principal;
+  /** The calling context, read once per cell; `null` outside a Centaur session. */
+  readonly context: Readonly<CallingContext> | null;
   readonly files: Files;
   sleep(ms: number): Promise<void>;
 }

@@ -20,7 +20,7 @@ use eyre::{Result, WrapErr, bail};
 
 use crate::{
     catalog::Catalog,
-    engine::{Engine, ExecRequest, Principal},
+    engine::{Engine, ExecRequest},
 };
 
 #[derive(Parser)]
@@ -49,6 +49,10 @@ struct Common {
     /// Extra PEM roots to trust, such as the iron-proxy CA.
     #[arg(long, env = "CENTAUR_CODEMODE_CA_FILE", global = true)]
     ca_file: Option<PathBuf>,
+    /// Sandbox context file, given to connectors as `ctx.context`. Defaults
+    /// to `~/.centaur/sandbox.json`, where harness-server writes it.
+    #[arg(long, env = "CENTAUR_SANDBOX_CONTEXT_FILE", global = true)]
+    context_file: Option<PathBuf>,
     /// Connectors to expose (comma-separated); all when unset.
     #[arg(long, value_delimiter = ',', global = true)]
     tools: Option<Vec<String>>,
@@ -61,13 +65,6 @@ enum Command {
         /// Cell source; `-` (or nothing) reads standard input.
         #[arg(short = 'e', long = "code")]
         code: Option<String>,
-        #[arg(long, default_value = "local")]
-        principal_id: String,
-        #[arg(long)]
-        principal_email: Option<String>,
-        /// Live OAuth providers for the principal (comma-separated), e.g. `slack`.
-        #[arg(long, value_delimiter = ',')]
-        oauth: Vec<String>,
         /// Print only the result (or the error) instead of the full response.
         #[arg(long)]
         result_only: bool,
@@ -88,9 +85,6 @@ enum Command {
             default_value = "127.0.0.1:8790"
         )]
         listen: SocketAddr,
-        /// Refuse requests for any other principal.
-        #[arg(long, env = "CENTAUR_CODEMODE_PRINCIPAL")]
-        principal: Option<String>,
     },
 }
 
@@ -123,13 +117,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&results)?);
             Ok(())
         }
-        Command::Exec {
-            code,
-            principal_id,
-            principal_email,
-            oauth,
-            result_only,
-        } => {
+        Command::Exec { code, result_only } => {
             let code = match code.as_deref() {
                 Some("-") | None => {
                     let mut code = String::new();
@@ -142,12 +130,6 @@ async fn run(cli: Cli) -> Result<()> {
             let response = engine
                 .exec(ExecRequest {
                     code,
-                    principal: Principal {
-                        id: principal_id,
-                        email: principal_email,
-                        name: None,
-                        oauth,
-                    },
                     tools: common.tools.clone(),
                 })
                 .await;
@@ -166,13 +148,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Serve { listen, principal } => {
+        Command::Serve { listen } => {
             let engine = engine(&common, catalog)?;
             let listener = tokio::net::TcpListener::bind(listen)
                 .await
                 .wrap_err_with(|| format!("binding {listen}"))?;
             tracing::warn!(%listen, "centaur-codemode serving");
-            axum::serve(listener, server::router(engine, principal))
+            axum::serve(listener, server::router(engine))
                 .with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;
                 })
@@ -198,5 +180,8 @@ fn engine(common: &Common, catalog: Arc<Catalog>) -> Result<Engine> {
                 .join(":")
         );
     }
-    Engine::new(catalog, files_dir, common.ca_file.as_deref())
+    let context_file = common.context_file.clone().or_else(|| {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".centaur/sandbox.json"))
+    });
+    Engine::new(catalog, files_dir, common.ca_file.as_deref(), context_file)
 }
