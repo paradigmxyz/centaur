@@ -30,7 +30,8 @@ There is no principal argument: which principal a runner serves, and so which
 credentials iron-proxy injects, is set by where it runs. `--context-file`
 (default `$CENTAUR_SANDBOX_CONTEXT_FILE` or `~/.centaur/sandbox.json`) is the
 sandbox context file, read once per cell and given to connectors as
-`ctx.context` for routing decisions such as Slack's direct or Centaur path.
+`ctx.context` (and to cells as `context`) for routing decisions such as Slack's
+direct or Centaur path.
 Connectors read configuration from the
 environment as `ctx.env` (`CENTAUR_API_URL`, ...). Behind iron-proxy,
 credentials are injected on the wire; for local testing only, a connector may
@@ -45,6 +46,7 @@ A cell is the body of an async function; its return value is the result.
 |---|---|
 | `tools.<connector>.<fn>(args)` | Call a connector function; the runtime passes `ctx`. |
 | `files.read/readText/write` | The principal's scratch directory (relative paths only). |
+| `context` | The calling context (sandbox context file), as connectors see it in `ctx.context`; `null` outside a session. |
 | `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder` | As usual; logs are returned. |
 
 Cells get no `fetch` and no module loader: the network is reachable only

@@ -2,7 +2,7 @@
 // checks policy, records the call and runs the connector in its own realm.
 // A cell that replaces anything here only changes what it sees itself.
 (() => {
-  const { host, sleep, files } = globalThis.__common;
+  const { host, sleep, files, context } = globalThis.__common;
   const connectors = globalThis.__connectors;
   delete globalThis.__common;
   delete globalThis.__connectors;
@@ -21,5 +21,6 @@
   }
   globalThis.tools = Object.freeze(tools);
   globalThis.files = files;
+  globalThis.context = context;
   globalThis.sleep = sleep;
 })();

@@ -54,6 +54,17 @@
   globalThis.console = Object.freeze({
     log: log("log"), info: log("info"), warn: log("warn"), error: log("error"), debug: log("debug"),
   });
-  globalThis.__common = { host, toBytes, sleep, files };
+  // The calling context, read once per cell. Each realm gets its own copy.
+  const deepFreeze = (value) => {
+    if (value && typeof value === "object") {
+      for (const key of Object.keys(value)) deepFreeze(value[key]);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const context = deepFreeze(globalThis.__context ?? null);
+  delete globalThis.__context;
+
+  globalThis.__common = { host, toBytes, sleep, files, context };
   delete globalThis.__host;
 })();

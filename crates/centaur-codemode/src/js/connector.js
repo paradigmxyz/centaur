@@ -1,18 +1,9 @@
 // Connector realm, fresh for every call. Evaluates to the `ctx` passed to the
 // connector function. `host.fetch` is bound by the host to this call.
 (() => {
-  const { host, toBytes, sleep, files } = globalThis.__common;
-  const deepFreeze = (value) => {
-    if (value && typeof value === "object") {
-      for (const key of Object.keys(value)) deepFreeze(value[key]);
-      Object.freeze(value);
-    }
-    return value;
-  };
-  const context = deepFreeze(globalThis.__context ?? null);
+  const { host, toBytes, sleep, files, context } = globalThis.__common;
   const env = Object.freeze({ ...globalThis.__env });
   delete globalThis.__common;
-  delete globalThis.__context;
   delete globalThis.__env;
 
   class Response {

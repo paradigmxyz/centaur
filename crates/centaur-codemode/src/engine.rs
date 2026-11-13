@@ -524,6 +524,8 @@ async fn run_cell(cell: Arc<Cell>, code: &str) -> Result<Outcome> {
                 ctx.globals().set("__host", cell_host(&ctx, cell.clone())?)?;
                 ctx.globals()
                     .set("__connectors", ctx.json_parse(connectors.as_str())?)?;
+                ctx.globals()
+                    .set("__context", ctx.json_parse(cell.context.as_str())?)?;
                 Ok(load_prelude(&ctx, cell_prelude())?.1)
             })();
             let prelude = match prelude.catch(&ctx) {
@@ -1199,11 +1201,16 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn connectors_read_the_environment_and_cells_do_not() {
+    async fn connectors_read_the_environment_and_everyone_reads_the_context() {
         let (_dir, engine) = engine();
         let response = exec(
             &engine,
-            r#"return { connector: await tools.demo.env({ name: "PATH" }), cell: typeof env };"#,
+            r#"return {
+                connector: await tools.demo.env({ name: "PATH" }),
+                cell: typeof env,
+                thread_key: context.thread_key,
+                frozen: Object.isFrozen(context),
+            };"#,
             None,
         )
         .await;
@@ -1211,6 +1218,11 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         assert_eq!(result["connector"]["value"], std::env::var("PATH").unwrap());
         assert_eq!(result["connector"]["frozen"], true);
         assert_eq!(result["cell"], "undefined");
+        assert_eq!(
+            result["thread_key"], "slack:T1:C1:1.2",
+            "cells see the calling context"
+        );
+        assert_eq!(result["frozen"], true);
     }
 
     #[tokio::test(flavor = "multi_thread")]
