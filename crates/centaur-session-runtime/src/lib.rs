@@ -491,14 +491,19 @@ pub struct ExecuteSessionInput {
 }
 
 /// Whether appended user messages reached a running execution as a steer.
-/// Anything but `Delivered` means no harness saw them, so the caller must
-/// start a new execution if the messages expect a reply.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SteeringStatus {
+    /// Written to the active execution's sandbox input.
     Delivered,
-    Failed,
+    /// No execution was queued or running, so no harness saw the messages.
     NoActiveExecution,
+    /// Nothing was written (lookup failed, no pipe, or the execution ended
+    /// first), so no harness saw the messages.
+    NotDelivered,
+    /// Writing to the sandbox failed partway or with an ambiguous transport
+    /// error; the harness may have seen some or all of the messages.
+    DeliveryUnknown,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2917,7 +2922,7 @@ impl SessionRuntime {
             Err(error) => {
                 warn!(%thread_key, %error, "active execution lookup failed during message append");
                 return Some(SteeringOutcome {
-                    status: SteeringStatus::Failed,
+                    status: SteeringStatus::NotDelivered,
                     execution_id: None,
                 });
             }
@@ -2934,9 +2939,9 @@ impl SessionRuntime {
                 execution_id: None,
             });
         };
-        let failed = |execution_id: &str| {
+        let failed = |status, execution_id: &str| {
             Some(SteeringOutcome {
-                status: SteeringStatus::Failed,
+                status,
                 execution_id: Some(execution_id.to_owned()),
             })
         };
@@ -2990,7 +2995,7 @@ impl SessionRuntime {
             Err(error) => {
                 self.record_steering_failure(thread_key, &execution.execution_id, error)
                     .await;
-                return failed(&execution.execution_id);
+                return failed(SteeringStatus::NotDelivered, &execution.execution_id);
             }
         };
 
@@ -3005,7 +3010,9 @@ impl SessionRuntime {
         {
             self.record_steering_failure(thread_key, &execution.execution_id, error.to_string())
                 .await;
-            return failed(&execution.execution_id);
+            // Lines are sent one at a time, and a transport error can follow
+            // a write that landed, so the harness may already have the steer.
+            return failed(SteeringStatus::DeliveryUnknown, &execution.execution_id);
         }
 
         if let Err(error) = self

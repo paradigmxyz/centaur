@@ -1390,7 +1390,12 @@ async function appendSessionMessages(
   return appendSteering(await response.json().catch(() => undefined))
 }
 
-const APPEND_STEERING_STATUSES = new Set(['delivered', 'failed', 'no_active_execution'])
+const APPEND_STEERING_STATUSES = new Set([
+  'delivered',
+  'delivery_unknown',
+  'no_active_execution',
+  'not_delivered'
+])
 
 function appendSteering(body: unknown): SlackbotV2AppendSteering | undefined {
   if (!isJsonObject(body) || !isJsonObject(body.steering)) return undefined

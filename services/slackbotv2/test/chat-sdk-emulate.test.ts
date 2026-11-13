@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from 'bu
 import { WebClient } from '@slack/web-api'
 import { createEmulator, type Emulator } from 'emulate'
 import { createMemoryState } from '@chat-adapter/state-memory'
+import { Message as ChatSdkMessage, type StateAdapter } from 'chat'
 import type { ServerNotification } from '@centaur/harness-events'
 import {
   createSlackbotV2,
@@ -4594,7 +4595,13 @@ describe('slackbotv2', () => {
 
   it('starts a new turn for a steer that lands after the execution ended', async () => {
     const logs: CapturedLog[] = []
-    bot = createTestBot({ logger: captureLogger(logs), steeringReactionEnabled: true })
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({
+      logger: captureLogger(logs),
+      state: sharedState,
+      steeringReactionEnabled: true
+    })
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('History before a late steer.')
@@ -4607,36 +4614,194 @@ describe('slackbotv2', () => {
     // The execution completed in api-rs, but its render has not finalized,
     // so the bot still treats the thread as active and only appends.
     codexApi.nextAppendSteering = { status: 'no_active_execution' }
-    const lateText = `<@${BOT_USER_ID}> answer me after the turn ended`
-    const lateMention = await sendMessage(lateText, { threadTs: parent.ts })
-    expect(lateMention.response.status).toBe(200)
-    // The follow-up waits in the background for the first render to finalize.
-    await waitFor(() => hasLog(logs, 'slackbotv2_undelivered_steer_turn_scheduled'))
-    expect(codexApi.executes).toHaveLength(1)
-    expect(hasLog(logs, 'slackbotv2_steer_undelivered')).toBe(true)
-    expect(logData(logs, 'slackbotv2_undelivered_steer_turn_scheduled')).toMatchObject({
-      reason: 'no_active_execution'
+    const lateMention = await sendMessage(`<@${BOT_USER_ID}> answer me after the turn ended`, {
+      threadTs: parent.ts
     })
-
-    expect(slackApi.calls.some(call =>
-      call.method === 'reactions.remove' && stringField(call.body.timestamp) === lateMention.ts
-    )).toBe(false)
+    expect(lateMention.response.status).toBe(200)
+    await lateMention.finished()
+    expect(codexApi.executes).toHaveLength(1)
+    expect(logData(logs, 'slackbotv2_steer_undelivered')).toMatchObject({
+      pending_turn_queued: true,
+      steering_status: 'no_active_execution'
+    })
+    const key = threadKey(parent.ts)
+    expect(await pendingTurnIds(sharedState, key)).toEqual([lateMention.ts])
 
     codexApi.autoRespond = true
-    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('First execution complete.'))
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('First execution complete.'))
     await firstMention.finished()
-    await lateMention.finished()
 
-    expect(codexApi.executes).toHaveLength(2)
+    await waitFor(() => codexApi.executes.length === 2, 3000)
     expect(JSON.stringify(codexApi.executes[1]?.body.input_lines)).toContain(
       'answer me after the turn ended'
     )
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 2.'), 3000)
     expect(await threadText(parent.ts)).toContain('First execution complete.')
-    // The late message's reaction stays until its own turn renders.
+    await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
     await waitFor(() => slackApi.calls.some(call =>
       call.method === 'reactions.remove' && stringField(call.body.timestamp) === lateMention.ts
     ), 3000)
+  })
+
+  it('does not start another turn when steer delivery is unknown', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('History before an ambiguous steer.')
+    const firstMention = await sendMessage(`<@${BOT_USER_ID}> start running`, {
+      threadTs: parent.ts
+    })
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.nextAppendSteering = { status: 'delivery_unknown', execution_id: 'exe-1' }
+    const steer = await sendMessage(`<@${BOT_USER_ID}> maybe delivered`, { threadTs: parent.ts })
+    await steer.finished()
+    expect(logData(logs, 'slackbotv2_steer_undelivered')).toMatchObject({
+      pending_turn_queued: false,
+      steering_status: 'delivery_unknown'
+    })
+
+    codexApi.emitOutputLines(threadKey(parent.ts), sampleCodexOutputLines('Only turn.'))
+    await firstMention.finished()
+    await sleep(200)
+    expect(codexApi.executes).toHaveLength(1)
+  })
+
+  it('keeps a pending turn queued while its execute is retried', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ handoffRetryDelaysMs: [100], logger: captureLogger(logs), state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('History before a retried pending turn.')
+    const firstMention = await sendMessage(`<@${BOT_USER_ID}> start running`, {
+      threadTs: parent.ts
+    })
+    await waitFor(() => codexApi.streamCount === 1)
+    codexApi.nextAppendSteering = { status: 'not_delivered', execution_id: 'exe-1' }
+    const late = await sendMessage(`<@${BOT_USER_ID}> retry my turn`, { threadTs: parent.ts })
+    await late.finished()
+
+    const key = threadKey(parent.ts)
+    codexApi.autoRespond = true
+    codexApi.failNextExecute = true
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('First execution complete.'))
+    await firstMention.finished()
+
+    await waitFor(() => hasLog(logs, 'slackbotv2_handoff_retry_scheduled'), 3000)
+    expect(logData(logs, 'slackbotv2_handoff_retry_scheduled')).toMatchObject({ pending_turn: true })
+    expect(await pendingTurnIds(sharedState, key)).toEqual([late.ts])
+
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 2.'), 3000)
+    expect(JSON.stringify(codexApi.executes.at(-1)?.body.input_lines)).toContain('retry my turn')
+    await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
+  })
+
+  it('runs queued pending turns one at a time', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('History before two late steers.')
+    const firstMention = await sendMessage(`<@${BOT_USER_ID}> start running`, {
+      threadTs: parent.ts
+    })
+    await waitFor(() => codexApi.streamCount === 1)
+
+    for (const text of ['first late steer', 'second late steer']) {
+      codexApi.nextAppendSteering = { status: 'no_active_execution' }
+      const late = await sendMessage(`<@${BOT_USER_ID}> ${text}`, { threadTs: parent.ts })
+      await late.finished()
+    }
+    const key = threadKey(parent.ts)
+    expect(await pendingTurnIds(sharedState, key)).toHaveLength(2)
+
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('First execution complete.'))
+    await firstMention.finished()
+    await waitFor(() => codexApi.executes.length === 2, 3000)
+    // The second pending turn waits for the first one's render.
+    await sleep(200)
+    expect(codexApi.executes).toHaveLength(2)
+    expect(JSON.stringify(codexApi.executes[1]?.body.input_lines)).toContain('first late steer')
+
+    codexApi.autoRespond = true
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Second execution complete.'))
+    await waitFor(() => codexApi.executes.length === 3, 3000)
+    expect(JSON.stringify(codexApi.executes[2]?.body.input_lines)).toContain('second late steer')
+    await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
+  })
+
+  it('leaves a newer execution\'s state alone when an older render finalizes', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    bot = createTestBot({ state: sharedState })
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('History before overlapping turns.')
+    const mention = await sendMessage(`<@${BOT_USER_ID}> start running`, { threadTs: parent.ts })
+    await waitFor(() => codexApi.streamCount === 1)
+    const key = threadKey(parent.ts)
+    const stateKey = `thread-state:${key}`
+    const current = (await sharedState.get<Record<string, unknown>>(stateKey)) ?? {}
+    const newer = {
+      afterEventId: 0,
+      executionId: 'exe-newer',
+      message: (current.renderObligation as { message: unknown }).message
+    }
+    await sharedState.set(stateKey, { ...current, activeExecution: true, renderObligation: newer })
+
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Older execution complete.'))
+    await mention.finished()
+
+    expect(await sharedState.get<Record<string, unknown>>(stateKey)).toMatchObject({
+      activeExecution: true,
+      renderObligation: { executionId: 'exe-newer' }
+    })
+  })
+
+  it('runs pending turns left by a restart from the startup recovery sweep', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const parent = await postUserMessage('History before a restart.')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> answer me after the restart`, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = new ChatSdkMessage({
+      attachments: [],
+      author: { fullName: 'User', isBot: false, isMe: false, userId: USER_ID, userName: 'user' },
+      formatted: { type: 'root', children: [] },
+      id: mention.ts,
+      isMention: true,
+      metadata: { dateSent: new Date(), edited: false },
+      raw: {
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        text: `<@${BOT_USER_ID}> answer me after the restart`,
+        thread_ts: parent.ts,
+        ts: mention.ts,
+        type: 'message',
+        user: USER_ID
+      },
+      text: `<@${BOT_USER_ID}> answer me after the restart`,
+      threadId: key
+    })
+    await sharedState.set(`thread-state:${key}`, { forwardedMessageIds: [mention.ts] })
+    await sharedState.appendToList(`slackbotv2:pending-turns:${key}`, {
+      message: message.toJSON(),
+      queuedAt: Date.now()
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+
+    bot = createTestBot({ state: sharedState })
+
+    await waitFor(() => codexApi.executes.length === 1, 3000)
+    expect(JSON.stringify(codexApi.executes[0]?.body.input_lines)).toContain(
+      'answer me after the restart'
+    )
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
+    await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
   })
 
   it('keeps a steering reaction when an append retry starts an execution', async () => {
@@ -6452,6 +6617,19 @@ function signedSlackInteraction(payload: Record<string, unknown>): RequestInit {
  * A Slack event the bot received: its webhook response, and `finished`, which
  * settles once the work the webhook scheduled has finished.
  */
+/** Messages still queued for their own turn in `threadKey`. */
+async function pendingTurnIds(state: StateAdapter, threadKey: string): Promise<string[]> {
+  const ids: string[] = []
+  for (const turn of await state.getList<{ message: { id: string } }>(
+    `slackbotv2:pending-turns:${threadKey}`
+  )) {
+    if (!(await state.get(`slackbotv2:pending-turn:done:${threadKey}:${turn.message.id}`))) {
+      ids.push(turn.message.id)
+    }
+  }
+  return ids
+}
+
 type Delivery = { response: Response; finished: () => Promise<unknown> }
 
 let eventCount = 0

@@ -220,9 +220,14 @@ Example response:
 ```
 
 User messages are also forwarded to the session's active execution as a steer.
-`steering.status` reports the result: `delivered`, `failed`, or
-`no_active_execution`. Anything but `delivered` means no harness saw the
-messages, so a caller that expects a reply must start a new execution.
+`steering.status` reports the result:
+
+- `delivered`: written to the active execution's sandbox input.
+- `no_active_execution` or `not_delivered`: no harness saw the messages, so a
+  caller that expects a reply must start a new execution.
+- `delivery_unknown`: the write failed in a way that may have reached the
+  harness; starting another execution could answer the messages twice.
+
 `steering` is omitted when the append holds no user message.
 
 Message `parts` are durable transcript data for clients and operators. The API
