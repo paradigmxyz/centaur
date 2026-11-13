@@ -52,7 +52,7 @@ export function dispositionFilename(header: string | undefined): string | undefi
 }
 
 /** How long a file download may take by default; `init.timeout_ms` overrides it. */
-export const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+export const DOWNLOAD_TIMEOUT_MS: number = 5 * 60 * 1000;
 
 /**
  * Download `url` to `path`; throws `<label> returned HTTP <status>: <body>` on a non-2xx
