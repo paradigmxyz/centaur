@@ -35,7 +35,7 @@ use centaur_session_sqlx::{
 use centaur_telemetry::{
     record_sandbox_warm_pool_claim, record_session_execution_finished,
     record_session_execution_started, record_session_failure, record_session_first_token_latency,
-    set_span_parent_from_traceparent,
+    record_session_stdout_line_dropped, set_span_parent_from_traceparent,
 };
 use dashmap::{DashMap, DashSet};
 use futures_util::{FutureExt, SinkExt, Stream, StreamExt, future::BoxFuture, stream};
@@ -5318,6 +5318,31 @@ async fn run_stdout_pump(
                 .map(|execution| execution.execution_id.as_str());
             let Some(output_execution_id) = output_state.execution_for_line(execution_id, &line)
             else {
+                // Output no execution owns never reaches a client: a harness
+                // turn that ran after its execution ended, or a finished
+                // turn's late output while a newer execution runs.
+                let reason = if execution_id.is_some() {
+                    "stale_execution"
+                } else {
+                    "no_active_execution"
+                };
+                record_session_stdout_line_dropped(reason);
+                let turn_id = output_value
+                    .as_ref()
+                    .and_then(|value| turn_ids(value).into_iter().next())
+                    .unwrap_or_default();
+                if output_state.first_drop_for_turn(&turn_id) {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_stdout_line_dropped",
+                        thread_key = %thread_key,
+                        sandbox_id,
+                        reason,
+                        harness_turn_id = %turn_id,
+                        active_execution_id = execution_id.unwrap_or(""),
+                        "dropped sandbox output no execution owns"
+                    );
+                }
                 continue;
             };
             let first_token_execution = active_execution
@@ -5565,9 +5590,20 @@ struct StdoutPumpState {
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
     stdout_span_by_execution: HashMap<String, Span>,
+    /// Harness turns whose dropped output was already logged.
+    dropped_turn_ids: HashSet<String>,
 }
 
 impl StdoutPumpState {
+    /// Whether this is the first dropped line of `turn_id`, so each orphaned
+    /// turn logs once rather than once per streamed delta.
+    fn first_drop_for_turn(&mut self, turn_id: &str) -> bool {
+        if self.dropped_turn_ids.len() >= 1024 {
+            self.dropped_turn_ids.clear();
+        }
+        self.dropped_turn_ids.insert(turn_id.to_owned())
+    }
+
     fn execution_for_line(
         &mut self,
         active_execution_id: Option<&str>,
@@ -7236,6 +7272,9 @@ fn steering_input_line(
             "message_id": message_id,
             "metadata": message.metadata.clone(),
         },
+        // The harness names the steer's userMessage item with it, tying the
+        // item in the execution's output to the session message.
+        "client_user_message_id": message_id,
         "message": {
             "role": message.role.as_ref(),
             "content": message.parts.clone(),
@@ -8989,7 +9028,16 @@ mod tests {
         assert_eq!(value["thread_key"], "cli:test-steering");
         assert_eq!(value["trace_metadata"]["action"], "steer_active_execution");
         assert_eq!(value["trace_metadata"]["message_id"], "msg-user");
+        assert_eq!(value["client_user_message_id"], "msg-user");
         assert_eq!(value["message"]["content"][0]["text"], "steer now");
+    }
+
+    #[test]
+    fn stdout_pump_logs_each_dropped_turn_once() {
+        let mut state = StdoutPumpState::default();
+        assert!(state.first_drop_for_turn("turn-1"));
+        assert!(!state.first_drop_for_turn("turn-1"));
+        assert!(state.first_drop_for_turn("turn-2"));
     }
 
     #[test]

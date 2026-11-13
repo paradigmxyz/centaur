@@ -1,7 +1,8 @@
 // How a turn ends, and what reaches it while it runs. Every outcome must leave
 // one visible reply: an answer, a failure the provider reported, or an answer
-// with no text. A mention during a turn steers it, carrying its sender's
-// identity, with a reaction on each follow-up until the turn answers, and the
+// with no text. A mention during a turn steers it on every harness, carrying
+// its sender's identity, with a reaction on each follow-up until the turn
+// answers it within the same reply, and the
 // turn shows its status again after Slack hides it for the follow-up; replies
 // without a mention neither steer nor stop it.
 import { expect, test } from 'bun:test'
@@ -40,21 +41,23 @@ test.concurrent('replies without a mention neither steer nor stop a running turn
   }
 }, 2 * turnTimeoutMs)
 
-test.concurrent('a mention during a turn steers it as its sender, marked until the answer', async () => {
-  const thread = await slack.mention('--codex Start a long task.', model.says('First part.', { delayMs: 5_000 }))
-  await thread.inFlight()
-  const steer = model.says('Steered answer.')
-  const followUp = await thread.interject('Also handle this.', steer, { as: USER_B })
-  await waitForReaction(thread.channel, followUp, true)
-  const turn = await thread.nextTurn()
+for (const harness of ['codex', 'claude'] as const) {
+  test.concurrent(`${harness}: a mention during a turn steers it as its sender, marked until the answer`, async () => {
+    const thread = await slack.mention(`--${harness} Start a long task.`, model.says('First part.', { delayMs: 5_000 }))
+    await thread.inFlight()
+    const steer = model.says('Steered answer.')
+    const followUp = await thread.interject('Also handle this.', steer, { as: USER_B })
+    await waitForReaction(thread.channel, followUp, true)
+    const turn = await thread.nextTurn()
 
-  // The turn answers before and after taking the follow-up.
-  expect(turn.reply).toContain('Steered answer.')
-  const [steered] = await model.requests(steer)
-  expect(steered?.userMessage).toContain('Also handle this.')
-  expect(steered?.userMessage).toContain(`Slack user ID: ${USER_B.id}`)
-  await waitForReaction(thread.channel, followUp, false)
-}, 2 * turnTimeoutMs)
+    // The turn answers before and after taking the follow-up.
+    expect(turn.reply).toContain('Steered answer.')
+    const [steered] = await model.requests(steer)
+    expect(steered?.userMessage).toContain('Also handle this.')
+    expect(steered?.userMessage).toContain(`Slack user ID: ${USER_B.id}`)
+    await waitForReaction(thread.channel, followUp, false)
+  }, 2 * turnTimeoutMs)
+}
 
 test.concurrent('a steered turn shows its status again after the follow-up hides it', async () => {
   const first = model.says('First part.', { delayMs: 20_000 })

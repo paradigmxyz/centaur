@@ -33,6 +33,9 @@ fn fake_pi(dir: &Path) -> PathBuf {
             "*'\"type\":\"prompt\"'*) ",
             "printf '%s\\n' '{{\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{{\"disposition\":\"started\"}}}}'; ",
             "case \"$line\" in *codemode*) cat '{codemode}' ;; *slow*) ;; *) cat '{tool}' ;; esac ;; ",
+            // Pi answers a steer within the running prompt, before `agent_settled`.
+            "*'\"type\":\"steer\"'*) ",
+            "printf '%s\\n' '{{\"type\":\"response\",\"command\":\"steer\",\"success\":true}}'; cat '{tool}' ;; ",
             "*) printf '%s\\n' '{{\"type\":\"response\",\"command\":\"set_thinking_level\",\"success\":true}}' ;; ",
             "esac; done"
         ),
@@ -260,5 +263,69 @@ fn pi_blocks_turns_render_tools_and_codemode_and_respawn_on_model_change_and_int
         ]
     );
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn pi_blocks_steer_reaches_the_running_prompt_as_a_native_steer() {
+    let dir: PathBuf = std::env::temp_dir().join(format!("pi-stdio-steer-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_harness-server"))
+        .arg("pi")
+        .env("CENTAUR_PI_BIN", fake_pi(&dir))
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CENTAUR_PI_MODEL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx
+                .send(serde_json::from_str::<Value>(&line).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut server = Server {
+        stdin: child.stdin.take().unwrap(),
+        stdout: rx,
+    };
+
+    server.user("slow", json!({}));
+    server.read_until("turn/started");
+    server.user(
+        "also this",
+        json!({
+            "client_user_message_id": "steer-message-1",
+            "trace_metadata": {"action": "steer_active_execution"},
+        }),
+    );
+    let turn = server.read_until("turn/completed");
+    drop(server);
+    child.wait().unwrap();
+
+    assert_eq!(status(&turn), "completed", "{turn:#?}");
+    let users = items(&turn, "item/completed")
+        .into_iter()
+        .filter(|item| item["type"] == "userMessage")
+        .map(|item| item["clientId"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(users, vec![Value::Null, json!("steer-message-1")]);
+    let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
+    let commands: Vec<Value> = stdin
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|line: &Value| line["type"] == "prompt" || line["type"] == "steer")
+        .collect();
+    assert_eq!(commands.len(), 2, "{stdin}");
+    assert_eq!(commands[1]["type"], "steer");
+    assert_eq!(commands[1]["message"], "also this");
     let _ = std::fs::remove_dir_all(dir);
 }

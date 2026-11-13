@@ -332,7 +332,17 @@ impl HarnessServer for PiHarness {
         command_line(json!({"type": "prompt", "message": message_text(input)}))
     }
 
-    fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
+    /// The steer is queued natively and answered before `agent_settled`,
+    /// which ends the turn.
+    fn steers_mid_turn(&self) -> bool {
+        true
+    }
+
+    fn stdin_for_steer(
+        &self,
+        _normalizer: &mut Self::EventNormalizer,
+        input: &[UserInput],
+    ) -> Result<Vec<u8>> {
         command_line(json!({"type": "steer", "message": message_text(input)}))
     }
 
