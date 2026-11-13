@@ -669,7 +669,92 @@ fn common_host<'js>(
             TypedArray::<u8>::new(ctx, text.into_bytes())
         })?,
     )?;
+    host.set(
+        "base64Encode",
+        Function::new(ctx.clone(), |data: TypedArray<'js, u8>, url: Opt<bool>| {
+            base64_encode(&copy_bytes(&data), url.0.unwrap_or(false))
+        })?,
+    )?;
+    host.set(
+        "base64Decode",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, text: String| {
+            let bytes =
+                base64_decode(&text).map_err(|message| Exception::throw_type(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
+    host.set(
+        "gzip",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, data: TypedArray<'js, u8>| {
+            let bytes = gzip(&copy_bytes(&data))
+                .map_err(|message| Exception::throw_message(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
+    host.set(
+        "gunzip",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, data: TypedArray<'js, u8>| {
+            let bytes = gunzip(&copy_bytes(&data))
+                .map_err(|message| Exception::throw_message(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
     Ok(host)
+}
+
+fn base64_encode(data: &[u8], url: bool) -> String {
+    use base64::Engine as _;
+    if url {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+    } else {
+        base64::engine::general_purpose::STANDARD.encode(data)
+    }
+}
+
+/// Standard or URL-safe alphabet, padding optional, whitespace ignored.
+fn base64_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let normalized: String = text
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '=')
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(normalized)
+        .map_err(|error| format!("invalid base64: {error}"))
+}
+
+fn gzip(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(data)
+        .and_then(|()| encoder.finish())
+        .map_err(|error| format!("gzip failed: {error}"))
+}
+
+/// Decompresses gzip (all members) or zlib data, bounded by `MAX_FETCH_BYTES`
+/// so a small bomb cannot exhaust host memory.
+fn gunzip(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let reader: Box<dyn std::io::Read + '_> = if data.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::MultiGzDecoder::new(data))
+    } else {
+        Box::new(flate2::read::ZlibDecoder::new(data))
+    };
+    let mut out = Vec::new();
+    reader
+        .take(MAX_FETCH_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|error| format!("gunzip failed: {error}"))?;
+    if out.len() > MAX_FETCH_BYTES {
+        return Err(format!("gunzip output exceeds {MAX_FETCH_BYTES} bytes"));
+    }
+    Ok(out)
 }
 
 /// The cell's host: the common functions plus `invoke`.
@@ -851,6 +936,18 @@ export async function env(args: { name: string }, ctx: Ctx): Promise<{ value: st
   return { value: ctx.env[args.name] ?? null, frozen: Object.isFrozen(ctx.env) };
 }
 
+/** Round-trips text through base64 and gzip. */
+export async function codec(args: { text: string }, ctx: Ctx): Promise<{ b64: string; url: string; back: string; btoa: string; zipped: string }> {
+  const zipped = ctx.gzip(args.text);
+  return {
+    b64: ctx.base64.encode(args.text),
+    url: ctx.base64.encode(new Uint8Array([251, 255]), { url: true }),
+    back: ctx.base64.decodeText(ctx.base64.encode(args.text, { url: true })),
+    btoa: atob(btoa("latin")),
+    zipped: new TextDecoder().decode(ctx.gunzip(ctx.base64.decode(ctx.base64.encode(zipped)))),
+  };
+}
+
 /** What the connector realm sees of globals a cell may have touched. */
 export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json: string }> {
   return { marker: typeof (globalThis as any).marker, json: JSON.stringify({ a: 1 }) };
@@ -897,6 +994,28 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{address}")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_get_base64_and_gzip() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"return await tools.demo.codec({ text: "héllo?" });"#,
+            None,
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "b64": "aMOpbGxvPw==", "url": "-_8", "back": "héllo?", "btoa": "latin", "zipped": "héllo?" })
+        );
+    }
+
+    #[test]
+    fn gunzip_is_bounded() {
+        let bomb = gzip(&vec![0u8; MAX_FETCH_BYTES + 1]).unwrap();
+        assert!(gunzip(&bomb).unwrap_err().contains("exceeds"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

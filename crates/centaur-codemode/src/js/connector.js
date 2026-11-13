@@ -32,10 +32,19 @@
     return new Response(raw.status, JSON.parse(raw.headers), raw.body);
   };
 
+  const base64 = Object.freeze({
+    encode: (data, options = {}) => host.base64Encode(toBytes(data), Boolean(options.url)),
+    decode: (text) => host.base64Decode(String(text)),
+    decodeText: (text) => host.utf8Decode(host.base64Decode(String(text))),
+  });
+
   return Object.freeze({
     fetch,
     env,
     context,
     sleep,
+    base64,
+    gzip: (data) => host.gzip(toBytes(data)),
+    gunzip: (data) => host.gunzip(toBytes(data)),
   });
 })();

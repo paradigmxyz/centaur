@@ -66,4 +66,19 @@ export interface Ctx {
   /** The calling context, read once per cell; `null` outside a Centaur session. */
   readonly context: Readonly<CallingContext> | null;
   sleep(ms: number): Promise<void>;
+  /** Base64 in the standard alphabet; `url: true` encodes URL-safe without padding. */
+  readonly base64: {
+    encode(data: string | Uint8Array | ArrayBuffer, options?: { url?: boolean }): string;
+    /** Accepts both alphabets, with or without padding. */
+    decode(text: string): Uint8Array;
+    /** `decode`, then UTF-8. */
+    decodeText(text: string): string;
+  };
+  /** Gzip-compress bytes (strings are UTF-8 encoded). */
+  gzip(data: string | Uint8Array | ArrayBuffer): Uint8Array;
+  /**
+   * Decompress gzip (all members) or zlib data, up to 10 MiB. HTTP responses with
+   * `Content-Encoding: gzip` or `deflate` are already decompressed by `fetch`.
+   */
+  gunzip(data: Uint8Array | ArrayBuffer): Uint8Array;
 }

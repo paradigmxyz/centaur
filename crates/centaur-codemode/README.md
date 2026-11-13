@@ -45,7 +45,7 @@ A cell is the body of an async function; its return value is the result.
 |---|---|
 | `tools.<connector>.<fn>(args)` | Call a connector function; the runtime passes `ctx`. |
 | `context` | The calling context (sandbox context file), as connectors see it in `ctx.context`; `null` outside a session. |
-| `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder` | As usual; logs are returned. |
+| `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder`, `atob`/`btoa` | As usual; logs are returned. |
 
 Cells get no `fetch` and no module loader: the network is reachable only
 through connectors.
@@ -86,6 +86,11 @@ Connectors may import only `../centaur` (with `import type`) and
 `../_lib/<name>`; shared modules may import each other as `./<name>`. Anything
 else fails at load. Exported signatures should use types declared in the
 connector itself, since the brief shows each connector's declarations alone.
+
+Besides `fetch`, `env`, `context` and `sleep`, `ctx` offers `base64`
+(`encode`, `decode`, `decodeText`; both alphabets) and `gzip`/`gunzip` (gzip
+or zlib, output capped like a response body). `fetch` already decodes
+`Content-Encoding: gzip` and `deflate` responses.
 
 Exported functions take `(args, ctx: Ctx)`, need explicit parameter and return
 types (TypeScript `isolatedDeclarations`), and a JSDoc comment, which becomes
