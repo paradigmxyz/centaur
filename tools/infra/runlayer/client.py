@@ -1,6 +1,8 @@
 """One MCP connection using the active requester's proxy-injected OAuth grant."""
+
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from typing import Any
@@ -13,6 +15,7 @@ from referencing.exceptions import Unresolvable
 
 MAX_BYTES = 8 * 1024 * 1024
 PROTOCOL = "2025-03-26"
+APP_SLUG = "runlayer"
 
 
 class RunlayerError(RuntimeError):
@@ -34,12 +37,22 @@ def _https_url(value: str) -> str:
     try:
         if isinstance(value, str):
             parsed = urlsplit(value)
-            if (parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password
-                    and not parsed.query and not parsed.fragment and parsed.port in (None, 443) and parsed.path):
+            if (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and not parsed.username
+                and not parsed.password
+                and not parsed.query
+                and not parsed.fragment
+                and parsed.port in (None, 443)
+                and parsed.path.endswith("/mcp")
+            ):
                 return value
     except ValueError:
         pass
-    raise RunlayerError("Set RUNLAYER_MCP_URL to an exact HTTPS Plugin MCP URL.")
+    raise RunlayerError(
+        "The Runlayer integration has no valid HTTPS MCP URL; ask an administrator to fix it in Console."
+    )
 
 
 class RunlayerClient:
@@ -48,6 +61,7 @@ class RunlayerClient:
     The sandbox supplies no user identifier or real credential. iron-proxy adds
     the current requester's bearer, after the runtime's config barrier.
     """
+
     def __init__(self, url: str | None = None, *, http_client: httpx.Client | None = None):
         self.url = _https_url(url) if url else None
         self.connect_url: str | None = None
@@ -61,30 +75,47 @@ class RunlayerClient:
     def _connection(self) -> None:
         if self.url:
             return
-        resource_url = _https_url(os.getenv("RUNLAYER_MCP_URL", "").strip())
-        console = os.getenv("CENTAUR_CONSOLE_URL", "http://centaur-console:3000").rstrip("/")
+        # Non-secret service address, as in the centaur-console tool.
+        console = os.getenv("CENTAUR_CONSOLE_URL", "http://centaur-console:3000").rstrip("/")  # noqa: TID251
         try:
             response = self.http.get(f"{console}/api/v1/sandbox/oauth_apps")
             response.raise_for_status()
             apps = response.json().get("data", [])
         except (httpx.HTTPError, ValueError, AttributeError):
-            raise RunlayerError("Could not load Runlayer configuration from Centaur Console.") from None
+            raise RunlayerError(
+                "Could not load Runlayer configuration from Centaur Console."
+            ) from None
         if not isinstance(apps, list):
             raise RunlayerError("Centaur Console returned an invalid OAuth-app catalog.")
-        matches = [app for app in apps if isinstance(app, dict) and app.get("provider") == "runlayer"]
+        # Console's Runlayer preset registers an owner-only app with this slug.
+        matches = [
+            app
+            for app in apps
+            if isinstance(app, dict)
+            and app.get("slug") == APP_SLUG
+            and app.get("owner_only") is True
+        ]
         if len(matches) != 1:
-            raise RunlayerError("Ask an administrator to configure one personal Runlayer integration in Console.")
-        self.url = resource_url
+            raise RunlayerError(
+                "Ask an administrator to set up the Runlayer integration in Console Integrations."
+            )
+        # The tenant URL is the app's public resource; the bearer is injected
+        # by iron-proxy only for that host and path.
+        self.url = _https_url(matches[0].get("resource"))
         self.connect_url = matches[0].get("start_url")
 
     def initialize(self) -> None:
         if self._initialized:
             return
         self._connection()
-        result = self._request("initialize", {
-            "protocolVersion": PROTOCOL, "capabilities": {},
-            "clientInfo": {"name": "centaur-runlayer", "version": "0.1.0"},
-        })
+        result = self._request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL,
+                "capabilities": {},
+                "clientInfo": {"name": "centaur-runlayer", "version": "0.1.0"},
+            },
+        )
         if not isinstance(result, dict) or not isinstance(result.get("protocolVersion"), str):
             raise RunlayerError("Runlayer returned an invalid initialize response.")
         if result["protocolVersion"] != PROTOCOL:
@@ -103,8 +134,12 @@ class RunlayerClient:
             if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
                 raise RunlayerError("Runlayer returned an invalid tools/list response.")
             for tool in result["tools"]:
-                if (not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
-                        or not tool["name"] or not isinstance(tool.get("inputSchema"), dict)):
+                if (
+                    not isinstance(tool, dict)
+                    or not isinstance(tool.get("name"), str)
+                    or not tool["name"]
+                    or not isinstance(tool.get("inputSchema"), dict)
+                ):
                     raise RunlayerError("Runlayer returned an invalid tool definition.")
                 tools.append(tool)
             cursor = result.get("nextCursor")
@@ -119,8 +154,13 @@ class RunlayerClient:
         if any(tool["name"] == "search_tools" for tool in tools):
             return self._call_tool("search_tools", {"query": query}, tools)
         terms = query.casefold().split()
-        return [tool for tool in tools if all(term in f"{tool['name']} {tool.get('description', '')}".casefold()
-                                              for term in terms)]
+        return [
+            tool
+            for tool in tools
+            if all(
+                term in f"{tool['name']} {tool.get('description', '')}".casefold() for term in terms
+            )
+        ]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call one tool using the schema discovered for the active requester."""
@@ -136,22 +176,37 @@ class RunlayerClient:
             Draft202012Validator.check_schema(tool["inputSchema"])
             Draft202012Validator(tool["inputSchema"], registry=Registry()).validate(arguments)
         except (SchemaError, ValidationError, Unresolvable):
-            raise RunlayerError("Arguments do not match Runlayer's advertised input schema.") from None
+            raise RunlayerError(
+                "Arguments do not match Runlayer's advertised input schema."
+            ) from None
         return self._request("tools/call", {"name": name, "arguments": arguments})
 
     def _request(self, method: str, params: dict[str, Any]) -> Any:
         self._id += 1
-        reply = self._send({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}, self._id)
-        if not isinstance(reply, dict) or reply.get("jsonrpc") != "2.0" or reply.get("id") != self._id:
+        reply = self._send(
+            {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}, self._id
+        )
+        if (
+            not isinstance(reply, dict)
+            or reply.get("jsonrpc") != "2.0"
+            or reply.get("id") != self._id
+        ):
             raise RunlayerError("Runlayer returned an invalid MCP response ID.")
         if "error" in reply:
-            raise RunlayerError("Runlayer rejected the MCP request.", connect_url=self.connect_url, details=reply["error"])
+            raise RunlayerError(
+                "Runlayer rejected the MCP request.",
+                connect_url=self.connect_url,
+                details=reply["error"],
+            )
         if "result" not in reply:
             raise RunlayerError("Runlayer omitted the MCP result.")
         return reply["result"]
 
     def _send(self, body: dict[str, Any] | None, request_id: int | None, method="POST") -> Any:
-        headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": self._protocol}
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": self._protocol,
+        }
         if self._session:
             headers["Mcp-Session-Id"] = self._session
         try:
@@ -160,16 +215,27 @@ class RunlayerClient:
                 if supplied_url:
                     try:
                         parsed = urlsplit(supplied_url)
-                        if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password:
+                        if (
+                            parsed.scheme == "https"
+                            and parsed.hostname
+                            and not parsed.username
+                            and not parsed.password
+                        ):
                             self.connect_url = supplied_url
                     except (RunlayerError, ValueError):
                         pass
                 if response.status_code in (401, 403):
-                    message = ("Runlayer authentication is required. Connect or reconnect your account."
-                               if response.status_code == 401 else "Runlayer denied access for this requester (HTTP 403).")
+                    message = (
+                        "Runlayer authentication is required. Connect or reconnect your account."
+                        if response.status_code == 401
+                        else "Runlayer denied access for this requester (HTTP 403)."
+                    )
                     raise RunlayerError(message, connect_url=self.connect_url)
                 if not response.is_success:
-                    raise RunlayerError(f"Runlayer returned HTTP {response.status_code}.", connect_url=self.connect_url)
+                    raise RunlayerError(
+                        f"Runlayer returned HTTP {response.status_code}.",
+                        connect_url=self.connect_url,
+                    )
                 self._session = response.headers.get("Mcp-Session-Id", self._session)
                 if request_id is None:
                     return None
@@ -204,10 +270,8 @@ class RunlayerClient:
 
     def close(self) -> None:
         if self._session:
-            try:
+            with contextlib.suppress(RunlayerError):
                 self._send(None, None, method="DELETE")
-            except RunlayerError:
-                pass
         if self._owns_http:
             self.http.close()
 
@@ -216,7 +280,3 @@ class RunlayerClient:
 
     def __exit__(self, *_):
         self.close()
-
-
-def _client() -> RunlayerClient:
-    return RunlayerClient()

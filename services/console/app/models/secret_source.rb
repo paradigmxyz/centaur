@@ -117,16 +117,15 @@ class SecretSource < ApplicationRecord
 
   private
 
-  # Only current, eligible tokens may be delivered in a proxy configuration.
+  # An owner-only token is delivered only while it is live, its app is
+  # enabled, its owner is active, and this source belongs to the credential's
+  # own wrapper. Other apps keep their existing delivery behavior.
   def brokered_access_token
     credential = brokered_credential
-    return nil unless credential && !credential.dead?
-    return nil if credential.expires_at && credential.expires_at <= Time.current
-    if credential.oauth_app&.provider == "runlayer"
-      return nil unless credential.oauth_app.enabled?
-      return nil unless static_secret&.broker_credential_id == credential.id
-      return nil unless credential.created_by&.active? && credential.oauth_app.provider_strategy.credential_resource_matches?(credential)
-    end
+    return credential&.access_token unless credential&.oauth_app&.owner_only?
+    return nil if credential.dead? || (credential.expires_at && credential.expires_at <= Time.current)
+    return nil unless credential.oauth_app.enabled? && credential.created_by&.active?
+    return nil unless static_secret&.broker_credential_id == credential.id
 
     credential.access_token
   end

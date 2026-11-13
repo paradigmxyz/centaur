@@ -20,7 +20,6 @@ module Oauth
         Linear::KEY => Linear.new,
         Mercator::KEY => Mercator.new,
         Microsoft::KEY => Microsoft.new,
-        Runlayer::KEY => Runlayer.new,
         Slack::KEY => Slack.new,
         Zoom::KEY => Zoom.new
       }.freeze

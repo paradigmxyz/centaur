@@ -37,7 +37,11 @@ class Grant < ApplicationRecord
 
   validate :exactly_one_grantee
   validate :exactly_one_grantable
-  validate :runlayer_personal_owner
+  # Checked when a grant is created or retargeted; disabling the owner later
+  # withholds delivery without making existing grants unsaveable.
+  validate :owner_only_grantee, if: -> {
+    new_record? || will_save_change_to_principal_id? || will_save_change_to_role_id? || will_save_change_to_static_secret_id?
+  }
   validates :priority, presence: true, numericality: { only_integer: true }
 
   # The grantee this grant attaches the secret to: a principal or a role.
@@ -52,12 +56,12 @@ class Grant < ApplicationRecord
 
   private
 
-  def runlayer_personal_owner
+  def owner_only_grantee
     credential = static_secret&.broker_credential
-    return unless credential&.oauth_app&.provider == "runlayer"
-    return if role.nil? && PrincipalCredentialReconciliation.new.runlayer_owner?(principal, credential)
+    return unless credential&.oauth_app&.owner_only?
+    return if role.nil? && PrincipalCredentialReconciliation.new.connection_owner?(principal, credential)
 
-    errors.add(:principal, "must be the owner of this personal Runlayer connection")
+    errors.add(:principal, "must be the owner of this owner-only connection")
   end
 
   def sync_config_affected_principals

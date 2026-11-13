@@ -9,7 +9,9 @@ module Oauth
     # confidential client, an RFC 8707 resource indicator naming the protected
     # resource on the authorization, token, and refresh requests (as MCP servers
     # require), and the account identity from a userinfo endpoint or, when the
-    # server has none, from the claims of a JWT access token. The endpoints live
+    # server has none, from the claims of a JWT access token (owner-only apps
+    # key credentials by the connecting Console user instead, so they need
+    # neither). An optional RFC 7009 revocation endpoint backs Disconnect. The endpoints live
     # in the OAuth app's provider_config, so OauthApp#provider_strategy builds a
     # configured instance per app; the registry's unconfigured instance only
     # names the provider.
@@ -24,8 +26,8 @@ module Oauth
       include HttpIdentity
 
       KEY = "custom"
-      CONFIG_KEYS = %w[authorization_endpoint token_endpoint userinfo_endpoint resource].freeze
-      OPTIONAL_CONFIG_KEYS = %w[userinfo_endpoint].freeze
+      CONFIG_KEYS = %w[authorization_endpoint token_endpoint userinfo_endpoint revocation_endpoint resource].freeze
+      OPTIONAL_CONFIG_KEYS = %w[userinfo_endpoint revocation_endpoint].freeze
 
       # Validation messages for a provider_config hash; empty when valid.
       def self.config_errors(config)
@@ -54,6 +56,8 @@ module Oauth
       def display_name = @app&.slug || "Custom"
       def authorization_endpoint = @config["authorization_endpoint"]
       def token_endpoint = @config["token_endpoint"]
+      # RFC 7009 endpoint used when a user disconnects; nil when unsupported.
+      def revocation_endpoint = @config["revocation_endpoint"].presence
       def identity_scopes = []
       def authorization_scope_param = "scope"
       def scope_separator = " "

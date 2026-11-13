@@ -16,7 +16,6 @@ pub(crate) struct AppState {
     pub(crate) jwt_secret: Option<String>,
     pub(crate) api_hosts: Vec<String>,
     pub(crate) console_host: Option<String>,
-    pub(crate) runlayer_resource_url: Option<String>,
     pub(crate) sync_cache: Arc<SyncCache>,
     pub(crate) metrics: PrometheusHandle,
 }
@@ -35,6 +34,10 @@ pub(crate) struct ProxyRecord {
     pub(crate) console_user_email: Option<String>,
     pub(crate) console_user_id: Option<i64>,
     pub(crate) slack_history_channel_ids: Value,
+    /// An owner-only token's liveness (expiry, owner status, app state) is
+    /// not covered by the principal cache version, so such configs are always
+    /// assembled live.
+    pub(crate) has_owner_only_grant: bool,
 }
 
 impl ProxyRecord {

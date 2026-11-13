@@ -80,7 +80,6 @@ impl Fixture {
                 vec![]
             },
             console_host: None,
-            runlayer_resource_url: Some("https://tenant.runlayer.test/mcp".to_owned()),
             sync_cache: Arc::new(SyncCache::default()),
             metrics: PrometheusBuilder::new().build_recorder().handle(),
         };
@@ -1310,7 +1309,7 @@ async fn ssh_requests_are_limited_to_deployment_policy() {
 }
 
 #[tokio::test]
-async fn disabled_non_runlayer_apps_keep_existing_credentials_available() {
+async fn disabled_apps_keep_existing_credentials_available() {
     let Some(f) = Fixture::new().await else {
         return;
     };
@@ -1345,18 +1344,32 @@ async fn disabled_non_runlayer_apps_keep_existing_credentials_available() {
         assert_eq!(secret_hosts(&config), vec!["api.github.test"]);
         assert_eq!(config["secrets"][0]["source"]["value"], "known secret");
     }
-    let redacted = centaur_console_db::effective_config(&f.pool, principal, None)
+    let redacted = centaur_console_db::effective_config(&f.pool, principal)
         .await
         .unwrap()
         .unwrap();
     let redacted = json!({ "secrets": redacted.secrets });
     assert_eq!(secret_hosts(&redacted), vec!["api.github.test"]);
     assert_eq!(redacted["secrets"][0]["source"]["value"], "[redacted]");
+
+    // The owner-only liveness gate does not change delivery for other apps.
+    sqlx::query(
+        "UPDATE broker_credentials SET expires_at = now() - interval '1 minute' WHERE id = $1",
+    )
+    .bind(credential)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let proxy = f.proxy(Some(principal), None, json!({})).await;
+    assert_eq!(
+        f.sync(&proxy).await["secrets"][0]["source"]["value"],
+        "known secret"
+    );
 }
 
 #[tokio::test]
-async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocation() {
-    let Some(mut f) = Fixture::new().await else {
+async fn owner_only_credentials_follow_the_owner_and_stop_after_revocation() {
+    let Some(f) = Fixture::new().await else {
         return;
     };
     sqlx::query("UPDATE users SET status = 'active' WHERE id = $1")
@@ -1380,8 +1393,8 @@ async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocatio
         .await
         .unwrap();
     }
-    let app = f.oauth_app("runlayer", true).await;
-    sqlx::query("UPDATE oauth_apps SET provider = 'runlayer' WHERE id = $1")
+    let app = f.oauth_app("personal-mcp", true).await;
+    sqlx::query("UPDATE oauth_apps SET owner_only = true WHERE id = $1")
         .bind(app)
         .execute(&f.pool)
         .await
@@ -1394,16 +1407,14 @@ async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocatio
         .execute(&f.pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE broker_credentials SET labels = jsonb_build_object('runlayer_resource', 'https://tenant.runlayer.test/mcp') WHERE oauth_app_id = $1")
-        .bind(app).execute(&f.pool).await.unwrap();
-    let sa = f.wrapper_secret("alice", a, a, "alice.runlayer.test").await;
-    let sb = f.wrapper_secret("bob", b, b, "bob.runlayer.test").await;
+    let sa = f.wrapper_secret("alice", a, a, "alice.mcp.test").await;
+    let sb = f.wrapper_secret("bob", b, b, "bob.mcp.test").await;
     f.grant(Grantee::Principal(alice), "static_secret_id", sa, DIRECT)
         .await;
     f.grant(Grantee::Principal(bob), "static_secret_id", sb, DIRECT)
         .await;
     // Even stale or manually inserted shared/cross-owner grants cannot supply
-    // another user's Runlayer token.
+    // another user's owner-only token.
     let shared_role = f.role("shared", channel).await;
     f.grant(
         Grantee::Role(shared_role),
@@ -1422,9 +1433,9 @@ async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocatio
     let token = f.proxy(Some(channel), Some(alice), json!({})).await;
     let mut last_hash = Value::Null;
     for (actor, expected) in [
-        (Some(alice), vec!["alice.runlayer.test"]),
-        (Some(bob), vec!["bob.runlayer.test"]),
-        (Some(alice), vec!["alice.runlayer.test"]),
+        (Some(alice), vec!["alice.mcp.test"]),
+        (Some(bob), vec!["bob.mcp.test"]),
+        (Some(alice), vec!["alice.mcp.test"]),
         (None, vec![]),
     ] {
         sqlx::query("UPDATE proxies SET requester_principal_id = $1 WHERE bearer_token_hash = $2")
@@ -1439,27 +1450,18 @@ async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocatio
         last_hash = body["config_hash"].clone();
     }
     // The shared reader also protects api-rs' redacted effective-config path.
-    let redacted = centaur_console_db::effective_config(
-        &f.pool,
-        bob,
-        f.state.runlayer_resource_url.as_deref(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let redacted = json!({ "secrets": redacted.secrets });
-    assert_eq!(secret_hosts(&redacted), vec!["bob.runlayer.test"]);
-    assert_eq!(redacted["secrets"][0]["source"]["value"], "[redacted]");
-    let unconfigured = centaur_console_db::effective_config(&f.pool, alice, None)
+    let redacted = centaur_console_db::effective_config(&f.pool, bob)
         .await
         .unwrap()
         .unwrap();
-    assert!(unconfigured.secrets.is_empty());
+    let redacted = json!({ "secrets": redacted.secrets });
+    assert_eq!(secret_hosts(&redacted), vec!["bob.mcp.test"]);
+    assert_eq!(redacted["secrets"][0]["source"]["value"], "[redacted]");
 
     // The DM path has no requester and would otherwise cache the old token.
     let dm = f.proxy(Some(alice), None, json!({})).await;
     let previous = f.sync(&dm).await;
-    assert_eq!(secret_hosts(&previous), vec!["alice.runlayer.test"]);
+    assert_eq!(secret_hosts(&previous), vec!["alice.mcp.test"]);
     sqlx::query("UPDATE secret_sources SET broker_credential_id = $1 WHERE static_secret_id = $2")
         .bind(b)
         .bind(sa)
@@ -1497,9 +1499,6 @@ async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocatio
     .execute(&f.pool)
     .await
     .unwrap();
-    f.state.runlayer_resource_url = Some("https://changed.runlayer.test/mcp".to_owned());
-    assert!(secret_hosts(&f.sync(&dm).await).is_empty());
-    f.state.runlayer_resource_url = Some("https://tenant.runlayer.test/mcp".to_owned());
     sqlx::query("UPDATE oauth_apps SET enabled = false WHERE id = $1")
         .bind(app)
         .execute(&f.pool)
@@ -1509,7 +1508,7 @@ async fn personal_runlayer_credentials_follow_the_owner_and_stop_after_revocatio
 }
 
 #[tokio::test]
-async fn personal_runlayer_requires_the_owners_verified_slack_team_and_active_account() {
+async fn owner_only_requires_the_owners_verified_slack_team_and_active_account() {
     let Some(f) = Fixture::new().await else {
         return;
     };
@@ -1531,17 +1530,15 @@ async fn personal_runlayer_requires_the_owners_verified_slack_team_and_active_ac
     .execute(&f.pool)
     .await
     .unwrap();
-    let app = f.oauth_app("runlayer-slack", true).await;
-    sqlx::query("UPDATE oauth_apps SET provider = 'runlayer' WHERE id = $1")
+    let app = f.oauth_app("personal-mcp-slack", true).await;
+    sqlx::query("UPDATE oauth_apps SET owner_only = true WHERE id = $1")
         .bind(app)
         .execute(&f.pool)
         .await
         .unwrap();
     let credential = f.broker_credential("slack-user", Some(app), true).await;
-    sqlx::query("UPDATE broker_credentials SET labels = jsonb_build_object('runlayer_resource', 'https://tenant.runlayer.test/mcp') WHERE id = $1")
-        .bind(credential).execute(&f.pool).await.unwrap();
     let secret = f
-        .wrapper_secret("slack-user", credential, credential, "tenant.runlayer.test")
+        .wrapper_secret("slack-user", credential, credential, "tenant.mcp.test")
         .await;
     f.grant(
         Grantee::Principal(actor),
@@ -1551,10 +1548,7 @@ async fn personal_runlayer_requires_the_owners_verified_slack_team_and_active_ac
     )
     .await;
     let token = f.proxy(Some(channel), Some(actor), json!({})).await;
-    assert_eq!(
-        secret_hosts(&f.sync(&token).await),
-        vec!["tenant.runlayer.test"]
-    );
+    assert_eq!(secret_hosts(&f.sync(&token).await), vec!["tenant.mcp.test"]);
 
     sqlx::query("UPDATE principals SET slack_team_id = 'T000000002' WHERE id = $1")
         .bind(actor)
@@ -1593,6 +1587,11 @@ async fn personal_runlayer_requires_the_owners_verified_slack_team_and_active_ac
         .execute(&f.pool)
         .await
         .unwrap();
+    // Console ignores identities without a team when resolving the owner's
+    // Slack identity, so they must not make the owner ambiguous here either.
+    sqlx::query("INSERT INTO user_identities (user_id, provider, subject, team_id, created_at, updated_at) VALUES ($1, 'slack', $2, NULL, now(), now())")
+        .bind(f.admin).bind(format!("UNOTEAM{}", f.unique.to_uppercase())).execute(&f.pool).await.unwrap();
+    assert_eq!(secret_hosts(&f.sync(&token).await), vec!["tenant.mcp.test"]);
     sqlx::query("INSERT INTO user_identities (user_id, provider, subject, team_id, created_at, updated_at) VALUES ($1, 'slack', $2, 'T000000002', now(), now())")
         .bind(f.admin).bind(format!("W{}", f.unique.to_uppercase())).execute(&f.pool).await.unwrap();
     assert!(secret_hosts(&f.sync(&token).await).is_empty());

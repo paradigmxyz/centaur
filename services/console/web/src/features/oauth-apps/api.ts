@@ -18,6 +18,8 @@ export interface OauthApp {
   enabled: boolean;
   always_available: boolean;
   shared: boolean;
+  /** Each user's connection serves only that user. Create-only. */
+  owner_only: boolean;
   client_secret_set: boolean;
   redirect_uri: string;
   start_url: string;
@@ -59,16 +61,36 @@ export interface IntegrationApp {
   description: string | null;
   shared: boolean;
   always_available: boolean;
+  owner_only: boolean;
   usage: IntegrationUsage;
   start_url: string;
-  connection: { status: "connected" | "needs_reconnect" } | null;
+  connection: IntegrationConnection | null;
+}
+
+export interface IntegrationConnection {
+  id: string;
+  status: "connected" | "needs_reconnect";
+  /** Only the user who made a personal connection may disconnect it. */
+  can_disconnect: boolean;
+}
+
+/** A value the admin enters to set up a preset (e.g. Runlayer's tenant MCP URL). */
+export interface PresetInput {
+  name: string;
+  label: string;
+  type: "url" | "text";
+  placeholder: string | null;
 }
 
 export interface IntegrationPreset {
   provider: string;
   display_name: string;
   description: string | null;
+  inputs: PresetInput[];
 }
+
+/** DELETE /api/v1/console/integrations/connections/:id. */
+export type DisconnectOutcome = "revoked" | "local_only" | "failed";
 
 export interface Integrations {
   apps: IntegrationApp[];
@@ -86,6 +108,7 @@ export interface OauthAppInput {
   allowed_scopes: string[];
   enabled: boolean;
   shared?: boolean;
+  owner_only?: boolean;
   always_available: boolean;
   labels: Record<string, string>;
 }
@@ -160,16 +183,32 @@ export function useIntegrations() {
   });
 }
 
-/** POST /api/v1/console/oauth_apps/presets/:provider -> the consent start URL. */
-export async function setupPreset(queryClient: QueryClient, provider: string) {
+/**
+ * POST /api/v1/console/oauth_apps/presets/:provider -> the consent start URL.
+ * `input` carries the values the preset asks for (see PresetInput).
+ */
+export async function setupPreset(queryClient: QueryClient, provider: string, input: Record<string, string> = {}) {
   try {
     return await api.post<DataEnvelope<{ id: string; slug: string; start_url: string }>>(
       `${base}/presets/${encodeURIComponent(provider)}`,
+      Object.keys(input).length > 0 ? { data: input } : undefined,
     );
   } finally {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: integrationKeys.all }),
       queryClient.invalidateQueries({ queryKey: oauthAppKeys.lists() }),
     ]);
+  }
+}
+
+/** Disconnects one of the caller's own personal connections. */
+export async function disconnectIntegration(queryClient: QueryClient, connectionId: string) {
+  try {
+    const body = await api.delete<DataEnvelope<{ id: string; outcome: DisconnectOutcome }>>(
+      `/api/v1/console/integrations/connections/${encodeURIComponent(connectionId)}`,
+    );
+    return body.data.outcome;
+  } finally {
+    await queryClient.invalidateQueries({ queryKey: integrationKeys.all });
   }
 }

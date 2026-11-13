@@ -25,13 +25,20 @@ WITH candidate_grants AS (
       AND g.principal_id = $2
       AND g.role_id IS NULL
 ),
+-- An owner-only app's token serves only its owner, through the owner's own
+-- direct grant, whichever principal the turn runs as. The owner is the
+-- requester (or the principal itself when there is none): a Console-user
+-- principal of the connecting user, or a Slack principal whose user id and
+-- team match the connecting user's single verified Slack identity. Keep in
+-- step with PrincipalCredentialReconciliation#connection_owner? and
+-- UserIdentity.unambiguous_slack_identity in Console.
 effective_grants AS (
     SELECT g.* FROM candidate_grants g
     LEFT JOIN static_secrets ss ON ss.id = g.static_secret_id
     LEFT JOIN broker_credentials bc ON bc.id = ss.broker_credential_id
     LEFT JOIN oauth_apps oa ON oa.id = bc.oauth_app_id
     LEFT JOIN principals actor ON actor.id = COALESCE($2, $1)
-    WHERE oa.provider IS DISTINCT FROM 'runlayer' OR (
+    WHERE oa.owner_only IS NOT TRUE OR (
         NOT oa.shared AND g.role_id IS NULL AND g.principal_id = actor.id AND (
             (actor.kind = 'console_user' AND actor.console_user_id = bc.created_by_id) OR
             (actor.kind IS DISTINCT FROM 'console_user' AND EXISTS (
@@ -43,11 +50,13 @@ effective_grants AS (
                   AND NULLIF(trim(actor.slack_team_id), '') IS NOT NULL
                   AND lower(trim(ui.subject)) = lower(trim(actor.slack_user_id))
                   AND lower(trim(ui.team_id)) = lower(trim(actor.slack_team_id))
+                  -- Identities missing a subject or team are ignored, as in
+                  -- Console; any other distinct pair makes the owner ambiguous.
                   AND NOT EXISTS (
                       SELECT 1 FROM user_identities other
                       WHERE other.user_id = ui.user_id AND other.provider = 'slack'
-                        AND (lower(trim(other.subject)) IS DISTINCT FROM lower(trim(ui.subject))
-                          OR lower(trim(other.team_id)) IS DISTINCT FROM lower(trim(ui.team_id)))
+                        AND other.subject !~ '^\s*$' AND other.team_id !~ '^\s*$'
+                        AND (other.subject, other.team_id) IS DISTINCT FROM (ui.subject, ui.team_id)
                   )
             ))
         )
@@ -124,14 +133,16 @@ sources AS (
         sr.credential_id,
         jsonb_agg(
             sr.source || jsonb_strip_nulls(jsonb_build_object('broker_access_token',
-                CASE WHEN NOT bc.dead AND (bc.expires_at IS NULL OR bc.expires_at > CURRENT_TIMESTAMP)
-                     AND (oa.provider IS DISTINCT FROM 'runlayer' OR
-                          (oa.enabled AND credential_owner.status = 'active' AND $3::text = bc.labels->>'runlayer_resource'
-                           AND sr.kind = 'static' AND EXISTS (
-                               SELECT 1 FROM static_secrets wrapper
-                               WHERE wrapper.id = sr.credential_id AND wrapper.broker_credential_id = bc.id
-                           )))
-                THEN bc.access_token END))
+                -- An owner-only token is delivered only while live, from an
+                -- enabled app and an active owner, through its own wrapper.
+                CASE WHEN oa.owner_only IS NOT TRUE THEN bc.access_token
+                     WHEN NOT bc.dead AND (bc.expires_at IS NULL OR bc.expires_at > CURRENT_TIMESTAMP)
+                          AND oa.enabled AND credential_owner.status = 'active'
+                          AND sr.kind = 'static' AND EXISTS (
+                              SELECT 1 FROM static_secrets wrapper
+                              WHERE wrapper.id = sr.credential_id AND wrapper.broker_credential_id = bc.id
+                          )
+                     THEN bc.access_token END))
             ORDER BY sr.source_id
         ) AS sources
     FROM source_rows AS sr

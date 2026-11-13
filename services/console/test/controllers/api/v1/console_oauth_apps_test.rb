@@ -121,7 +121,7 @@ module Api
         assert_equal Oauth::Providers.keys, keys
         custom = json_body["data"].find { |p| p["key"] == "custom" }
         assert_equal Oauth::Providers::Custom::CONFIG_KEYS, custom["config_keys"]
-        assert_equal %w[userinfo_endpoint], custom["optional_config_keys"]
+        assert_equal %w[userinfo_endpoint revocation_endpoint], custom["optional_config_keys"]
         assert_equal [], json_body["data"].find { |p| p["key"] == "google" }["config_keys"]
         assert json_body["data"].find { |p| p["key"] == "mercator" }["presettable"]
       end
