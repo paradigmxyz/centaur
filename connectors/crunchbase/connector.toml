@@ -1,0 +1,5 @@
+description = "Crunchbase Enterprise API: organizations, people, funding rounds, investments, autocomplete"
+
+secrets = [
+  { type = "http", name = "CRUNCHBASE_API_KEY", mode = "inject", inject_header = "X-cb-user-key", hosts = ["api.crunchbase.com"] },
+]
