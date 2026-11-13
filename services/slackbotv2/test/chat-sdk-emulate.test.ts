@@ -4693,6 +4693,10 @@ describe('slackbotv2', () => {
     await waitFor(() => hasLog(logs, 'slackbotv2_handoff_retry_scheduled'), 3000)
     expect(logData(logs, 'slackbotv2_handoff_retry_scheduled')).toMatchObject({ pending_turn: true })
     expect(await pendingTurnIds(sharedState, key)).toEqual([late.ts])
+    // The retry budget is stored with the message for every trigger to honour.
+    expect(await sharedState.get(`slackbotv2:pending-turn:retry:${key}:${late.ts}`)).toMatchObject({
+      attempt: 1
+    })
 
     await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 2.'), 3000)
     expect(JSON.stringify(codexApi.executes.at(-1)?.body.input_lines)).toContain('retry my turn')
@@ -4734,7 +4738,7 @@ describe('slackbotv2', () => {
     await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
   })
 
-  it('leaves a newer execution\'s state alone when an older render finalizes', async () => {
+  it('leaves a newer turn\'s state alone when an older render finalizes', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()
     bot = createTestBot({ state: sharedState })
@@ -4745,20 +4749,22 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
     const key = threadKey(parent.ts)
     const stateKey = `thread-state:${key}`
+    // A stop cleared this turn's obligation, and a newer handoff has marked
+    // the thread active but not yet committed its own obligation.
     const current = (await sharedState.get<Record<string, unknown>>(stateKey)) ?? {}
-    const newer = {
-      afterEventId: 0,
-      executionId: 'exe-newer',
-      message: (current.renderObligation as { message: unknown }).message
-    }
-    await sharedState.set(stateKey, { ...current, activeExecution: true, renderObligation: newer })
+    await sharedState.set(stateKey, {
+      ...current,
+      activeExecution: true,
+      activeTurnMessageId: 'newer-turn-message',
+      renderObligation: null
+    })
 
     codexApi.emitOutputLines(key, sampleCodexOutputLines('Older execution complete.'))
     await mention.finished()
 
     expect(await sharedState.get<Record<string, unknown>>(stateKey)).toMatchObject({
       activeExecution: true,
-      renderObligation: { executionId: 'exe-newer' }
+      activeTurnMessageId: 'newer-turn-message'
     })
   })
 

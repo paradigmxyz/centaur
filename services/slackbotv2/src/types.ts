@@ -327,6 +327,11 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  /**
+   * The message whose turn set activeExecution, so an older render's cleanup
+   * leaves a newer turn's state alone. Null clears persisted state.
+   */
+  activeTurnMessageId?: string | null
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */
