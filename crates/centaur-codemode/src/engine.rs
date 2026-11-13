@@ -11,7 +11,9 @@
 //! 3. Cells and connectors never share a realm. Every tool call runs in a
 //!    fresh QuickJS runtime; arguments and results cross as JSON text.
 //! 4. A connector's `fetch` is bound to its call, so every upstream request
-//!    is recorded against the call that made it, at the point of I/O.
+//!    is recorded against the call that made it, at the point of I/O. So are
+//!    its file operations, when the runner has the files capability; cells
+//!    never get file access.
 //! 5. `invoke` checks the tool against the cell's allowlist.
 //! 6. Time, memory, call count and call concurrency are bounded per cell,
 //!    including the work connectors do.
@@ -33,7 +35,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
-use crate::catalog::{Catalog, lib_name};
+use crate::{
+    catalog::{Catalog, lib_name},
+    files::{FileInfo, Files, MAX_FILE_BYTES},
+};
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
 const CELL_PRELUDE: &str = include_str!("js/cell.js");
@@ -91,6 +96,22 @@ pub struct CallRecord {
     pub error: Option<String>,
     pub ms: u64,
     pub requests: Vec<RequestRecord>,
+    /// Files the call read or wrote through the files capability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileRecord>,
+}
+
+/// One file operation made by a connector call.
+#[derive(Clone, Debug, Serialize)]
+pub struct FileRecord {
+    /// `read`, `write`, `download` or `upload` (sent as a request body).
+    pub op: &'static str,
+    /// The path as the connector gave it.
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One upstream HTTP request made by a connector call. The query string is
@@ -123,16 +144,19 @@ pub struct Engine {
     catalog: Arc<Catalog>,
     http: reqwest::Client,
     context_file: Option<PathBuf>,
+    files: Option<Files>,
 }
 
 impl Engine {
     /// `context_file` is the sandbox context file (`~/.centaur/sandbox.json`),
     /// read once per cell and given to cells as `context` and to connectors
-    /// as `ctx.context`.
+    /// as `ctx.context`. `files_dir` turns on the files capability: connectors
+    /// get `ctx.files`, rooted there.
     pub fn new(
         catalog: Arc<Catalog>,
         ca_file: Option<&Path>,
         context_file: Option<PathBuf>,
+        files_dir: Option<&Path>,
     ) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
             .timeout(TOOL_TIMEOUT)
@@ -148,6 +172,7 @@ impl Engine {
             catalog,
             http: builder.build()?,
             context_file,
+            files: files_dir.map(Files::new).transpose()?,
         })
     }
 
@@ -194,6 +219,7 @@ impl Engine {
             allowed,
             context: self.calling_context().await,
             http: self.http.clone(),
+            files: self.files.clone(),
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             deadline: started + CELL_TIMEOUT,
@@ -249,6 +275,7 @@ struct Cell {
     /// The sandbox context file as JSON text, or `null`.
     context: String,
     http: reqwest::Client,
+    files: Option<Files>,
     logs: Mutex<Vec<String>>,
     calls: Mutex<Vec<Call>>,
     deadline: Instant,
@@ -260,6 +287,7 @@ struct Call {
     started: Instant,
     ended: Option<(Instant, Result<(), String>)>,
     requests: Vec<RequestRecord>,
+    files: Vec<FileRecord>,
 }
 
 impl Cell {
@@ -286,15 +314,81 @@ impl Cell {
                     error: result.err(),
                     ms: ended.duration_since(call.started).as_millis() as u64,
                     requests: call.requests.clone(),
+                    files: call.files.clone(),
                 }
             })
             .collect()
     }
 
-    fn record_request(&self, call: usize, request: RequestRecord) {
+    fn record_request(
+        &self,
+        call: usize,
+        method: &str,
+        url: &str,
+        started: Instant,
+        status: std::result::Result<u16, &String>,
+    ) {
+        let request = RequestRecord {
+            method: method.to_ascii_uppercase(),
+            url: redact_url(url),
+            status: status.ok(),
+            error: status.err().cloned(),
+            ms: started.elapsed().as_millis() as u64,
+        };
         if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
             call.requests.push(request);
         }
+    }
+
+    fn record_file(
+        &self,
+        call: usize,
+        op: &'static str,
+        path: &str,
+        result: std::result::Result<&FileInfo, &eyre::Report>,
+    ) {
+        let record = FileRecord {
+            op,
+            path: truncate(path.to_owned(), 1024),
+            bytes: result.as_ref().ok().map(|info| info.bytes),
+            error: result.err().map(|error| format!("{error:#}")),
+        };
+        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
+            call.files.push(record);
+        }
+    }
+
+    /// Join body parts, reading file parts through the files capability.
+    async fn request_body(
+        &self,
+        call: usize,
+        parts: Option<Vec<BodyPart>>,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let Some(parts) = parts else {
+            return Ok(None);
+        };
+        let mut body = Vec::new();
+        for part in parts {
+            match part {
+                BodyPart::Bytes(bytes) => body.extend_from_slice(&bytes),
+                BodyPart::File(path) => {
+                    let files = self.files.as_ref().ok_or_else(|| {
+                        "a { file } body part needs the files capability (--files-dir)".to_owned()
+                    })?;
+                    let result = files.read(&path).await;
+                    self.record_file(call, "upload", &path, result.as_ref().map(|(info, _)| info));
+                    let (_, data) =
+                        result.map_err(|error| format!("files.read({path:?}): {error:#}"))?;
+                    body.extend_from_slice(&data);
+                }
+            }
+            if body.len() > MAX_FILE_BYTES {
+                return Err(format!(
+                    "request body is over the {MAX_FILE_BYTES}-byte limit"
+                ));
+            }
+        }
+        Ok(Some(body))
     }
 
     /// The `invoke` host function: record, check policy, run, record.
@@ -311,6 +405,7 @@ impl Cell {
                 started: Instant::now(),
                 ended: None,
                 requests: Vec::new(),
+                files: Vec::new(),
             });
             calls.len() - 1
         };
@@ -785,7 +880,7 @@ fn cell_host<'js>(ctx: &Ctx<'js>, cell: Arc<Cell>) -> rquickjs::Result<Object<'j
 }
 
 /// A connector call's host: the common functions plus `fetch` bound to this
-/// call.
+/// call, and the files functions when the runner has the files capability.
 fn connector_host<'js>(
     ctx: &Ctx<'js>,
     cell: Arc<Cell>,
@@ -793,6 +888,7 @@ fn connector_host<'js>(
     label: &str,
 ) -> rquickjs::Result<Object<'js>> {
     let host = common_host(ctx, cell.clone(), format!("[{label}] "))?;
+    let fetch_cell = cell.clone();
     host.set(
         "fetch",
         Function::new(
@@ -802,21 +898,27 @@ fn connector_host<'js>(
                       url: String,
                       method: String,
                       headers: String,
-                      body: Opt<TypedArray<'js, u8>>| {
-                    let cell = cell.clone();
-                    let body = body.0.as_ref().map(copy_bytes);
+                      body: Opt<Value<'js>>| {
+                    let cell = fetch_cell.clone();
+                    let parts = body_parts(body.0);
                     async move {
+                        let parts =
+                            parts.map_err(|message| Exception::throw_type(&ctx, &message))?;
+                        let body = cell
+                            .request_body(call, parts)
+                            .await
+                            .map_err(|message| Exception::throw_message(&ctx, &message))?;
                         let started = Instant::now();
-                        let result = fetch(&cell.http, &url, &method, &headers, body).await;
+                        let result = match send(&cell.http, &url, &method, &headers, body).await {
+                            Ok(response) => collect(response).await,
+                            Err(error) => Err(error),
+                        };
                         cell.record_request(
                             call,
-                            RequestRecord {
-                                method: method.to_ascii_uppercase(),
-                                url: redact_url(&url),
-                                status: result.as_ref().ok().map(|out| out.status),
-                                error: result.as_ref().err().cloned(),
-                                ms: started.elapsed().as_millis() as u64,
-                            },
+                            &method,
+                            &url,
+                            started,
+                            result.as_ref().map(|out| out.status),
                         );
                         result.map_err(|message| Exception::throw_message(&ctx, &message))
                     }
@@ -824,7 +926,172 @@ fn connector_host<'js>(
             ),
         )?,
     )?;
+    let Some(files) = cell.files.clone() else {
+        return Ok(host);
+    };
+    let read_cell = cell.clone();
+    let read_files = files.clone();
+    host.set(
+        "filesRead",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, path: String| {
+                let (cell, files) = (read_cell.clone(), read_files.clone());
+                async move {
+                    let result = files.read(&path).await;
+                    cell.record_file(call, "read", &path, result.as_ref().map(|(info, _)| info));
+                    let (info, data) = result.map_err(|error| {
+                        Exception::throw_message(&ctx, &format!("files.read({path:?}): {error:#}"))
+                    })?;
+                    let object = Object::new(ctx.clone())?;
+                    object.set("path", info.path.display().to_string())?;
+                    object.set("data", TypedArray::<u8>::new(ctx.clone(), data)?)?;
+                    Ok::<_, rquickjs::Error>(object)
+                }
+            }),
+        )?,
+    )?;
+    let write_cell = cell.clone();
+    let write_files = files.clone();
+    host.set(
+        "filesWrite",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>, path: String, data: TypedArray<'js, u8>| {
+                    let (cell, files) = (write_cell.clone(), write_files.clone());
+                    let data = copy_bytes(&data);
+                    async move {
+                        let result = files.write(&path, &data).await;
+                        cell.record_file(call, "write", &path, result.as_ref());
+                        let info = result.map_err(|error| {
+                            Exception::throw_message(
+                                &ctx,
+                                &format!("files.write({path:?}): {error:#}"),
+                            )
+                        })?;
+                        file_info(&ctx, &info)
+                    }
+                },
+            ),
+        )?,
+    )?;
+    let stat_files = files.clone();
+    host.set(
+        "filesStat",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, path: String| {
+                let files = stat_files.clone();
+                async move {
+                    match files.stat(&path).await {
+                        Ok(Some(info)) => Ok(file_info(&ctx, &info)?.into_value()),
+                        Ok(None) => Ok(Value::new_null(ctx.clone())),
+                        Err(error) => Err(Exception::throw_message(
+                            &ctx,
+                            &format!("files.stat({path:?}): {error:#}"),
+                        )),
+                    }
+                }
+            }),
+        )?,
+    )?;
+    let download_cell = cell.clone();
+    host.set(
+        "filesDownload",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>,
+                      url: String,
+                      path: String,
+                      method: String,
+                      headers: String,
+                      body: Opt<Value<'js>>| {
+                    let (cell, files) = (download_cell.clone(), files.clone());
+                    let parts = body_parts(body.0);
+                    async move {
+                        let parts =
+                            parts.map_err(|message| Exception::throw_type(&ctx, &message))?;
+                        let body = cell
+                            .request_body(call, parts)
+                            .await
+                            .map_err(|message| Exception::throw_message(&ctx, &message))?;
+                        let started = Instant::now();
+                        let result = match send(&cell.http, &url, &method, &headers, body).await {
+                            Ok(response) => download(&files, &path, response).await,
+                            Err(error) => Err(error),
+                        };
+                        cell.record_request(
+                            call,
+                            &method,
+                            &url,
+                            started,
+                            result.as_ref().map(|out| out.status),
+                        );
+                        if let Ok(out) = &result
+                            && let Some(info) = &out.file
+                        {
+                            cell.record_file(call, "download", &path, Ok(info));
+                        }
+                        let out =
+                            result.map_err(|message| Exception::throw_message(&ctx, &message))?;
+                        let object = Object::new(ctx.clone())?;
+                        object.set("status", out.status)?;
+                        object.set("headers", out.headers)?;
+                        if let Some(info) = &out.file {
+                            object.set("path", info.path.display().to_string())?;
+                            object.set("bytes", info.bytes as f64)?;
+                        }
+                        if let Some(text) = out.error_body {
+                            object.set("body", text)?;
+                        }
+                        Ok::<_, rquickjs::Error>(object)
+                    }
+                },
+            ),
+        )?,
+    )?;
     Ok(host)
+}
+
+fn file_info<'js>(ctx: &Ctx<'js>, info: &FileInfo) -> rquickjs::Result<Object<'js>> {
+    let object = Object::new(ctx.clone())?;
+    object.set("path", info.path.display().to_string())?;
+    object.set("bytes", info.bytes as f64)?;
+    Ok(object)
+}
+
+/// One piece of a request body: bytes, or a file under the files root.
+enum BodyPart {
+    Bytes(Vec<u8>),
+    File(String),
+}
+
+/// A request body from the connector prelude: absent, one `Uint8Array`, or
+/// an array of `Uint8Array` and `{ file }` parts, sent in order.
+fn body_parts<'js>(body: Option<Value<'js>>) -> std::result::Result<Option<Vec<BodyPart>>, String> {
+    let Some(body) = body.filter(|body| !body.is_undefined() && !body.is_null()) else {
+        return Ok(None);
+    };
+    let part = |value: Value<'js>| -> std::result::Result<BodyPart, String> {
+        if let Ok(array) = TypedArray::<u8>::from_value(value.clone()) {
+            return Ok(BodyPart::Bytes(copy_bytes(&array)));
+        }
+        let path = value
+            .as_object()
+            .and_then(|object| object.get::<_, Option<String>>("file").ok().flatten());
+        path.map(BodyPart::File)
+            .ok_or_else(|| "body parts must be strings, bytes or { file: path }".to_owned())
+    };
+    if let Some(array) = body.as_array() {
+        let mut parts = Vec::with_capacity(array.len());
+        for value in array.iter::<Value>() {
+            parts.push(part(value.map_err(|error| error.to_string())?)?);
+        }
+        return Ok(Some(parts));
+    }
+    Ok(Some(vec![part(body)?]))
 }
 
 fn redact_url(url: &str) -> String {
@@ -840,13 +1107,14 @@ fn redact_url(url: &str) -> String {
     }
 }
 
-async fn fetch(
+/// Build and send one request; the caller reads the body.
+async fn send(
     http: &reqwest::Client,
     url: &str,
     method: &str,
     headers: &str,
     body: Option<Vec<u8>>,
-) -> std::result::Result<FetchOut, String> {
+) -> std::result::Result<reqwest::Response, String> {
     let parsed = reqwest::Url::parse(url).map_err(|error| format!("invalid URL: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("unsupported URL scheme {:?}", parsed.scheme()));
@@ -862,43 +1130,102 @@ async fn fetch(
     if let Some(body) = body {
         request = request.body(body);
     }
-    // Drop the URL: query-string keys would otherwise land in error text.
-    let transport = |error: reqwest::Error| {
-        let error = error.without_url();
-        let mut message = format!("request failed: {error}");
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            message.push_str(&format!(": {cause}"));
-            source = cause.source();
-        }
-        message
-    };
-    let mut response = request.send().await.map_err(transport)?;
-    let status = response.status().as_u16();
-    let mut out_headers: BTreeMap<String, String> = BTreeMap::new();
+    request.send().await.map_err(transport)
+}
+
+/// Transport errors without the URL: query-string keys would otherwise land
+/// in error text.
+fn transport(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut message = format!("request failed: {error}");
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
+}
+
+fn response_headers(response: &reqwest::Response) -> String {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in response.headers() {
         let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        out_headers
-            .entry(name.as_str().to_owned())
+        out.entry(name.as_str().to_owned())
             .and_modify(|existing| {
                 existing.push_str(", ");
                 existing.push_str(&value);
             })
             .or_insert(value);
     }
+    serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_owned())
+}
+
+async fn collect(mut response: reqwest::Response) -> std::result::Result<FetchOut, String> {
+    let status = response.status().as_u16();
+    let headers = response_headers(&response);
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport)? {
         if body.len() + chunk.len() > MAX_FETCH_BYTES {
             return Err(format!(
-                "response body is over the {MAX_FETCH_BYTES}-byte limit"
+                "response body is over the {MAX_FETCH_BYTES}-byte limit; use ctx.files.download for large files"
             ));
         }
         body.extend_from_slice(&chunk);
     }
     Ok(FetchOut {
         status,
-        headers: serde_json::to_string(&out_headers).unwrap_or_else(|_| "{}".to_owned()),
+        headers,
         body,
+    })
+}
+
+struct DownloadOut {
+    status: u16,
+    headers: String,
+    /// The saved file, for a 2xx response.
+    file: Option<FileInfo>,
+    /// The start of the body of a non-2xx response, which is not saved.
+    error_body: Option<String>,
+}
+
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Stream a 2xx response body to `path`; keep the start of any other body
+/// for the connector's error message.
+async fn download(
+    files: &Files,
+    path: &str,
+    mut response: reqwest::Response,
+) -> std::result::Result<DownloadOut, String> {
+    let status = response.status().as_u16();
+    let headers = response_headers(&response);
+    if !response.status().is_success() {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
+            body.extend_from_slice(&chunk);
+            if body.len() >= MAX_ERROR_BODY_BYTES {
+                body.truncate(MAX_ERROR_BODY_BYTES);
+                break;
+            }
+        }
+        return Ok(DownloadOut {
+            status,
+            headers,
+            file: None,
+            error_body: Some(String::from_utf8_lossy(&body).into_owned()),
+        });
+    }
+    let failed = |error: eyre::Report| format!("files.download({path:?}): {error:#}");
+    let mut writer = files.create(path).await.map_err(failed)?;
+    while let Some(chunk) = response.chunk().await.map_err(transport)? {
+        writer.write(&chunk).await.map_err(failed)?;
+    }
+    let info = writer.finish().await.map_err(failed)?;
+    Ok(DownloadOut {
+        status,
+        headers,
+        file: Some(info),
+        error_body: None,
     })
 }
 
@@ -948,6 +1275,29 @@ export async function codec(args: { text: string }, ctx: Ctx): Promise<{ b64: st
   };
 }
 
+/** Exercise the files capability. */
+export async function files(args: { base: string }, ctx: Ctx): Promise<unknown> {
+  if (!ctx.files) return { capability: false };
+  const written = await ctx.files.write("out/a.txt", "héllo");
+  const text = await ctx.files.readText("out/a.txt");
+  const missing = await ctx.files.stat("out/none");
+  const saved = await ctx.files.download(args.base + "/blob", "dl/blob.bin");
+  const failed = await ctx.files.download(args.base + "/missing", "dl/missing.bin");
+  const echoed = await ctx.fetch(args.base + "/echo", { method: "POST", body: ["<", { file: "out/a.txt" }, ">"] });
+  let escape = "";
+  try { await ctx.files.write("../x", "no"); } catch (e) { escape = String(e); }
+  return {
+    capability: true,
+    written: written.path.endsWith("/out/a.txt") && written.bytes === 6,
+    text,
+    missing,
+    saved: { ok: saved.ok, bytes: saved.bytes, type: saved.headers["content-type"], found: (await ctx.files.stat("dl/blob.bin"))?.bytes },
+    failed: { ok: failed.ok, status: failed.status, body: failed.body, path: failed.path ?? null, found: await ctx.files.stat("dl/missing.bin") },
+    echoed: await echoed.text(),
+    escape: escape.includes("files.write"),
+  };
+}
+
 /** What the connector realm sees of globals a cell may have touched. */
 export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json: string }> {
   return { marker: typeof (globalThis as any).marker, json: JSON.stringify({ a: 1 }) };
@@ -955,6 +1305,10 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 "#;
 
     fn engine() -> (tempfile::TempDir, Engine) {
+        engine_with_files(false)
+    }
+
+    fn engine_with_files(files: bool) -> (tempfile::TempDir, Engine) {
         let dir = tempfile::tempdir().unwrap();
         let connector = dir.path().join("connectors").join("demo");
         std::fs::create_dir_all(&connector).unwrap();
@@ -974,7 +1328,13 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
         )
         .unwrap();
-        let engine = Engine::new(Arc::new(catalog), None, Some(context_file)).unwrap();
+        let engine = Engine::new(
+            Arc::new(catalog),
+            None,
+            Some(context_file),
+            files.then(|| dir.path().join("files")).as_deref(),
+        )
+        .unwrap();
         (dir, engine)
     }
 
@@ -989,7 +1349,27 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 
     /// A one-route HTTP server for fetch tests.
     async fn upstream() -> String {
-        let app = axum::Router::new().route("/hello", axum::routing::get(|| async { "hi there" }));
+        let app = axum::Router::new()
+            .route("/hello", axum::routing::get(|| async { "hi there" }))
+            .route(
+                "/blob",
+                axum::routing::get(|| async {
+                    (
+                        [("content-type", "application/octet-stream")],
+                        vec![7u8; 20 * 1024 * 1024],
+                    )
+                }),
+            )
+            .route(
+                "/missing",
+                axum::routing::get(|| async {
+                    (axum::http::StatusCode::NOT_FOUND, "no such blob")
+                }),
+            )
+            .route(
+                "/echo",
+                axum::routing::post(|body: String| async move { body }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1010,6 +1390,55 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             response.result.unwrap(),
             serde_json::json!({ "b64": "aMOpbGxvPw==", "url": "-_8", "back": "héllo?", "btoa": "latin", "zipped": "héllo?" })
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_use_the_files_capability() {
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let code = format!("return await tools.demo.files({{ base: {base:?} }});");
+        let response = exec(&engine, &code, None).await;
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "capability": false })
+        );
+
+        let (dir, engine) = engine_with_files(true);
+        let response = exec(&engine, &code, None).await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({
+                "capability": true,
+                "written": true,
+                "text": "héllo",
+                "missing": null,
+                "saved": { "ok": true, "bytes": 20971520, "type": "application/octet-stream", "found": 20971520 },
+                "failed": { "ok": false, "status": 404, "body": "no such blob", "path": null, "found": null },
+                "echoed": "<héllo>",
+                "escape": true,
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("files/out/a.txt")).unwrap(),
+            "héllo"
+        );
+        let ops: Vec<(&str, String, Option<u64>)> = response.calls[0]
+            .files
+            .iter()
+            .map(|file| (file.op, file.path.clone(), file.bytes))
+            .collect();
+        assert_eq!(
+            ops,
+            vec![
+                ("write", "out/a.txt".to_owned(), Some(6)),
+                ("read", "out/a.txt".to_owned(), Some(6)),
+                ("download", "dl/blob.bin".to_owned(), Some(20971520)),
+                ("upload", "out/a.txt".to_owned(), Some(6)),
+                ("write", "../x".to_owned(), None),
+            ]
+        );
+        assert_eq!(response.calls[0].requests.len(), 3);
     }
 
     #[test]
@@ -1138,6 +1567,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             allowed: vec!["other".to_owned()],
             context: "null".to_owned(),
             http: engine.http.clone(),
+            files: None,
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             deadline: Instant::now() + CELL_TIMEOUT,
