@@ -1,0 +1,5 @@
+description = "Google Gemini image generation (Nano Banana): generate and edit images, list models"
+
+secrets = [
+    {type = "http", name = "GOOGLE_API_KEY", mode = "inject", inject_header = "x-goog-api-key", hosts = ["generativelanguage.googleapis.com"]},
+]

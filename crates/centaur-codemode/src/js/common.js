@@ -41,6 +41,28 @@
   };
   const log = (level) => (...values) => host.log(level, values.map(format).join(" "));
 
+  // Web-standard Latin-1 base64, for code that expects it.
+  const btoa = (text) => {
+    const value = String(text);
+    const bytes = new Uint8Array(value.length);
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      if (code > 255) throw new TypeError("btoa: string contains characters outside Latin-1");
+      bytes[i] = code;
+    }
+    return host.base64Encode(bytes, false);
+  };
+  const atob = (text) => {
+    const bytes = host.base64Decode(String(text));
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 8192) {
+      out += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    }
+    return out;
+  };
+
+  globalThis.btoa = btoa;
+  globalThis.atob = atob;
   globalThis.TextEncoder = TextEncoder;
   globalThis.TextDecoder = TextDecoder;
   globalThis.setTimeout = setTimeout;

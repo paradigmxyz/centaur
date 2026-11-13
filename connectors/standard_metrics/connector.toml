@@ -1,0 +1,6 @@
+description = "Standard Metrics: portfolio companies, metrics, financials, documents, budgets, funds, notes"
+
+secrets = [
+  {type = "http", name = "STANDARD_METRICS_CLIENT_ID", match_headers = ["Authorization"], hosts = ["api.standardmetrics.io"]},
+  {type = "http", name = "STANDARD_METRICS_CLIENT_SECRET", match_headers = ["Authorization"], hosts = ["api.standardmetrics.io"]},
+]

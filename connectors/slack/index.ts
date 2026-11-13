@@ -1,10 +1,12 @@
-import type { Ctx, Response } from "../centaur";
+import type { Ctx, RequestInit, Response } from "../centaur";
 import { query, readJson, encode, type Params } from "../_lib/http";
+import { downloadTo, outputPath, requireFiles, safeFilename } from "../_lib/files";
 
 // Results are Slack's own objects, passed through. The interfaces list the
 // fields worth knowing; Slack sends more.
 
 const SLACK = "https://slack.com/api";
+const FILES_HOST = "files.slack.com";
 const DEFAULT_CENTAUR_API = "http://api:8000";
 
 /**
@@ -62,6 +64,37 @@ export interface User {
   [field: string]: unknown;
 }
 
+/** A Slack file object, as `files.info` and `files.completeUploadExternal` return it. */
+export interface FileInfo {
+  id: string;
+  name: string | null;
+  title: string | null;
+  mimetype: string | null;
+  size: number | null;
+  user: string | null;
+  permalink: string | null;
+  url_private_download: string | null;
+}
+
+/** A file a connector function saved for the caller (see `_lib/files`). */
+export interface SavedFile {
+  /** Absolute path in the sandbox. */
+  path: string;
+  bytes: number;
+  mime_type?: string;
+}
+
+/** A Slack file downloaded to the sandbox: where it landed, and Slack's metadata for it. */
+export interface DownloadedFile extends SavedFile {
+  file: FileInfo;
+}
+
+/** A completed upload: the new file IDs, and Slack's metadata for each. */
+export interface UploadedFiles {
+  file_ids: string[];
+  files: FileInfo[];
+}
+
 /** One `search.messages` match. */
 export interface SearchMatch {
   ts: string;
@@ -111,17 +144,57 @@ async function slackPost(ctx: Ctx, method: string, params: Params): Promise<Body
   return slackResult(res, method);
 }
 
-async function centaur(ctx: Ctx, path: string, params: Params = {}, method = "GET"): Promise<Body> {
-  const base = (ctx.env.CENTAUR_API_URL || DEFAULT_CENTAUR_API).replace(/\/+$/, "");
+function centaurBase(ctx: Ctx): string {
+  return (ctx.env.CENTAUR_API_URL || DEFAULT_CENTAUR_API).replace(/\/+$/, "");
+}
+
+function centaurHeaders(ctx: Ctx): Record<string, string> {
   const headers: Record<string, string> = { accept: "application/json" };
   // Behind iron-proxy the API credential is injected for the API host.
   if (ctx.env.CENTAUR_API_BEARER_TOKEN) headers.authorization = `Bearer ${ctx.env.CENTAUR_API_BEARER_TOKEN}`;
-  const res = await ctx.fetch(`${base}${path}${query(params)}`, { method, headers });
+  return headers;
+}
+
+async function centaur(ctx: Ctx, path: string, params: Params = {}, method = "GET"): Promise<Body> {
+  const res = await ctx.fetch(`${centaurBase(ctx)}${path}${query(params)}`, { method, headers: centaurHeaders(ctx) });
   return readJson(res, `Centaur API ${path}`);
+}
+
+/** Content type for an upload, from the file name's extension; Slack uses it for previews. */
+function mimeFor(filename: string): string {
+  const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+  const known: Record<string, string> = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    pdf: "application/pdf", csv: "text/csv", txt: "text/plain", md: "text/markdown",
+    json: "application/json", html: "text/html", zip: "application/zip",
+    mp4: "video/mp4", mov: "video/quicktime", mp3: "audio/mpeg", wav: "audio/wav",
+  };
+  return known[extension] ?? "application/octet-stream";
 }
 
 const seg = (value: string): string => encodeURIComponent(value.trim());
 const nextCursor = (body: Body): string | null => body.response_metadata?.next_cursor || null;
+const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+/** Slack's file object, narrowed to the fields worth knowing. */
+function fileInfo(raw: Body): FileInfo {
+  return {
+    id: text(raw.id) ?? "",
+    name: text(raw.name),
+    title: text(raw.title),
+    mimetype: text(raw.mimetype),
+    size: typeof raw.size === "number" ? raw.size : null,
+    user: text(raw.user),
+    permalink: text(raw.permalink),
+    url_private_download: text(raw.url_private_download ?? raw.url_private),
+  };
+}
+
+/** Through the Centaur API a file is authorized by the channel it is shared in. */
+function requireChannel(channelId: string | undefined, what: string): string {
+  if (!channelId) throw new Error(`${what} through the Centaur API needs \`channel\` (the conversation the file is shared in)`);
+  return channelId;
+}
 
 /** Slack ts, YYYY-MM-DD (UTC midnight) or ISO time to a Slack ts. */
 function slackTs(value: string | undefined): string | undefined {
@@ -264,6 +337,40 @@ export async function user_details(args: { user: string }, ctx: Ctx): Promise<{ 
 }
 
 /**
+ * Download a Slack file (F…) to the sandbox and return where it landed, plus Slack's metadata.
+ * `channel` is the conversation the file is shared in, required through the Centaur API. `path`
+ * defaults to `downloads/slack/<file name>`. Read it back with `files.read` or hand it to another
+ * tool.
+ */
+export async function download_file(
+  args: { file: string; channel?: string; path?: string },
+  ctx: Ctx,
+): Promise<DownloadedFile> {
+  requireFiles(ctx, "slack.download_file");
+  let info: FileInfo;
+  let url: string;
+  let init: RequestInit;
+  if (access(ctx) === "centaur") {
+    const channelId = requireChannel(args.channel, "download_file");
+    const raw = await centaur(ctx, `/api/slack/files/${seg(args.file)}/info`, { channel_id: channelId });
+    info = fileInfo(raw.file ?? {});
+    url = `${centaurBase(ctx)}/api/slack/files/${seg(args.file)}/download?${encode({ channel_id: channelId })}`;
+    init = { headers: centaurHeaders(ctx) };
+  } else {
+    info = fileInfo((await slackGet(ctx, "files.info", { file: args.file.trim() })).file ?? {});
+    const downloadUrl = info.url_private_download;
+    if (!downloadUrl) throw new Error(`file ${args.file} has no download URL`);
+    if (!downloadUrl.startsWith(`https://${FILES_HOST}/`)) {
+      throw new Error(`file ${args.file} downloads from ${downloadUrl}, not https://${FILES_HOST}; refusing to send the token there`);
+    }
+    url = downloadUrl;
+    init = { headers: { authorization: `Bearer ${token(ctx)}` } };
+  }
+  const path = outputPath(args.path, "slack", safeFilename(info.name ?? args.file));
+  return { ...(await downloadTo(ctx, url, path, `downloading Slack file ${args.file}`, init)), file: info };
+}
+
+/**
  * Write: post a message. `channel` is a conversation ID or a user ID (U…) to DM them from the
  * bot; `text` is Slack mrkdwn; `thread_ts` replies in a thread. Direct access only.
  */
@@ -296,4 +403,59 @@ export async function add_reaction(
     if (String((error as Error).message).includes("already_reacted")) return { changed: false };
     throw error;
   }
+}
+
+/**
+ * Write: upload a file from the sandbox (`path`, for example one saved by `download_file` or
+ * `files.write`) and share it into `channel`, optionally in a thread. `filename` defaults to the
+ * path's last segment; the file is streamed from disk, not read into the cell.
+ */
+export async function upload_file(
+  args: { channel: string; path: string; filename?: string; title?: string; initial_comment?: string; thread_ts?: string },
+  ctx: Ctx,
+): Promise<UploadedFiles> {
+  const files = requireFiles(ctx, "slack.upload_file");
+  const stat = await files.stat(args.path);
+  if (!stat) throw new Error(`no such file: ${args.path}`);
+  const filename = args.filename ?? args.path.split(/[\\/]/).pop() ?? "file";
+  const title = args.title ?? filename;
+  const content_type = mimeFor(filename);
+  const channel = args.channel.trim();
+  if (access(ctx) === "centaur") {
+    const params: Params = {
+      channel_id: channel, filename, title, content_type,
+      initial_comment: args.initial_comment, thread_ts: args.thread_ts,
+    };
+    const res = await ctx.fetch(`${centaurBase(ctx)}/api/slack/files/upload${query(params)}`, {
+      method: "POST",
+      headers: { ...centaurHeaders(ctx), "content-type": content_type },
+      body: { file: args.path },
+    });
+    const body = await readJson(res, "Centaur API /api/slack/files/upload");
+    const file = fileInfo(body.file ?? {});
+    return { file_ids: [typeof body.file_id === "string" ? body.file_id : file.id], files: [file] };
+  }
+  const ticket = await slackPost(ctx, "files.getUploadURLExternal", { filename, length: stat.bytes });
+  const uploadUrl = typeof ticket.upload_url === "string" ? ticket.upload_url : "";
+  const fileId = typeof ticket.file_id === "string" ? ticket.file_id : "";
+  if (!uploadUrl || !fileId) throw new Error("Slack files.getUploadURLExternal returned no upload_url");
+  if (!uploadUrl.startsWith(`https://${FILES_HOST}/`)) {
+    throw new Error(`Slack gave an upload URL at ${uploadUrl}, not https://${FILES_HOST}; refusing to upload there`);
+  }
+  // The upload URL is presigned: no bearer token goes to the file host.
+  const upload = await ctx.fetch(uploadUrl, {
+    method: "POST",
+    headers: { "content-type": content_type },
+    body: { file: args.path },
+  });
+  if (!upload.ok) {
+    throw new Error(`uploading ${filename} returned HTTP ${upload.status}: ${(await upload.text()).slice(0, 500)}`);
+  }
+  const completed = await slackPost(ctx, "files.completeUploadExternal", {
+    files: JSON.stringify([{ id: fileId, title }]),
+    channel_id: channel, thread_ts: args.thread_ts, initial_comment: args.initial_comment,
+  });
+  const uploaded = ((completed.files ?? []) as Body[]).map(fileInfo);
+  const ids = uploaded.map((file) => file.id).filter((id) => id);
+  return { file_ids: ids.length > 0 ? ids : [fileId], files: uploaded };
 }

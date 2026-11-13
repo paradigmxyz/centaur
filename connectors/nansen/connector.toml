@@ -1,0 +1,3 @@
+description = "Nansen: wallet labels, balances, PnL, Smart Money flows, token holders, trades and entity search"
+
+secrets = [{type = "http", name = "NANSEN_API_KEY", mode = "inject", inject_header = "apiKey", hosts = ["api.nansen.ai"]}]

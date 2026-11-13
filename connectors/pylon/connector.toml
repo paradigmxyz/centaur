@@ -1,0 +1,3 @@
+description = "Pylon: support issues, accounts, contacts, users, teams and tags"
+
+secrets = [{type = "http", name = "PYLON_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.usepylon.com"]}]

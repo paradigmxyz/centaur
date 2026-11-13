@@ -36,6 +36,8 @@ environment as `ctx.env` (`CENTAUR_API_URL`, ...). Behind iron-proxy,
 credentials are injected on the wire; for local testing only, a connector may
 read a real key from the environment (`CRUNCHBASE_API_KEY`, `SLACK_BOT_TOKEN`).
 `HTTPS_PROXY` is honored; `--ca-file` adds the proxy CA.
+`--files-dir` (`$CENTAUR_CODEMODE_FILES_DIR`) turns on the files capability
+(below); without it connectors have no file access.
 
 ## Cells
 
@@ -45,7 +47,7 @@ A cell is the body of an async function; its return value is the result.
 |---|---|
 | `tools.<connector>.<fn>(args)` | Call a connector function; the runtime passes `ctx`. |
 | `context` | The calling context (sandbox context file), as connectors see it in `ctx.context`; `null` outside a session. |
-| `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder` | As usual; logs are returned. |
+| `console.log`, `setTimeout`, `sleep`, `TextEncoder`/`TextDecoder`, `atob`/`btoa` | As usual; logs are returned. |
 
 Cells get no `fetch` and no module loader: the network is reachable only
 through connectors.
@@ -62,7 +64,8 @@ through connectors.
    modules.
 4. A connector's `fetch` is bound to its call, so each upstream request is
    recorded against the call that made it, at the point of I/O (method, URL
-   without query string, status, duration).
+   without query string, status, duration). File operations are recorded the
+   same way (operation, path, bytes).
 5. `invoke` checks every tool against the principal's allowlist; refusals are
    recorded.
 6. Time, memory, call count and call concurrency are bounded per cell,
@@ -79,13 +82,41 @@ Egress is limited to the principal's iron-proxy.
 connectors/<name>/connector.toml   description + secrets (same schema as [tool.centaur])
 connectors/<name>/index.ts         every exported async function is a tool
 connectors/_lib/<name>.ts          helpers shared by connectors (not by cells)
-connectors/centaur.d.ts            Ctx, Response, CallingContext types
+connectors/centaur.d.ts            Ctx, Response, Files, CallingContext types
 ```
 
 Connectors may import only `../centaur` (with `import type`) and
 `../_lib/<name>`; shared modules may import each other as `./<name>`. Anything
 else fails at load. Exported signatures should use types declared in the
 connector itself, since the brief shows each connector's declarations alone.
+
+Besides `fetch`, `env`, `context` and `sleep`, `ctx` offers `base64`
+(`encode`, `decode`, `decodeText`; both alphabets) and `gzip`/`gunzip` (gzip
+or zlib, output capped like a response body). `fetch` already decodes
+`Content-Encoding: gzip` and `deflate` responses.
+
+### Files
+
+With `--files-dir`, connectors get `ctx.files`, rooted at that directory: in a
+Centaur sandbox, the agent's workspace. Without it `ctx.files` is `null`.
+Cells never get file access; they pass paths between tools.
+
+- `read`, `readText`, `write`, `stat`. Paths are relative to the root or
+  absolute inside it, and must stay inside it after symlinks resolve. Writes
+  create parent directories and land atomically (temporary file, then
+  rename), so they never follow a symlink at the destination.
+- `download(url, path, init?)` streams a 2xx body to disk in the host, past the
+  10 MiB response limit and without the bytes entering the realm. A non-2xx
+  response saves nothing and returns the start of its body.
+- Transfers can take a while: `RequestInit.timeout_ms` (up to 10 minutes)
+  sets one request's timeout, body included, and pushes back the call's and
+  the cell's deadlines to fit. `downloadTo` defaults to 5 minutes.
+- A `fetch` body may be a list of parts (strings, bytes, `{ file: path }`) the
+  host joins, so uploads send files the realm never reads.
+
+Connector functions that produce or consume files take paths and require the
+capability (`requireFiles`, `downloadTo`, `saveBytes` and `multipart` in
+`_lib/files.ts`). They do not return or accept file contents as base64.
 
 Exported functions take `(args, ctx: Ctx)`, need explicit parameter and return
 types (TypeScript `isolatedDeclarations`), and a JSDoc comment, which becomes
@@ -101,7 +132,7 @@ Type-check with `npx -p typescript tsc -p connectors`.
 
 | Route | Body / query | Result |
 |---|---|---|
-| `POST /exec` | `{code, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls: [{tool, ok, error?, ms, requests: [{method, url, status?, error?, ms}]}], ms}` |
+| `POST /exec` | `{code, tools?}` | `{ok, result?, error?: {message, stack?, tool?}, logs, calls: [{tool, ok, error?, ms, requests: [{method, url, status?, error?, ms}], files?: [{op, path, bytes?, error?}]}], ms}` |
 | `GET /catalog?tools=a,b` | | `{connectors, brief}` |
 | `GET /healthz` | | `{ok, connectors}` |
 
@@ -112,7 +143,10 @@ sandbox, so connectors may route on it but nothing authorizes from it.
 
 Cell 120 s (busy loops are interrupted), tool call 60 s, 64 MiB heap and 1 MiB
 stack per realm (the cell and each running call), 1000 calls and 8 concurrent
-calls per cell, 10 MiB result, 10 MiB per HTTP response.
+calls per cell, 10 MiB result, 10 MiB per HTTP response, 100 MiB per file
+(read, written, downloaded or sent as a request body). A request may ask for
+up to 10 minutes with `timeout_ms`, which extends its call and cell (plus 10 s
+for the call to finish).
 
 ## Cost of a realm per call
 

@@ -1,0 +1,5 @@
+description = "FRED (Federal Reserve Economic Data): search series, fetch observations, browse categories, releases, sources and tags"
+
+secrets = [
+  {type = "http", name = "FRED_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.stlouisfed.org"]},
+]

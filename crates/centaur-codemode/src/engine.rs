@@ -11,7 +11,9 @@
 //! 3. Cells and connectors never share a realm. Every tool call runs in a
 //!    fresh QuickJS runtime; arguments and results cross as JSON text.
 //! 4. A connector's `fetch` is bound to its call, so every upstream request
-//!    is recorded against the call that made it, at the point of I/O.
+//!    is recorded against the call that made it, at the point of I/O. So are
+//!    its file operations, when the runner has the files capability; cells
+//!    never get file access.
 //! 5. `invoke` checks the tool against the cell's allowlist.
 //! 6. Time, memory, call count and call concurrency are bounded per cell,
 //!    including the work connectors do.
@@ -19,7 +21,10 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -33,7 +38,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
-use crate::catalog::{Catalog, lib_name};
+use crate::{
+    catalog::{Catalog, lib_name},
+    files::{FileInfo, Files, MAX_FILE_BYTES},
+};
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
 const CELL_PRELUDE: &str = include_str!("js/cell.js");
@@ -42,6 +50,12 @@ const CONNECTOR_PRELUDE: &str = include_str!("js/connector.js");
 /// Hard-coded limits for the spike.
 pub const CELL_TIMEOUT: Duration = Duration::from_secs(120);
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a connector may let one request run (`timeout_ms`), for large
+/// downloads and uploads. A request that needs longer than its call or cell
+/// has left pushes both deadlines back.
+pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Time after a long request for the connector to finish its call.
+const REQUEST_GRACE: Duration = Duration::from_secs(10);
 /// Heap per realm: the cell, and each connector call while it runs.
 pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 pub const STACK_LIMIT: usize = 1024 * 1024;
@@ -91,6 +105,22 @@ pub struct CallRecord {
     pub error: Option<String>,
     pub ms: u64,
     pub requests: Vec<RequestRecord>,
+    /// Files the call read or wrote through the files capability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileRecord>,
+}
+
+/// One file operation made by a connector call.
+#[derive(Clone, Debug, Serialize)]
+pub struct FileRecord {
+    /// `read`, `write`, `download` or `upload` (sent as a request body).
+    pub op: &'static str,
+    /// The path as the connector gave it.
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One upstream HTTP request made by a connector call. The query string is
@@ -123,16 +153,19 @@ pub struct Engine {
     catalog: Arc<Catalog>,
     http: reqwest::Client,
     context_file: Option<PathBuf>,
+    files: Option<Files>,
 }
 
 impl Engine {
     /// `context_file` is the sandbox context file (`~/.centaur/sandbox.json`),
     /// read once per cell and given to cells as `context` and to connectors
-    /// as `ctx.context`.
+    /// as `ctx.context`. `files_dir` turns on the files capability: connectors
+    /// get `ctx.files`, rooted there.
     pub fn new(
         catalog: Arc<Catalog>,
         ca_file: Option<&Path>,
         context_file: Option<PathBuf>,
+        files_dir: Option<&Path>,
     ) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
             .timeout(TOOL_TIMEOUT)
@@ -148,6 +181,7 @@ impl Engine {
             catalog,
             http: builder.build()?,
             context_file,
+            files: files_dir.map(Files::new).transpose()?,
         })
     }
 
@@ -194,9 +228,10 @@ impl Engine {
             allowed,
             context: self.calling_context().await,
             http: self.http.clone(),
+            files: self.files.clone(),
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
-            deadline: started + CELL_TIMEOUT,
+            deadline: Deadline::new(started + CELL_TIMEOUT),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         });
         // No newline after the opening brace, so error line numbers match the cell.
@@ -209,20 +244,20 @@ impl Engine {
                 serde_json::to_string(&connectors).expect("connector list serializes"),
             )],
             entry: Entry::Script(&code),
-            deadline: cell.deadline,
+            deadline: cell.deadline.clone(),
             libs: None,
         };
-        let outcome = tokio::time::timeout(
-            CELL_TIMEOUT + Duration::from_secs(1),
-            run_realm(&cell, realm),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(ExecError::new(format!(
+        let expired = async {
+            cell.deadline.passed().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
+        let outcome = tokio::select! {
+            outcome = run_realm(&cell, realm) => outcome,
+            () = expired => Err(ExecError::new(format!(
                 "cell timed out after {}s",
-                CELL_TIMEOUT.as_secs()
-            )))
-        })
+                started.elapsed().as_secs()
+            ))),
+        }
         .and_then(|text| {
             serde_json::from_str(&text)
                 .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
@@ -242,6 +277,48 @@ impl Engine {
     }
 }
 
+/// A deadline that long requests may push back, shared by the timers and the
+/// interrupt handler that enforce it.
+#[derive(Clone)]
+struct Deadline {
+    base: Instant,
+    /// Nanoseconds after `base`.
+    at: Arc<AtomicU64>,
+}
+
+impl Deadline {
+    fn new(at: Instant) -> Self {
+        let base = Instant::now();
+        Self {
+            base,
+            at: Arc::new(AtomicU64::new(
+                at.saturating_duration_since(base).as_nanos() as u64,
+            )),
+        }
+    }
+
+    fn get(&self) -> Instant {
+        self.base + Duration::from_nanos(self.at.load(Ordering::Relaxed))
+    }
+
+    /// Move the deadline to `at` if that is later.
+    fn extend(&self, at: Instant) {
+        let nanos = at.saturating_duration_since(self.base).as_nanos() as u64;
+        self.at.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Resolves once the deadline, as it stands then, has passed.
+    async fn passed(&self) {
+        loop {
+            let at = self.get();
+            if Instant::now() >= at {
+                return;
+            }
+            tokio::time::sleep_until(at.into()).await;
+        }
+    }
+}
+
 /// Per-cell state shared by the host functions of the cell and its calls.
 struct Cell {
     catalog: Arc<Catalog>,
@@ -249,9 +326,10 @@ struct Cell {
     /// The sandbox context file as JSON text, or `null`.
     context: String,
     http: reqwest::Client,
+    files: Option<Files>,
     logs: Mutex<Vec<String>>,
     calls: Mutex<Vec<Call>>,
-    deadline: Instant,
+    deadline: Deadline,
     permits: Arc<Semaphore>,
 }
 
@@ -260,6 +338,7 @@ struct Call {
     started: Instant,
     ended: Option<(Instant, Result<(), String>)>,
     requests: Vec<RequestRecord>,
+    files: Vec<FileRecord>,
 }
 
 impl Cell {
@@ -286,15 +365,81 @@ impl Cell {
                     error: result.err(),
                     ms: ended.duration_since(call.started).as_millis() as u64,
                     requests: call.requests.clone(),
+                    files: call.files.clone(),
                 }
             })
             .collect()
     }
 
-    fn record_request(&self, call: usize, request: RequestRecord) {
+    fn record_request(
+        &self,
+        call: usize,
+        method: &str,
+        url: &str,
+        started: Instant,
+        status: std::result::Result<u16, &String>,
+    ) {
+        let request = RequestRecord {
+            method: method.to_ascii_uppercase(),
+            url: redact_url(url),
+            status: status.ok(),
+            error: status.err().cloned(),
+            ms: started.elapsed().as_millis() as u64,
+        };
         if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
             call.requests.push(request);
         }
+    }
+
+    fn record_file(
+        &self,
+        call: usize,
+        op: &'static str,
+        path: &str,
+        result: std::result::Result<&FileInfo, &eyre::Report>,
+    ) {
+        let record = FileRecord {
+            op,
+            path: truncate(path.to_owned(), 1024),
+            bytes: result.as_ref().ok().map(|info| info.bytes),
+            error: result.err().map(|error| format!("{error:#}")),
+        };
+        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
+            call.files.push(record);
+        }
+    }
+
+    /// Join body parts, reading file parts through the files capability.
+    async fn request_body(
+        &self,
+        call: usize,
+        parts: Option<Vec<BodyPart>>,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let Some(parts) = parts else {
+            return Ok(None);
+        };
+        let mut body = Vec::new();
+        for part in parts {
+            match part {
+                BodyPart::Bytes(bytes) => body.extend_from_slice(&bytes),
+                BodyPart::File(path) => {
+                    let files = self.files.as_ref().ok_or_else(|| {
+                        "a { file } body part needs the files capability (--files-dir)".to_owned()
+                    })?;
+                    let result = files.read(&path).await;
+                    self.record_file(call, "upload", &path, result.as_ref().map(|(info, _)| info));
+                    let (_, data) =
+                        result.map_err(|error| format!("files.read({path:?}): {error:#}"))?;
+                    body.extend_from_slice(&data);
+                }
+            }
+            if body.len() > MAX_FILE_BYTES {
+                return Err(format!(
+                    "request body is over the {MAX_FILE_BYTES}-byte limit"
+                ));
+            }
+        }
+        Ok(Some(body))
     }
 
     /// The `invoke` host function: record, check policy, run, record.
@@ -311,6 +456,7 @@ impl Cell {
                 started: Instant::now(),
                 ended: None,
                 requests: Vec::new(),
+                files: Vec::new(),
             });
             calls.len() - 1
         };
@@ -350,12 +496,13 @@ impl Cell {
             .acquire_owned()
             .await
             .map_err(|_| ExecError::new("cell is shutting down"))?;
-        let deadline = self.deadline.min(Instant::now() + TOOL_TIMEOUT);
-        let budget = deadline.saturating_duration_since(Instant::now());
+        let started = Instant::now();
+        let deadline = Deadline::new(self.deadline.get().min(started + TOOL_TIMEOUT));
         let realm = Realm {
             host: HostKind::Connector {
                 call: id,
                 label: &tool,
+                deadline: deadline.clone(),
             },
             prelude: connector_prelude(),
             globals: vec![("__env", environment().to_owned())],
@@ -364,17 +511,30 @@ impl Cell {
                 function,
                 args: &args,
             },
-            deadline,
+            deadline: deadline.clone(),
             libs: Some(self.catalog.libs.clone()),
         };
-        tokio::time::timeout(budget, run_realm(&self, realm))
-            .await
-            .unwrap_or_else(|_| {
-                Err(ExecError::new(format!(
-                    "{tool} timed out after {}s",
-                    budget.as_secs()
-                )))
-            })
+        tokio::select! {
+            result = run_realm(&self, realm) => result,
+            () = deadline.passed() => Err(ExecError::new(format!(
+                "{tool} timed out after {}s",
+                started.elapsed().as_secs()
+            ))),
+        }
+    }
+
+    /// Give a request of up to `timeout_ms` (bounded by `MAX_REQUEST_TIMEOUT`)
+    /// room to finish by pushing back the call's and the cell's deadlines.
+    /// Returns the timeout to set on the request, or `None` for the default.
+    fn request_timeout(&self, call_deadline: &Deadline, timeout_ms: f64) -> Option<Duration> {
+        if !timeout_ms.is_finite() || timeout_ms <= 0.0 {
+            return None;
+        }
+        let timeout = Duration::from_millis(timeout_ms as u64).min(MAX_REQUEST_TIMEOUT);
+        let until = Instant::now() + timeout + REQUEST_GRACE;
+        call_deadline.extend(until);
+        self.deadline.extend(until);
+        Some(timeout)
     }
 }
 
@@ -386,7 +546,7 @@ struct Realm<'a> {
     /// Extra JSON globals for the prelude to consume.
     globals: Vec<(&'static str, String)>,
     entry: Entry<'a>,
-    deadline: Instant,
+    deadline: Deadline,
     /// Shared modules the realm may import; `None` means no module loader.
     libs: Option<Libs>,
 }
@@ -432,7 +592,11 @@ impl rquickjs::loader::Loader for LibLoader {
 
 enum HostKind<'a> {
     Cell,
-    Connector { call: usize, label: &'a str },
+    Connector {
+        call: usize,
+        label: &'a str,
+        deadline: Deadline,
+    },
 }
 
 enum Entry<'a> {
@@ -453,9 +617,9 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
     let runtime = AsyncRuntime::new().map_err(internal)?;
     runtime.set_memory_limit(MEMORY_LIMIT).await;
     runtime.set_max_stack_size(STACK_LIMIT).await;
-    let deadline = realm.deadline;
+    let deadline = realm.deadline.clone();
     runtime
-        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
+        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline.get())))
         .await;
     // Without a loader, code in the realm cannot import modules at all.
     if let Some(libs) = realm.libs.clone() {
@@ -469,9 +633,11 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
             let caught = |error| caught(&ctx, error);
             let host = match realm.host {
                 HostKind::Cell => cell_host(&ctx, cell.clone()),
-                HostKind::Connector { call, label } => {
-                    connector_host(&ctx, cell.clone(), call, label)
-                }
+                HostKind::Connector {
+                    call,
+                    label,
+                    ref deadline,
+                } => connector_host(&ctx, cell.clone(), call, label, deadline.clone()),
             };
             let setup = (|| -> rquickjs::Result<_> {
                 let globals = ctx.globals();
@@ -669,7 +835,92 @@ fn common_host<'js>(
             TypedArray::<u8>::new(ctx, text.into_bytes())
         })?,
     )?;
+    host.set(
+        "base64Encode",
+        Function::new(ctx.clone(), |data: TypedArray<'js, u8>, url: Opt<bool>| {
+            base64_encode(&copy_bytes(&data), url.0.unwrap_or(false))
+        })?,
+    )?;
+    host.set(
+        "base64Decode",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, text: String| {
+            let bytes =
+                base64_decode(&text).map_err(|message| Exception::throw_type(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
+    host.set(
+        "gzip",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, data: TypedArray<'js, u8>| {
+            let bytes = gzip(&copy_bytes(&data))
+                .map_err(|message| Exception::throw_message(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
+    host.set(
+        "gunzip",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, data: TypedArray<'js, u8>| {
+            let bytes = gunzip(&copy_bytes(&data))
+                .map_err(|message| Exception::throw_message(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
     Ok(host)
+}
+
+fn base64_encode(data: &[u8], url: bool) -> String {
+    use base64::Engine as _;
+    if url {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+    } else {
+        base64::engine::general_purpose::STANDARD.encode(data)
+    }
+}
+
+/// Standard or URL-safe alphabet, padding optional, whitespace ignored.
+fn base64_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let normalized: String = text
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '=')
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(normalized)
+        .map_err(|error| format!("invalid base64: {error}"))
+}
+
+fn gzip(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(data)
+        .and_then(|()| encoder.finish())
+        .map_err(|error| format!("gzip failed: {error}"))
+}
+
+/// Decompresses gzip (all members) or zlib data, bounded by `MAX_FETCH_BYTES`
+/// so a small bomb cannot exhaust host memory.
+fn gunzip(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let reader: Box<dyn std::io::Read + '_> = if data.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::MultiGzDecoder::new(data))
+    } else {
+        Box::new(flate2::read::ZlibDecoder::new(data))
+    };
+    let mut out = Vec::new();
+    reader
+        .take(MAX_FETCH_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|error| format!("gunzip failed: {error}"))?;
+    if out.len() > MAX_FETCH_BYTES {
+        return Err(format!("gunzip output exceeds {MAX_FETCH_BYTES} bytes"));
+    }
+    Ok(out)
 }
 
 /// The cell's host: the common functions plus `invoke`.
@@ -700,14 +951,17 @@ fn cell_host<'js>(ctx: &Ctx<'js>, cell: Arc<Cell>) -> rquickjs::Result<Object<'j
 }
 
 /// A connector call's host: the common functions plus `fetch` bound to this
-/// call.
+/// call, and the files functions when the runner has the files capability.
 fn connector_host<'js>(
     ctx: &Ctx<'js>,
     cell: Arc<Cell>,
     call: usize,
     label: &str,
+    deadline: Deadline,
 ) -> rquickjs::Result<Object<'js>> {
     let host = common_host(ctx, cell.clone(), format!("[{label}] "))?;
+    let fetch_cell = cell.clone();
+    let fetch_deadline = deadline.clone();
     host.set(
         "fetch",
         Function::new(
@@ -717,21 +971,30 @@ fn connector_host<'js>(
                       url: String,
                       method: String,
                       headers: String,
-                      body: Opt<TypedArray<'js, u8>>| {
-                    let cell = cell.clone();
-                    let body = body.0.as_ref().map(copy_bytes);
+                      timeout_ms: f64,
+                      body: Opt<Value<'js>>| {
+                    let cell = fetch_cell.clone();
+                    let timeout = cell.request_timeout(&fetch_deadline, timeout_ms);
+                    let parts = body_parts(body.0);
                     async move {
+                        let parts =
+                            parts.map_err(|message| Exception::throw_type(&ctx, &message))?;
+                        let body = cell
+                            .request_body(call, parts)
+                            .await
+                            .map_err(|message| Exception::throw_message(&ctx, &message))?;
                         let started = Instant::now();
-                        let result = fetch(&cell.http, &url, &method, &headers, body).await;
+                        let result =
+                            match send(&cell.http, &url, &method, &headers, timeout, body).await {
+                                Ok(response) => collect(response).await,
+                                Err(error) => Err(error),
+                            };
                         cell.record_request(
                             call,
-                            RequestRecord {
-                                method: method.to_ascii_uppercase(),
-                                url: redact_url(&url),
-                                status: result.as_ref().ok().map(|out| out.status),
-                                error: result.as_ref().err().cloned(),
-                                ms: started.elapsed().as_millis() as u64,
-                            },
+                            &method,
+                            &url,
+                            started,
+                            result.as_ref().map(|out| out.status),
                         );
                         result.map_err(|message| Exception::throw_message(&ctx, &message))
                     }
@@ -739,7 +1002,175 @@ fn connector_host<'js>(
             ),
         )?,
     )?;
+    let Some(files) = cell.files.clone() else {
+        return Ok(host);
+    };
+    let read_cell = cell.clone();
+    let read_files = files.clone();
+    host.set(
+        "filesRead",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, path: String| {
+                let (cell, files) = (read_cell.clone(), read_files.clone());
+                async move {
+                    let result = files.read(&path).await;
+                    cell.record_file(call, "read", &path, result.as_ref().map(|(info, _)| info));
+                    let (info, data) = result.map_err(|error| {
+                        Exception::throw_message(&ctx, &format!("files.read({path:?}): {error:#}"))
+                    })?;
+                    let object = Object::new(ctx.clone())?;
+                    object.set("path", info.path.display().to_string())?;
+                    object.set("data", TypedArray::<u8>::new(ctx.clone(), data)?)?;
+                    Ok::<_, rquickjs::Error>(object)
+                }
+            }),
+        )?,
+    )?;
+    let write_cell = cell.clone();
+    let write_files = files.clone();
+    host.set(
+        "filesWrite",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>, path: String, data: TypedArray<'js, u8>| {
+                    let (cell, files) = (write_cell.clone(), write_files.clone());
+                    let data = copy_bytes(&data);
+                    async move {
+                        let result = files.write(&path, &data).await;
+                        cell.record_file(call, "write", &path, result.as_ref());
+                        let info = result.map_err(|error| {
+                            Exception::throw_message(
+                                &ctx,
+                                &format!("files.write({path:?}): {error:#}"),
+                            )
+                        })?;
+                        file_info(&ctx, &info)
+                    }
+                },
+            ),
+        )?,
+    )?;
+    let stat_files = files.clone();
+    host.set(
+        "filesStat",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, path: String| {
+                let files = stat_files.clone();
+                async move {
+                    match files.stat(&path).await {
+                        Ok(Some(info)) => Ok(file_info(&ctx, &info)?.into_value()),
+                        Ok(None) => Ok(Value::new_null(ctx.clone())),
+                        Err(error) => Err(Exception::throw_message(
+                            &ctx,
+                            &format!("files.stat({path:?}): {error:#}"),
+                        )),
+                    }
+                }
+            }),
+        )?,
+    )?;
+    let download_cell = cell.clone();
+    host.set(
+        "filesDownload",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>,
+                      url: String,
+                      path: String,
+                      method: String,
+                      headers: String,
+                      timeout_ms: f64,
+                      body: Opt<Value<'js>>| {
+                    let (cell, files) = (download_cell.clone(), files.clone());
+                    let timeout = cell.request_timeout(&deadline, timeout_ms);
+                    let parts = body_parts(body.0);
+                    async move {
+                        let parts =
+                            parts.map_err(|message| Exception::throw_type(&ctx, &message))?;
+                        let body = cell
+                            .request_body(call, parts)
+                            .await
+                            .map_err(|message| Exception::throw_message(&ctx, &message))?;
+                        let started = Instant::now();
+                        let result =
+                            match send(&cell.http, &url, &method, &headers, timeout, body).await {
+                                Ok(response) => download(&files, &path, response).await,
+                                Err(error) => Err(error),
+                            };
+                        cell.record_request(
+                            call,
+                            &method,
+                            &url,
+                            started,
+                            result.as_ref().map(|out| out.status),
+                        );
+                        if let Ok(out) = &result
+                            && let Some(info) = &out.file
+                        {
+                            cell.record_file(call, "download", &path, Ok(info));
+                        }
+                        let out =
+                            result.map_err(|message| Exception::throw_message(&ctx, &message))?;
+                        let object = Object::new(ctx.clone())?;
+                        object.set("status", out.status)?;
+                        object.set("headers", out.headers)?;
+                        if let Some(info) = &out.file {
+                            object.set("path", info.path.display().to_string())?;
+                            object.set("bytes", info.bytes as f64)?;
+                        }
+                        if let Some(text) = out.error_body {
+                            object.set("body", text)?;
+                        }
+                        Ok::<_, rquickjs::Error>(object)
+                    }
+                },
+            ),
+        )?,
+    )?;
     Ok(host)
+}
+
+fn file_info<'js>(ctx: &Ctx<'js>, info: &FileInfo) -> rquickjs::Result<Object<'js>> {
+    let object = Object::new(ctx.clone())?;
+    object.set("path", info.path.display().to_string())?;
+    object.set("bytes", info.bytes as f64)?;
+    Ok(object)
+}
+
+/// One piece of a request body: bytes, or a file under the files root.
+enum BodyPart {
+    Bytes(Vec<u8>),
+    File(String),
+}
+
+/// A request body from the connector prelude: absent, one `Uint8Array`, or
+/// an array of `Uint8Array` and `{ file }` parts, sent in order.
+fn body_parts<'js>(body: Option<Value<'js>>) -> std::result::Result<Option<Vec<BodyPart>>, String> {
+    let Some(body) = body.filter(|body| !body.is_undefined() && !body.is_null()) else {
+        return Ok(None);
+    };
+    let part = |value: Value<'js>| -> std::result::Result<BodyPart, String> {
+        if let Ok(array) = TypedArray::<u8>::from_value(value.clone()) {
+            return Ok(BodyPart::Bytes(copy_bytes(&array)));
+        }
+        let path = value
+            .as_object()
+            .and_then(|object| object.get::<_, Option<String>>("file").ok().flatten());
+        path.map(BodyPart::File)
+            .ok_or_else(|| "body parts must be strings, bytes or { file: path }".to_owned())
+    };
+    if let Some(array) = body.as_array() {
+        let mut parts = Vec::with_capacity(array.len());
+        for value in array.iter::<Value>() {
+            parts.push(part(value.map_err(|error| error.to_string())?)?);
+        }
+        return Ok(Some(parts));
+    }
+    Ok(Some(vec![part(body)?]))
 }
 
 fn redact_url(url: &str) -> String {
@@ -755,13 +1186,15 @@ fn redact_url(url: &str) -> String {
     }
 }
 
-async fn fetch(
+/// Build and send one request; the caller reads the body.
+async fn send(
     http: &reqwest::Client,
     url: &str,
     method: &str,
     headers: &str,
+    timeout: Option<Duration>,
     body: Option<Vec<u8>>,
-) -> std::result::Result<FetchOut, String> {
+) -> std::result::Result<reqwest::Response, String> {
     let parsed = reqwest::Url::parse(url).map_err(|error| format!("invalid URL: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("unsupported URL scheme {:?}", parsed.scheme()));
@@ -777,43 +1210,105 @@ async fn fetch(
     if let Some(body) = body {
         request = request.body(body);
     }
-    // Drop the URL: query-string keys would otherwise land in error text.
-    let transport = |error: reqwest::Error| {
-        let error = error.without_url();
-        let mut message = format!("request failed: {error}");
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            message.push_str(&format!(": {cause}"));
-            source = cause.source();
-        }
-        message
-    };
-    let mut response = request.send().await.map_err(transport)?;
-    let status = response.status().as_u16();
-    let mut out_headers: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
+    request.send().await.map_err(transport)
+}
+
+/// Transport errors without the URL: query-string keys would otherwise land
+/// in error text.
+fn transport(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut message = format!("request failed: {error}");
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
+}
+
+fn response_headers(response: &reqwest::Response) -> String {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in response.headers() {
         let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        out_headers
-            .entry(name.as_str().to_owned())
+        out.entry(name.as_str().to_owned())
             .and_modify(|existing| {
                 existing.push_str(", ");
                 existing.push_str(&value);
             })
             .or_insert(value);
     }
+    serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_owned())
+}
+
+async fn collect(mut response: reqwest::Response) -> std::result::Result<FetchOut, String> {
+    let status = response.status().as_u16();
+    let headers = response_headers(&response);
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport)? {
         if body.len() + chunk.len() > MAX_FETCH_BYTES {
             return Err(format!(
-                "response body is over the {MAX_FETCH_BYTES}-byte limit"
+                "response body is over the {MAX_FETCH_BYTES}-byte limit; use ctx.files.download for large files"
             ));
         }
         body.extend_from_slice(&chunk);
     }
     Ok(FetchOut {
         status,
-        headers: serde_json::to_string(&out_headers).unwrap_or_else(|_| "{}".to_owned()),
+        headers,
         body,
+    })
+}
+
+struct DownloadOut {
+    status: u16,
+    headers: String,
+    /// The saved file, for a 2xx response.
+    file: Option<FileInfo>,
+    /// The start of the body of a non-2xx response, which is not saved.
+    error_body: Option<String>,
+}
+
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Stream a 2xx response body to `path`; keep the start of any other body
+/// for the connector's error message.
+async fn download(
+    files: &Files,
+    path: &str,
+    mut response: reqwest::Response,
+) -> std::result::Result<DownloadOut, String> {
+    let status = response.status().as_u16();
+    let headers = response_headers(&response);
+    if !response.status().is_success() {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
+            body.extend_from_slice(&chunk);
+            if body.len() >= MAX_ERROR_BODY_BYTES {
+                body.truncate(MAX_ERROR_BODY_BYTES);
+                break;
+            }
+        }
+        return Ok(DownloadOut {
+            status,
+            headers,
+            file: None,
+            error_body: Some(String::from_utf8_lossy(&body).into_owned()),
+        });
+    }
+    let failed = |error: eyre::Report| format!("files.download({path:?}): {error:#}");
+    let mut writer = files.create(path).await.map_err(failed)?;
+    while let Some(chunk) = response.chunk().await.map_err(transport)? {
+        writer.write(&chunk).await.map_err(failed)?;
+    }
+    let info = writer.finish().await.map_err(failed)?;
+    Ok(DownloadOut {
+        status,
+        headers,
+        file: Some(info),
+        error_body: None,
     })
 }
 
@@ -851,6 +1346,47 @@ export async function env(args: { name: string }, ctx: Ctx): Promise<{ value: st
   return { value: ctx.env[args.name] ?? null, frozen: Object.isFrozen(ctx.env) };
 }
 
+/** Round-trips text through base64 and gzip. */
+export async function codec(args: { text: string }, ctx: Ctx): Promise<{ b64: string; url: string; back: string; btoa: string; zipped: string }> {
+  const zipped = ctx.gzip(args.text);
+  return {
+    b64: ctx.base64.encode(args.text),
+    url: ctx.base64.encode(new Uint8Array([251, 255]), { url: true }),
+    back: ctx.base64.decodeText(ctx.base64.encode(args.text, { url: true })),
+    btoa: atob(btoa("latin")),
+    zipped: new TextDecoder().decode(ctx.gunzip(ctx.base64.decode(ctx.base64.encode(zipped)))),
+  };
+}
+
+/** GET with a request timeout. */
+export async function slow(args: { url: string; timeout_ms: number }, ctx: Ctx): Promise<{ status: number }> {
+  const res = await ctx.fetch(args.url, { timeout_ms: args.timeout_ms });
+  return { status: res.status };
+}
+
+/** Exercise the files capability. */
+export async function files(args: { base: string }, ctx: Ctx): Promise<unknown> {
+  if (!ctx.files) return { capability: false };
+  const written = await ctx.files.write("out/a.txt", "héllo");
+  const text = await ctx.files.readText("out/a.txt");
+  const missing = await ctx.files.stat("out/none");
+  const saved = await ctx.files.download(args.base + "/blob", "dl/blob.bin");
+  const failed = await ctx.files.download(args.base + "/missing", "dl/missing.bin");
+  const echoed = await ctx.fetch(args.base + "/echo", { method: "POST", body: ["<", { file: "out/a.txt" }, ">"] });
+  let escape = "";
+  try { await ctx.files.write("../x", "no"); } catch (e) { escape = String(e); }
+  return {
+    capability: true,
+    written: written.path.endsWith("/out/a.txt") && written.bytes === 6,
+    text,
+    missing,
+    saved: { ok: saved.ok, bytes: saved.bytes, type: saved.headers["content-type"], found: (await ctx.files.stat("dl/blob.bin"))?.bytes },
+    failed: { ok: failed.ok, status: failed.status, body: failed.body, path: failed.path ?? null, found: await ctx.files.stat("dl/missing.bin") },
+    echoed: await echoed.text(),
+    escape: escape.includes("files.write"),
+  };
+}
+
 /** What the connector realm sees of globals a cell may have touched. */
 export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json: string }> {
   return { marker: typeof (globalThis as any).marker, json: JSON.stringify({ a: 1 }) };
@@ -858,6 +1394,10 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 "#;
 
     fn engine() -> (tempfile::TempDir, Engine) {
+        engine_with_files(false)
+    }
+
+    fn engine_with_files(files: bool) -> (tempfile::TempDir, Engine) {
         let dir = tempfile::tempdir().unwrap();
         let connector = dir.path().join("connectors").join("demo");
         std::fs::create_dir_all(&connector).unwrap();
@@ -877,7 +1417,13 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
         )
         .unwrap();
-        let engine = Engine::new(Arc::new(catalog), None, Some(context_file)).unwrap();
+        let engine = Engine::new(
+            Arc::new(catalog),
+            None,
+            Some(context_file),
+            files.then(|| dir.path().join("files")).as_deref(),
+        )
+        .unwrap();
         (dir, engine)
     }
 
@@ -892,11 +1438,169 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 
     /// A one-route HTTP server for fetch tests.
     async fn upstream() -> String {
-        let app = axum::Router::new().route("/hello", axum::routing::get(|| async { "hi there" }));
+        let app = axum::Router::new()
+            .route("/hello", axum::routing::get(|| async { "hi there" }))
+            .route(
+                "/blob",
+                axum::routing::get(|| async {
+                    (
+                        [("content-type", "application/octet-stream")],
+                        vec![7u8; 20 * 1024 * 1024],
+                    )
+                }),
+            )
+            .route(
+                "/missing",
+                axum::routing::get(|| async {
+                    (axum::http::StatusCode::NOT_FOUND, "no such blob")
+                }),
+            )
+            .route(
+                "/echo",
+                axum::routing::post(|body: String| async move { body }),
+            )
+            .route(
+                "/slow",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    "finally"
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{address}")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_get_base64_and_gzip() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"return await tools.demo.codec({ text: "héllo?" });"#,
+            None,
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "b64": "aMOpbGxvPw==", "url": "-_8", "back": "héllo?", "btoa": "latin", "zipped": "héllo?" })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_use_the_files_capability() {
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let code = format!("return await tools.demo.files({{ base: {base:?} }});");
+        let response = exec(&engine, &code, None).await;
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "capability": false })
+        );
+
+        let (dir, engine) = engine_with_files(true);
+        let response = exec(&engine, &code, None).await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({
+                "capability": true,
+                "written": true,
+                "text": "héllo",
+                "missing": null,
+                "saved": { "ok": true, "bytes": 20971520, "type": "application/octet-stream", "found": 20971520 },
+                "failed": { "ok": false, "status": 404, "body": "no such blob", "path": null, "found": null },
+                "echoed": "<héllo>",
+                "escape": true,
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("files/out/a.txt")).unwrap(),
+            "héllo"
+        );
+        let ops: Vec<(&str, String, Option<u64>)> = response.calls[0]
+            .files
+            .iter()
+            .map(|file| (file.op, file.path.clone(), file.bytes))
+            .collect();
+        assert_eq!(
+            ops,
+            vec![
+                ("write", "out/a.txt".to_owned(), Some(6)),
+                ("read", "out/a.txt".to_owned(), Some(6)),
+                ("download", "dl/blob.bin".to_owned(), Some(20971520)),
+                ("upload", "out/a.txt".to_owned(), Some(6)),
+                ("write", "../x".to_owned(), None),
+            ]
+        );
+        assert_eq!(response.calls[0].requests.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_take_a_timeout() {
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let short = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.slow({{ url: {:?}, timeout_ms: 200 }});",
+                format!("{base}/slow")
+            ),
+            None,
+        )
+        .await;
+        assert!(!short.ok, "{short:?}");
+        let message = short.error.unwrap().message;
+        assert!(message.contains("timed out"), "{message}");
+        let long = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.slow({{ url: {:?}, timeout_ms: 5000 }});",
+                format!("{base}/slow")
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(long.result.unwrap(), serde_json::json!({ "status": 200 }));
+    }
+
+    #[tokio::test]
+    async fn deadlines_only_move_later() {
+        let start = Instant::now();
+        let deadline = Deadline::new(start + Duration::from_millis(50));
+        deadline.extend(start + Duration::from_millis(10));
+        assert!(deadline.get() >= start + Duration::from_millis(50));
+        deadline.extend(start + Duration::from_millis(150));
+        deadline.passed().await;
+        assert!(start.elapsed() >= Duration::from_millis(150));
+
+        // A long request pushes back both the call's and the cell's deadlines,
+        // bounded by MAX_REQUEST_TIMEOUT.
+        let (_dir, engine) = engine();
+        let cell = Cell {
+            catalog: engine.catalog.clone(),
+            allowed: Vec::new(),
+            context: "null".to_owned(),
+            http: engine.http.clone(),
+            files: None,
+            logs: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            deadline: Deadline::new(Instant::now() + CELL_TIMEOUT),
+            permits: Arc::new(Semaphore::new(1)),
+        };
+        let call = Deadline::new(Instant::now() + TOOL_TIMEOUT);
+        assert_eq!(cell.request_timeout(&call, 0.0), None);
+        assert_eq!(cell.request_timeout(&call, f64::NAN), None);
+        assert_eq!(cell.request_timeout(&call, 1e12), Some(MAX_REQUEST_TIMEOUT));
+        let floor = Instant::now() + MAX_REQUEST_TIMEOUT;
+        assert!(call.get() >= floor && cell.deadline.get() >= floor);
+    }
+
+    #[test]
+    fn gunzip_is_bounded() {
+        let bomb = gzip(&vec![0u8; MAX_FETCH_BYTES + 1]).unwrap();
+        assert!(gunzip(&bomb).unwrap_err().contains("exceeds"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1019,9 +1723,10 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             allowed: vec!["other".to_owned()],
             context: "null".to_owned(),
             http: engine.http.clone(),
+            files: None,
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
-            deadline: Instant::now() + CELL_TIMEOUT,
+            deadline: Deadline::new(Instant::now() + CELL_TIMEOUT),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         });
         for tool in ["demo.echo", "demo.nope", "nope", "other.echo"] {

@@ -9,6 +9,7 @@
 
 mod catalog;
 mod engine;
+mod files;
 mod server;
 
 use std::{io::Read, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -48,6 +49,10 @@ struct Common {
     /// to `~/.centaur/sandbox.json`, where harness-server writes it.
     #[arg(long, env = "CENTAUR_SANDBOX_CONTEXT_FILE", global = true)]
     context_file: Option<PathBuf>,
+    /// Turns on the files capability: connectors may read and write files
+    /// under this directory (in a Centaur sandbox, the agent's workspace).
+    #[arg(long, env = "CENTAUR_CODEMODE_FILES_DIR", global = true)]
+    files_dir: Option<PathBuf>,
     /// Connectors to expose (comma-separated); all when unset.
     #[arg(long, value_delimiter = ',', global = true)]
     tools: Option<Vec<String>>,
@@ -163,5 +168,10 @@ fn engine(common: &Common, catalog: Arc<Catalog>) -> Result<Engine> {
     let context_file = common.context_file.clone().or_else(|| {
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".centaur/sandbox.json"))
     });
-    Engine::new(catalog, common.ca_file.as_deref(), context_file)
+    Engine::new(
+        catalog,
+        common.ca_file.as_deref(),
+        context_file,
+        common.files_dir.as_deref(),
+    )
 }

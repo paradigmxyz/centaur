@@ -14,9 +14,10 @@ path = "src/main.rs"
 axum.workspace = true
 base64.workspace = true
 clap.workspace = true
+flate2 = "1"
 eyre.workspace = true
 oxc = { version = "0.158", features = ["codegen", "isolated_declarations", "semantic", "transformer"] }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["gzip", "deflate"] }
 rquickjs = { version = "0.14", features = ["futures", "loader", "parallel"] }
 serde.workspace = true
 serde_json.workspace = true

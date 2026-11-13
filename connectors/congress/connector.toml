@@ -1,0 +1,5 @@
+description = "Congress.gov: bills and bill sub-resources, members, committees, hearings, roll call votes"
+
+secrets = [
+  { type = "http", name = "DATAGOV_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.congress.gov"] },
+]

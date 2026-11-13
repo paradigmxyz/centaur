@@ -1,0 +1,22 @@
+description = "Gmail: search and read mail, send and reply, labels, archive and trash messages"
+
+# Authentication is minted by iron-proxy's oauth_token transform. The
+# refresh_token grant exchanges the GOOGLE_TOKEN_JSON authorized-user
+# credential against token_endpoint for a short-lived access token. The
+# credential's refresh_token, client_id and client_secret are each pulled
+# from that one JSON secret via json_key. No scopes are declared: the
+# refresh_token grant returns a token with the scopes the credential was
+# originally consented for.
+secrets = [
+    { type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = [
+        "gmail.googleapis.com",
+        "calendar.googleapis.com",
+        "people.googleapis.com",
+        "www.googleapis.com",
+        "docs.google.com",
+        "docs.googleapis.com",
+        "sheets.googleapis.com",
+        "slides.googleapis.com",
+        "analyticsdata.googleapis.com",
+    ], fields = { refresh_token = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "refresh_token" }, client_id = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_id" }, client_secret = { secret_ref = "GOOGLE_TOKEN_JSON", json_key = "client_secret" } } },
+]

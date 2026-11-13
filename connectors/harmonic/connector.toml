@@ -1,0 +1,3 @@
+description = "Harmonic: company and person enrichment, natural-language company search, saved searches, typeahead, team connections"
+
+secrets = [{type = "http", name = "HARMONIC_API_KEY", mode = "inject", inject_header = "apikey", hosts = ["api.harmonic.ai"]}]

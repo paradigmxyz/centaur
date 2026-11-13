@@ -1,0 +1,5 @@
+description = "Browserbase sessions and download records behind DocSend document retrieval"
+
+# Copied from the Python docsend tool. iron-proxy injects X-BB-API-Key for
+# api.browserbase.com; locally the env var may hold a real key.
+secrets = [{type = "http", name = "BROWSERBASE_API_KEY", mode = "inject", inject_header = "X-BB-API-Key", hosts = ["api.browserbase.com"]}]

@@ -1,0 +1,5 @@
+description = "Notion: pages, databases, blocks, comments (search, read, create, update, archive)"
+
+secrets = [
+  {type = "http", name = "NOTION_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.notion.com"]},
+]

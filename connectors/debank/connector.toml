@@ -1,0 +1,3 @@
+description = "DeBank Pro: wallet balances, token holdings, DeFi protocol positions, NFTs, chains and protocols"
+
+secrets = [{type = "http", name = "DEBANK_API_KEY", mode = "inject", inject_header = "AccessKey", hosts = ["pro-openapi.debank.com"]}]

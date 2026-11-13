@@ -12,10 +12,63 @@ export interface Response {
   bytes(): Promise<Uint8Array>;
 }
 
+/** A file under the files root, sent as part of a request body without reading it into the realm. */
+export interface FilePart {
+  file: string;
+}
+
+export type BodyPart = string | Uint8Array | ArrayBuffer | FilePart;
+
 export interface RequestInit {
   method?: string;
   headers?: Record<string, string | undefined>;
-  body?: string | Uint8Array | ArrayBuffer;
+  /** One part, or parts sent in order (for example a multipart body around a `{ file }`). */
+  body?: BodyPart | BodyPart[];
+  /**
+   * How long this request may take, body included, up to 600000 (10 minutes). By default a
+   * request gets the call's remaining time (a call has 60 s). A longer timeout extends the
+   * call's and the cell's deadlines to fit, so set it only for transfers that need it, such as
+   * large downloads and uploads.
+   */
+  timeout_ms?: number;
+}
+
+/** A file the runtime read or wrote. */
+export interface FileInfo {
+  /** Absolute path, as the agent's other tools open it. */
+  path: string;
+  bytes: number;
+}
+
+export interface Download {
+  status: number;
+  ok: boolean;
+  /** Lowercase header names. */
+  headers: Record<string, string>;
+  /** The saved file, when `ok`. */
+  path?: string;
+  bytes?: number;
+  /** The start of the response body when not `ok`; nothing is saved then. */
+  body?: string;
+}
+
+/**
+ * Read and write files under the runner's files directory (in a Centaur sandbox, the agent's
+ * workspace). Paths are relative to it, or absolute paths inside it; parent directories are
+ * created; writes replace existing files. Files are at most 100 MiB.
+ */
+export interface Files {
+  read(path: string): Promise<Uint8Array>;
+  readText(path: string): Promise<string>;
+  write(path: string, data: string | Uint8Array | ArrayBuffer): Promise<FileInfo>;
+  /** `null` when nothing exists at `path`. */
+  stat(path: string): Promise<FileInfo | null>;
+  /**
+   * Request `url` and stream a 2xx body straight to `path`, without the 10 MiB response limit
+   * or passing the bytes through the realm. Recorded like `fetch`. Pass `init.timeout_ms` for
+   * files that may take longer than the call's remaining time to transfer.
+   */
+  download(url: string, path: string, init?: RequestInit): Promise<Download>;
 }
 
 export interface OAuthCredential {
@@ -66,4 +119,25 @@ export interface Ctx {
   /** The calling context, read once per cell; `null` outside a Centaur session. */
   readonly context: Readonly<CallingContext> | null;
   sleep(ms: number): Promise<void>;
+  /**
+   * The files capability, or `null` when the runner has none (outside a Centaur sandbox).
+   * Functions that produce or consume files should require it (see `_lib/files`) rather than
+   * pass file contents as base64.
+   */
+  readonly files: Files | null;
+  /** Base64 in the standard alphabet; `url: true` encodes URL-safe without padding. */
+  readonly base64: {
+    encode(data: string | Uint8Array | ArrayBuffer, options?: { url?: boolean }): string;
+    /** Accepts both alphabets, with or without padding. */
+    decode(text: string): Uint8Array;
+    /** `decode`, then UTF-8. */
+    decodeText(text: string): string;
+  };
+  /** Gzip-compress bytes (strings are UTF-8 encoded). */
+  gzip(data: string | Uint8Array | ArrayBuffer): Uint8Array;
+  /**
+   * Decompress gzip (all members) or zlib data, up to 10 MiB. HTTP responses with
+   * `Content-Encoding: gzip` or `deflate` are already decompressed by `fetch`.
+   */
+  gunzip(data: Uint8Array | ArrayBuffer): Uint8Array;
 }
