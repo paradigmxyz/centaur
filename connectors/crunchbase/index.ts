@@ -1,9 +1,14 @@
 import type { Ctx } from "../centaur";
 import { query, readJson } from "../_lib/http";
-import { num, str, type Raw } from "../_lib/values";
 
-const BASE = "https://api.crunchbase.com/v4/data";
+// Results are Crunchbase's own entity properties, passed through; searches and
+// lookups only unwrap the `entities[].properties` envelope. Field names are
+// Crunchbase's (https://data.crunchbase.com/docs). Fields the API has no value
+// for are absent.
 
+const DEFAULT_BASE = "https://api.crunchbase.com/v4/data";
+
+// Crunchbase returns only the fields a request names.
 const ORGANIZATION_FIELDS = [
   "identifier", "short_description", "categories", "location_identifiers", "website_url",
   "linkedin", "twitter", "founded_on", "operating_status", "company_type", "ipo_status",
@@ -36,252 +41,114 @@ export type Collection =
   | "people" | "funding_rounds" | "acquisitions" | "investments" | "funds" | "events"
   | "categories" | "category_groups" | "locations";
 
+/** A reference to another entity; `value` is its display name. */
 export interface Identifier {
   uuid: string;
-  name: string;
-  permalink: string | null;
-  entity_type: string;
-  url: string | null;
-}
-
-export interface Location {
-  name: string;
-  permalink: string | null;
-  location_type: string | null;
+  value: string;
+  permalink?: string;
+  entity_def_id: string;
+  image_id?: string;
 }
 
 export interface Money {
   value: number;
   currency: string;
-  value_usd: number | null;
+  value_usd?: number;
 }
 
-export interface DateValue {
-  date: string;
+export interface DateWithPrecision {
+  value: string;
   precision: string;
+}
+
+export interface Link {
+  value: string;
 }
 
 export interface Organization {
   identifier: Identifier;
-  short_description: string | null;
-  description: string | null;
-  legal_name: string | null;
-  categories: Identifier[];
-  locations: Location[];
-  website_url: string | null;
-  linkedin: string | null;
-  twitter: string | null;
-  contact_email: string | null;
-  founded_on: DateValue | null;
-  operating_status: string | null;
-  company_type: string | null;
-  ipo_status: string | null;
-  stock_symbol: string | null;
-  investor_type: string[];
-  num_employees_enum: string | null;
-  revenue_range: string | null;
-  rank_org: number | null;
-  funding_total: Money | null;
-  valuation: Money | null;
-  num_funding_rounds: number | null;
-  last_funding_type: string | null;
-  last_funding_at: string | null;
-  num_investments: number | null;
-  num_exits: number | null;
-  founders: Identifier[];
-  investors: Identifier[];
+  short_description?: string;
+  description?: string;
+  legal_name?: string;
+  categories?: Identifier[];
+  location_identifiers?: Identifier[];
+  website_url?: string;
+  linkedin?: Link;
+  twitter?: Link;
+  contact_email?: string;
+  founded_on?: DateWithPrecision;
+  operating_status?: string;
+  company_type?: string;
+  ipo_status?: string;
+  stock_symbol?: Identifier;
+  investor_type?: string[];
+  num_employees_enum?: string;
+  revenue_range?: string;
+  rank_org?: number;
+  funding_total?: Money;
+  valuation?: Money;
+  num_funding_rounds?: number;
+  last_funding_type?: string;
+  last_funding_at?: string;
+  num_investments?: number;
+  num_exits?: number;
+  founder_identifiers?: Identifier[];
+  investor_identifiers?: Identifier[];
 }
 
 export interface Person {
   identifier: Identifier;
-  first_name: string | null;
-  last_name: string | null;
-  primary_job_title: string | null;
-  primary_organization: Identifier | null;
-  short_description: string | null;
-  description: string | null;
-  locations: Location[];
-  linkedin: string | null;
-  twitter: string | null;
-  website_url: string | null;
-  gender: string | null;
-  rank_person: number | null;
-  num_founded_organizations: number | null;
-  num_investments: number | null;
-  num_exits: number | null;
-  num_jobs: number | null;
+  first_name?: string;
+  last_name?: string;
+  primary_job_title?: string;
+  primary_organization?: Identifier;
+  short_description?: string;
+  description?: string;
+  location_identifiers?: Identifier[];
+  linkedin?: Link;
+  twitter?: Link;
+  website_url?: string;
+  gender?: string;
+  rank_person?: number;
+  num_founded_organizations?: number;
+  num_investments?: number;
+  num_exits?: number;
+  num_jobs?: number;
 }
 
 export interface FundingRound {
   identifier: Identifier;
-  short_description: string | null;
-  announced_on: string | null;
-  closed_on: string | null;
-  investment_type: string | null;
-  investment_stage: string | null;
-  money_raised: Money | null;
-  pre_money_valuation: Money | null;
-  post_money_valuation: Money | null;
-  funded_organization: Identifier | null;
-  lead_investors: Identifier[];
-  investors: Identifier[];
-  num_investors: number | null;
+  short_description?: string;
+  announced_on?: string;
+  closed_on?: string;
+  investment_type?: string;
+  investment_stage?: string;
+  money_raised?: Money;
+  pre_money_valuation?: Money;
+  post_money_valuation?: Money;
+  funded_organization_identifier?: Identifier;
+  lead_investor_identifiers?: Identifier[];
+  investor_identifiers?: Identifier[];
+  num_investors?: number;
 }
 
 export interface Investment {
   identifier: Identifier;
-  announced_on: string | null;
-  investor: Identifier | null;
-  organization: Identifier | null;
-  funding_round: Identifier | null;
-  funding_round_investment_type: string | null;
-  funding_round_money_raised: Money | null;
-  money_invested: Money | null;
-  is_lead_investor: boolean | null;
-  partners: Identifier[];
+  announced_on?: string;
+  investor_identifier?: Identifier;
+  organization_identifier?: Identifier;
+  funding_round_identifier?: Identifier;
+  funding_round_investment_type?: string;
+  funding_round_money_raised?: Money;
+  money_invested?: Money;
+  is_lead_investor?: boolean;
+  partner_identifiers?: Identifier[];
 }
 
 export interface Suggestion {
   identifier: Identifier;
-  short_description: string | null;
-}
-
-function headers(ctx: Ctx): Record<string, string> {
-  const out: Record<string, string> = { accept: "application/json" };
-  // Behind iron-proxy the key is injected on the wire; locally it comes from the env.
-  const key = ctx.env.CRUNCHBASE_API_KEY;
-  if (key) out["X-cb-user-key"] = key;
-  return out;
-}
-
-async function request(ctx: Ctx, path: string, init: { method?: string; body?: unknown } = {}): Promise<Raw> {
-  const h = headers(ctx);
-  if (init.body !== undefined) h["content-type"] = "application/json";
-  const res = await ctx.fetch(BASE + path, {
-    method: init.method ?? "GET",
-    headers: h,
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
-  });
-  return readJson(res, "Crunchbase");
-}
-
-const link = (value: any): string | null => str(value?.value);
-
-function identifier(raw: Raw | null | undefined): Identifier | null {
-  if (!raw) return null;
-  return {
-    uuid: raw.uuid,
-    name: raw.value ?? raw.name ?? "",
-    permalink: str(raw.permalink),
-    entity_type: raw.entity_def_id ?? raw.entity_type ?? "",
-    url: str(raw.url),
-  };
-}
-
-const identifiers = (raw: any): Identifier[] =>
-  Array.isArray(raw) ? raw.map(identifier).filter((id): id is Identifier => id !== null) : [];
-
-const locations = (raw: any): Location[] =>
-  Array.isArray(raw)
-    ? raw.map((l: Raw) => ({ name: l.value ?? l.name ?? "", permalink: str(l.permalink), location_type: str(l.location_type) }))
-    : [];
-
-function money(raw: any): Money | null {
-  if (!raw || typeof raw.value !== "number") return null;
-  return { value: raw.value, currency: raw.currency, value_usd: num(raw.value_usd) };
-}
-
-function date(raw: any): DateValue | null {
-  if (!raw) return null;
-  return { date: raw.value ?? raw.date, precision: raw.precision };
-}
-
-function organization(p: Raw): Organization {
-  return {
-    identifier: identifier(p.identifier)!,
-    short_description: str(p.short_description),
-    description: str(p.description),
-    legal_name: str(p.legal_name),
-    categories: identifiers(p.categories),
-    locations: locations(p.location_identifiers),
-    website_url: str(p.website_url),
-    linkedin: link(p.linkedin),
-    twitter: link(p.twitter),
-    contact_email: str(p.contact_email),
-    founded_on: date(p.founded_on),
-    operating_status: str(p.operating_status),
-    company_type: str(p.company_type),
-    ipo_status: str(p.ipo_status),
-    stock_symbol: link(p.stock_symbol),
-    investor_type: Array.isArray(p.investor_type) ? p.investor_type : [],
-    num_employees_enum: str(p.num_employees_enum),
-    revenue_range: str(p.revenue_range),
-    rank_org: num(p.rank_org),
-    funding_total: money(p.funding_total),
-    valuation: money(p.valuation),
-    num_funding_rounds: num(p.num_funding_rounds),
-    last_funding_type: str(p.last_funding_type),
-    last_funding_at: str(p.last_funding_at),
-    num_investments: num(p.num_investments),
-    num_exits: num(p.num_exits),
-    founders: identifiers(p.founder_identifiers),
-    investors: identifiers(p.investor_identifiers),
-  };
-}
-
-function person(p: Raw): Person {
-  return {
-    identifier: identifier(p.identifier)!,
-    first_name: str(p.first_name),
-    last_name: str(p.last_name),
-    primary_job_title: str(p.primary_job_title),
-    primary_organization: identifier(p.primary_organization),
-    short_description: str(p.short_description),
-    description: str(p.description),
-    locations: locations(p.location_identifiers),
-    linkedin: link(p.linkedin),
-    twitter: link(p.twitter),
-    website_url: str(p.website_url),
-    gender: str(p.gender),
-    rank_person: num(p.rank_person),
-    num_founded_organizations: num(p.num_founded_organizations),
-    num_investments: num(p.num_investments),
-    num_exits: num(p.num_exits),
-    num_jobs: num(p.num_jobs),
-  };
-}
-
-function fundingRound(p: Raw): FundingRound {
-  return {
-    identifier: identifier(p.identifier)!,
-    short_description: str(p.short_description),
-    announced_on: str(p.announced_on),
-    closed_on: str(p.closed_on),
-    investment_type: str(p.investment_type),
-    investment_stage: str(p.investment_stage),
-    money_raised: money(p.money_raised),
-    pre_money_valuation: money(p.pre_money_valuation),
-    post_money_valuation: money(p.post_money_valuation),
-    funded_organization: identifier(p.funded_organization_identifier),
-    lead_investors: identifiers(p.lead_investor_identifiers),
-    investors: identifiers(p.investor_identifiers),
-    num_investors: num(p.num_investors),
-  };
-}
-
-function investment(p: Raw): Investment {
-  return {
-    identifier: identifier(p.identifier)!,
-    announced_on: str(p.announced_on),
-    investor: identifier(p.investor_identifier),
-    organization: identifier(p.organization_identifier),
-    funding_round: identifier(p.funding_round_identifier),
-    funding_round_investment_type: str(p.funding_round_investment_type),
-    funding_round_money_raised: money(p.funding_round_money_raised),
-    money_invested: money(p.money_invested),
-    is_lead_investor: typeof p.is_lead_investor === "boolean" ? p.is_lead_investor : null,
-    partners: identifiers(p.partner_identifiers),
-  };
+  short_description?: string;
+  facet_ids?: string[];
 }
 
 interface Predicate {
@@ -291,41 +158,52 @@ interface Predicate {
   values: string[];
 }
 
+async function request(ctx: Ctx, path: string, body?: unknown): Promise<any> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  // Behind iron-proxy the key is injected on the wire; locally it comes from the env.
+  if (ctx.env.CRUNCHBASE_API_KEY) headers["X-cb-user-key"] = ctx.env.CRUNCHBASE_API_KEY;
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const res = await ctx.fetch((ctx.env.CRUNCHBASE_API_URL || DEFAULT_BASE) + path, {
+    method: body === undefined ? "GET" : "POST",
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return readJson(res, "Crunchbase");
+}
+
 const predicate = (field_id: string, operator_id: string, values: string[]): Predicate => ({
   type: "predicate", field_id, operator_id, values,
 });
 
-async function search(
+async function search<T>(
   ctx: Ctx,
   collection: string,
   field_ids: string[],
   predicates: Predicate[],
   order: { field_id: string; sort: "asc" | "desc" },
-  limit?: number,
-  after_id?: string,
-): Promise<{ count: number; entities: Raw[] }> {
-  const body: Raw = { field_ids, query: predicates, order: [order] };
-  if (limit !== undefined) body.limit = limit;
-  if (after_id !== undefined) body.after_id = after_id;
-  const page = await request(ctx, `/searches/${collection}`, { method: "POST", body });
-  return { count: page.count ?? 0, entities: (page.entities ?? []).map((e: Raw) => e.properties) };
+  page: { limit?: number; after_id?: string },
+): Promise<{ count: number; entities: T[] }> {
+  const body = await request(ctx, `/searches/${collection}`, {
+    field_ids, query: predicates, order: [order], ...page,
+  });
+  return { count: body.count, entities: body.entities.map((entity: { properties: T }) => entity.properties) };
 }
 
-async function entity(ctx: Ctx, collection: string, id: string, field_ids: string[]): Promise<Raw> {
-  const page = await request(
-    ctx,
-    `/entities/${collection}/${encodeURIComponent(id)}${query({ field_ids: field_ids.join(",") })}`,
-  );
-  return page.properties ?? {};
+async function entity<T>(ctx: Ctx, collection: string, id: string, field_ids: string[]): Promise<T> {
+  const body = await request(ctx, `/entities/${collection}/${encodeURIComponent(id)}${query({ field_ids: field_ids.join(",") })}`);
+  return body.properties;
 }
 
-function dateRange(predicates: Predicate[], field: string, after?: string, before?: string): void {
-  if (after) predicates.push(predicate(field, "gte", [after]));
-  if (before) predicates.push(predicate(field, "lte", [before]));
-}
-
-function includes(predicates: Predicate[], field: string, values?: string[]): void {
-  if (values && values.length) predicates.push(predicate(field, "includes", values));
+function filters(
+  includes: [field: string, values: string[] | undefined][],
+  announced: { after?: string; before?: string },
+): Predicate[] {
+  const predicates = includes
+    .filter(([, values]) => values?.length)
+    .map(([field, values]) => predicate(field, "includes", values!));
+  if (announced.after) predicates.push(predicate("announced_on", "gte", [announced.after]));
+  if (announced.before) predicates.push(predicate("announced_on", "lte", [announced.before]));
+  return predicates;
 }
 
 /**
@@ -336,18 +214,10 @@ function includes(predicates: Predicate[], field: string, values?: string[]): vo
 export async function autocomplete(
   args: { query: string; collections?: Collection[]; limit?: number },
   ctx: Ctx,
-): Promise<{ count: number; suggestions: Suggestion[] }> {
-  const page = await request(
-    ctx,
-    `/autocompletes${query({ query: args.query, collection_ids: args.collections?.join(","), limit: args.limit })}`,
-  );
-  return {
-    count: page.count ?? 0,
-    suggestions: (page.entities ?? []).map((e: Raw) => ({
-      identifier: identifier(e.identifier)!,
-      short_description: str(e.short_description),
-    })),
-  };
+): Promise<{ count: number; entities: Suggestion[] }> {
+  const params = { query: args.query, collection_ids: args.collections?.join(","), limit: args.limit };
+  const { count, entities } = await request(ctx, `/autocompletes${query(params)}`);
+  return { count, entities };
 }
 
 /**
@@ -359,12 +229,11 @@ export async function search_organizations(
   args: { query: string; limit?: number; after_id?: string },
   ctx: Ctx,
 ): Promise<{ count: number; organizations: Organization[] }> {
-  const page = await search(
-    ctx, "organizations", ORGANIZATION_FIELDS,
-    [predicate("identifier", "contains", [args.query])],
-    { field_id: "rank_org", sort: "asc" }, args.limit, args.after_id,
+  const { count, entities } = await search<Organization>(
+    ctx, "organizations", ORGANIZATION_FIELDS, [predicate("identifier", "contains", [args.query])],
+    { field_id: "rank_org", sort: "asc" }, { limit: args.limit, after_id: args.after_id },
   );
-  return { count: page.count, organizations: page.entities.map(organization) };
+  return { count, organizations: entities };
 }
 
 /**
@@ -376,8 +245,8 @@ export async function organization_details(
   args: { id: string },
   ctx: Ctx,
 ): Promise<{ organization: Organization }> {
-  const raw = await entity(ctx, "organizations", args.id, [...ORGANIZATION_FIELDS, ...ORGANIZATION_DETAIL_FIELDS]);
-  return { organization: organization(raw) };
+  const fields = [...ORGANIZATION_FIELDS, ...ORGANIZATION_DETAIL_FIELDS];
+  return { organization: await entity<Organization>(ctx, "organizations", args.id, fields) };
 }
 
 /**
@@ -388,18 +257,16 @@ export async function search_people(
   args: { query: string; limit?: number; after_id?: string },
   ctx: Ctx,
 ): Promise<{ count: number; people: Person[] }> {
-  const page = await search(
-    ctx, "people", PERSON_FIELDS,
-    [predicate("identifier", "contains", [args.query])],
-    { field_id: "rank_person", sort: "asc" }, args.limit, args.after_id,
+  const { count, entities } = await search<Person>(
+    ctx, "people", PERSON_FIELDS, [predicate("identifier", "contains", [args.query])],
+    { field_id: "rank_person", sort: "asc" }, { limit: args.limit, after_id: args.after_id },
   );
-  return { count: page.count, people: page.entities.map(person) };
+  return { count, people: entities };
 }
 
 /** One person by permalink or uuid, with full biography. */
 export async function person_details(args: { id: string }, ctx: Ctx): Promise<{ person: Person }> {
-  const raw = await entity(ctx, "people", args.id, [...PERSON_FIELDS, "description"]);
-  return { person: person(raw) };
+  return { person: await entity<Person>(ctx, "people", args.id, [...PERSON_FIELDS, "description"]) };
 }
 
 /**
@@ -420,16 +287,19 @@ export async function search_funding_rounds(
   },
   ctx: Ctx,
 ): Promise<{ count: number; funding_rounds: FundingRound[] }> {
-  const predicates: Predicate[] = [];
-  includes(predicates, "funded_organization_identifier", args.organizations);
-  includes(predicates, "investor_identifiers", args.investors);
-  includes(predicates, "investment_type", args.investment_types);
-  dateRange(predicates, "announced_on", args.announced_after, args.announced_before);
-  const page = await search(
-    ctx, "funding_rounds", FUNDING_ROUND_FIELDS, predicates,
-    { field_id: "announced_on", sort: "desc" }, args.limit, args.after_id,
+  const predicates = filters(
+    [
+      ["funded_organization_identifier", args.organizations],
+      ["investor_identifiers", args.investors],
+      ["investment_type", args.investment_types],
+    ],
+    { after: args.announced_after, before: args.announced_before },
   );
-  return { count: page.count, funding_rounds: page.entities.map(fundingRound) };
+  const { count, entities } = await search<FundingRound>(
+    ctx, "funding_rounds", FUNDING_ROUND_FIELDS, predicates,
+    { field_id: "announced_on", sort: "desc" }, { limit: args.limit, after_id: args.after_id },
+  );
+  return { count, funding_rounds: entities };
 }
 
 /** One funding round by uuid or permalink. */
@@ -437,8 +307,7 @@ export async function funding_round_details(
   args: { id: string },
   ctx: Ctx,
 ): Promise<{ funding_round: FundingRound }> {
-  const raw = await entity(ctx, "funding_rounds", args.id, FUNDING_ROUND_FIELDS);
-  return { funding_round: fundingRound(raw) };
+  return { funding_round: await entity<FundingRound>(ctx, "funding_rounds", args.id, FUNDING_ROUND_FIELDS) };
 }
 
 /**
@@ -458,14 +327,17 @@ export async function search_investments(
   },
   ctx: Ctx,
 ): Promise<{ count: number; investments: Investment[] }> {
-  const predicates: Predicate[] = [];
-  includes(predicates, "investor_identifier", args.investors);
-  includes(predicates, "organization_identifier", args.organizations);
-  if (args.lead_only) predicates.push(predicate("is_lead_investor", "eq", ["true"]));
-  dateRange(predicates, "announced_on", args.announced_after, args.announced_before);
-  const page = await search(
-    ctx, "investments", INVESTMENT_FIELDS, predicates,
-    { field_id: "announced_on", sort: "desc" }, args.limit, args.after_id,
+  const predicates = filters(
+    [
+      ["investor_identifier", args.investors],
+      ["organization_identifier", args.organizations],
+    ],
+    { after: args.announced_after, before: args.announced_before },
   );
-  return { count: page.count, investments: page.entities.map(investment) };
+  if (args.lead_only) predicates.push(predicate("is_lead_investor", "eq", ["true"]));
+  const { count, entities } = await search<Investment>(
+    ctx, "investments", INVESTMENT_FIELDS, predicates,
+    { field_id: "announced_on", sort: "desc" }, { limit: args.limit, after_id: args.after_id },
+  );
+  return { count, investments: entities };
 }

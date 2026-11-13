@@ -90,6 +90,11 @@ connector itself, since the brief shows each connector's declarations alone.
 Exported functions take `(args, ctx: Ctx)`, need explicit parameter and return
 types (TypeScript `isolatedDeclarations`), and a JSDoc comment, which becomes
 the description in the brief. Return objects, not bare arrays.
+
+Return upstream data as the API sends it. Unwrap envelopes and turn API errors
+into thrown errors, but don't coerce or rename fields: types describe the
+vendor's shape, using its field names, so drift shows up as real data rather
+than silent nulls.
 Type-check with `npx -p typescript tsc -p connectors`.
 
 ## HTTP API

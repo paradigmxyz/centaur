@@ -1,6 +1,8 @@
 import type { Ctx, Response } from "../centaur";
-import { encode, readJson, type Params } from "../_lib/http";
-import { bool, num, str, type Raw } from "../_lib/values";
+import { query, readJson, encode, type Params } from "../_lib/http";
+
+// Results are Slack's own objects, passed through. The interfaces list the
+// fields worth knowing; Slack sends more.
 
 const SLACK = "https://slack.com/api";
 const DEFAULT_CENTAUR_API = "http://api:8000";
@@ -12,55 +14,66 @@ const DEFAULT_CENTAUR_API = "http://api:8000";
  */
 export type Access = "direct" | "centaur";
 
+/** A Slack message object. */
 export interface Message {
   ts: string;
-  thread_ts: string | null;
-  user: string | null;
-  bot_id: string | null;
-  subtype: string | null;
   text: string;
-  reply_count: number | null;
-  reactions: { name: string; count: number }[];
-  files: { id: string; name: string | null; mimetype: string | null; size: number | null }[];
+  user?: string;
+  bot_id?: string;
+  subtype?: string;
+  thread_ts?: string;
+  reply_count?: number;
+  reactions?: { name: string; count: number; users?: string[] }[];
+  files?: { id: string; name?: string; mimetype?: string; size?: number }[];
+  [field: string]: unknown;
 }
 
+/**
+ * A conversation. Directly this is Slack's conversation object (`topic`/`purpose` are
+ * `{ value }`, `num_members`); through the Centaur API it is Centaur's channel item (`topic` and
+ * `purpose` are strings, `member_count`, and the caller's `can_*` grants).
+ */
 export interface Channel {
   id: string;
-  name: string | null;
-  is_private: boolean | null;
-  is_im: boolean | null;
-  is_mpim: boolean | null;
-  is_member: boolean | null;
-  num_members: number | null;
-  topic: string | null;
-  purpose: string | null;
-  /** Only through the Centaur API: the caller's grants on this channel. */
-  can_read_history: boolean | null;
-  can_upload: boolean | null;
-  can_download: boolean | null;
+  name?: string;
+  is_private?: boolean;
+  is_im?: boolean;
+  is_mpim?: boolean;
+  is_member?: boolean;
+  num_members?: number;
+  member_count?: number;
+  topic?: string | { value: string };
+  purpose?: string | { value: string };
+  can_read_history?: boolean;
+  can_upload?: boolean;
+  can_download?: boolean;
+  [field: string]: unknown;
 }
 
+/** A Slack user object. */
 export interface User {
   id: string;
   name: string;
-  real_name: string | null;
-  display_name: string | null;
-  email: string | null;
-  title: string | null;
-  tz: string | null;
-  is_bot: boolean;
-  deleted: boolean;
+  real_name?: string;
+  tz?: string;
+  is_bot?: boolean;
+  deleted?: boolean;
+  profile?: { email?: string; title?: string; display_name?: string; real_name?: string; [field: string]: unknown };
+  [field: string]: unknown;
 }
 
+/** One `search.messages` match. */
 export interface SearchMatch {
-  channel_id: string | null;
-  channel_name: string | null;
   ts: string;
-  user: string | null;
-  username: string | null;
   text: string;
-  permalink: string | null;
+  user?: string;
+  username?: string;
+  channel?: { id: string; name?: string };
+  permalink?: string;
+  [field: string]: unknown;
 }
+
+type Body = Record<string, any>;
 
 // Routing only: iron-proxy injects the user token and the API checks grants either way.
 function access(ctx: Ctx): Access {
@@ -74,66 +87,41 @@ function token(ctx: Ctx): string {
   return value;
 }
 
-async function slackResult(res: Response, method: string): Promise<Raw> {
-  const text = await res.text();
-  if (!res.ok) {
-    const retry = res.headers["retry-after"];
-    throw new Error(`Slack ${method} returned HTTP ${res.status}${retry ? ` (Retry-After: ${retry}s)` : ""}: ${text.slice(0, 1000)}`);
-  }
-  const body = JSON.parse(text);
-  if (!body.ok) throw new Error(`Slack ${method} failed: ${body.error ?? text.slice(0, 1000)}`);
+/** Slack answers 200 with `{ ok: false, error }`; surface that as an error. */
+async function slackResult(res: Response, method: string): Promise<Body> {
+  const retry = res.headers["retry-after"];
+  const body = await readJson(res, `Slack ${method}${retry ? ` (Retry-After: ${retry}s)` : ""}`);
+  if (!body.ok) throw new Error(`Slack ${method} failed: ${body.error ?? JSON.stringify(body)}`);
   return body;
 }
 
-async function slackGet(ctx: Ctx, method: string, params: Params = {}): Promise<Raw> {
-  const qs = encode(params);
-  const res = await ctx.fetch(`${SLACK}/${method}${qs ? `?${qs}` : ""}`, {
+async function slackGet(ctx: Ctx, method: string, params: Params = {}): Promise<Body> {
+  const res = await ctx.fetch(`${SLACK}/${method}${query(params)}`, {
     headers: { authorization: `Bearer ${token(ctx)}` },
   });
   return slackResult(res, method);
 }
 
-async function slackPost(ctx: Ctx, method: string, params: Params): Promise<Raw> {
+async function slackPost(ctx: Ctx, method: string, params: Params): Promise<Body> {
   const res = await ctx.fetch(`${SLACK}/${method}`, {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${token(ctx)}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
+    headers: { authorization: `Bearer ${token(ctx)}`, "content-type": "application/x-www-form-urlencoded" },
     body: encode(params),
   });
   return slackResult(res, method);
 }
 
-function centaurBase(ctx: Ctx): string {
-  return (ctx.env.CENTAUR_API_URL || DEFAULT_CENTAUR_API).replace(/\/+$/, "");
-}
-
-function centaurHeaders(ctx: Ctx, extra: Record<string, string> = {}): Record<string, string> {
-  const headers: Record<string, string> = { accept: "application/json", ...extra };
+async function centaur(ctx: Ctx, path: string, params: Params = {}, method = "GET"): Promise<Body> {
+  const base = (ctx.env.CENTAUR_API_URL || DEFAULT_CENTAUR_API).replace(/\/+$/, "");
+  const headers: Record<string, string> = { accept: "application/json" };
   // Behind iron-proxy the API credential is injected for the API host.
-  const bearer = ctx.env.CENTAUR_API_BEARER_TOKEN;
-  if (bearer) headers.authorization = `Bearer ${bearer}`;
-  return headers;
-}
-
-async function centaur(
-  ctx: Ctx,
-  path: string,
-  params: Params = {},
-  init: { method?: string; body?: Uint8Array; contentType?: string } = {},
-): Promise<Raw> {
-  const qs = encode(params);
-  const res = await ctx.fetch(`${centaurBase(ctx)}${path}${qs ? `?${qs}` : ""}`, {
-    method: init.method ?? "GET",
-    headers: centaurHeaders(ctx, init.contentType ? { "content-type": init.contentType } : {}),
-    body: init.body,
-  });
+  if (ctx.env.CENTAUR_API_BEARER_TOKEN) headers.authorization = `Bearer ${ctx.env.CENTAUR_API_BEARER_TOKEN}`;
+  const res = await ctx.fetch(`${base}${path}${query(params)}`, { method, headers });
   return readJson(res, `Centaur API ${path}`);
 }
 
 const seg = (value: string): string => encodeURIComponent(value.trim());
-const nextCursor = (raw: Raw): string | null => str(raw.response_metadata?.next_cursor);
+const nextCursor = (body: Body): string | null => body.response_metadata?.next_cursor || null;
 
 /** Slack ts, YYYY-MM-DD (UTC midnight) or ISO time to a Slack ts. */
 function slackTs(value: string | undefined): string | undefined {
@@ -143,55 +131,6 @@ function slackTs(value: string | undefined): string | undefined {
   const millis = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw);
   if (Number.isNaN(millis)) throw new Error(`timestamp ${JSON.stringify(value)} is not a Slack ts, YYYY-MM-DD or ISO time`);
   return (millis / 1000).toFixed(6);
-}
-
-function message(raw: Raw): Message {
-  return {
-    ts: raw.ts,
-    thread_ts: str(raw.thread_ts),
-    user: str(raw.user),
-    bot_id: str(raw.bot_id),
-    subtype: str(raw.subtype),
-    text: raw.text ?? "",
-    reply_count: num(raw.reply_count),
-    reactions: (raw.reactions ?? []).map((r: Raw) => ({ name: r.name, count: r.count ?? 0 })),
-    files: (raw.files ?? []).map((f: Raw) => ({
-      id: f.id, name: str(f.name), mimetype: str(f.mimetype), size: num(f.size),
-    })),
-  };
-}
-
-function channel(raw: Raw): Channel {
-  const text = (value: any): string | null => str(typeof value === "string" ? value : value?.value);
-  return {
-    id: raw.id,
-    name: str(raw.name),
-    is_private: bool(raw.is_private),
-    is_im: bool(raw.is_im),
-    is_mpim: bool(raw.is_mpim),
-    is_member: bool(raw.is_member),
-    num_members: num(raw.num_members ?? raw.member_count),
-    topic: text(raw.topic),
-    purpose: text(raw.purpose),
-    can_read_history: bool(raw.can_read_history),
-    can_upload: bool(raw.can_upload),
-    can_download: bool(raw.can_download),
-  };
-}
-
-function user(raw: Raw): User {
-  const profile = raw.profile ?? {};
-  return {
-    id: raw.id,
-    name: raw.name ?? "",
-    real_name: str(raw.real_name ?? profile.real_name),
-    display_name: str(profile.display_name),
-    email: str(profile.email),
-    title: str(profile.title),
-    tz: str(raw.tz),
-    is_bot: Boolean(raw.is_bot),
-    deleted: Boolean(raw.deleted),
-  };
 }
 
 /** Which path Slack calls take for this caller (see `Access`). */
@@ -207,28 +146,12 @@ export async function get_access(args: {}, ctx: Ctx): Promise<{ access: Access; 
 export async function search_messages(
   args: { query: string; sort?: "score" | "timestamp"; sort_dir?: "asc" | "desc"; count?: number; page?: number },
   ctx: Ctx,
-): Promise<{ total: number; matches: SearchMatch[]; page: number | null; pages: number | null }> {
+): Promise<{ total: number; matches: SearchMatch[]; paging?: { count: number; total: number; page: number; pages: number } }> {
   if (access(ctx) !== "direct") {
     throw new Error("search_messages needs a linked Slack user token (direct access); this caller reaches Slack through the Centaur API");
   }
-  const raw = await slackGet(ctx, "search.messages", {
-    query: args.query, sort: args.sort, sort_dir: args.sort_dir, count: args.count, page: args.page,
-  });
-  const messages = raw.messages ?? {};
-  return {
-    total: messages.total ?? 0,
-    matches: (messages.matches ?? []).map((m: Raw) => ({
-      channel_id: str(m.channel?.id),
-      channel_name: str(m.channel?.name),
-      ts: m.ts,
-      user: str(m.user),
-      username: str(m.username),
-      text: m.text ?? "",
-      permalink: str(m.permalink),
-    })),
-    page: num(messages.paging?.page),
-    pages: num(messages.paging?.pages),
-  };
+  const { messages } = await slackGet(ctx, "search.messages", args);
+  return { total: messages?.total ?? 0, matches: messages?.matches ?? [], paging: messages?.paging };
 }
 
 /**
@@ -242,23 +165,24 @@ export async function channels(
 ): Promise<{ channels: Channel[]; next_cursor: string | null }> {
   const limit = Math.min(args.limit ?? 100, 200);
   if (access(ctx) === "centaur") {
-    const raw = await centaur(ctx, "/api/slack/channels", {
+    const body = await centaur(ctx, "/api/slack/channels", {
       limit, cursor: args.cursor, query: args.query, history_only: args.readable_only ?? false,
     });
-    return { channels: (raw.channels ?? []).map(channel), next_cursor: nextCursor(raw) };
+    return { channels: body.channels ?? [], next_cursor: nextCursor(body) };
   }
+  // Slack has no name filter, so page until `limit` matches.
   const needle = args.query?.trim().toLowerCase();
   const method = args.readable_only ? "users.conversations" : "conversations.list";
   const found: Channel[] = [];
   let cursor = args.cursor;
   for (;;) {
-    const raw = await slackGet(ctx, method, {
+    const body = await slackGet(ctx, method, {
       limit, cursor, types: "public_channel,private_channel", exclude_archived: true,
     });
-    for (const c of (raw.channels ?? []).map(channel)) {
+    for (const c of (body.channels ?? []) as Channel[]) {
       if (!needle || c.name?.toLowerCase().includes(needle)) found.push(c);
     }
-    cursor = nextCursor(raw) ?? undefined;
+    cursor = nextCursor(body) ?? undefined;
     if (!cursor || found.length >= limit) return { channels: found.slice(0, limit), next_cursor: cursor ?? null };
   }
 }
@@ -276,10 +200,10 @@ export async function channel_history(
     limit: args.limit, cursor: args.cursor, oldest: slackTs(args.oldest), latest: slackTs(args.latest),
     inclusive: args.inclusive,
   };
-  const raw = access(ctx) === "centaur"
+  const body = access(ctx) === "centaur"
     ? await centaur(ctx, `/api/slack/channels/${seg(args.channel)}/history`, params)
     : await slackGet(ctx, "conversations.history", { ...params, channel: args.channel });
-  return { messages: (raw.messages ?? []).map(message), has_more: Boolean(raw.has_more), next_cursor: nextCursor(raw) };
+  return { messages: body.messages ?? [], has_more: Boolean(body.has_more), next_cursor: nextCursor(body) };
 }
 
 /**
@@ -291,23 +215,23 @@ export async function thread_replies(
   ctx: Ctx,
 ): Promise<{ messages: Message[]; has_more: boolean; next_cursor: string | null }> {
   const params: Params = { limit: args.limit, cursor: args.cursor };
-  const raw = access(ctx) === "centaur"
+  const body = access(ctx) === "centaur"
     ? await centaur(ctx, `/api/slack/channels/${seg(args.channel)}/threads/${seg(args.ts)}/replies`, params)
     : await slackGet(ctx, "conversations.replies", { ...params, channel: args.channel, ts: args.ts });
-  return { messages: (raw.messages ?? []).map(message), has_more: Boolean(raw.has_more), next_cursor: nextCursor(raw) };
+  return { messages: body.messages ?? [], has_more: Boolean(body.has_more), next_cursor: nextCursor(body) };
 }
 
 /** A message's permalink by conversation ID and ts. */
 export async function permalink(args: { channel: string; ts: string }, ctx: Ctx): Promise<{ permalink: string }> {
-  const raw = access(ctx) === "centaur"
+  const body = access(ctx) === "centaur"
     ? await centaur(ctx, `/api/slack/channels/${seg(args.channel)}/messages/${seg(args.ts)}/permalink`)
     : await slackGet(ctx, "chat.getPermalink", { channel: args.channel, message_ts: args.ts });
-  return { permalink: raw.permalink };
+  return { permalink: body.permalink };
 }
 
 /**
- * Workspace users with handle, names, email, title and timezone. `query` filters on handle, real
- * name, display name, email or title (case-insensitive), paging until `limit` matches.
+ * Workspace users. `query` filters on handle, real name, display name, email or title
+ * (case-insensitive), paging until `limit` matches; Slack has no server-side filter.
  */
 export async function users(
   args: { query?: string; limit?: number; cursor?: string },
@@ -319,24 +243,24 @@ export async function users(
   let cursor = args.cursor;
   for (;;) {
     const params: Params = { limit, cursor };
-    const raw = access(ctx) === "centaur"
+    const body = access(ctx) === "centaur"
       ? await centaur(ctx, "/api/slack/users", params)
       : await slackGet(ctx, "users.list", params);
-    for (const u of (raw.members ?? []).map(user)) {
-      const hay = [u.name, u.real_name, u.display_name, u.email, u.title];
+    for (const u of (body.members ?? []) as User[]) {
+      const hay = [u.name, u.real_name, u.profile?.display_name, u.profile?.email, u.profile?.title];
       if (!needle || hay.some((v) => v?.toLowerCase().includes(needle))) found.push(u);
     }
-    cursor = nextCursor(raw) ?? undefined;
+    cursor = nextCursor(body) ?? undefined;
     if (!cursor || found.length >= limit) return { users: found.slice(0, limit), next_cursor: cursor ?? null };
   }
 }
 
-/** One user's profile by user ID (U… or W…). */
+/** One user by user ID (U… or W…). */
 export async function user_details(args: { user: string }, ctx: Ctx): Promise<{ user: User }> {
-  const raw = access(ctx) === "centaur"
+  const body = access(ctx) === "centaur"
     ? await centaur(ctx, `/api/slack/users/${seg(args.user)}`)
     : await slackGet(ctx, "users.info", { user: args.user.trim() });
-  return { user: user(raw.user ?? {}) };
+  return { user: body.user };
 }
 
 /**
@@ -346,14 +270,12 @@ export async function user_details(args: { user: string }, ctx: Ctx): Promise<{ 
 export async function send_message(
   args: { channel: string; text: string; thread_ts?: string; unfurl_links?: boolean },
   ctx: Ctx,
-): Promise<{ channel: string; ts: string }> {
+): Promise<{ channel: string; ts: string; message: Message }> {
   if (access(ctx) !== "direct") {
     throw new Error("send_message needs direct Slack access; the Centaur API does not post messages");
   }
-  const raw = await slackPost(ctx, "chat.postMessage", {
-    channel: args.channel.trim(), text: args.text, thread_ts: args.thread_ts, unfurl_links: args.unfurl_links,
-  });
-  return { channel: raw.channel, ts: raw.ts };
+  const { channel, ts, message } = await slackPost(ctx, "chat.postMessage", args);
+  return { channel, ts, message };
 }
 
 /** Write: add an emoji reaction (with or without colons) to a message. */
@@ -363,11 +285,9 @@ export async function add_reaction(
 ): Promise<{ changed: boolean }> {
   const name = args.emoji.trim().replace(/^:|:$/g, "");
   if (access(ctx) === "centaur") {
-    const raw = await centaur(
-      ctx, `/api/slack/channels/${seg(args.channel)}/messages/${seg(args.ts)}/reactions/${seg(name)}`, {},
-      { method: "POST" },
-    );
-    return { changed: raw.added !== false };
+    const path = `/api/slack/channels/${seg(args.channel)}/messages/${seg(args.ts)}/reactions/${seg(name)}`;
+    const body = await centaur(ctx, path, {}, "POST");
+    return { changed: body.added !== false };
   }
   try {
     await slackPost(ctx, "reactions.add", { channel: args.channel, timestamp: args.ts, name });
