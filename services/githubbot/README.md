@@ -130,6 +130,14 @@ running work isn't dropped (claims are taken before the work, so a dropped turn 
 It also **serializes turns targeting the same session** so two turns can't interleave git/push in one
 sandbox. Both assume the **single replica** the chart runs (`replicaCount: 1`).
 
+The chart uses `GET /ready` for Kubernetes readiness (200 only after Chat initializes)
+and `GET /health` for liveness (503 after Chat initialization fails). Chat SDK 4.31.0
+caches a rejected initialization promise, so retrying within the same process
+cannot recover from a transient Postgres failure during initialization. The
+liveness probe then restarts the pod; until it initializes, readiness keeps
+webhook traffic away. Neither probe queries Postgres on every request. A
+webhook that fails during the database outage still requires GitHub redelivery.
+
 ## Auth
 
 A personal access token for the bot's GitHub teammate account is required (`GITHUB_TOKEN`). As a
