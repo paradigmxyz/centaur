@@ -280,6 +280,73 @@ async fn databases_keep_their_text_search_backend() -> Result<(), Box<dyn Error>
     server.drop_database(database, result).await
 }
 
+/// Core version that indexes Absurd tasks with a cancellation policy.
+const ABSURD_CANCELLATION_INDEX_VERSION: i64 = 61;
+
+#[tokio::test]
+async fn absurd_cancellation_sweeps_use_the_cancellation_index() -> Result<(), Box<dyn Error>> {
+    let Some(server) = TestServer::connect().await? else {
+        return Ok(());
+    };
+    let backend = TextSearchBackend::Postgres;
+    let mut database = server.create_database().await?;
+    let result = AssertUnwindSafe(async {
+        let earlier = migration_list(backend)
+            .into_iter()
+            .filter(|migration| migration.version < ABSURD_CANCELLATION_INDEX_VERSION)
+            .collect();
+        run_list(&mut database.conn, earlier).await?;
+        database
+            .conn
+            .execute("select absurd.create_queue('existing')")
+            .await?;
+        migrate(&mut database.conn, backend).await?;
+        database
+            .conn
+            .execute("select absurd.create_queue('new')")
+            .await?;
+        for queue in ["existing", "new"] {
+            let definition: Option<String> = sqlx::query_scalar(
+                "select indexdef from pg_indexes where schemaname = 'absurd' and indexname = $1",
+            )
+            .bind(format!("t_{queue}_ci"))
+            .fetch_optional(&mut database.conn)
+            .await?;
+            assert_eq!(
+                definition.as_deref(),
+                Some(
+                    format!(
+                        "CREATE INDEX t_{queue}_ci ON absurd.t_{queue} USING btree (task_id) \
+                         WHERE (cancellation IS NOT NULL)"
+                    )
+                    .as_str()
+                ),
+                "queue {queue} has no cancellation index"
+            );
+        }
+
+        database.conn.execute("set enable_seqscan = off").await?;
+        database
+            .conn
+            .execute("select * from absurd.claim_task('existing', 'worker')")
+            .await?;
+        database
+            .conn
+            .execute("select pg_stat_force_next_flush()")
+            .await?;
+        let scans: i64 = sqlx::query_scalar(
+            "select idx_scan from pg_stat_user_indexes where indexrelname = 't_existing_ci'",
+        )
+        .fetch_one(&mut database.conn)
+        .await?;
+        assert_eq!(scans, 1, "claim_task does not read t_existing_ci");
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .catch_unwind()
+    .await;
+    server.drop_database(database, result).await
+}
+
 async fn has_keyword_index(
     conn: &mut PgConnection,
     backend: TextSearchBackend,
