@@ -1153,6 +1153,142 @@ fn fake_codex_blocks_mode_steers_active_turn() {
     let _ = std::fs::remove_file(fake_codex_log);
 }
 
+/// A fake Claude Code that logs its stdin, answers the first prompt, and
+/// handles the steer it receives as `steer_body` (shell) describes.
+fn fake_claude_steer_script(log: &std::path::Path, steer_body: &str) -> String {
+    format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "IFS= read -r prompt; printf '%s\\n' \"$prompt\" >> '{log}'; ",
+            "printf '%s\\n' '{{\"type\":\"stream_event\",\"event\":{{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_1\",\"content\":[]}}}}}}'; ",
+            "IFS= read -r steer; printf '%s\\n' \"$steer\" >> '{log}'; ",
+            "uuid=$(printf '%s' \"$steer\" | sed -n 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/p'); ",
+            "replay=\"{{\\\"type\\\":\\\"user\\\",\\\"isReplay\\\":true,\\\"uuid\\\":\\\"$uuid\\\",\\\"message\\\":{{\\\"role\\\":\\\"user\\\",\\\"content\\\":[{{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"steer\\\"}}]}}}}\"; ",
+            "{steer_body} ",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{log}'; done"
+        ),
+        log = log.display(),
+        steer_body = steer_body,
+    )
+}
+
+fn logged_lines(log: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(log)
+        .expect("read fake stdin log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("fake stdin JSON"))
+        .collect()
+}
+
+#[test]
+fn fake_claude_blocks_mode_folds_a_steer_into_the_active_turn() {
+    // Claude Code takes the steer in at its next tool result and echoes it,
+    // then ends the turn with one `result` answering both.
+    let log = temp_path("fake-claude-fold-stdin.jsonl");
+    let fake_claude = fake_claude_steer_script(
+        &log,
+        concat!(
+            "printf '%s\\n' \"$replay\" ",
+            "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"did both\"}]}}' ",
+            "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"did both\"}';"
+        ),
+    );
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    let turn = bridge.run_blocks_steered_turn("start", "also this", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.text_from_deltas, "did both");
+    assert_eq!(turn.turn_completed_count, 1);
+    assert_eq!(
+        turn.user_message_client_ids,
+        vec![None, Some("steer-message-1".to_string())]
+    );
+    let lines = logged_lines(&log);
+    assert_eq!(lines.len(), 2, "stdin={lines:?}");
+    assert_eq!(lines[1]["message"]["content"][0]["text"], "also this");
+    assert!(
+        lines[1]["uuid"]
+            .as_str()
+            .is_some_and(|uuid| !uuid.is_empty())
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn fake_claude_blocks_mode_keeps_a_follow_up_steer_answer_in_the_turn() {
+    // No tool result is left to carry the steer, so Claude Code ends its turn
+    // and answers the steer in a follow-up turn of its own; both belong to
+    // the one Centaur turn (and so to the api-rs execution).
+    let log = temp_path("fake-claude-follow-up-stdin.jsonl");
+    let fake_claude = fake_claude_steer_script(
+        &log,
+        concat!(
+            "printf '%s\\n' ",
+            "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_1\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"first part\"}]}}' ",
+            "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"first part\"}' ",
+            "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}' ",
+            "\"$replay\" ",
+            "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"content\":[]}}}' ",
+            "'{\"type\":\"assistant\",\"is_partial\":false,\"message\":{\"id\":\"msg_2\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"steered\"}]}}' ",
+            "'{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"steered\"}';"
+        ),
+    );
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    let turn = bridge.run_blocks_steered_turn("start", "also this", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.turn_completed_count, 1);
+    assert!(turn.text_from_deltas.contains("first part"), "{turn:?}");
+    assert!(turn.text_from_deltas.ends_with("steered"), "{turn:?}");
+    assert_eq!(
+        turn.user_message_client_ids,
+        vec![None, Some("steer-message-1".to_string())]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn fake_amp_blocks_mode_continues_the_turn_with_a_held_steer() {
+    // Amp's turn ends at its terminal stop, so a steer waits for it and is
+    // sent as Amp's next native turn, which this turn continues into.
+    let log = temp_path("fake-amp-held-steer-stdin.jsonl");
+    let fake_amp = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"T-amp-session\"}}'; ",
+            "IFS= read -r prompt; printf '%s\\n' \"$prompt\" >> '{log}'; ",
+            "sleep 1; ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"first part\"}}]}}}}'; ",
+            "IFS= read -r steer; printf '%s\\n' \"$steer\" >> '{log}'; ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_2\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"steered\"}}]}}}}'; ",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{log}'; done"
+        ),
+        log = log.display(),
+    );
+    let mut bridge = BridgeProcess::spawn_harness_blocks(Harness::Amp, Some(fake_amp), None);
+    let turn = bridge.run_blocks_steered_turn("start", "also this", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.turn_completed_count, 1);
+    assert_eq!(turn.text_from_deltas, "first partsteered");
+    assert_eq!(
+        turn.user_message_client_ids,
+        vec![None, Some("steer-message-1".to_string())]
+    );
+    let lines = logged_lines(&log);
+    assert_eq!(lines.len(), 2, "stdin={lines:?}");
+    assert!(
+        lines[1].get("steer").is_none(),
+        "held steer is a plain turn"
+    );
+    assert_eq!(lines[1]["message"]["content"][0]["text"], "also this");
+    let _ = std::fs::remove_file(log);
+}
+
 #[test]
 fn fake_codex_blocks_mode_forwards_traceparent_to_app_server_requests() {
     let fake_codex = temp_path("fake-codex-trace.sh");
@@ -1625,6 +1761,9 @@ struct TurnCapture {
     delta_text_by_item: HashMap<String, String>,
     terminal_status: Option<String>,
     terminal_error: Option<String>,
+    /// `clientId` of each completed userMessage item, in order.
+    user_message_client_ids: Vec<Option<String>>,
+    turn_completed_count: usize,
 }
 
 fn run_bridge_turn(config: BridgeTurnConfig) -> BridgeRun {
@@ -2403,6 +2542,13 @@ impl TurnCapture {
                     .get("params")
                     .and_then(|params| params.get("item"))
                     .expect("completed item");
+                if item.get("type").and_then(Value::as_str) == Some("userMessage") {
+                    self.user_message_client_ids.push(
+                        item.get("clientId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    );
+                }
                 if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                     let item_id = item
                         .get("id")
@@ -2417,6 +2563,7 @@ impl TurnCapture {
                 }
             }
             "turn/completed" => {
+                self.turn_completed_count += 1;
                 self.terminal_status = value
                     .pointer("/params/turn/status")
                     .and_then(Value::as_str)

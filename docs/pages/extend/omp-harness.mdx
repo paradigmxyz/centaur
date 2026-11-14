@@ -14,8 +14,9 @@ until `session_settled`. Each tool call shows up as its own tool item.
 OMP saves the session on disk in a directory derived from the thread key, so
 an interrupt (which stops the OMP process, as with Claude Code), a model switch,
 or a sandbox restart with persistent state resumes the same conversation.
-JSON-RPC `turn/steer` sends an update to the running turn; blocks input received
-during a turn queues as the next turn, as with Pi.
+A message that steers a running turn (JSON-RPC `turn/steer`, or a blocks `user`
+line api-rs forwards to the active execution) reaches OMP as a native `steer`
+command, which OMP answers within the running prompt, as with Pi.
 
 ## Credentials
 
