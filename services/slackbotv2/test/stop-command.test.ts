@@ -32,13 +32,26 @@ describe('Slack stop command detection', () => {
   })
 
   test('matches Chat-SDK-normalized mentions plus stop keyword', () => {
-    // The Chat SDK rewrites <@U123|name> to @name and the bot's own <@U123>
-    // to @U123 before handlers run, so live message.text carries these forms.
+    // The Chat SDK rewrites <@U123> to @<display name> before handlers run
+    // (or @U123 when it cannot look the name up), so live message.text
+    // carries these forms.
     expect(isSlackStopCommand({ text: '@centaur_ai stop' })).toBe(true)
     expect(isSlackStopCommand({ text: '@U08TEST123 stop' })).toBe(true)
     expect(isSlackStopCommand({ text: 'please @centaur_ai STOP now' })).toBe(true)
     expect(isSlackStopCommand({ text: '@centaur_ai could you stop the execution?' })).toBe(true)
     expect(isSlackStopCommand({ text: '@centaur_ai cancel' })).toBe(true)
+  })
+
+  test("strips the bot's own multi-word display name", () => {
+    const botNames = ['U08TEST123', 'mybot (dev)']
+    expect(isSlackStopCommand({ text: '@mybot (dev) stop' })).toBe(false)
+    expect(isSlackStopCommand({ text: '@mybot (dev) stop' }, botNames)).toBe(true)
+    expect(isSlackStopCommand({ text: '@MyBot (Dev) cancel it' }, botNames)).toBe(true)
+    expect(isSlackStopCommand({ text: 'please @mybot (dev) STOP now' }, botNames)).toBe(true)
+    expect(isSlackStopCommand({ text: '@U08TEST123 stop' }, botNames)).toBe(true)
+    expect(isSlackStopCommand({ text: '@mybot (dev) status' }, botNames)).toBe(false)
+    expect(isSlackStopCommand({ text: '@mybot (dev) stopping by to ask' }, botNames)).toBe(false)
+    expect(isSlackStopCommand({ text: '@mybot (dev)stop' }, botNames)).toBe(false)
   })
 
   test('does not match unrelated normalized mentions', () => {
