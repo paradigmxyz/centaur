@@ -12,6 +12,7 @@ import {
   type CardElement,
   type Logger,
   type Message as ChatMessage,
+  type SerializedMessage,
   type StateAdapter,
   type Thread
 } from 'chat'
@@ -119,10 +120,12 @@ import type {
   ProactiveDecision,
   SlackbotV2,
   SlackbotV2ApiAttachment,
+  SlackbotV2AppendSteering,
   SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2ExecuteSessionResponse,
   SlackbotV2MessageMode,
+  SlackbotV2PendingTurn,
   SlackbotV2Options,
   SlackbotV2ProactivityOptions,
   SlackbotV2RenderObligation,
@@ -154,6 +157,8 @@ export type {
   SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
+  SlackbotV2AppendMessagesResponse,
+  SlackbotV2AppendSteering,
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
   SlackbotV2ExecuteSessionResponse,
@@ -237,6 +242,13 @@ const PROACTIVE_CLAIM_TTL_MS = 60 * 1000
 // How long an accepted message waits for another handoff's turn to start.
 const PROACTIVE_CLAIM_WAIT_MS = 30 * 1000
 const PROACTIVE_CLAIM_POLL_MS = 250
+/**
+ * Raw queue entries kept per thread; beyond this the oldest drops, with a
+ * warning. Each entry is one unanswered mention.
+ */
+const PENDING_TURN_MAX = 100
+const PENDING_TURN_TTL_MS = 24 * 60 * 60 * 1000
+const PENDING_TURN_BLOCKED_RETRIES = 3
 // Pending burst messages outlive the debounce by this much, covering handler
 // latency between recording a message and reading the burst.
 const PROACTIVE_PENDING_GRACE_MS = 60 * 1000
@@ -791,7 +803,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
   app.post('/api/slack/commands', handleSlackWebhook)
 
   if (options.recoverRenderObligationsOnStart !== false) {
-    scheduleRenderObligationRecovery(chat, state, options, stateConnected)
+    scheduleRenderObligationRecovery(chat, state, options, stateConnected, steeringReactions)
   }
 
   return { app, chat, drain: background.drain }
@@ -1134,11 +1146,12 @@ async function handleProactiveMessage(
     ? rules?.find(rule => rule.name === rulesDecision.value.rule)
     : undefined
   if (matchedRule) decisionFields.rule = matchedRule.name
-  const releaseClaim = await claimProactiveHandoff(thread, input.state)
-  if (!releaseClaim) {
+  const claim = await claimThreadTurn(thread, input.state)
+  if (!claim) {
     record('skip_claimed', decisionFields)
     return
   }
+  const releaseClaim = claim.release
   try {
     // A stop or another execution may have landed while the classifier ran.
     const lateSkipReason = proactiveSkipReason(rules, (await thread.state) ?? {}, message)
@@ -1167,25 +1180,34 @@ async function handleProactiveMessage(
 /**
  * Until a handoff records its execution as active, a second accepted message
  * in the thread would queue a second turn. A claim in shared state lets one
- * handoff start a turn at a time, across replicas; others wait until the turn
- * is active and then steer it. Resolves to the release function, or undefined
- * when the wait times out.
+ * proactive reply or pending turn start a turn at a time, across replicas;
+ * others wait until the turn is active and then steer it. Mentions do not
+ * wait on it, so a Slack webhook is never held behind another handoff.
+ * Resolves with `claimed: false` when the thread became active first, or
+ * undefined when the wait times out.
  */
-async function claimProactiveHandoff(
+async function claimThreadTurn(
   thread: Thread<SlackbotV2ThreadState>,
   state: StateAdapter
-): Promise<(() => Promise<void>) | undefined> {
+): Promise<{ claimed: boolean; release: () => Promise<void> } | undefined> {
+  // The key predates pending turns taking the claim; it is kept so replicas
+  // on either side of a rollout exclude each other.
   const key = `slackbotv2:proactive:claim:${thread.id}`
   const token = randomUUID()
   const deadline = Date.now() + PROACTIVE_CLAIM_WAIT_MS
   while (true) {
     if (await state.setIfNotExists(key, token, PROACTIVE_CLAIM_TTL_MS)) {
-      return async () => {
-        if ((await state.get(key)) === token) await state.delete(key)
+      return {
+        claimed: true,
+        release: async () => {
+          if ((await state.get(key)) === token) await state.delete(key)
+        }
       }
     }
     // Steering an active turn cannot start another one.
-    if ((await thread.state)?.activeExecution === true) return async () => {}
+    if ((await thread.state)?.activeExecution === true) {
+      return { claimed: false, release: async () => {} }
+    }
     if (Date.now() >= deadline) return undefined
     await sleep(PROACTIVE_CLAIM_POLL_MS)
   }
@@ -1476,6 +1498,22 @@ function recordForward(
   slackbotMetrics.forwardDuration.observe({ mode, outcome }, observeSeconds(startedAtMs))
 }
 
+/**
+ * Whether the thread's active state still belongs to this turn rather than a
+ * newer one. A turn is named by the message that started it, recorded when
+ * the handoff marks the thread active, so a newer turn is recognized even
+ * before it commits its render obligation. State written before that field
+ * existed falls back to the obligation's execution.
+ */
+function ownsThreadExecution(
+  state: SlackbotV2ThreadState,
+  turn: { executionId?: string; messageId: string }
+): boolean {
+  if (state.activeTurnMessageId) return state.activeTurnMessageId === turn.messageId
+  const current = state.renderObligation?.executionId
+  return current === undefined || turn.executionId === undefined || current === turn.executionId
+}
+
 function recordRenderAttempt(source: string, outcome: string, startedAtMs: number): void {
   slackbotMetrics.renderAttempts.inc({ outcome, source })
   slackbotMetrics.renderAttemptDuration.observe({ outcome, source }, observeSeconds(startedAtMs))
@@ -1631,7 +1669,236 @@ type SyncThreadMessageInput = {
   state: StateAdapter
   steeringReactionAck?: SteeringReactionAck
   steeringReactions: SteeringReactionController
+  /** Set when running a queued pending turn (see runPendingTurns). */
+  pendingTurn?: boolean
+  /** Set by scheduleHandoffRetry once a pending turn's retry is being recorded. */
+  pendingRetryRecorded?: Promise<void>
 }
+
+type PendingTurnRunner = {
+  options: SlackbotV2Options
+  state: StateAdapter
+  steeringReactions: SteeringReactionController
+}
+
+/**
+ * api-rs guarantees no harness saw a steer with these statuses. A message
+ * that expects a reply then needs a turn of its own. `delivery_unknown` is
+ * excluded: the harness may already have it, and a new turn could answer it
+ * twice.
+ */
+function steerNeedsOwnTurn(steering: SlackbotV2AppendSteering | undefined): boolean {
+  return steering?.status === 'no_active_execution' || steering?.status === 'not_delivered'
+}
+
+function pendingTurnFor(message: ChatMessage, input: SyncThreadMessageInput): SlackbotV2PendingTurn {
+  return {
+    message: message.toJSON(),
+    ...(input.proactive ? { proactive: true } : {}),
+    ...(input.proactiveRule ? { proactiveRuleName: input.proactiveRule.name } : {}),
+    queuedAt: Date.now()
+  }
+}
+
+function chatMessageFromPendingTurn(
+  turn: SlackbotV2PendingTurn,
+  options: SlackbotV2Options
+): ChatMessage {
+  const message = ChatSdkMessage.fromJSON(turn.message as SerializedMessage)
+  // Serialization drops the byte loaders; Slack files reload from their URL.
+  for (const attachment of message.attachments) {
+    const url = attachment.fetchMetadata?.url ?? attachment.url
+    if (!attachment.fetchData && url) attachment.fetchData = () => fetchSlackFile(options, url)
+  }
+  return message
+}
+
+/**
+ * Pending turns live outside thread state: Chat SDK's setState is a
+ * read-merge-write, so concurrent enqueues and removals there could drop one
+ * another. The list append is atomic, and a turn is retired by setting its
+ * own done key rather than rewriting the list.
+ */
+function pendingTurnsKey(threadId: string): string {
+  return `slackbotv2:pending-turns:${threadId}`
+}
+
+function pendingTurnDoneKey(threadId: string, messageId: string): string {
+  return `slackbotv2:pending-turn:done:${threadId}:${messageId}`
+}
+
+async function enqueuePendingTurn(
+  thread: Thread<SlackbotV2ThreadState>,
+  message: ChatMessage,
+  input: SyncThreadMessageInput,
+  trace: SlackbotV2Trace
+): Promise<void> {
+  const key = pendingTurnsKey(thread.id)
+  const entries = await input.state.getList<SlackbotV2PendingTurn>(key)
+  // A handoff retry of the same message must not take a second slot.
+  if (entries.some(turn => turn?.message?.id === message.id)) return
+  if (entries.length >= PENDING_TURN_MAX) {
+    traceWarn(input.options, 'slackbotv2_pending_turn_queue_full', trace, {
+      dropped_message_id: entries[0]?.message?.id,
+      max_entries: PENDING_TURN_MAX
+    })
+  }
+  await input.state.appendToList(key, pendingTurnFor(message, input), {
+    maxLength: PENDING_TURN_MAX,
+    ttlMs: PENDING_TURN_TTL_MS
+  })
+  // Index the thread so the startup recovery sweep finds the queue.
+  await indexRenderObligation(input.state, { options: input.options, threadId: thread.id, trace })
+}
+
+/** Queued turns not yet retired, oldest first, one per message. */
+async function listPendingTurns(
+  state: StateAdapter,
+  threadId: string
+): Promise<SlackbotV2PendingTurn[]> {
+  const seen = new Set<string>()
+  const turns: SlackbotV2PendingTurn[] = []
+  for (const turn of await state.getList<SlackbotV2PendingTurn>(pendingTurnsKey(threadId))) {
+    const id = turn?.message?.id
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    if (await state.get(pendingTurnDoneKey(threadId, id))) continue
+    turns.push(turn)
+  }
+  return turns
+}
+
+async function retirePendingTurn(
+  state: StateAdapter,
+  threadId: string,
+  messageId: string
+): Promise<void> {
+  await state.set(pendingTurnDoneKey(threadId, messageId), true, PENDING_TURN_TTL_MS)
+}
+
+/**
+ * A pending turn's retry budget and backoff, kept per message so that every
+ * trigger (a render, the sweep, a restart) honours them, not only the timer.
+ */
+type PendingTurnRetry = { attempt: number; notBefore: number }
+
+function pendingTurnRetryKey(threadId: string, messageId: string): string {
+  return `slackbotv2:pending-turn:retry:${threadId}:${messageId}`
+}
+
+/**
+ * Starts queued pending turns once the thread is idle. A message is queued
+ * when it was appended while the thread looked active but api-rs had no
+ * execution to steer: the turn ended (turn.completed) before its render
+ * finalized. Any replica runs the queue: from a render's finalization, from
+ * the append when the thread is already idle, or from the recovery sweep.
+ */
+function schedulePendingTurns(
+  thread: Thread<SlackbotV2ThreadState>,
+  runner: PendingTurnRunner,
+  trace?: SlackbotV2Trace
+): void {
+  backgroundWaitUntil(
+    (async () => {
+      // A claim left by a crashed holder lapses after its TTL; outwait it.
+      for (let attempt = 0; attempt < PENDING_TURN_BLOCKED_RETRIES; attempt++) {
+        if ((await runPendingTurns(thread, runner, trace)) !== 'blocked') return
+        await sleep(PROACTIVE_CLAIM_TTL_MS)
+      }
+      traceWarn(runner.options, 'slackbotv2_pending_turn_blocked', trace, { thread_id: thread.id })
+    })().catch(error => {
+      traceWarn(runner.options, 'slackbotv2_pending_turn_failed', trace, {
+        error: errorMessage(error),
+        thread_id: thread.id
+      })
+    })
+  )
+}
+
+/**
+ * Resolves to `blocked` when another holder kept the turn claim past the
+ * wait, `waiting` when the next turn's retry backoff has not elapsed (both
+ * still need a run), and `idle` otherwise.
+ */
+async function runPendingTurns(
+  thread: Thread<SlackbotV2ThreadState>,
+  runner: PendingTurnRunner,
+  trace?: SlackbotV2Trace
+): Promise<'blocked' | 'idle' | 'waiting'> {
+  const { options, state } = runner
+  if ((await listPendingTurns(state, thread.id)).length === 0) return 'idle'
+  if ((await thread.state)?.activeExecution === true) return 'idle'
+  const claim = await claimThreadTurn(thread, state)
+  if (!claim) {
+    traceWarn(options, 'slackbotv2_pending_turn_claim_timeout', trace, { thread_id: thread.id })
+    return 'blocked'
+  }
+  try {
+    // Without the claim the thread went active: that turn's render runs the queue.
+    if (!claim.claimed) return 'idle'
+    const maxAgeMs =
+      options.renderRecoveryMaxObligationAgeMs ?? RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS
+    while (true) {
+      if ((await thread.state)?.activeExecution === true) return 'idle'
+      const [next] = await listPendingTurns(state, thread.id)
+      if (!next) return 'idle'
+      const retry = await state.get<PendingTurnRetry>(pendingTurnRetryKey(thread.id, next.message.id))
+      // Its retry timer runs it; after a restart, the recovery sweep does.
+      if (retry && retry.notBefore > Date.now()) return 'waiting'
+      const fields = {
+        message_id: next.message.id,
+        queued_ms: Date.now() - next.queuedAt,
+        retry_attempt: retry?.attempt ?? 0,
+        thread_id: thread.id
+      }
+      if (Date.now() - next.queuedAt > maxAgeMs) {
+        traceWarn(options, 'slackbotv2_pending_turn_stale_dropped', trace, fields)
+        await retirePendingTurn(state, thread.id, next.message.id)
+        continue
+      }
+      const message = chatMessageFromPendingTurn(next, options)
+      const proactiveRule = next.proactiveRuleName
+        ? resolveProactivityRules(options.proactivity?.rules, thread.id)
+          ?.find(rule => rule.name === next.proactiveRuleName)
+        : undefined
+      traceLog(options, 'slackbotv2_pending_turn_starting', trace, fields)
+      // Show the status as a mention's handoff does, keeping the promise so
+      // that every early exit (admission denied, stop, retry) can clear it.
+      const statusTrace = createHandoffTrace(thread, message, 'execute')
+      const initialAssistantStatus = setInitialAssistantStatus(thread, options, statusTrace)
+      backgroundWaitUntil(initialAssistantStatus.then(() => undefined).catch(() => undefined))
+      let outcome: SyncOutcome = undefined
+      const turnInput: SyncThreadMessageInput = {
+        initialAssistantStatus,
+        initialAssistantStatusRequested: true,
+        initialAssistantStatusVisible: false,
+        mode: 'execute',
+        options,
+        pendingTurn: true,
+        proactive: next.proactive,
+        proactiveRule,
+        retryAttempt: retry?.attempt,
+        state,
+        steeringReactions: runner.steeringReactions
+      }
+      try {
+        outcome = await syncThreadMessageToSession(thread, message, turnInput)
+        await turnInput.pendingRetryRecorded
+      } finally {
+        // A crash before this leaves the turn queued for the recovery sweep;
+        // the execute idempotency key keeps a rerun from starting it twice.
+        if (outcome !== 'deferred') await retirePendingTurn(state, thread.id, next.message.id)
+      }
+      // Deferred: the thread went active, or a retry runs the queue later.
+      if (outcome === 'deferred') return 'idle'
+    }
+  } finally {
+    await claim.release()
+  }
+}
+
+/** `deferred`: a pending turn stays queued (the thread went active, or a retry is due). */
+type SyncOutcome = 'deferred' | undefined
 
 /**
  * Schedules an in-process retry of a Slack→session handoff after a retryable
@@ -1660,8 +1927,23 @@ function scheduleHandoffRetry(
     attempt: attempt + 1,
     delay_ms: delayMs,
     error: errorMessage(error),
-    max_attempts: delays.length
+    max_attempts: delays.length,
+    pending_turn: input.pendingTurn === true
   })
+  if (input.pendingTurn) {
+    // The turn stays queued, and the retry runs through the queue so it
+    // holds the turn claim. Its budget and backoff are stored with the
+    // message (before the runner lets go of the claim), so a restart or
+    // another trigger honours them too.
+    finishSteeringReaction(input, trace)
+    const retry: PendingTurnRetry = { attempt: attempt + 1, notBefore: Date.now() + delayMs }
+    input.pendingRetryRecorded = input.state
+      .set(pendingTurnRetryKey(thread.id, message.id), retry, PENDING_TURN_TTL_MS)
+      .then(() => {
+        backgroundWaitUntil(sleep(delayMs).then(() => schedulePendingTurns(thread, input, trace)))
+      })
+    return true
+  }
   backgroundWaitUntil(
     (async () => {
       await sleep(delayMs)
@@ -1704,7 +1986,7 @@ async function syncThreadMessageToSession(
   thread: Thread<SlackbotV2ThreadState>,
   message: ChatMessage,
   input: SyncThreadMessageInput
-): Promise<void> {
+): Promise<SyncOutcome> {
   const traceStartedAtMs = nowMs()
   const state = (await thread.state) ?? {}
   const messageIds = new Set(state.forwardedMessageIds ?? [])
@@ -1724,6 +2006,16 @@ async function syncThreadMessageToSession(
     slackUserId: slackUserIdForMessage(message),
     startedAtMs: traceStartedAtMs,
     threadId: thread.id
+  }
+  if (input.pendingTurn && !shouldStartExecution) {
+    if (state.activeExecution === true && !executedMessageIds.has(message.id)) {
+      // Another turn got the thread first; this one runs after it.
+      traceLog(input.options, 'slackbotv2_pending_turn_deferred', trace)
+      return 'deferred'
+    }
+    traceLog(input.options, 'slackbotv2_pending_turn_already_executed', trace)
+    recordForward(input.mode, 'duplicate_skipped', traceStartedAtMs)
+    return
   }
   if (isDuplicateIncrementalMessage) {
     traceLog(input.options, 'slackbotv2_forward_duplicate_skipped', trace)
@@ -2090,13 +2382,28 @@ async function syncThreadMessageToSession(
     })
   }
 
-  const commitMessagesAppended = async (): Promise<void> => {
+  // The steer outcome api-rs reported for this message, when it was meant to
+  // steer the active turn.
+  let steering: SlackbotV2AppendSteering | undefined
+  let queuedPendingTurn = false
+  const commitMessagesAppended = async (
+    result: { steering?: SlackbotV2AppendSteering } = {}
+  ): Promise<void> => {
+    const steersThisMessage =
+      !shouldStartExecution
+      && input.mode === 'execute'
+      && messagesToAppend.some(item => item.id === message.id)
+    if (steersThisMessage) steering = result.steering
+    queuedPendingTurn = steersThisMessage && steerNeedsOwnTurn(result.steering)
     const latest = (await thread.state) ?? {}
     const latestMessageIds = new Set(latest.forwardedMessageIds ?? [])
     for (const item of messagesToAppend) latestMessageIds.add(item.id)
     const steeringReactionAck = input.steeringReactionAck
     const holdSteeringReaction =
       steeringReactionAck !== undefined && latest.activeExecution === true
+    // Queue the turn before marking the message forwarded, so no crash can
+    // leave it forwarded yet unanswered.
+    if (queuedPendingTurn) await enqueuePendingTurn(thread, message, input, trace)
     await thread.setState({
       ...(stickyOverridesUpdate ?? {}),
       forwardedMessageIds: Array.from(latestMessageIds).slice(-1000),
@@ -2149,6 +2456,7 @@ async function syncThreadMessageToSession(
     await thread.setState({
       ...(stickyOverridesUpdate ?? {}),
       activeExecution: true,
+      activeTurnMessageId: serializedMessage.id,
       executedMessageIds: Array.from(latestExecutedMessageIds).slice(-1000),
       lastEventId,
       ...(generativeUiNote
@@ -2199,7 +2507,7 @@ async function syncThreadMessageToSession(
       if (isRetryableSessionApiError(error)) {
         if (scheduleHandoffRetry(thread, message, input, error, trace)) {
           recordForward(input.mode, 'retry_scheduled', traceStartedAtMs)
-          return
+          return input.pendingTurn ? 'deferred' : undefined
         }
         slackbotMetrics.handoffRetries.inc({ outcome: 'exhausted' })
         traceWarn(input.options, 'slackbotv2_handoff_retry_exhausted', trace, {
@@ -2210,6 +2518,15 @@ async function syncThreadMessageToSession(
       recordForward(input.mode, 'error', traceStartedAtMs)
       throw error
     }
+    if (steering && steering.status !== 'delivered') {
+      traceWarn(input.options, 'slackbotv2_steer_undelivered', trace, {
+        pending_turn_queued: queuedPendingTurn,
+        steering_execution_id: steering.execution_id,
+        steering_status: steering.status
+      })
+    }
+    // The thread may already be idle, with no render left to run the queue.
+    if (queuedPendingTurn) schedulePendingTurns(thread, input, trace)
     finishSteeringReaction(input, trace)
     traceLog(input.options, 'slackbotv2_forward_complete', trace)
     recordForward(input.mode, 'complete', traceStartedAtMs)
@@ -2220,7 +2537,7 @@ async function syncThreadMessageToSession(
   let responseContextBlock: SlackContextBlock | undefined
   let stoppedBeforeExecute = false
   try {
-    await thread.setState({ activeExecution: true })
+    await thread.setState({ activeExecution: true, activeTurnMessageId: serializedMessage.id })
     traceLog(input.options, 'slackbotv2_forward_active_execution_marked', trace)
     await forwardToSessionApi(input.options, forwardInput, {
       shouldExecute: async () => {
@@ -2323,7 +2640,7 @@ async function syncThreadMessageToSession(
       () => lastEventId,
       renderLease,
       assistantStatusVisible,
-      input.steeringReactions,
+      input,
       trace,
       [
         ...(responseContextBlock ? [responseContextBlock] : []),
@@ -2374,7 +2691,7 @@ async function syncThreadMessageToSession(
       // system. The thread is never left silent in that case.
       if (scheduleHandoffRetry(thread, message, input, error, trace)) {
         recordForward(input.mode, 'retry_scheduled', traceStartedAtMs)
-        return
+        return input.pendingTurn ? 'deferred' : undefined
       }
       slackbotMetrics.handoffRetries.inc({ outcome: 'exhausted' })
       traceWarn(input.options, 'slackbotv2_handoff_retry_exhausted', trace, {
@@ -2414,7 +2731,7 @@ function scheduleExecutionRender(
   getLastEventId: () => number,
   renderLease: { release: (() => Promise<void>) | null },
   assistantStatusVisible: boolean,
-  steeringReactions: SteeringReactionController,
+  runner: PendingTurnRunner,
   trace?: SlackbotV2Trace,
   stopBlocks: SlackStopBlock[] = []
 ): void {
@@ -2430,7 +2747,7 @@ function scheduleExecutionRender(
           input,
           getLastEventId,
           assistantStatusVisible,
-          steeringReactions,
+          runner,
           trace,
           stopBlocks
         )
@@ -2475,10 +2792,11 @@ async function renderExecutionAttempt(
   input: ForwardSessionInput,
   getLastEventId: () => number,
   assistantStatusVisible: boolean,
-  steeringReactions: SteeringReactionController,
+  runner: PendingTurnRunner,
   trace?: SlackbotV2Trace,
   stopBlocks: SlackStopBlock[] = []
 ): Promise<'complete' | 'retry'> {
+  const { steeringReactions } = runner
   const renderStartedAtMs = nowMs()
   let outcome = 'failure'
   let rendered = false
@@ -2624,14 +2942,22 @@ async function renderExecutionAttempt(
     throw error
   } finally {
     const latest = (await thread.state) ?? {}
+    // Leave a newer execution's state alone: clearing it would let a second
+    // turn start beside it and drop its obligation from recovery.
+    const owned = ownsThreadExecution(latest, { executionId: input.executionId, messageId: message.id })
     await thread.setState({
-      activeExecution: retry,
+      ...(owned ? { activeExecution: retry } : {}),
       lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
-      ...(rendered ? { renderObligation: null } : {})
+      ...(rendered && owned ? { renderObligation: null } : {})
     })
-    if (rendered) await steeringReactions.completeThread(thread.id, trace)
+    // A newer turn's acknowledgements end with that turn's render.
+    if (rendered && owned) await steeringReactions.completeThread(thread.id, trace)
+    // Only after delivery: a failed render keeps its obligation for recovery,
+    // which the next turn's would overwrite.
+    if (rendered && owned) schedulePendingTurns(thread, runner, trace)
     traceLog(options, 'slackbotv2_render_finalized', trace, {
-      obligation_cleared: rendered,
+      execution_owned: owned,
+      obligation_cleared: rendered && owned,
       render_duration_ms: elapsedMs(renderStartedAtMs),
       retry_scheduled: retry,
       last_event_id: getLastEventId()
@@ -2892,26 +3218,31 @@ function scheduleRenderObligationRecovery(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
   state: StateAdapter,
   options: SlackbotV2Options,
-  stateConnected: Promise<void>
+  stateConnected: Promise<void>,
+  steeringReactions: SteeringReactionController
 ): void {
   backgroundWaitUntil(
-    recoverRenderObligationsWithRetry(chat, state, options, stateConnected)
+    recoverRenderObligationsWithRetry(
+      chat,
+      { options, state, steeringReactions },
+      stateConnected
+    )
   )
 }
 
 async function recoverRenderObligationsWithRetry(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
-  state: StateAdapter,
-  options: SlackbotV2Options,
+  runner: PendingTurnRunner,
   stateConnected: Promise<void>
 ): Promise<void> {
+  const { options } = runner
   // Wait for the startup Postgres connection before scanning for obligations.
   await stateConnected
   const failureCounts = new Map<string, number>()
   let attempt = 0
   while (true) {
     try {
-      const deferredCount = await recoverRenderObligations(chat, state, options, failureCounts)
+      const deferredCount = await recoverRenderObligations(chat, runner, failureCounts)
       if (deferredCount === 0) return
       const delayMs = renderRetryDelayMs(attempt)
       attempt += 1
@@ -2939,10 +3270,10 @@ async function recoverRenderObligationsWithRetry(
 
 async function recoverRenderObligations(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
-  state: StateAdapter,
-  options: SlackbotV2Options,
+  runner: PendingTurnRunner,
   failureCounts: Map<string, number>
 ): Promise<number> {
+  const { options, state } = runner
   const startedAtMs = nowMs()
   await chat.initialize()
   const indexedThreadIds = await state.getList<string>(RENDER_OBLIGATION_INDEX_KEY)
@@ -2970,7 +3301,12 @@ async function recoverRenderObligations(
       const thread = chat.thread(threadId)
       const threadState = await thread.state
       const obligation = threadState?.renderObligation
-      if (!obligation) continue
+      if (!obligation) {
+        // Pending turns left by a crash or restart. A claim still held (for
+        // example by a crashed process, until its TTL) keeps the sweep going.
+        if ((await runPendingTurns(thread, runner)) !== 'idle') deferredCount += 1
+        continue
+      }
       activeObligationCount += 1
 
       const obligationAgeMs = renderObligationAgeMs(obligation)
@@ -2987,6 +3323,7 @@ async function recoverRenderObligations(
           lastEventId: threadState?.lastEventId ?? 0,
           renderObligation: null
         })
+        schedulePendingTurns(thread, runner)
         continue
       }
 
@@ -3012,6 +3349,7 @@ async function recoverRenderObligations(
           lastEventId: threadState?.lastEventId ?? 0,
           renderObligation: null
         })
+        schedulePendingTurns(thread, runner)
         continue
       }
 
@@ -3040,7 +3378,7 @@ async function recoverRenderObligations(
       // Race a deadline; on timeout move on and leave the attempt running
       // detached - it may still finish and clear the obligation, which is why
       // the lease is renewed until the detached attempt actually settles.
-      const recovery = recoverRenderObligation(chat, state, options, threadId, obligation)
+      const recovery = recoverRenderObligation(chat, runner, threadId, obligation)
         .finally(releaseLease)
       let outcome: { timedOut: true } | { timedOut: false; deferred: boolean }
       let timeout: ReturnType<typeof setTimeout> | undefined
@@ -3130,11 +3468,11 @@ async function recoverRenderObligations(
 
 async function recoverRenderObligation(
   chat: Chat<Record<string, Adapter>, SlackbotV2ThreadState>,
-  state: StateAdapter,
-  options: SlackbotV2Options,
+  runner: PendingTurnRunner,
   threadId: string,
   obligation: SlackbotV2RenderObligation
 ): Promise<boolean> {
+  const { options } = runner
   const trace: SlackbotV2Trace = {
     includeContext: false,
     messageId: obligation.message.id,
@@ -3179,11 +3517,17 @@ async function recoverRenderObligation(
       return true
     }
     await renderRecoveredExecutionStream(thread, streamError(error), obligation.message, options, trace)
-    await thread.setState({
-      activeExecution: false,
-      lastEventId,
-      renderObligation: null
-    })
+    if (ownsThreadExecution((await thread.state) ?? {}, {
+      executionId: obligation.executionId,
+      messageId: obligation.message.id
+    })) {
+      await thread.setState({
+        activeExecution: false,
+        lastEventId,
+        renderObligation: null
+      })
+      schedulePendingTurns(thread, runner, trace)
+    }
     renderOutcome = 'stream_error_rendered'
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
     return false
@@ -3194,6 +3538,7 @@ async function recoverRenderObligation(
   try {
     await thread.setState({
       activeExecution: true,
+      activeTurnMessageId: obligation.message.id,
       lastEventId
     })
     const streamResult = await renderRecoveredExecutionStream(
@@ -3297,13 +3642,19 @@ async function recoverRenderObligation(
     }
   } finally {
     const latest = (await thread.state) ?? {}
-    await thread.setState({
-      activeExecution: false,
-      lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
-      ...(rendered ? { renderObligation: null } : {})
+    const owned = ownsThreadExecution(latest, {
+      executionId: obligation.executionId,
+      messageId: obligation.message.id
     })
+    await thread.setState({
+      ...(owned ? { activeExecution: false } : {}),
+      lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
+      ...(rendered && owned ? { renderObligation: null } : {})
+    })
+    if (rendered && owned) schedulePendingTurns(thread, runner, trace)
     traceLog(options, 'slackbotv2_render_recovery_finalized', trace, {
-      obligation_cleared: rendered,
+      execution_owned: owned,
+      obligation_cleared: rendered && owned,
       last_event_id: lastEventId
     })
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)

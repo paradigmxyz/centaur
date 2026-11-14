@@ -1,7 +1,7 @@
 import type { GenerativeUiOptions } from './generative-ui'
 import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import type { CodexAppServerToChatStreamOptions } from '@centaur/rendering'
-import type { Attachment, Chat, Logger, StateAdapter } from 'chat'
+import type { Attachment, Chat, Logger, SerializedMessage, StateAdapter } from 'chat'
 import type { Hono } from 'hono'
 import type { ChannelDefaults } from './channel-defaults'
 import type { ProactivityRule, ProactivityRules } from './proactivity-rules'
@@ -71,6 +71,23 @@ export type SlackbotV2SessionMessage = {
 
 export type SlackbotV2AppendMessagesRequest = {
   messages: SlackbotV2SessionMessage[]
+}
+
+/**
+ * Whether api-rs delivered the appended user messages to an active execution.
+ * Absent from older api-rs builds and from appends without a user message.
+ * `no_active_execution` and `not_delivered` guarantee no harness saw them;
+ * after `delivery_unknown` the harness may have.
+ */
+export type SlackbotV2AppendSteering = {
+  status: 'delivered' | 'delivery_unknown' | 'no_active_execution' | 'not_delivered'
+  execution_id?: string
+}
+
+export type SlackbotV2AppendMessagesResponse = {
+  ok?: boolean
+  message_ids?: string[]
+  steering?: SlackbotV2AppendSteering
 }
 
 export type SlackbotV2CreateSessionRequest = {
@@ -310,6 +327,11 @@ export type SlackbotV2 = {
 
 export type SlackbotV2ThreadState = {
   activeExecution?: boolean
+  /**
+   * The message whose turn set activeExecution, so an older render's cleanup
+   * leaves a newer turn's state alone. Null clears persisted state.
+   */
+  activeTurnMessageId?: string | null
   executedMessageIds?: string[]
   forwardedMessageIds?: string[]
   /** Last thread-level harness selected by Slack flags. Null clears persisted state. */
@@ -348,6 +370,15 @@ export type SlackbotV2ThreadState = {
    * handed off for a message sent before then must not run.
    */
   stopRequestedAt?: number
+}
+
+/** A message that missed the turn it was sent to steer and waits for its own. */
+export type SlackbotV2PendingTurn = {
+  message: SerializedMessage
+  proactive?: boolean
+  /** The proactivity rule the message matched, resolved again when it runs. */
+  proactiveRuleName?: string
+  queuedAt: number
 }
 
 export type SlackbotV2RenderObligation = {
