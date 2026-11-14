@@ -26,9 +26,10 @@ const CLAUDE_MODEL = claudeSettings.model
 // Claude Code picks its default effort per model; this is its choice for the
 // baked model. Steps on other Claude models leave effort unchecked.
 const CLAUDE_EFFORT = 'medium'
-// Deployed personas, each recognized by the first line of its prompt.
+// Deployed personas, each recognized by the first line of its prompt. The e2e
+// stack deploys only the fixture persona (see e2e/infra/values.yaml).
 const PERSONA_HEADINGS: Record<string, string> = {
-  eng: (await Bun.file(new URL('../../tools/personas/eng/PROMPT.md', import.meta.url)).text()).split('\n')[0]!
+  e2e: (await Bun.file(new URL('../fixtures/personas/e2e/PROMPT.md', import.meta.url)).text()).split('\n')[0]!
 }
 
 type Step = {
@@ -107,20 +108,20 @@ const scenarios: Record<string, Scenario> = {
   },
   'a persona flag sticks to the thread alongside a harness flag': {
     steps: [
-      { say: '--claude --persona=eng hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, persona: 'eng' },
-      { say: 'again', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, persona: 'eng', sandbox: 'same', sees: [1] }
+      { say: '--claude --persona=e2e hello', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, persona: 'e2e' },
+      { say: 'again', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, persona: 'e2e', sandbox: 'same', sees: [1] }
     ]
   },
   'a later persona flag does not move the pinned persona': {
     steps: [
-      { say: '--codex --persona=eng hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, persona: 'eng' },
-      { say: '--persona=missing again', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, persona: 'eng', sandbox: 'same' }
+      { say: '--codex --persona=e2e hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, persona: 'e2e' },
+      { say: '--persona=missing again', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, persona: 'e2e', sandbox: 'same' }
     ]
   },
   'a harness switch keeps the pinned persona': {
     steps: [
-      { say: '--codex --persona=eng hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, persona: 'eng' },
-      { say: '--claude switch', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, persona: 'eng', sandbox: 'new' }
+      { say: '--codex --persona=e2e hello', harness: 'codex', model: CODEX_MODEL, effort: CODEX_EFFORT, persona: 'e2e' },
+      { say: '--claude switch', harness: 'claudecode', model: CLAUDE_MODEL, effort: CLAUDE_EFFORT, persona: 'e2e', sandbox: 'new' }
     ]
   },
   'an unavailable persona continues without one': {
@@ -137,22 +138,22 @@ const scenarios: Record<string, Scenario> = {
   'a channel default picks the persona, harness, and model': {
     channel: DEFAULTS_CHANNEL,
     steps: [
-      { say: 'hello', harness: 'claudecode', model: 'claude-sonnet-5-5', persona: 'eng', footer: 'Sonnet 5.5 · Claude Code · High' },
-      { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5-5', persona: 'eng', sandbox: 'same', sees: [1] }
+      { say: 'hello', harness: 'claudecode', model: 'claude-sonnet-5-5', persona: 'e2e', footer: 'Sonnet 5.5 · Claude Code · High' },
+      { say: 'again', harness: 'claudecode', model: 'claude-sonnet-5-5', persona: 'e2e', sandbox: 'same', sees: [1] }
     ]
   },
   'flags beat the channel default': {
     channel: DEFAULTS_CHANNEL,
     steps: [
-      { say: '--codex --model gpt-5.4 -rsn low hello', harness: 'codex', model: 'gpt-5.4', effort: 'low', persona: 'eng' }
+      { say: '--codex --model gpt-5.4 -rsn low hello', harness: 'codex', model: 'gpt-5.4', effort: 'low', persona: 'e2e' }
     ]
   },
   'a harness flag does not carry the channel model to the new harness': {
     channel: DEFAULTS_CHANNEL,
     steps: [
       // The channel's reasoning default still applies to every turn.
-      { say: '--codex hello', harness: 'codex', model: CODEX_MODEL, effort: 'high', persona: 'eng' },
-      { say: 'again', harness: 'codex', model: CODEX_MODEL, effort: 'high', persona: 'eng', sandbox: 'same' }
+      { say: '--codex hello', harness: 'codex', model: CODEX_MODEL, effort: 'high', persona: 'e2e' },
+      { say: 'again', harness: 'codex', model: CODEX_MODEL, effort: 'high', persona: 'e2e', sandbox: 'same' }
     ]
   }
 }

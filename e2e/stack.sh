@@ -134,6 +134,11 @@ up() {
   kubectl -n "$NAMESPACE" create secret generic centaur-e2e-iron-proxy-env \
     --from-literal=SSL_CERT_FILE=/etc/iron-proxy-ca/ca-cert.pem \
     --dry-run=client -o yaml | apply_stdin
+  # The fixture persona api-rs mounts (apiRs.extraVolumes in e2e/infra/values.yaml).
+  # api-rs reads personas only at startup, so restart it if the persona changed.
+  local personas_applied
+  personas_applied="$(kubectl -n "$NAMESPACE" create configmap centaur-e2e-personas \
+    --from-file=e2e/fixtures/personas/e2e --dry-run=client -o yaml | kubectl apply -f -)"
 
   load_release_ca
   deploy_model_server
@@ -158,6 +163,10 @@ up() {
     seed_broker_credentials
   fi
   wait "$helm_pid"
+  if [[ "$personas_applied" == *" configured" ]]; then
+    kubectl -n "$NAMESPACE" rollout restart deploy/${RELEASE}-centaur-api-rs > /dev/null
+    kubectl -n "$NAMESPACE" rollout status deploy/${RELEASE}-centaur-api-rs --timeout=10m
+  fi
   kubectl apply -f e2e/infra/test-access.yaml > /dev/null
   wait_for_test_access
   admit_external_team
