@@ -1,9 +1,0 @@
-[project]
-name = "eng"
-description = "Engineering persona — code review, debugging, repo work"
-version = "0.1.0"
-
-[tool.centaur]
-type = "persona"
-engine = "codex"
-prompt = "PROMPT.md"

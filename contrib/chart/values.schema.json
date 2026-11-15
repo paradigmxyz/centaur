@@ -584,7 +584,10 @@
         "extraEnv": {
           "type": "object",
           "additionalProperties": { "type": "string" }
-        }
+        },
+        "extraVolumes": { "type": "array", "items": { "type": "object" } },
+        "extraVolumeMounts": { "type": "array", "items": { "type": "object" } },
+        "extraToolDirs": { "type": "array", "items": { "type": "string" } }
       }
     },
     "slackbotv2": {
