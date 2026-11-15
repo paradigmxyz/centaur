@@ -84,12 +84,6 @@ export type SlackbotV2AppendSteering = {
   execution_id?: string
 }
 
-export type SlackbotV2AppendMessagesResponse = {
-  ok?: boolean
-  message_ids?: string[]
-  steering?: SlackbotV2AppendSteering
-}
-
 export type SlackbotV2CreateSessionRequest = {
   harness_type: string
   metadata: JsonObject

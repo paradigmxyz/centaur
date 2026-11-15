@@ -157,7 +157,6 @@ export type {
   SlackbotV2BlockActionPayload,
   SlackbotV2ApiMessage,
   SlackbotV2AppendMessagesRequest,
-  SlackbotV2AppendMessagesResponse,
   SlackbotV2AppendSteering,
   SlackbotV2CreateSessionRequest,
   SlackbotV2ExecuteSessionRequest,
@@ -1887,7 +1886,6 @@ async function runPendingTurns(
       const statusTrace = createHandoffTrace(thread, message, 'execute')
       const initialAssistantStatus = setInitialAssistantStatus(thread, options, statusTrace)
       backgroundWaitUntil(initialAssistantStatus.then(() => undefined).catch(() => undefined))
-      let outcome: SyncOutcome = undefined
       const turnInput: SyncThreadMessageInput = {
         initialAssistantStatus,
         initialAssistantStatusRequested: true,
@@ -1901,6 +1899,7 @@ async function runPendingTurns(
         state,
         steeringReactions: runner.steeringReactions
       }
+      let outcome: SyncOutcome
       try {
         outcome = await syncThreadMessageToSession(thread, message, turnInput)
         await turnInput.pendingRetryRecorded
@@ -1917,9 +1916,9 @@ async function runPendingTurns(
       // Retire only on an explicit, non-deferred return: a crash leaves the
       // turn queued for the recovery sweep, and the execute idempotency key
       // keeps a rerun from starting it twice.
-      if (outcome !== 'deferred') await retirePendingTurn(state, thread.id, next.message.id)
       // Deferred: the thread went active, or a retry runs the queue later.
       if (outcome === 'deferred') return 'idle'
+      await retirePendingTurn(state, thread.id, next.message.id)
     }
   } finally {
     await claim.release()
@@ -2974,19 +2973,22 @@ async function renderExecutionAttempt(
     // Leave a newer execution's state alone: clearing it would let a second
     // turn start beside it and drop its obligation from recovery.
     const owned = ownsThreadExecution(latest, { executionId: input.executionId, messageId: message.id })
+    const finalized = rendered && owned
     await thread.setState({
       ...(owned ? { activeExecution: retry } : {}),
       lastEventId: Math.max(latest.lastEventId ?? 0, getLastEventId(), fallbackLastEventId),
-      ...(rendered && owned ? { renderObligation: null } : {})
+      ...(finalized ? { renderObligation: null } : {})
     })
-    // A newer turn's acknowledgements end with that turn's render.
-    if (rendered && owned) await steeringReactions.completeThread(thread.id, trace)
-    // Only after delivery: a failed render keeps its obligation for recovery,
-    // which the next turn's would overwrite.
-    if (rendered && owned) schedulePendingTurns(thread, runner, trace)
+    if (finalized) {
+      // A newer turn's acknowledgements end with that turn's render.
+      await steeringReactions.completeThread(thread.id, trace)
+      // Only after delivery: a failed render keeps its obligation for recovery,
+      // which the next turn's would overwrite.
+      schedulePendingTurns(thread, runner, trace)
+    }
     traceLog(options, 'slackbotv2_render_finalized', trace, {
       execution_owned: owned,
-      obligation_cleared: rendered && owned,
+      obligation_cleared: finalized,
       render_duration_ms: elapsedMs(renderStartedAtMs),
       retry_scheduled: retry,
       last_event_id: getLastEventId()
@@ -3679,15 +3681,16 @@ async function recoverRenderObligation(
       executionId: obligation.executionId,
       messageId: obligation.message.id
     })
+    const finalized = rendered && owned
     await thread.setState({
       ...(owned ? { activeExecution: false } : {}),
       lastEventId: Math.max(latest.lastEventId ?? 0, lastEventId),
-      ...(rendered && owned ? { renderObligation: null } : {})
+      ...(finalized ? { renderObligation: null } : {})
     })
-    if (rendered && owned) schedulePendingTurns(thread, runner, trace)
+    if (finalized) schedulePendingTurns(thread, runner, trace)
     traceLog(options, 'slackbotv2_render_recovery_finalized', trace, {
       execution_owned: owned,
-      obligation_cleared: rendered && owned,
+      obligation_cleared: finalized,
       last_event_id: lastEventId
     })
     recordRenderAttempt('recovery', renderOutcome, renderStartedAtMs)
