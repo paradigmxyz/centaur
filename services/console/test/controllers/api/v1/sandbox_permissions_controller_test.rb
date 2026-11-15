@@ -56,6 +56,7 @@ module Api
         assert_equal @proxy.oid, data.fetch("proxy_id")
         assert_equal @proxy.principal.oid, data.fetch("principal_id")
         refute data.fetch("principal").key?("namespace")
+        assert_equal @proxy.principal.kind, data.dig("principal", "kind")
         assert_equal @proxy.principal.sandbox_repo_cache, data.dig("capabilities", "sandbox_repo_cache")
         assert_equal false, data.dig("capabilities", "sandbox_sessions_read_enabled")
         assert_equal false, data.dig("capabilities", "sandbox_workflows_read_enabled")

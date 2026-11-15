@@ -30,7 +30,8 @@ credentials iron-proxy injects, is set by where it runs. `--context-file`
 (default `$CENTAUR_SANDBOX_CONTEXT_FILE` or `~/.centaur/sandbox.json`) is the
 sandbox context file, read once per cell and given to connectors as
 `ctx.context` (and to cells as `context`) for routing decisions such as Slack's
-direct or Centaur path.
+direct or Centaur path, or whether message search
+uses company context v2.
 Connectors read configuration from the
 environment as `ctx.env` (`CENTAUR_API_URL`, ...). Behind iron-proxy,
 credentials are injected on the wire; for local testing only, a connector may
