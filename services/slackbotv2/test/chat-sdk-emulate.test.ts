@@ -4738,6 +4738,144 @@ describe('slackbotv2', () => {
     await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
   })
 
+  it('holds pending turns until an undelivered answer is rendered', async () => {
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const parent = await postUserMessage('History before an undelivered answer.')
+    const undelivered = await postUserMessage(`<@${BOT_USER_ID}> first turn`, parent.ts)
+    const mentionText = `<@${BOT_USER_ID}> answer me after the undelivered one`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = new ChatSdkMessage({
+      attachments: [],
+      author: { fullName: 'User', isBot: false, isMe: false, userId: USER_ID, userName: 'user' },
+      formatted: { type: 'root', children: [] },
+      id: mention.ts,
+      isMention: true,
+      metadata: { dateSent: new Date(), edited: false },
+      raw: {
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        text: mentionText,
+        thread_ts: parent.ts,
+        ts: mention.ts,
+        type: 'message',
+        user: USER_ID
+      },
+      text: mentionText,
+      threadId: key
+    })
+    // The first turn's render failed: activeExecution cleared but its
+    // obligation stayed, and a steer from that window is queued behind it.
+    await sharedState.set(`thread-state:${key}`, {
+      forwardedMessageIds: [mention.ts],
+      lastEventId: 0,
+      renderObligation: {
+        afterEventId: 0,
+        executionId: 'exe-undelivered',
+        message: apiMessageFromSlackEvent({
+          isMention: true,
+          text: `<@${BOT_USER_ID}> first turn`,
+          threadId: key,
+          ts: undelivered.ts
+        })
+      }
+    })
+    await sharedState.appendToList(`slackbotv2:pending-turns:${key}`, {
+      message: message.toJSON(),
+      queuedAt: Date.now()
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+    codexApi.emitOutputLines(key, sampleCodexOutputLines('Undelivered answer.'))
+
+    // The sweep read the thread just before the obligation was committed, so
+    // the queue sees it first; that must not replace the obligation.
+    let staleReads = 1
+    const racyState = new Proxy(sharedState, {
+      get(target, prop, receiver) {
+        if (prop !== 'get') return Reflect.get(target, prop, receiver)
+        return async (stateKey: string) => {
+          const value = await target.get<Record<string, unknown>>(stateKey)
+          if (staleReads > 0 && value?.renderObligation) {
+            staleReads -= 1
+            return { ...value, renderObligation: null }
+          }
+          return value
+        }
+      }
+    })
+
+    bot = createTestBot({ state: racyState })
+
+    const threadEventRequests = () =>
+      codexApi.eventRequests.filter(request => request.threadKey === key)
+    const threadExecutes = () => codexApi.executes.filter(request => request.threadKey === key)
+    await waitFor(() => threadEventRequests().length === 1, 3000)
+    await waitFor(async () => (await threadText(parent.ts)).includes('Undelivered answer.'), 5000)
+    // The obligation was recovered under its own execution, not replaced by
+    // the queued turn's.
+    expect(threadEventRequests()[0]).toEqual({
+      afterEventId: 0,
+      executionId: 'exe-undelivered',
+      threadKey: key
+    })
+    // Only then does the queued turn run, and it still answers its own message.
+    await waitFor(() => threadExecutes().length === 1, 3000)
+    expect(JSON.stringify(threadExecutes()[0]?.body.input_lines)).toContain(
+      'answer me after the undelivered one'
+    )
+    await waitFor(async () => (await threadText(parent.ts)).includes('Executed request 1.'), 3000)
+    await waitFor(async () => (await pendingTurnIds(sharedState, key)).length === 0, 3000)
+  })
+
+  it('keeps a pending turn queued when its handoff throws unexpectedly', async () => {
+    const logs: CapturedLog[] = []
+    const sharedState = createMemoryState()
+    await sharedState.connect()
+    const parent = await postUserMessage('History before a broken pending turn.')
+    const mentionText = `<@${BOT_USER_ID}> survive a broken handoff`
+    const mention = await postUserMessage(mentionText, parent.ts)
+    const key = threadKey(parent.ts)
+    const message = new ChatSdkMessage({
+      attachments: [],
+      author: { fullName: 'User', isBot: false, isMe: false, userId: USER_ID, userName: 'user' },
+      formatted: { type: 'root', children: [] },
+      id: mention.ts,
+      isMention: true,
+      metadata: { dateSent: new Date(), edited: false },
+      raw: {
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        text: mentionText,
+        thread_ts: parent.ts,
+        ts: mention.ts,
+        type: 'message',
+        user: USER_ID
+      },
+      text: mentionText,
+      threadId: key
+    })
+    const serialized = message.toJSON()
+    await sharedState.set(`thread-state:${key}`, { forwardedMessageIds: [mention.ts] })
+    await sharedState.appendToList(`slackbotv2:pending-turns:${key}`, {
+      // A timestamp the SDK cannot parse makes the handoff throw.
+      message: {
+        ...serialized,
+        metadata: { ...serialized.metadata, dateSent: 'not-a-date' }
+      } as never,
+      queuedAt: Date.now()
+    })
+    await sharedState.appendToList('slackbotv2:render:index', key)
+
+    bot = createTestBot({ logger: captureLogger(logs), state: sharedState })
+
+    await waitFor(() => hasLog(logs, 'slackbotv2_pending_turn_handoff_failed'), 3000)
+    // A thrown handoff is not an answer: the message stays queued for a later
+    // trigger instead of being retired by the run that failed.
+    expect(await pendingTurnIds(sharedState, key)).toEqual([mention.ts])
+    expect(codexApi.executes.filter(request => request.threadKey === key)).toHaveLength(0)
+  })
+
   it('leaves a newer turn\'s state alone when an older render finalizes', async () => {
     const sharedState = createMemoryState()
     await sharedState.connect()

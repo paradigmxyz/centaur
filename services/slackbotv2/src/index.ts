@@ -1816,18 +1816,37 @@ function schedulePendingTurns(
 }
 
 /**
+ * What keeps the queue from starting a turn, if anything: `obligated` is an
+ * undelivered answer whose render obligation survives a failed render after
+ * activeExecution cleared, and `idle` is a live turn or handoff already
+ * scheduled to finalize and run the queue.
+ */
+async function pendingTurnBlocker(
+  thread: Thread<SlackbotV2ThreadState>
+): Promise<'idle' | 'obligated' | undefined> {
+  const current = await thread.state
+  if (current?.activeExecution === true) return 'idle'
+  if (current?.renderObligation) return 'obligated'
+  return undefined
+}
+
+/**
  * Resolves to `blocked` when another holder kept the turn claim past the
- * wait, `waiting` when the next turn's retry backoff has not elapsed (both
- * still need a run), and `idle` otherwise.
+ * wait, `waiting` when the next turn's retry backoff has not elapsed,
+ * `obligated` when an outstanding render obligation owns the thread (all
+ * three still need a run), and `idle` otherwise.
  */
 async function runPendingTurns(
   thread: Thread<SlackbotV2ThreadState>,
   runner: PendingTurnRunner,
   trace?: SlackbotV2Trace
-): Promise<'blocked' | 'idle' | 'waiting'> {
+): Promise<'blocked' | 'idle' | 'obligated' | 'waiting'> {
   const { options, state } = runner
   if ((await listPendingTurns(state, thread.id)).length === 0) return 'idle'
-  if ((await thread.state)?.activeExecution === true) return 'idle'
+  // Starting a turn now would replace the obligation and lose recovery for
+  // the earlier answer; finalizing it schedules the queue again.
+  const blocked = await pendingTurnBlocker(thread)
+  if (blocked) return blocked
   const claim = await claimThreadTurn(thread, state)
   if (!claim) {
     traceWarn(options, 'slackbotv2_pending_turn_claim_timeout', trace, { thread_id: thread.id })
@@ -1839,7 +1858,8 @@ async function runPendingTurns(
     const maxAgeMs =
       options.renderRecoveryMaxObligationAgeMs ?? RENDER_RECOVERY_MAX_OBLIGATION_AGE_MS
     while (true) {
-      if ((await thread.state)?.activeExecution === true) return 'idle'
+      const blocker = await pendingTurnBlocker(thread)
+      if (blocker) return blocker
       const [next] = await listPendingTurns(state, thread.id)
       if (!next) return 'idle'
       const retry = await state.get<PendingTurnRetry>(pendingTurnRetryKey(thread.id, next.message.id))
@@ -1884,11 +1904,20 @@ async function runPendingTurns(
       try {
         outcome = await syncThreadMessageToSession(thread, message, turnInput)
         await turnInput.pendingRetryRecorded
-      } finally {
-        // A crash before this leaves the turn queued for the recovery sweep;
-        // the execute idempotency key keeps a rerun from starting it twice.
-        if (outcome !== 'deferred') await retirePendingTurn(state, thread.id, next.message.id)
+      } catch (error) {
+        // Not a deferral: stay queued for the next trigger (a render, the
+        // sweep, a restart) instead of retiring an unanswered message. The
+        // trigger is not immediate, so a persistent failure cannot spin.
+        traceWarn(options, 'slackbotv2_pending_turn_handoff_failed', trace, {
+          ...fields,
+          error: errorMessage(error)
+        })
+        return 'idle'
       }
+      // Retire only on an explicit, non-deferred return: a crash leaves the
+      // turn queued for the recovery sweep, and the execute idempotency key
+      // keeps a rerun from starting it twice.
+      if (outcome !== 'deferred') await retirePendingTurn(state, thread.id, next.message.id)
       // Deferred: the thread went active, or a retry runs the queue later.
       if (outcome === 'deferred') return 'idle'
     }
@@ -3303,8 +3332,12 @@ async function recoverRenderObligations(
       const obligation = threadState?.renderObligation
       if (!obligation) {
         // Pending turns left by a crash or restart. A claim still held (for
-        // example by a crashed process, until its TTL) keeps the sweep going.
-        if ((await runPendingTurns(thread, runner)) !== 'idle') deferredCount += 1
+        // example by a crashed process, until its TTL) keeps the sweep going,
+        // as does an obligation a turn committed after this pass read the
+        // thread: its recovery finalizes it and then runs the queue.
+        const queued = await runPendingTurns(thread, runner)
+        if (queued !== 'idle') deferredCount += 1
+        if (queued === 'obligated') activeObligationCount += 1
         continue
       }
       activeObligationCount += 1
