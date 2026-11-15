@@ -1,6 +1,7 @@
 import type { Ctx, RequestInit, Response } from "../centaur";
 import { query, readJson, encode, type Params } from "../_lib/http";
 import { downloadTo, outputPath, requireFiles, safeFilename } from "../_lib/files";
+import { companyContextRequest, companyContextUrl, rfc3339 } from "../_lib/company_context";
 
 // Results are Slack's own objects, passed through. The interfaces list the
 // fields worth knowing; Slack sends more.
@@ -15,6 +16,14 @@ const DEFAULT_CENTAUR_API = "http://api:8000";
  * API, scoped to the caller's channel grants. Every function picks the path automatically.
  */
 export type Access = "direct" | "centaur";
+
+/**
+ * Where `search_messages` searches. `company_context`: the indexed Slack history in company
+ * context v2, scoped to what the calling principal can see; used for every principal other than a
+ * Slack DM or MCP (Console user) principal wherever company context v2 is deployed. `slack`:
+ * Slack's native `search.messages`, with direct access. `null`: search is unavailable.
+ */
+export type SearchBackend = "company_context" | "slack";
 
 /** A Slack message object. */
 export interface Message {
@@ -95,6 +104,38 @@ export interface UploadedFiles {
   files: FileInfo[];
 }
 
+/** An indexed Slack document from company context v2, passed through as the API sends it. */
+export interface IndexedDocument {
+  /** Pass to `company_context.read_document`. */
+  document_id: string;
+  /** `slack_message`: a channel-day transcript chunk. */
+  type: string;
+  title: string | null;
+  url: string | null;
+  text: string;
+  occurred_at: string | null;
+  /** Fused rank score in hybrid mode; absent in keyword (timestamp) mode. */
+  score?: number;
+  /** For Slack messages, `conversation_id` and `channel_name` among others. */
+  metadata: Record<string, unknown>;
+  [field: string]: unknown;
+}
+
+/** Native Slack search results. */
+export interface SlackSearchResult {
+  backend: "slack";
+  total: number;
+  matches: SearchMatch[];
+  paging?: { count: number; total: number; page: number; pages: number };
+}
+
+/** Company context v2 search results; follow `next_cursor` as `cursor` in timestamp mode. */
+export interface IndexedSearchResult {
+  backend: "company_context";
+  results: IndexedDocument[];
+  next_cursor?: string | null;
+}
+
 /** One `search.messages` match. */
 export interface SearchMatch {
   ts: string;
@@ -112,6 +153,16 @@ type Body = Record<string, any>;
 function access(ctx: Ctx): Access {
   const credentials = ctx.context?.sandbox?.oauth_credentials ?? [];
   return credentials.some((c) => c.provider === "slack" && c.status === "live") ? "direct" : "centaur";
+}
+
+// Principals that act for one person: a Slack DM's user and a Console (MCP) user.
+const PERSONAL_PRINCIPAL_KINDS = ["slack_dm", "console_user"];
+
+// Routing only: the company-context service scopes results to the principal either way.
+function searchBackend(ctx: Ctx): SearchBackend | null {
+  const kind = ctx.context?.sandbox?.principal?.kind;
+  if (kind && !PERSONAL_PRINCIPAL_KINDS.includes(kind) && companyContextUrl(ctx)) return "company_context";
+  return access(ctx) === "direct" ? "slack" : null;
 }
 
 function token(ctx: Ctx): string {
@@ -207,24 +258,64 @@ function slackTs(value: string | undefined): string | undefined {
 }
 
 /** Which path Slack calls take for this caller (see `Access`). */
-export async function get_access(args: {}, ctx: Ctx): Promise<{ access: Access; thread_key: string | null }> {
-  return { access: access(ctx), thread_key: ctx.context?.thread_key ?? null };
+export async function get_access(
+  args: {},
+  ctx: Ctx,
+): Promise<{ access: Access; search: SearchBackend | null; thread_key: string | null }> {
+  return { access: access(ctx), search: searchBackend(ctx), thread_key: ctx.context?.thread_key ?? null };
 }
 
 /**
- * Slack's native search across the workspace. `query` takes Slack search syntax (`in:#channel`,
- * `from:@user`, `before:`, `after:`, `has:link`). `sort` is score or timestamp; `count` at most
- * 100. Needs direct access (a linked Slack user token); fails through the Centaur API.
+ * Search Slack messages; `backend` says where (see `SearchBackend`).
+ *
+ * `company_context`: indexed channel history visible to the caller, as channel-day transcript
+ * chunks. Ranked by relevance by default; `sort: "timestamp"` returns every chunk containing all
+ * query terms, newest first, paged with `cursor`. Slack modifiers are not parsed: filter with
+ * `channel_ids` (conversation IDs) and `after`/`before`. `count` at most 50.
+ *
+ * `slack`: Slack's native search, needing direct access. `query` takes Slack search syntax
+ * (`in:#channel`, `from:@user`, `before:`, `after:`, `has:link`); `count` at most 100, paged
+ * with `page`.
  */
 export async function search_messages(
-  args: { query: string; sort?: "score" | "timestamp"; sort_dir?: "asc" | "desc"; count?: number; page?: number },
+  args: {
+    query: string;
+    sort?: "score" | "timestamp";
+    sort_dir?: "asc" | "desc";
+    count?: number;
+    page?: number;
+    /** company_context only: Slack conversation IDs, at most 100. */
+    channel_ids?: string[];
+    /** company_context only: inclusive lower bound, RFC 3339 time or YYYY-MM-DD (UTC). */
+    after?: string;
+    /** company_context only: exclusive upper bound, RFC 3339 time or YYYY-MM-DD (UTC). */
+    before?: string;
+    /** company_context only: `next_cursor` from the previous timestamp-sorted page. */
+    cursor?: string;
+  },
   ctx: Ctx,
-): Promise<{ total: number; matches: SearchMatch[]; paging?: { count: number; total: number; page: number; pages: number } }> {
-  if (access(ctx) !== "direct") {
-    throw new Error("search_messages needs a linked Slack user token (direct access); this caller reaches Slack through the Centaur API");
+): Promise<SlackSearchResult | IndexedSearchResult> {
+  const backend = searchBackend(ctx);
+  if (backend === "company_context") {
+    if (!args.query?.trim()) throw new Error("query cannot be empty");
+    const filters: Record<string, unknown> = { types: ["slack_message"] };
+    if (args.channel_ids?.length) filters.channel_ids = args.channel_ids;
+    if (args.after) filters.occurred_after = rfc3339(args.after);
+    if (args.before) filters.occurred_before = rfc3339(args.before);
+    const body: Record<string, unknown> = { query: args.query.trim(), filters };
+    if (args.sort === "timestamp") body.mode = "keyword";
+    if (args.count !== undefined) body.limit = Math.min(args.count, 50);
+    if (args.cursor) body.cursor = args.cursor;
+    const result = await companyContextRequest(ctx, "POST", "/query", body);
+    return { backend, results: result?.results ?? [], next_cursor: result?.next_cursor ?? null };
   }
-  const { messages } = await slackGet(ctx, "search.messages", args);
-  return { total: messages?.total ?? 0, matches: messages?.matches ?? [], paging: messages?.paging };
+  if (backend !== "slack") {
+    throw new Error("search_messages needs company context v2 or a linked Slack user token (direct access); neither is available to this caller");
+  }
+  const { messages } = await slackGet(ctx, "search.messages", {
+    query: args.query, sort: args.sort, sort_dir: args.sort_dir, count: args.count, page: args.page,
+  });
+  return { backend, total: messages?.total ?? 0, matches: messages?.matches ?? [], paging: messages?.paging };
 }
 
 /**

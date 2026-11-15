@@ -84,7 +84,8 @@ export interface OAuthCredential {
 /** Console's `GET /api/v1/sandbox/permissions` data for the calling principal. */
 export interface SandboxPermissions {
   principal_id: string;
-  principal: { id: string; foreign_id: string; name: string };
+  /** `kind` is Console's principal kind, such as `slack_channel`, `slack_dm` or `console_user` (MCP). */
+  principal: { id: string; foreign_id: string; name: string; kind?: string };
   capabilities: Record<string, boolean>;
   oauth_credentials: OAuthCredential[];
   connected_tools?: string[];

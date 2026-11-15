@@ -34,7 +34,8 @@ module Api
           {
             id: principal.oid,
             foreign_id: principal.foreign_id,
-            name: principal.name
+            name: principal.name,
+            kind: principal.kind
           }
         end
 
