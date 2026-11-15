@@ -5,9 +5,8 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, RecvTimeoutError},
+    Arc, Mutex,
+    mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
 };
 use std::time::{Duration, Instant};
 
@@ -71,7 +70,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
     let mut state = initial_blocks_thread_state(harness)?;
     let (command_tx, command_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
-    let turn_active = Arc::new(AtomicBool::new(false));
+    let turn_active = Arc::new(Mutex::new(false));
 
     {
         let turn_active = Arc::clone(&turn_active);
@@ -87,8 +86,12 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     continue;
                 }
 
+                // Route under the same lock the runner uses to end a turn, so
+                // a steer is either delivered to that turn or becomes the next
+                // turn's command, never stranded between them.
+                let mut active = turn_active.lock().unwrap();
                 match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
-                    Ok(BlocksCommand::Interrupt) if turn_active.load(Ordering::SeqCst) => {
+                    Ok(BlocksCommand::Interrupt) if *active => {
                         if request_tx.send(ActiveTurnRequest::BlocksInterrupt).is_err() {
                             break;
                         }
@@ -97,9 +100,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     // belongs to the active turn, not a turn of its own: a
                     // separate turn would run after the execution completed,
                     // where api-rs attributes its output to no execution.
-                    Ok(command @ BlocksCommand::User { .. })
-                        if turn_active.load(Ordering::SeqCst) && command.is_steer() =>
-                    {
+                    Ok(command @ BlocksCommand::User { .. }) if *active && command.is_steer() => {
                         if request_tx
                             .send(ActiveTurnRequest::BlocksSteer(command))
                             .is_err()
@@ -108,7 +109,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                         }
                     }
                     Ok(command @ BlocksCommand::User { .. }) => {
-                        turn_active.store(true, Ordering::SeqCst);
+                        *active = true;
                         if command_tx
                             .send(BlocksReaderInput::Command(command))
                             .is_err()
@@ -167,7 +168,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 state.reasoning_effort = reasoning
                     .as_deref()
                     .and_then(|reasoning| harness.reasoning_effort(reasoning));
-                let result = run_blocks_turn(
+                let (result, unhandled_steers) = run_blocks_turn(
                     harness,
                     &mut state,
                     input,
@@ -177,7 +178,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     &request_rx,
                     &turn_active,
                 );
-                for steer in drain_active_turn_requests(&request_rx) {
+                for steer in unhandled_steers {
                     eprintln!(
                         "blocks steer arrived as the turn ended; running it as the next turn"
                     );
@@ -269,11 +270,11 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
     trace_context: &TraceContext,
     stdout: &mut W,
     request_rx: &Receiver<ActiveTurnRequest>,
-    turn_active: &AtomicBool,
-) -> Result<()> {
+    turn_active: &Mutex<bool>,
+) -> (Result<()>, Vec<BlocksCommand>) {
     let turn_id = format!("turn-{}", Uuid::new_v4().simple());
     let mut normalizer = normalizer_for(harness, state, &turn_id);
-    turn_active.store(true, Ordering::SeqCst);
+    *turn_active.lock().unwrap() = true;
     let result = run_normalized_turn(
         harness,
         state,
@@ -284,8 +285,15 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
         stdout,
         request_rx,
     );
-    turn_active.store(false, Ordering::SeqCst);
-    result
+    // Clear the flag and collect stragglers while holding the lock the reader
+    // routes under, so a steer cannot land after this drain with the turn still
+    // marked active.
+    let unhandled_steers = {
+        let mut active = turn_active.lock().unwrap();
+        *active = false;
+        drain_active_turn_requests(request_rx)
+    };
+    (result, unhandled_steers)
 }
 
 enum BlocksReaderInput {
@@ -1348,122 +1356,148 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     // Steers held for the harness's next native turn, which continues this
     // turn rather than starting another (see `HarnessServer::steers_mid_turn`).
     let mut held_steers: Vec<Vec<UserInput>> = Vec::new();
+    // Set once the native turn's last answer is in: from then on a steer may
+    // reach an idle agent, so it waits to continue the turn instead.
+    let mut native_turn_may_have_ended = false;
     loop {
-        while let Ok(request) = request_rx.try_recv() {
-            let process = state
+        let mut terminal = false;
+        // Apply buffered harness output before pending steers: writing a steer
+        // after the native turn ended reaches an idle agent that never answers.
+        loop {
+            let line = state
                 .process
                 .as_mut()
-                .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            match handle_active_turn_request(process, normalizer, request, stdout)? {
-                ActiveTurnAction::Continue => continue,
-                ActiveTurnAction::Interrupted => {
-                    state.process = None;
-                    return Err(HarnessServerError::TurnInterrupted {
-                        kind: harness.kind(),
-                    });
-                }
-                ActiveTurnAction::Steer {
-                    input,
-                    client_user_message_id,
-                } => {
-                    accept_steer(normalizer, stdout, client_user_message_id, &input)?;
-                    if harness.steers_mid_turn() {
-                        process
-                            .stdin
-                            .write_all(&harness.stdin_for_steer(&mut event_normalizer, &input)?)?;
-                        process.stdin.flush()?;
-                    } else {
-                        held_steers.push(input);
+                .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+                .stdout
+                .try_recv();
+            match line {
+                Ok(line) => {
+                    let line = line?;
+                    if let Some(progress) = handle_stdout_line(
+                        harness,
+                        state,
+                        normalizer,
+                        &mut event_normalizer,
+                        stdout,
+                        telemetry,
+                        &mut last_session_id,
+                        line,
+                    )? {
+                        apply_stdout_progress(
+                            progress,
+                            settle_window,
+                            &mut terminal,
+                            &mut settle_deadline,
+                            &mut hold_deadline,
+                            &mut native_turn_may_have_ended,
+                        );
+                    }
+                    if terminal {
+                        break;
                     }
                 }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
-            // A steer re-opens the turn: the harness now owes a response whose
-            // first token can take longer than the settle window, so the
-            // pending fallback completion no longer applies. The response's
-            // own terminal stop re-arms it.
-            settle_deadline = None;
         }
 
-        let mut terminal = false;
-        match state
-            .process
-            .as_mut()
-            .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
-            .stdout
-            .recv_timeout(Duration::from_millis(50))
-        {
-            Ok(line) => {
-                let line = line?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let event = harness.parse_stdout_line(trimmed)?;
-                let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
-                // A held turn still owes output after a terminal stop (for
-                // example the answer to a steer), so the stop must not arm the
-                // fallback completion.
-                let held = harness.turn_hold(&event_normalizer) != TurnHold::Released;
-                let mut terminal_stop = false;
-                for normalized in normalized_events {
-                    telemetry.observe_normalized(&normalized);
-                    if let Some(session_id) = normalized.session_id() {
-                        last_session_id = Some(session_id.to_string());
-                        state.harness_session_id = Some(session_id.to_string());
-                    }
-                    for notification in normalizer.process_event(&normalized)? {
-                        let value = notification_to_wire_value(&notification)?;
-                        telemetry.observe_tool_notification(&value);
-                        write_value(stdout, &value)?;
-                    }
-                    terminal |= normalized.is_terminal();
-                    terminal_stop |=
-                        settle_window.is_some() && !held && normalized.is_terminal_assistant_stop();
-                }
-                if !terminal {
-                    match settle_window {
-                        Some(window) if terminal_stop && window.is_zero() => terminal = true,
-                        Some(window) if terminal_stop || settle_deadline.is_some() => {
-                            settle_deadline = Some(Instant::now() + window);
-                        }
-                        _ => {}
-                    }
-                }
-                hold_deadline = match harness.turn_hold(&event_normalizer) {
-                    TurnHold::Idle(window) => Some(Instant::now() + window),
-                    TurnHold::Released | TurnHold::Waiting => None,
-                };
-            }
-            Err(RecvTimeoutError::Timeout)
-                if hold_deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
-            {
-                return Err(HarnessServerError::BackgroundFollowUpStalled {
-                    kind: harness.kind(),
-                });
-            }
-            Err(RecvTimeoutError::Timeout) => match settle_deadline {
-                Some(deadline) if Instant::now() >= deadline => terminal = true,
-                _ => continue,
-            },
-            Err(RecvTimeoutError::Disconnected) => {
-                let status = state
+        if !terminal {
+            while let Ok(request) = request_rx.try_recv() {
+                let process = state
                     .process
                     .as_mut()
-                    .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
-                    .child
-                    .wait()?;
-                // A clean exit while waiting out the settle window means the
-                // native result is never coming: the terminal stop already
-                // seen ends the turn.
-                if settle_deadline.is_some() && status.success() {
-                    state.process = None;
-                    terminal = true;
-                } else {
-                    return Err(HarnessServerError::HarnessExited {
+                    .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+                match handle_active_turn_request(process, normalizer, request, stdout)? {
+                    ActiveTurnAction::Continue => continue,
+                    ActiveTurnAction::Interrupted => {
+                        state.process = None;
+                        return Err(HarnessServerError::TurnInterrupted {
+                            kind: harness.kind(),
+                        });
+                    }
+                    ActiveTurnAction::Steer {
+                        input,
+                        client_user_message_id,
+                    } => {
+                        accept_steer(normalizer, stdout, client_user_message_id, &input)?;
+                        if harness.steers_mid_turn() && !native_turn_may_have_ended {
+                            process.stdin.write_all(
+                                &harness.stdin_for_steer(&mut event_normalizer, &input)?,
+                            )?;
+                            process.stdin.flush()?;
+                        } else {
+                            held_steers.push(input);
+                        }
+                    }
+                }
+                // A steer re-opens the turn: the harness now owes a response whose
+                // first token can take longer than the settle window, so the
+                // pending fallback completion no longer applies. The response's
+                // own terminal stop re-arms it.
+                settle_deadline = None;
+            }
+        }
+
+        if !terminal {
+            match state
+                .process
+                .as_mut()
+                .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+                .stdout
+                .recv_timeout(Duration::from_millis(50))
+            {
+                Ok(line) => {
+                    let line = line?;
+                    if let Some(progress) = handle_stdout_line(
+                        harness,
+                        state,
+                        normalizer,
+                        &mut event_normalizer,
+                        stdout,
+                        telemetry,
+                        &mut last_session_id,
+                        line,
+                    )? {
+                        apply_stdout_progress(
+                            progress,
+                            settle_window,
+                            &mut terminal,
+                            &mut settle_deadline,
+                            &mut hold_deadline,
+                            &mut native_turn_may_have_ended,
+                        );
+                    }
+                }
+                Err(RecvTimeoutError::Timeout)
+                    if hold_deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
+                {
+                    return Err(HarnessServerError::BackgroundFollowUpStalled {
                         kind: harness.kind(),
-                        status,
-                        stderr: String::new(),
                     });
+                }
+                Err(RecvTimeoutError::Timeout) => match settle_deadline {
+                    Some(deadline) if Instant::now() >= deadline => terminal = true,
+                    _ => {}
+                },
+                Err(RecvTimeoutError::Disconnected) => {
+                    let status = state
+                        .process
+                        .as_mut()
+                        .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
+                        .child
+                        .wait()?;
+                    // A clean exit while waiting out the settle window means the
+                    // native result is never coming: the terminal stop already
+                    // seen ends the turn.
+                    if settle_deadline.is_some() && status.success() {
+                        state.process = None;
+                        terminal = true;
+                    } else {
+                        return Err(HarnessServerError::HarnessExited {
+                            kind: harness.kind(),
+                            status,
+                            stderr: String::new(),
+                        });
+                    }
                 }
             }
         }
@@ -1497,17 +1531,23 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
                 if harness.turn_hold(&event_normalizer) != TurnHold::Released {
                     state.process = None;
                 }
-                ensure_harness_process(harness, state)?;
+                if ensure_harness_process(harness, state)? {
+                    event_normalizer = H::EventNormalizer::default();
+                }
                 let process = state
                     .process
                     .as_mut()
                     .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-                for input in held_steers.drain(..) {
-                    process.stdin.write_all(&harness.stdin_for_turn(&input)?)?;
-                }
+                // Drop the finished turn's trailing output before continuing.
+                while process.stdout.try_recv().is_ok() {}
+                // One native turn at a time, so every held steer's answer lands
+                // before the turn's final terminal.
+                let input = held_steers.remove(0);
+                process.stdin.write_all(&harness.stdin_for_turn(&input)?)?;
                 process.stdin.flush()?;
                 settle_deadline = None;
                 hold_deadline = None;
+                native_turn_may_have_ended = false;
                 continue;
             }
             // Background work outliving the turn (e.g. an error result while
@@ -1536,6 +1576,85 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
     Ok(completed_turn)
+}
+
+struct StdoutProgress {
+    terminal: bool,
+    assistant_stop: bool,
+    held: bool,
+    hold: TurnHold,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_stdout_line<H: HarnessServer, W: Write>(
+    harness: &H,
+    state: &mut ThreadState,
+    normalizer: &mut CodexTurnNormalizer,
+    event_normalizer: &mut H::EventNormalizer,
+    stdout: &mut W,
+    telemetry: &mut TurnTelemetry,
+    last_session_id: &mut Option<String>,
+    line: String,
+) -> Result<Option<StdoutProgress>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let event = harness.parse_stdout_line(trimmed)?;
+    let normalized_events = harness.normalize_events(event_normalizer, event)?;
+    // A held turn still owes output after a terminal stop (for example the
+    // answer to a steer), so the stop must not arm the fallback completion.
+    let held = harness.turn_hold(event_normalizer) != TurnHold::Released;
+    let mut terminal = false;
+    let mut assistant_stop = false;
+    for normalized in normalized_events {
+        telemetry.observe_normalized(&normalized);
+        if let Some(session_id) = normalized.session_id() {
+            *last_session_id = Some(session_id.to_string());
+            state.harness_session_id = Some(session_id.to_string());
+        }
+        for notification in normalizer.process_event(&normalized)? {
+            let value = notification_to_wire_value(&notification)?;
+            telemetry.observe_tool_notification(&value);
+            write_value(stdout, &value)?;
+        }
+        terminal |= normalized.is_terminal();
+        assistant_stop |= normalized.is_terminal_assistant_stop();
+    }
+    Ok(Some(StdoutProgress {
+        terminal,
+        assistant_stop,
+        held,
+        hold: harness.turn_hold(event_normalizer),
+    }))
+}
+
+fn apply_stdout_progress(
+    progress: StdoutProgress,
+    settle_window: Option<Duration>,
+    terminal: &mut bool,
+    settle_deadline: &mut Option<Instant>,
+    hold_deadline: &mut Option<Instant>,
+    native_turn_may_have_ended: &mut bool,
+) {
+    if progress.assistant_stop {
+        *native_turn_may_have_ended = true;
+    }
+    *terminal |= progress.terminal;
+    if !*terminal {
+        let terminal_stop = progress.assistant_stop && !progress.held;
+        match settle_window {
+            Some(window) if terminal_stop && window.is_zero() => *terminal = true,
+            Some(window) if terminal_stop || settle_deadline.is_some() => {
+                *settle_deadline = Some(Instant::now() + window);
+            }
+            _ => {}
+        }
+    }
+    *hold_deadline = match progress.hold {
+        TurnHold::Idle(window) => Some(Instant::now() + window),
+        TurnHold::Released | TurnHold::Waiting => None,
+    };
 }
 
 /// Records a steer in the active turn as its own user message item.
@@ -1572,12 +1691,12 @@ pub(crate) fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
     non_empty(Some(&joined)).map(str::to_owned)
 }
 
-fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
+fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<bool> {
     if let Some(process) = state.process.as_mut()
         && (process.model == state.model || !harness.restart_on_model_change())
         && process.child.try_wait()?.is_none()
     {
-        return Ok(());
+        return Ok(false);
     }
     let previous_model = state.process.as_ref().map(|process| process.model.clone());
     if !state.model.is_empty()
@@ -1647,7 +1766,7 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         return Err(error);
     }
     state.process = Some(process);
-    Ok(())
+    Ok(true)
 }
 
 fn request_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T> {

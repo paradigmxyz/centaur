@@ -329,3 +329,112 @@ fn pi_blocks_steer_reaches_the_running_prompt_as_a_native_steer() {
     assert_eq!(commands[1]["message"], "also this");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn pi_blocks_steer_after_the_final_assistant_message_continues_the_turn() {
+    // Pi already emitted its final answer, so a native steer would reach an
+    // idle agent; the steer must be held and sent as the next prompt instead.
+    let dir: PathBuf = std::env::temp_dir().join(format!("pi-stdio-settled-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"message_start","message":{"role":"assistant","content":[]}}'
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first part"}],"stopReason":"stop"}}'
+IFS= read -r prompt; printf '%s\n' "$prompt" >> 'DIR/stdin'
+sleep 0.3
+printf '%s\n' '{"type":"agent_settled"}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> 'DIR/stdin'
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}'
+      printf '%s\n' '{"type":"message_start","message":{"role":"assistant","content":[]}}'
+      printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"steered"}],"stopReason":"stop"}}'
+      printf '%s\n' '{"type":"agent_settled"}'
+      ;;
+    *'"type":"steer"'*)
+      printf '%s\n' '{"type":"response","command":"steer","success":true}'
+      printf '%s\n' '{"type":"message_start","message":{"role":"assistant","content":[]}}'
+      printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"wrong"}],"stopReason":"stop"}}'
+      printf '%s\n' '{"type":"agent_settled"}'
+      ;;
+  esac
+done
+"#
+        .replace("DIR", &dir.display().to_string());
+    let pi = dir.join("pi");
+    std::fs::write(&pi, script).unwrap();
+    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_harness-server"))
+        .arg("pi")
+        .env("CENTAUR_PI_BIN", pi)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("CENTAUR_PI_MODEL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx
+                .send(serde_json::from_str::<Value>(&line).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut server = Server {
+        stdin: child.stdin.take().unwrap(),
+        stdout: rx,
+    };
+
+    server.user("start", json!({}));
+    let mut turn = Vec::new();
+    loop {
+        let value = server.stdout.recv_timeout(Duration::from_secs(10)).unwrap();
+        let done = value["method"] == "item/completed"
+            && value["params"]["item"]["type"] == "agentMessage";
+        turn.push(value);
+        if done {
+            break;
+        }
+    }
+    server.user(
+        "also this",
+        json!({
+            "client_user_message_id": "steer-message-1",
+            "trace_metadata": {"action": "steer_active_execution"},
+        }),
+    );
+    turn.extend(server.read_until("turn/completed"));
+    drop(server);
+    child.wait().unwrap();
+
+    assert_eq!(status(&turn), "completed", "{turn:#?}");
+    let users = items(&turn, "item/completed")
+        .into_iter()
+        .filter(|item| item["type"] == "userMessage")
+        .map(|item| item["clientId"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(users, vec![Value::Null, json!("steer-message-1")]);
+    let messages = items(&turn, "item/completed")
+        .into_iter()
+        .filter(|item| item["type"] == "agentMessage")
+        .map(|item| item["text"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(messages, vec![json!("first part"), json!("steered")]);
+    let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
+    let commands: Vec<Value> = stdin
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|line: &Value| line["type"] == "prompt" || line["type"] == "steer")
+        .collect();
+    assert_eq!(commands.len(), 2, "{stdin}");
+    assert_eq!(commands[1]["type"], "prompt");
+    assert_eq!(commands[1]["message"], "also this");
+    let _ = std::fs::remove_dir_all(dir);
+}

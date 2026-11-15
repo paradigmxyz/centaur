@@ -1252,6 +1252,75 @@ fn fake_claude_blocks_mode_keeps_a_follow_up_steer_answer_in_the_turn() {
 }
 
 #[test]
+fn fake_claude_blocks_mode_resets_turn_state_when_a_held_steer_respawns_the_process() {
+    // The errored turn leaves a native steer unanswered, so the process is
+    // replaced. The held steer's answer must not be swallowed by that dead
+    // process's outstanding-steer state.
+    let log = temp_path("fake-claude-held-steer-respawn-stdin.jsonl");
+    let fake_claude = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}'; ",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{log}'; ",
+            "case \"$line\" in ",
+            "*'\"text\":\"steer one\"'*) ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"first part\"}}]}}}}'; ",
+            "sleep 0.5; ",
+            "printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"boom\"}}';; ",
+            "*'\"text\":\"steer two\"'*) ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_2\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"steered\"}}]}}}}'; ",
+            "printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"steered\"}}';; ",
+            "esac; done"
+        ),
+        log = log.display(),
+    );
+    let mut bridge =
+        BridgeProcess::spawn_harness_blocks(Harness::ClaudeCode, Some(fake_claude), None);
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "trace_metadata": {"source": "slackbotv2", "action": "execute"},
+        "message": {"role": "user", "content": [{"type": "text", "text": "start"}]},
+    }));
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "trace_metadata": {"source": "session.append_messages", "action": "steer_active_execution"},
+        "client_user_message_id": "steer-message-1",
+        "message": {"role": "user", "content": [{"type": "text", "text": "steer one"}]},
+    }));
+    // The first steer is native; this one arrives after Claude Code's final
+    // assistant message and is held for the next native turn.
+    std::thread::sleep(Duration::from_millis(250));
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "trace_metadata": {"source": "session.append_messages", "action": "steer_active_execution"},
+        "client_user_message_id": "steer-message-2",
+        "message": {"role": "user", "content": [{"type": "text", "text": "steer two"}]},
+    }));
+    let turn = bridge.read_blocks_turn(Instant::now() + Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_eq!(turn.terminal_status.as_deref(), Some("failed"));
+    assert_eq!(turn.terminal_error.as_deref(), Some("boom"), "{turn:?}");
+    assert_eq!(turn.turn_completed_count, 1);
+    assert_eq!(turn.text_from_deltas, "first partsteered");
+    assert_eq!(
+        turn.user_message_client_ids,
+        vec![
+            None,
+            Some("steer-message-1".to_string()),
+            Some("steer-message-2".to_string())
+        ]
+    );
+    let lines = logged_lines(&log);
+    assert_eq!(lines.len(), 3, "stdin={lines:?}");
+    assert_eq!(lines[1]["message"]["content"][0]["text"], "steer one");
+    assert_eq!(lines[2]["message"]["content"][0]["text"], "steer two");
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
 fn fake_amp_blocks_mode_continues_the_turn_with_a_held_steer() {
     // Amp's turn ends at its terminal stop, so a steer waits for it and is
     // sent as Amp's next native turn, which this turn continues into.
@@ -1286,6 +1355,64 @@ fn fake_amp_blocks_mode_continues_the_turn_with_a_held_steer() {
         "held steer is a plain turn"
     );
     assert_eq!(lines[1]["message"]["content"][0]["text"], "also this");
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn fake_amp_blocks_mode_runs_multiple_held_steers_one_native_turn_at_a_time() {
+    // A second held steer must wait for the first one's native turn instead of
+    // being written to an Amp process that already answered the first.
+    let log = temp_path("fake-amp-held-steers-stdin.jsonl");
+    let fake_amp = format!(
+        concat!(
+            "printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"T-amp-session\"}}'; ",
+            "IFS= read -r prompt; printf '%s\\n' \"$prompt\" >> '{log}'; ",
+            "sleep 1; ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_1\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"first part\"}}]}}}}'; ",
+            "IFS= read -r steer; printf '%s\\n' \"$steer\" >> '{log}'; ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_2\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"steered one\"}}]}}}}'; ",
+            "IFS= read -r steer; printf '%s\\n' \"$steer\" >> '{log}'; ",
+            "printf '%s\\n' '{{\"type\":\"assistant\",\"is_partial\":false,\"message\":{{\"id\":\"msg_3\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"steered two\"}}]}}}}'; ",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{log}'; done"
+        ),
+        log = log.display(),
+    );
+    let mut bridge = BridgeProcess::spawn_harness_blocks(Harness::Amp, Some(fake_amp), None);
+    bridge.send(json!({
+        "type": "user",
+        "thread_key": "slack:C123:123.456",
+        "trace_metadata": {"source": "slackbotv2", "action": "execute"},
+        "message": {"role": "user", "content": [{"type": "text", "text": "start"}]},
+    }));
+    for (index, steer) in ["also this", "and this"].into_iter().enumerate() {
+        bridge.send(json!({
+            "type": "user",
+            "thread_key": "slack:C123:123.456",
+            "trace_metadata": {"source": "session.append_messages", "action": "steer_active_execution"},
+            "client_user_message_id": format!("steer-message-{}", index + 1),
+            "message": {"role": "user", "content": [{"type": "text", "text": steer}]},
+        }));
+    }
+    let turn = bridge.read_blocks_turn(Instant::now() + Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&turn);
+    assert_eq!(turn.turn_completed_count, 1);
+    assert_eq!(turn.text_from_deltas, "first partsteered onesteered two");
+    assert_eq!(
+        turn.user_message_client_ids,
+        vec![
+            None,
+            Some("steer-message-1".to_string()),
+            Some("steer-message-2".to_string())
+        ]
+    );
+    let lines = logged_lines(&log);
+    assert_eq!(lines.len(), 3, "stdin={lines:?}");
+    for (line, steer) in lines[1..].iter().zip(["also this", "and this"]) {
+        assert!(line.get("steer").is_none(), "held steer is a plain turn");
+        assert_eq!(line["message"]["content"][0]["text"], steer);
+    }
     let _ = std::fs::remove_file(log);
 }
 
