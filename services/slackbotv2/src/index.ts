@@ -2788,6 +2788,15 @@ async function renderFallbackFinalAnswer(
       return null
     }
     const text = fallback.textOrDefault()
+    if (!text) {
+      // A stop ended the turn before any answer: there is nothing to post.
+      outcome = 'interrupted'
+      traceLog(options, 'slackbotv2_render_fallback_interrupted', trace, {
+        last_event_id: lastEventId,
+        phase_ms: elapsedMs(startedAtMs)
+      })
+      return { lastEventId }
+    }
     // With generative UI on, a valid json-render block leaves the markdown and
     // becomes a card posted after it; a rejected block stays in the markdown
     // as code so nothing is lost.
@@ -3828,7 +3837,8 @@ async function renderPlainTextExecutionStream(
     traceLog(options, 'slackbotv2_render_plain_text_final', trace, {
       chars: text.length
     })
-    await thread.post(text)
+    // A stop that ended the turn before any answer posts nothing.
+    if (text) await thread.post(text)
   } finally {
     await closeAssistantStatus(thread, statusTracker, options, trace)
   }
@@ -3864,13 +3874,9 @@ class SlackRenderFallback {
     return terminalText || markdownText
   }
 
+  /** The text to post; empty when a stop ended the turn before any answer. */
   textOrDefault(): string {
-    return (
-      this.text() ||
-      (this.interrupted
-        ? 'Execution interrupted.'
-        : EMPTY_FINAL_ANSWER_TEXT)
-    )
+    return this.text() || (this.interrupted ? '' : EMPTY_FINAL_ANSWER_TEXT)
   }
 
   isInterrupted(): boolean {

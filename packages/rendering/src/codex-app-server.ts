@@ -65,6 +65,8 @@ type CodexMapperState = {
   emittedActivityRunByTaskId: Map<string, string>
   emittedActivityOutputByTaskId: Map<string, string>
   emittedActivitySignatureByTaskId: Map<string, string>
+  // A stopped turn ends silently: no placeholder answer text is added.
+  interrupted: boolean
   done: boolean
 }
 
@@ -112,6 +114,10 @@ export class CodexAppServerRendererEventMapper
     const rustMapped = rustSessionEventToServerNotification(source)
     if (rustMapped?.kind === 'failed') return this.fail(rustMapped.error)
     if (rustMapped?.kind === 'completed') return this.complete(rustMapped.resultText)
+    if (rustMapped?.kind === 'cancelled') {
+      this.state.interrupted = true
+      return this.complete(rustMapped.resultText)
+    }
     if (rustMapped?.kind === 'status')
       return [{ type: 'renderer.status', status: rustMapped.status }]
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
@@ -327,9 +333,9 @@ export class CodexAppServerRendererEventMapper
         resultText,
         willClose
       })
-      const finalText = resultText || (isInterruptedTurn(event) ? INTERRUPTED_TEXT : '')
-      if (finalText && !this.state.answerText.trim()) {
-        this.state.harnessAnswerText += finalText
+      if (isInterruptedTurn(event)) this.state.interrupted = true
+      if (resultText && !this.state.answerText.trim()) {
+        this.state.harnessAnswerText += resultText
         recomposeBuffers(this.state)
         this.emitPendingAssistantText(out, { force: true })
       }
@@ -377,7 +383,7 @@ export class CodexAppServerRendererEventMapper
   }
 
   private ensureFinalAnswerText(): void {
-    if (this.state.answerText.trim()) return
+    if (this.state.answerText.trim() || this.state.interrupted) return
     this.state.harnessAnswerText += EMPTY_FINAL_ANSWER_TEXT
     recomposeBuffers(this.state)
   }
@@ -631,12 +637,11 @@ async function* renderChatSdkChunks(
   }
 }
 
-const INTERRUPTED_TEXT = 'Execution interrupted.'
-
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
   | { kind: 'completed'; resultText?: string }
+  | { kind: 'cancelled'; resultText?: string }
   | { kind: 'status'; status: string }
   | null
 
@@ -682,10 +687,10 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
 
   if (eventKind === 'session.execution_cancelled') {
     const data = isRecord(source.data) ? source.data : source
-    const resultText =
-      terminalResultText(data).trim() || String(data.error ?? INTERRUPTED_TEXT).trim()
+    // A stop keeps any answer text but adds no interruption notice.
+    const resultText = terminalResultText(data).trim()
     return {
-      kind: 'completed',
+      kind: 'cancelled',
       ...(resultText ? { resultText } : {})
     }
   }
@@ -735,6 +740,7 @@ function newState(): CodexMapperState {
     emittedActivityRunByTaskId: new Map(),
     emittedActivityOutputByTaskId: new Map(),
     emittedActivitySignatureByTaskId: new Map(),
+    interrupted: false,
     done: false
   }
 }

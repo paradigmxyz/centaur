@@ -890,7 +890,7 @@ describe('CodexAppServerRendererEventMapper', () => {
     })
   })
 
-  it('emits interrupted final text for cancelled Rust sessions', async () => {
+  it('ends cancelled Rust sessions without interruption text', async () => {
     const chunks = await collect(
       codexAppServerToChatSdkStream(
         toAsyncIterable([
@@ -900,21 +900,16 @@ describe('CodexAppServerRendererEventMapper', () => {
           },
           {
             eventKind: 'session.execution_cancelled',
-            data: { error: 'Execution interrupted.' }
+            data: { reason: 'turn_interrupted' }
           }
         ])
       )
     )
 
-    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
-      {
-        type: 'markdown_text',
-        text: 'Execution interrupted.'
-      }
-    ])
+    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([])
   })
 
-  it('emits interrupted final text when the interrupted turn precedes cancellation', async () => {
+  it('ends silently when the interrupted turn precedes cancellation', async () => {
     const chunks = await collect(
       codexAppServerToChatSdkStream(
         toAsyncIterable([
@@ -925,18 +920,13 @@ describe('CodexAppServerRendererEventMapper', () => {
           { type: 'turn.completed', turn: { id: 'turn-1', status: 'interrupted' } },
           {
             eventKind: 'session.execution_cancelled',
-            data: { error: 'Execution interrupted.' }
+            data: { reason: 'turn_interrupted' }
           }
         ])
       )
     )
 
-    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([
-      {
-        type: 'markdown_text',
-        text: 'Execution interrupted.'
-      }
-    ])
+    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([])
   })
 })
 
