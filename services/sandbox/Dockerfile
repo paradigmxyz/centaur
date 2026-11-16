@@ -94,11 +94,11 @@ RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.318
+ARG CLAUDE_CODE_VERSION=2.1.325
 # Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
 # from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
 ARG CODEX_VERSION=0.166.0
-ARG PI_CODING_AGENT_VERSION=1.5.0
+ARG PI_CODING_AGENT_VERSION=1.5.2
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG NUSHELL_VERSION=0.116.1
@@ -214,7 +214,7 @@ ARG FOUNDRY_VERSION=v1.9.0
 ARG AMP_CLI_VERSION=0.0.1793829508-g91ac5b
 ARG MANIM_VERSION=0.22.1
 ARG BUN_VERSION=bun-v1.4.4
-ARG OMP_VERSION=18.16.0
+ARG OMP_VERSION=18.21.0
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
