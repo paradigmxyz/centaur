@@ -14,9 +14,9 @@
     "@centaur/rendering": "workspace:*",
     "@chat-adapter/linear": "4.31.0",
     "@chat-adapter/state-pg": "4.31.0",
-    "@linear/sdk": "^101.0.0",
+    "@linear/sdk": "^101.1.0",
     "chat": "4.31.0",
-    "hono": "^4.13.16",
+    "hono": "^4.13.17",
     "pg": "^8.23.1"
   },
   "devDependencies": {
