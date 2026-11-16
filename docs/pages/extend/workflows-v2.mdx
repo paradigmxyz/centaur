@@ -145,6 +145,11 @@ session runtime.
 }
 ```
 
+If the workflow only needs `result_text`, pass `include_output_lines=False` to
+`ctx.agent_turn(...)`. This returns an empty `output_lines` array and avoids
+copying the transcript into the workflow host. The full execution stream remains
+in session storage. Omitting the option preserves the existing transcript return.
+
 Use `ctx.run_agents(...)` for independent work that should run concurrently:
 
 ```python

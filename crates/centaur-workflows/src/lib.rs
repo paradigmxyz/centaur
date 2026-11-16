@@ -3705,6 +3705,7 @@ async fn run_python_agent_turn(
     request_id: &str,
     default_thread_key: Option<String>,
 ) -> Result<Value, WorkflowRuntimeError> {
+    let include_output_lines = parse_include_output_lines(&args)?;
     let text = args
         .get("text")
         .or_else(|| args.get("prompt"))
@@ -3823,6 +3824,7 @@ async fn run_python_agent_turn(
             workflow_owned_thread,
             idle_timeout_ms,
             max_duration_ms,
+            include_output_lines,
             model,
             provider,
             reasoning,
@@ -3830,6 +3832,16 @@ async fn run_python_agent_turn(
     )
     .await?;
     serde_json::to_value(result).map_err(WorkflowRuntimeError::from)
+}
+
+fn parse_include_output_lines(args: &Value) -> Result<bool, WorkflowRuntimeError> {
+    match args.get("include_output_lines") {
+        None => Ok(true),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(WorkflowRuntimeError::BadRequest(
+            "ctx.agent_turn include_output_lines must be boolean".to_owned(),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4414,6 +4426,7 @@ struct AgentTurnRequest {
     workflow_owned_thread: bool,
     idle_timeout_ms: u64,
     max_duration_ms: u64,
+    include_output_lines: bool,
     // Optional per-turn model / provider / reasoning-effort overrides. When set
     // they ride the execute input line exactly like the slackbot's per-turn
     // `--model` / `--bedrock` / `-rsn` flags do (see slackbotv2's
@@ -4470,6 +4483,7 @@ async fn run_agent_session_turn(
         workflow_owned_thread,
         idle_timeout_ms,
         max_duration_ms,
+        include_output_lines,
         model,
         provider,
         reasoning,
@@ -4532,16 +4546,21 @@ async fn run_agent_session_turn(
         match event.event_type.as_str() {
             SESSION_OUTPUT_LINE_EVENT => {
                 if let Some(line) = event.payload.as_str() {
-                    output_lines.push(line.to_owned());
+                    record_agent_turn_output(&mut output_lines, line, include_output_lines);
                 }
             }
             "session.execution_completed" => {
+                let result_text = agent_turn_result_text(&event.payload, &output_lines);
                 return Ok(AgentTurnResult {
                     thread_key: thread_key.into_string(),
                     execution_id: execution.execution_id,
                     status: "completed".to_owned(),
-                    result_text: agent_turn_result_text(&event.payload, &output_lines),
-                    output_lines,
+                    result_text,
+                    output_lines: if include_output_lines {
+                        output_lines
+                    } else {
+                        Vec::new()
+                    },
                 });
             }
             "session.execution_failed" | "session.execution_cancelled" => {
@@ -4564,6 +4583,21 @@ async fn run_agent_session_turn(
     Err(WorkflowRuntimeError::Upstream(
         "session event stream ended before terminal execution event".to_owned(),
     ))
+}
+
+fn record_agent_turn_output(
+    output_lines: &mut Vec<String>,
+    line: &str,
+    include_output_lines: bool,
+) {
+    if include_output_lines {
+        output_lines.push(line.to_owned());
+    } else if completed_final_answer_text(line).is_some() {
+        // The canonical answer may be absent from the terminal event. Retain
+        // only its latest completed fallback; the full stream stays in storage.
+        output_lines.clear();
+        output_lines.push(line.to_owned());
+    }
 }
 
 fn agent_turn_result_text(terminal_payload: &Value, output_lines: &[String]) -> String {
@@ -4890,6 +4924,48 @@ mod tests {
         assert_eq!(value.get("provider"), Some(&json!("amazon-bedrock")));
         assert_eq!(value.get("reasoning"), Some(&json!("high")));
         assert_eq!(value.pointer("/message/content"), Some(&json!(parts)));
+    }
+
+    #[test]
+    fn agent_turn_can_omit_transcript_without_losing_the_final_answer() {
+        let mut output_lines = Vec::new();
+        let tool = json!({"method":"item/completed","params":{"item":{
+            "type":"commandExecution","aggregatedOutput":"x".repeat(1024 * 1024)
+        }}})
+        .to_string();
+        for _ in 0..300 {
+            record_agent_turn_output(&mut output_lines, &tool, false);
+        }
+        assert!(output_lines.is_empty());
+        for text in ["Earlier answer", "Final answer"] {
+            let line = json!({"method":"item/completed","params":{"item":{
+                "type":"agentMessage","phase":"final_answer","text":text
+            }}})
+            .to_string();
+            record_agent_turn_output(&mut output_lines, &line, false);
+        }
+        assert_eq!(output_lines.len(), 1);
+        assert_eq!(
+            agent_turn_result_text(&json!({}), &output_lines),
+            "Final answer"
+        );
+        assert_eq!(
+            agent_turn_result_text(&json!({"result_text":"Canonical answer"}), &output_lines),
+            "Canonical answer"
+        );
+    }
+
+    #[test]
+    fn agent_turn_transcript_is_enabled_by_default_and_requires_a_boolean() {
+        assert!(parse_include_output_lines(&json!({})).unwrap());
+        assert!(parse_include_output_lines(&json!({"include_output_lines":true})).unwrap());
+        assert!(!parse_include_output_lines(&json!({"include_output_lines":false})).unwrap());
+        for value in [json!(null), json!("false"), json!(0)] {
+            assert!(parse_include_output_lines(&json!({"include_output_lines":value})).is_err());
+        }
+        let mut output_lines = Vec::new();
+        record_agent_turn_output(&mut output_lines, "original output", true);
+        assert_eq!(output_lines, vec!["original output"]);
     }
 
     #[test]
