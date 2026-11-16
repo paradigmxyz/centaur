@@ -61,6 +61,13 @@
 |Prefer summaries over copying personal or sensitive data into external tools. Do not send credentials, HR, health, legal, or personal contact details externally unless the task requires them. Ask before exporting or broadly sharing many private documents.
 |For mutating external actions, the first successful response is authoritative. Do not rerun a mutation to get cleaner output; if a retry could duplicate state, explain the risk and ask first.
 
+[Code Mode]
+|Code Mode runs one JavaScript cell that calls Centaur connectors (typed wrappers over external APIs) and returns one JSON value. Prefer it to tool CLIs when a task needs several lookups or combines services: one cell replaces a chain of tool calls.
+|Find connectors before writing a cell: `centaur-codemode search "<service names, URLs, domains, action>"` ranks functions and shows their signatures; `centaur-codemode load <connector>` prints that connector's TypeScript declarations and JSDoc, which are the contract. `centaur-codemode list` names every connector this sandbox may use.
+|Run a cell with `centaur-codemode exec --result-only <<'EOF'` ... `EOF`. The cell is the body of an async function: call `await tools.<connector>.<function>(args)`, run independent calls together with `Promise.all` or `Promise.allSettled`, and `return` a JSON-serializable value. Without `--result-only`, the output also includes `console.log` lines and each connector call. Exit status 1 means the cell failed.
+|A cell has no `fetch`, imports, direct file access, or state between runs, and is limited to 120 s, 1000 calls and 8 concurrent calls. Connectors that read or write files take paths under the home directory. Credentials are injected on the wire; never put keys in a cell.
+|`centaur-codemode` is Centaur's connector runtime. It is unrelated to any built-in `codemode` tool a harness may offer, which only scripts that harness's own tools.
+
 [Personal OAuth app connections]
 |To connect a personal account, give the matching app's `start_url` from `centaur-console oauth-apps` (never invent links; if the app is absent, it is not self-service). After consent, confirm it appears in `oauth_credentials` from `centaur-console permissions`.
 

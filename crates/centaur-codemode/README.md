@@ -13,6 +13,9 @@ Status: experimental. `serve` is the HTTP API api-rs talks to when
 cargo build -p centaur-codemode
 B=target/debug/centaur-codemode
 
+$B list                                    # one line per connector
+$B search "slack channel history"          # rank functions, with signatures
+$B load slack                              # one connector's declarations
 $B brief                                   # typed catalog an agent reads
 $B exec <<'EOF'                            # run a cell, print the JSON response
 const [orgs, chans] = await Promise.allSettled([
@@ -27,10 +30,21 @@ curl -s localhost:8790/search -d '{"query": "search organizations"}'
 ```
 
 `--connectors a:b` sets connector roots (later roots shadow earlier ones;
-default `connectors`). A root that is not mounted is skipped with a warning, so
+default `connectors`). A root that is not mounted is skipped (logged at `info`), so
 overlays a principal cannot see do not break startup; loading with no connectors
 at all is an error. `--tools slack,crunchbase` limits what a cell sees; the HTTP
-API sends a per-request policy instead.
+API sends a per-request policy instead. Every CLI command also applies the
+deployment filter a Centaur sandbox sets, `TOOL_ALLOWLIST` and
+`TOOL_BLOCKLIST` (comma-separated connector names, as api-rs sends them to
+`serve`); `--tools` narrows that allowlist and never widens it.
+`list`, `search` and `load` are the CLI forms of the MCP tools
+`centaur_catalog_search` and `centaur_catalog_load`, so a session sandbox finds
+connectors the same way an MCP client does. Session sandboxes ship the binary
+and connectors.
+Commands other than `serve` log only warnings and errors by default, since
+their stderr lands in an agent's context; `RUST_LOG` overrides.
+TLS uses the system trust store and honors `SSL_CERT_FILE`, which a sandbox
+points at the proxy CA; `--ca-file` adds roots on top.
 There is no principal argument: which principal a runner serves, and so which
 credentials iron-proxy injects, is set by where it runs.
 

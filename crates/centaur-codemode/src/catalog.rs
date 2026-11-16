@@ -101,9 +101,10 @@ impl Catalog {
         let mut libs: BTreeMap<String, String> = BTreeMap::new();
         let mut imports: Vec<(String, Vec<Import>)> = Vec::new();
         for root in roots {
-            // Overlay roots a principal cannot see are not mounted.
+            // Overlay roots a principal cannot see are not mounted, and an
+            // overlay without connectors has no root: expected, not a problem.
             if !root.is_dir() {
-                tracing::warn!(root = %root.display(), "connector root is missing; skipping");
+                tracing::info!(root = %root.display(), "connector root is missing; skipping");
                 continue;
             }
             let lib_dir = root.join(LIB_DIR);

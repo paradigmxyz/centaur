@@ -408,6 +408,10 @@ fi
 # ── Ensure uploads directory exists ──────────────────────────────────────────
 mkdir -p "$HOME_DIR/uploads"
 
+# Code Mode connectors that read or write files take paths under the home
+# directory, which holds the workspace, uploads, and branches.
+export CENTAUR_CODEMODE_FILES_DIR="${CENTAUR_CODEMODE_FILES_DIR:-$HOME_DIR}"
+
 # ── Copy project skills into workspace (so `skill` tool discovers them) ──────
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2

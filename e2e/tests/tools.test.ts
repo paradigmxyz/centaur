@@ -7,9 +7,13 @@
 //
 // e2e/infra/values.yaml allowlists `ssh` (remote-ssh) and `demo`; demo needs
 // no credentials, so its output is deterministic.
+//
+// Code Mode connectors run in the sandbox through `centaur-codemode`, under
+// the same tool filter. A cell reaches its upstream through the sandbox's
+// iron-proxy and reads the session's calling context.
 import { expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { api, model, slack, turnTimeoutMs } from '../lib'
+import { api, CHANNEL, model, slack, turnTimeoutMs } from '../lib'
 
 /** `name=value` lines a command printed, keyed by name. */
 function fields(output: string): Record<string, string> {
@@ -69,5 +73,51 @@ test('allowlisted tools mount as CLIs the harness can call, and others do not', 
   expect(output.ssh_shim).toBe('/home/agent/.local/bin/remote-ssh')
 
   // Free the sandbox's pod for the scenarios still running on the node.
+  await api.pause(thread)
+}, 2 * turnTimeoutMs)
+
+test('Code Mode connectors are found and called from the sandbox under the tool filter', async () => {
+  const marker = `e2e-${randomUUID().slice(0, 8)}`
+  const cell = [
+    `const { messages } = await tools.slack.channel_history({ channel: '${CHANNEL.id}', limit: 50 })`,
+    `return { thread: context?.thread_key ?? null, seen: messages.some(m => (m.text ?? '').includes('${marker}')) }`
+  ].join('\n')
+  const script = model.runs(
+    [
+      `echo "bin=$(command -v centaur-codemode)"`,
+      // TOOL_ALLOWLIST (ssh,demo) names no connector, so none are visible.
+      `echo "visible=$(centaur-codemode list | cut -d: -f1 | paste -sd, -)"`,
+      `centaur-codemode load slack > /dev/null 2> /tmp/hidden; echo "hidden_exit=$?"`,
+      `export TOOL_ALLOWLIST=slack`,
+      `echo "listed=$(centaur-codemode list 2> /tmp/list-stderr | cut -d: -f1 | paste -sd, -)"`,
+      `echo "list_stderr_bytes=$(wc -c < /tmp/list-stderr)"`,
+      `echo "top=$(centaur-codemode search 'read slack channel history' --limit 1 | python3 -c 'import json, sys; h = json.load(sys.stdin)[0]; print(h["tool"] + "." + h["function"])')"`,
+      `echo "declares_history=$(centaur-codemode load slack | grep -c 'channel_history(')"`,
+      `centaur-codemode exec --result-only > /tmp/cell <<'CELL'\n${cell}\nCELL`,
+      `echo "exec_exit=$?"`,
+      `echo "cell=$(python3 -c 'import json; print(json.dumps(json.load(open("/tmp/cell")), sort_keys=True))')"`
+    ].join('\n'),
+    'Connectors checked.'
+  )
+  const thread = await slack.mention(`--codex Check the connectors. ${marker}`, script)
+  const turn = await thread.nextTurn()
+  expect(turn.reply).toBe('Connectors checked.')
+  expect(turn.execution.status).toBe('completed')
+
+  const output = fields(await model.commandOutput(script))
+  expect(output).toMatchObject({
+    bin: '/usr/local/bin/centaur-codemode',
+    visible: '',
+    hidden_exit: '1',
+    listed: 'slack',
+    list_stderr_bytes: '0',
+    top: 'slack.channel_history',
+    declares_history: expect.stringMatching(/^[1-9]/),
+    exec_exit: '0'
+  })
+  // The connector read the thread's own message back through Centaur's Slack
+  // API, and saw the session's calling context.
+  expect(JSON.parse(output.cell!)).toEqual({ seen: true, thread: thread.key })
+
   await api.pause(thread)
 }, 2 * turnTimeoutMs)
