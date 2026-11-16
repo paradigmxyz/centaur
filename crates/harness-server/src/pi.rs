@@ -32,6 +32,7 @@ const DEFAULT_THINKING_LEVEL: &str = "medium";
 const MODELS: &[(&str, &str)] = &[
     ("anthropic", "claude-fable-5"),
     ("anthropic", "claude-fable-5-1"),
+    ("anthropic", "claude-fable-5-2"),
     ("anthropic", "claude-haiku-4-5"),
     ("anthropic", "claude-haiku-5-5"),
     ("anthropic", "claude-opus-4-7"),
@@ -376,6 +377,7 @@ mod tests {
         for model in [
             "anthropic/claude-sonnet-5",
             "anthropic/claude-fable-5-1",
+            "anthropic/claude-fable-5-2",
             "anthropic/claude-sonnet-5-5",
             "claude-haiku-5-5",
             "claude-sonnet-5",
