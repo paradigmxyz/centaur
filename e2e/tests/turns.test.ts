@@ -3,7 +3,8 @@
 // with no text. A mention during a turn steers it, carrying its sender's
 // identity, with a reaction on each follow-up until the turn answers, and the
 // turn shows its status again after Slack hides it for the follow-up; replies
-// without a mention neither steer nor stop it.
+// without a mention neither steer nor stop it. A mentioned stop ends the turn
+// silently: it posts no reply, not even an interruption notice.
 import { expect, test } from 'bun:test'
 import { USER_B, eventually, model, slack, turnTimeoutMs, type Channel } from '../lib'
 
@@ -39,6 +40,27 @@ test.concurrent('replies without a mention neither steer nor stop a running turn
     expect(request.prompt).not.toContain('One more constraint, no mention.')
   }
 }, 2 * turnTimeoutMs)
+
+test.concurrent('a mentioned stop ends the turn without posting a reply', async () => {
+  const thread = await slack.mention('--codex Work until stopped.', model.says('Never shown.', { delayMs: 60_000 }))
+  await thread.inFlight()
+  await thread.interject('stop')
+  const cancelled = await thread.nextCancelledExecution()
+  expect(cancelled.status).toBe('cancelled')
+  // The render that owned the turn clears the status once it is done.
+  await eventually('the stopped turn to clear its status', 60_000, async () =>
+    (await thread.status()) === '' ? true : undefined
+  )
+  expect(await thread.botReplies()).toEqual([])
+
+  // The next turn still answers once; a late interruption notice would show
+  // up as a second reply here.
+  const answer = model.says('Back to work.')
+  await thread.mention('Start again.', answer)
+  const turn = await thread.nextTurn()
+  expect(turn.reply).toBe('Back to work.')
+  expect((await thread.botReplies()).map(reply => reply.text)).toEqual(['Back to work.'])
+}, 3 * turnTimeoutMs)
 
 test.concurrent('a mention during a turn steers it as its sender, marked until the answer', async () => {
   const thread = await slack.mention('--codex Start a long task.', model.says('First part.', { delayMs: 5_000 }))

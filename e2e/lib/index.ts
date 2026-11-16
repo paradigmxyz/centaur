@@ -620,6 +620,11 @@ export class Thread {
     })
   }
 
+  /** Every bot message in the conversation so far, oldest first. */
+  async botReplies(): Promise<SlackMessage[]> {
+    return this.repliesTo(0, { untilNextTrigger: false })
+  }
+
   /** Sandboxes that served this thread, in the order they became ready. */
   async sandboxes(): Promise<Array<{ id: string; harness: string }>> {
     return db`
@@ -639,7 +644,7 @@ export class Thread {
   }
 
   /** Bot messages posted after a turn's trigger and before the next turn's trigger. */
-  private async repliesTo(index: number): Promise<SlackMessage[]> {
+  private async repliesTo(index: number, options: { untilNextTrigger?: boolean } = {}): Promise<SlackMessage[]> {
     const { messages } = this.dm
       ? await slackApi<{ messages: SlackMessage[] }>(USER, 'conversations.history', { channel: this.channel.id })
       : await slackApi<{ messages: SlackMessage[] }>(USER, 'conversations.replies', {
@@ -647,7 +652,7 @@ export class Thread {
         ts: this.ts
       })
     messages.sort((a, b) => (a.ts < b.ts ? -1 : 1))
-    const next = this.triggers[index + 1]
+    const next = options.untilNextTrigger === false ? undefined : this.triggers[index + 1]
     return messages.filter(message =>
       message.bot_id === BOT.id && message.ts > this.triggers[index]! && (!next || message.ts < next)
     )

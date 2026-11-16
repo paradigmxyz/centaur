@@ -6,6 +6,7 @@ import {
 } from './chat-sdk'
 import {
   CodexAppServerRendererEventMapper,
+  INTERRUPTED_TEXT,
   type CodexAppServerToChatStreamOptions
 } from './codex-app-server'
 import type {
@@ -29,6 +30,12 @@ export class NanocodexRendererEventMapper
   private error = ''
   private requestId = ''
   private done = false
+  private interrupted = false
+  private readonly silentInterrupt: boolean
+
+  constructor(options: { silentInterrupt?: boolean } = {}) {
+    this.silentInterrupt = options.silentInterrupt === true
+  }
 
   process(source: RustSessionStreamEvent | unknown): RendererEvent[] {
     if (this.done) return []
@@ -144,7 +151,8 @@ export class NanocodexRendererEventMapper
   }
 
   private interrupt(): RendererEvent[] {
-    if (!this.answer) this.answer = 'Execution interrupted.'
+    this.interrupted = true
+    if (!this.answer && !this.silentInterrupt) this.answer = INTERRUPTED_TEXT
     return this.complete()
   }
 
@@ -155,6 +163,7 @@ export class NanocodexRendererEventMapper
       {
         type: 'renderer.done',
         answerMarkdown: this.answer,
+        ...(this.interrupted ? { interrupted: true } : {}),
         streamFinalUpdates: true,
         threadId: this.requestId || undefined
       }
@@ -181,7 +190,7 @@ export async function* harnessToChatSdkStream(
   options: CodexAppServerToChatStreamOptions = {}
 ): AsyncIterable<ChatSDKStreamChunk> {
   const codex = new CodexAppServerRendererEventMapper(options)
-  const nano = new NanocodexRendererEventMapper()
+  const nano = new NanocodexRendererEventMapper({ silentInterrupt: options.silentInterrupt })
   const renderer = new ChatSDKRenderer()
   let selected: 'codex' | 'nanocodex' | null = null
 

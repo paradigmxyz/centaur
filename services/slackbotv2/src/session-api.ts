@@ -2117,7 +2117,7 @@ async function* parseSessionEventStream(
     }
     if (event.event === 'session.execution_cancelled') {
       yield {
-        data: { error: sessionErrorMessage(event, 'Execution interrupted.') },
+        data: sessionEventData(event),
         event: event.event,
         eventId: event.id,
         eventKind: event.event

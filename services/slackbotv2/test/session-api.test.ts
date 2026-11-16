@@ -310,7 +310,7 @@ describe('session event streaming', () => {
     expect(seenEventIds).toEqual([1, 2, 3])
   })
 
-  test('uses interrupted wording for cancelled executions without error text', async () => {
+  test('passes cancelled executions through without interruption wording', async () => {
     const encoded = new TextEncoder().encode(
       [
         'id: 1',
@@ -342,7 +342,7 @@ describe('session event streaming', () => {
 
     expect(events).toEqual([
       {
-        data: { error: 'Execution interrupted.' },
+        data: { status: 'cancelled', reason: 'turn_interrupted' },
         event: 'session.execution_cancelled',
         eventId: 1,
         eventKind: 'session.execution_cancelled'
