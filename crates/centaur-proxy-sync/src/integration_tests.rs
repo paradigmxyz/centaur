@@ -449,16 +449,28 @@ impl Fixture {
     }
 }
 
+/// Returns a suffix unique across tests sharing one database.
+///
+/// Each component owns disjoint bits, so values never collide the way XORing
+/// them would: the counter makes values unique within this process, and the
+/// process id and start time distinguish concurrent and repeated runs.
 fn rand_suffix() -> u128 {
+    use std::sync::{
+        LazyLock,
+        atomic::{AtomicU32, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    nanos
-        ^ (u128::from(std::process::id()) << 64)
-        ^ u128::from(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    static STARTED_NANOS: LazyLock<u64> = LazyLock::new(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        u64::try_from(nanos & u128::from(u64::MAX)).unwrap()
+    });
+    (u128::from(std::process::id()) << 96)
+        | (u128::from(*STARTED_NANOS) << 32)
+        | u128::from(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Hosts of the served static secrets, in served order.
