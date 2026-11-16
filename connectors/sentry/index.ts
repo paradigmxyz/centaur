@@ -93,18 +93,20 @@ function baseUrl(ctx: Ctx): string {
   return `${url}/api/0`;
 }
 
+/** `SENTRY_PROJECT`: the default project's numeric id or slug, or `undefined` when unset. */
+function defaultProject(ctx: Ctx): string | undefined {
+  return ctx.env.SENTRY_PROJECT?.trim() || undefined;
+}
+
 async function sentry(
   ctx: Ctx,
   path: string,
   params: Record<string, string | number | boolean | null | undefined> = {},
 ): Promise<Response> {
-  const token = ctx.env.SENTRY_AUTH_TOKEN;
-  if (!token) {
-    throw new Error("SENTRY_AUTH_TOKEN is not set; iron-proxy injects it for sentry.io hosts");
-  }
-  const res = await ctx.fetch(`${baseUrl(ctx)}${path}${query(params)}`, {
-    headers: { accept: "application/json", authorization: `Bearer ${token}` },
-  });
+  const headers: Record<string, string> = { accept: "application/json" };
+  // Behind iron-proxy the token is injected on the wire; locally it comes from the env.
+  if (ctx.env.SENTRY_AUTH_TOKEN) headers.authorization = `Bearer ${ctx.env.SENTRY_AUTH_TOKEN}`;
+  const res = await ctx.fetch(`${baseUrl(ctx)}${path}${query(params)}`, { headers });
   if (!res.ok) {
     throw new Error(`Sentry API error (${res.status}): ${(await res.text()).slice(0, 1000)}`);
   }
@@ -172,8 +174,9 @@ export async function list_projects(
  * `release:1.2.3`, `assigned:me`, `first-seen:-24h`), newest first by default. `sort` is `date`
  * (last seen), `new` (first seen), `freq` (events), `user` (users) or `priority`; `stats_period`
  * is the relative window (`24h`, `14d`, `90d`) that counts and sparklines cover. With
- * `project_slug` the search is scoped to that project, otherwise it spans the projects the token
- * can read. `limit` is per page (default 25, max 100); pass `next_cursor` back as `cursor` while
+ * `project_slug` (a project slug or numeric id) the search is scoped to that project; without it
+ * the search uses the deployment's default project (`SENTRY_PROJECT`) when one is configured, and
+ * otherwise spans the projects the token can read. `limit` is per page (default 25, max 100); pass `next_cursor` back as `cursor` while
  * it is not null.
  */
 export async function list_issues(
@@ -195,11 +198,12 @@ export async function list_issues(
     limit: checkLimit(args.limit, 25),
   };
   if (args.cursor) params.cursor = args.cursor;
-  const path = args.project_slug
-    ? `/projects/${seg(args.organization_slug)}/${seg(args.project_slug)}/issues/`
+  const project = args.project_slug ?? defaultProject(ctx);
+  const path = project
+    ? `/projects/${seg(args.organization_slug)}/${seg(project)}/issues/`
     : `/organizations/${seg(args.organization_slug)}/issues/`;
   // Organization-wide search needs `project=-1` (all projects) in Sentry's API.
-  if (!args.project_slug) params.project = -1;
+  if (!project) params.project = -1;
   const res = await sentry(ctx, path, params);
   return { issues: await res.json(), next_cursor: nextCursor(res) };
 }
