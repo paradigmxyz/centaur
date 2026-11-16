@@ -378,3 +378,328 @@ export async function write_table(
     header_count: headerCount,
   };
 }
+
+/** A rectangle of one tab, zero-based and end-exclusive; a missing bound is unbounded. */
+export interface GridRange {
+  sheetId: number;
+  startRowIndex?: number;
+  endRowIndex?: number;
+  startColumnIndex?: number;
+  endColumnIndex?: number;
+}
+
+/** The outcome of a spreadsheet `batchUpdate`: one reply per request, in order. */
+export interface BatchUpdateSpreadsheetResponse {
+  spreadsheetId?: string;
+  replies?: unknown[];
+  [field: string]: unknown;
+}
+
+/** Cell formatting for `format_range`. Options left out are not changed. */
+export interface CellFormatOptions {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  /** Points. */
+  font_size?: number;
+  /** Such as `Roboto Mono`. */
+  font_family?: string;
+  /** Hex, `#RGB` or `#RRGGBB`. */
+  text_color?: string;
+  /** Cell fill, hex `#RGB` or `#RRGGBB`. */
+  background_color?: string;
+  /** `LEFT`, `CENTER` or `RIGHT`. */
+  horizontal_alignment?: string;
+  /** `TOP`, `MIDDLE` or `BOTTOM`. */
+  vertical_alignment?: string;
+  /** `OVERFLOW_CELL`, `LEGACY_WRAP`, `CLIP` or `WRAP`. */
+  wrap_strategy?: string;
+  /** `TEXT`, `NUMBER`, `PERCENT`, `CURRENCY`, `DATE`, `TIME`, `DATE_TIME` or `SCIENTIFIC`. */
+  number_format_type?: string;
+  /** A Sheets number format pattern such as `#,##0.00`; type defaults to `NUMBER`. */
+  number_format_pattern?: string;
+}
+
+const HORIZONTAL_ALIGNMENTS = ["LEFT", "CENTER", "RIGHT"];
+const VERTICAL_ALIGNMENTS = ["TOP", "MIDDLE", "BOTTOM"];
+const WRAP_STRATEGIES = ["OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"];
+const NUMBER_FORMAT_TYPES = [
+  "TEXT",
+  "NUMBER",
+  "PERCENT",
+  "CURRENCY",
+  "DATE",
+  "TIME",
+  "DATE_TIME",
+  "SCIENTIFIC",
+];
+
+interface TabRef {
+  sheetId: number;
+  title: string;
+}
+
+/** Tabs in display order. The API omits `sheetId` and `index` when they are 0. */
+async function listTabs(ctx: Ctx, id: string): Promise<TabRef[]> {
+  const result = await sheetsRequest(
+    ctx,
+    `/spreadsheets/${encodeURIComponent(id)}${query({
+      fields: "sheets.properties(sheetId,title,index)",
+    })}`,
+  );
+  const props: SheetProperties[] = (result.sheets ?? []).map((sheet: Sheet) => sheet.properties ?? {});
+  props.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  return props.map((p) => ({ sheetId: p.sheetId ?? 0, title: p.title ?? "" }));
+}
+
+function resolveSheetId(tabs: TabRef[], title: string | undefined): number {
+  if (tabs.length === 0) throw new Error("Spreadsheet has no tabs");
+  if (title === undefined) return tabs[0].sheetId;
+  const tab = tabs.find((t) => t.title === title);
+  if (!tab) {
+    const titles = tabs.map((t) => JSON.stringify(t.title)).join(", ");
+    throw new Error(`No tab titled ${JSON.stringify(title)} (tabs: ${titles})`);
+  }
+  return tab.sheetId;
+}
+
+/** Split `'Tab'!A1:B2` into its tab title and cell part. */
+function splitSheetRange(notation: string): { title?: string; cells?: string } {
+  const value = notation.trim();
+  if (value.startsWith("'")) {
+    let title = "";
+    let index = 1;
+    for (;;) {
+      if (index >= value.length) throw new Error(`Unterminated quoted tab title in range: ${notation}`);
+      const char = value[index];
+      if (char === "'") {
+        if (value[index + 1] === "'") {
+          title += "'";
+          index += 2;
+          continue;
+        }
+        break;
+      }
+      title += char;
+      index += 1;
+    }
+    const rest = value.slice(index + 1);
+    if (rest === "") return { title };
+    if (!rest.startsWith("!")) throw new Error(`Invalid A1 range: ${notation}`);
+    return { title, cells: rest.slice(1) || undefined };
+  }
+  const bang = value.lastIndexOf("!");
+  if (bang >= 0) return { title: value.slice(0, bang), cells: value.slice(bang + 1) || undefined };
+  return { cells: value || undefined };
+}
+
+function columnIndex(letters: string): number {
+  let index = 0;
+  for (const letter of letters.toUpperCase()) index = index * 26 + (letter.charCodeAt(0) - 64);
+  return index - 1;
+}
+
+/** Parse `A1`, `A1:C3`, `A:C`, `2:5` or `A2:C` into GridRange bounds; `undefined` if not A1. */
+function parseA1Cells(cells: string): Omit<GridRange, "sheetId"> | undefined {
+  const parts = cells.split(":");
+  if (parts.length > 2) return undefined;
+  const parsed: { column?: number; row?: number }[] = [];
+  for (const part of parts) {
+    const match = /^\$?([A-Za-z]*)\$?(\d*)$/.exec(part.trim());
+    if (!match || (!match[1] && !match[2])) return undefined;
+    const row = match[2] ? Number(match[2]) - 1 : undefined;
+    if (row !== undefined && row < 0) return undefined;
+    parsed.push({ column: match[1] ? columnIndex(match[1]) : undefined, row });
+  }
+  const start = parsed[0];
+  const end = parsed[parsed.length - 1];
+  if (parsed.length === 1 && (start.column === undefined || start.row === undefined)) return undefined;
+  const bounds: Omit<GridRange, "sheetId"> = {};
+  type Bound = number | undefined;
+  const span = (a: Bound, b: Bound): [Bound, Bound] => {
+    if (a !== undefined && b !== undefined) return [Math.min(a, b), Math.max(a, b) + 1];
+    return [a, b === undefined ? undefined : b + 1];
+  };
+  const [startColumn, endColumn] = span(start.column, end.column);
+  const [startRow, endRow] = span(start.row, end.row);
+  if (startRow !== undefined) bounds.startRowIndex = startRow;
+  if (endRow !== undefined) bounds.endRowIndex = endRow;
+  if (startColumn !== undefined) bounds.startColumnIndex = startColumn;
+  if (endColumn !== undefined) bounds.endColumnIndex = endColumn;
+  return bounds;
+}
+
+/** An A1 range without a tab is on the first tab, unless the whole string is a tab title. */
+function gridRange(tabs: TabRef[], notation: string): GridRange {
+  let { title, cells } = splitSheetRange(notation);
+  if (title === undefined && cells !== undefined && tabs.some((t) => t.title === cells)) {
+    title = cells;
+    cells = undefined;
+  }
+  const range: GridRange = { sheetId: resolveSheetId(tabs, title) };
+  if (cells === undefined) return range;
+  const bounds = parseA1Cells(cells);
+  if (!bounds) throw new Error(`Invalid A1 range: ${notation}`);
+  return { ...range, ...bounds };
+}
+
+function parseColor(color: string): { red: number; green: number; blue: number } {
+  let hex = color.trim().replace(/^#/, "");
+  if (hex.length === 3) hex = [...hex].map((c) => c + c).join("");
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
+    throw new Error(`Color must be hex like "#1a73e8", got ${JSON.stringify(color)}`);
+  }
+  return {
+    red: parseInt(hex.slice(0, 2), 16) / 255,
+    green: parseInt(hex.slice(2, 4), 16) / 255,
+    blue: parseInt(hex.slice(4, 6), 16) / 255,
+  };
+}
+
+function choice(name: string, value: string, allowed: string[]): string {
+  const upper = value.toUpperCase();
+  if (!allowed.includes(upper)) {
+    throw new Error(`${name} must be one of ${allowed.join(", ")}, got ${JSON.stringify(value)}`);
+  }
+  return upper;
+}
+
+/** A Sheets CellFormat plus its `userEnteredFormat.*` field mask. */
+function cellFormat(options: CellFormatOptions): { format: Record<string, unknown>; fields: string[] } {
+  const format: Record<string, unknown> = {};
+  const fields: string[] = [];
+  const text: Record<string, unknown> = {};
+  if (options.bold !== undefined) text.bold = options.bold;
+  if (options.italic !== undefined) text.italic = options.italic;
+  if (options.underline !== undefined) text.underline = options.underline;
+  if (options.strikethrough !== undefined) text.strikethrough = options.strikethrough;
+  if (options.font_family !== undefined) text.fontFamily = options.font_family;
+  if (options.font_size !== undefined) {
+    if (!(options.font_size > 0)) throw new Error("font_size must be positive");
+    text.fontSize = options.font_size;
+  }
+  if (options.text_color !== undefined) {
+    text.foregroundColorStyle = { rgbColor: parseColor(options.text_color) };
+  }
+  if (Object.keys(text).length > 0) {
+    format.textFormat = text;
+    for (const key of Object.keys(text)) fields.push(`userEnteredFormat.textFormat.${key}`);
+  }
+  if (options.background_color !== undefined) {
+    format.backgroundColorStyle = { rgbColor: parseColor(options.background_color) };
+    fields.push("userEnteredFormat.backgroundColorStyle");
+  }
+  if (options.horizontal_alignment !== undefined) {
+    format.horizontalAlignment = choice(
+      "horizontal_alignment",
+      options.horizontal_alignment,
+      HORIZONTAL_ALIGNMENTS,
+    );
+    fields.push("userEnteredFormat.horizontalAlignment");
+  }
+  if (options.vertical_alignment !== undefined) {
+    format.verticalAlignment = choice(
+      "vertical_alignment",
+      options.vertical_alignment,
+      VERTICAL_ALIGNMENTS,
+    );
+    fields.push("userEnteredFormat.verticalAlignment");
+  }
+  if (options.wrap_strategy !== undefined) {
+    format.wrapStrategy = choice("wrap_strategy", options.wrap_strategy, WRAP_STRATEGIES);
+    fields.push("userEnteredFormat.wrapStrategy");
+  }
+  if (options.number_format_type !== undefined || options.number_format_pattern !== undefined) {
+    const numberFormat: Record<string, unknown> = {
+      type: choice("number_format_type", options.number_format_type ?? "NUMBER", NUMBER_FORMAT_TYPES),
+    };
+    if (options.number_format_pattern !== undefined) {
+      numberFormat.pattern = options.number_format_pattern;
+    }
+    format.numberFormat = numberFormat;
+    fields.push("userEnteredFormat.numberFormat");
+  }
+  return { format, fields };
+}
+
+/**
+ * Format the cells of one A1 range: bold/italic/underline/strikethrough, font size and family,
+ * text and background colors (hex), alignment, wrapping and number format. Only options given are
+ * changed. `range` is `'Tab'!A1:D1`, `A:A`, `2:2`, `A2:C` or a bare tab title for the whole tab;
+ * without a tab it is the first tab. Returns the batchUpdate response and the resolved grid range.
+ */
+export async function format_range(
+  args: { spreadsheet_id: string; range: string } & CellFormatOptions,
+  ctx: Ctx,
+): Promise<{ result: BatchUpdateSpreadsheetResponse; grid_range: GridRange; fields: string[] }> {
+  const { format, fields } = cellFormat(args);
+  if (fields.length === 0) throw new Error("Provide at least one format option");
+  const id = spreadsheetId(args.spreadsheet_id);
+  const range = gridRange(await listTabs(ctx, id), args.range);
+  const result = await sheetsRequest(ctx, `/spreadsheets/${encodeURIComponent(id)}:batchUpdate`, {
+    body: {
+      requests: [
+        { repeatCell: { range, cell: { userEnteredFormat: format }, fields: fields.join(",") } },
+      ],
+    },
+  });
+  return { result, grid_range: range, fields };
+}
+
+/**
+ * Freeze the top `rows` and/or left `columns` of a tab (`sheet_title`, default the first tab);
+ * 0 unfreezes. Returns the batchUpdate response and the tab's `sheetId`.
+ */
+export async function freeze(
+  args: { spreadsheet_id: string; sheet_title?: string; rows?: number; columns?: number },
+  ctx: Ctx,
+): Promise<{ result: BatchUpdateSpreadsheetResponse; sheet_id: number }> {
+  const gridProperties: Record<string, number> = {};
+  for (const [key, value] of [
+    ["frozenRowCount", args.rows],
+    ["frozenColumnCount", args.columns],
+  ] as const) {
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error("rows and columns must be non-negative integers");
+    }
+    gridProperties[key] = value;
+  }
+  const keys = Object.keys(gridProperties);
+  if (keys.length === 0) throw new Error("Provide rows and/or columns");
+  const id = spreadsheetId(args.spreadsheet_id);
+  const sheetId = resolveSheetId(await listTabs(ctx, id), args.sheet_title);
+  const result = await sheetsRequest(ctx, `/spreadsheets/${encodeURIComponent(id)}:batchUpdate`, {
+    body: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: { sheetId, gridProperties },
+            fields: keys.map((key) => `gridProperties.${key}`).join(","),
+          },
+        },
+      ],
+    },
+  });
+  return { result, sheet_id: sheetId };
+}
+
+/**
+ * Send raw Sheets `requests` (repeatCell, updateBorders, mergeCells, updateDimensionProperties,
+ * autoResizeDimensions, addConditionalFormatRule, addBanding, updateSheetProperties, ... see the
+ * Sheets spreadsheets.batchUpdate reference) to one spreadsheet, for anything `format_range` and
+ * `freeze` do not cover. Ranges are GridRanges keyed by numeric `sheetId` (from `get_spreadsheet`;
+ * an omitted `sheetId` is 0). Requests apply in order, atomically. Returns one reply per request.
+ */
+export async function spreadsheet_batch_update(
+  args: { spreadsheet_id: string; requests: unknown[] },
+  ctx: Ctx,
+): Promise<{ result: BatchUpdateSpreadsheetResponse }> {
+  if (args.requests.length === 0) throw new Error("Provide at least one request");
+  const id = spreadsheetId(args.spreadsheet_id);
+  const result = await sheetsRequest(ctx, `/spreadsheets/${encodeURIComponent(id)}:batchUpdate`, {
+    body: { requests: args.requests },
+  });
+  return { result };
+}
