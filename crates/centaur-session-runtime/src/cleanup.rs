@@ -127,6 +127,8 @@ impl SessionSandboxCleanupWorker {
             .list_idle_sandbox_candidates(idle_backstop)
             .await?
         {
+            // Code Mode sandboxes never appear here: the query starts from
+            // `sessions`, and a Code Mode sandbox has no session row.
             report.idle_pause_attempts += 1;
             if let Err(error) = record_idle_pause(
                 &self.ctx,
@@ -177,6 +179,12 @@ fn orphan_reap_eligible(sandbox: &ObservedSandbox, referenced: &BTreeSet<String>
     if sandbox.labels.get(COMPONENT_LABEL).map(String::as_str) == Some(WORKFLOW_RUN_COMPONENT) {
         return false;
     }
+    // Code Mode sandboxes are owned by a principal rather than a session, so no
+    // session row will ever reference them. The reaper releases a stopped one and
+    // the next call replaces it; sweeping them here would fight that path.
+    if centaur_sandbox_core::is_codemode_workload(&sandbox.labels) {
+        return false;
+    }
     // A Stopped sandbox is reaped too: agent-k8s reports a workload pod that
     // exited on its own (OOM, crash) as Stopped while its Sandbox, iron-proxy,
     // and state volume still exist.
@@ -198,6 +206,16 @@ mod tests {
             COMPONENT_LABEL.to_owned(),
             WORKFLOW_RUN_COMPONENT.to_owned(),
         )]))
+    }
+
+    fn codemode_observed(id: &str, status: SandboxStatus) -> ObservedSandbox {
+        ObservedSandbox::new(SandboxId::new(id), "test", status).with_labels(BTreeMap::from([
+            (
+                centaur_sandbox_core::WORKLOAD_LABEL.to_owned(),
+                centaur_sandbox_core::CODEMODE_WORKLOAD.to_owned(),
+            ),
+            (COMPONENT_LABEL.to_owned(), "codemode".to_owned()),
+        ]))
     }
 
     fn referenced(ids: &[&str]) -> BTreeSet<String> {
@@ -296,6 +314,23 @@ mod tests {
         assert!(
             select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending).is_empty()
         );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn codemode_sandboxes_are_not_session_orphans() {
+        let observed = [
+            codemode_observed("cm-0123456789abcdef-0123456789", SandboxStatus::Running),
+            codemode_observed("cm-fedcba9876543210-0123456789", SandboxStatus::Stopped),
+        ];
+        let mut pending = BTreeSet::new();
+
+        for _ in 0..3 {
+            assert!(
+                select_orphan_reap_candidates(&observed, &referenced(&[]), &mut pending).is_empty(),
+                "Code Mode sandboxes have no session row; the reaper owns their lifecycle"
+            );
+        }
         assert!(pending.is_empty());
     }
 }

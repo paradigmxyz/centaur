@@ -93,9 +93,11 @@ export interface SandboxPermissions {
 }
 
 /**
- * The sandbox context file (`~/.centaur/sandbox.json`) that the platform writes for the
- * session. Informational: route on it, never authorize anything with it; iron-proxy and
- * Console enforce access.
+ * The calling context, read once per cell. In a session sandbox it is the sandbox context file
+ * (`~/.centaur/sandbox.json`) the platform writes. In a Code Mode sandbox, which has no such file,
+ * it comes from Console's sandbox permissions, with `harness: "codemode"` and a null `thread_key`.
+ * Informational: route on it, never authorize anything with it; iron-proxy and Console enforce
+ * access.
  */
 export interface CallingContext {
   version?: number;
@@ -117,7 +119,10 @@ export interface Ctx {
    * the wire, and inject-mode credentials need no variable at all.
    */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** The calling context, read once per cell; `null` outside a Centaur session. */
+  /**
+   * The calling context, read once per cell; `null` when there is no context file and Code Mode
+   * has no Console permissions.
+   */
   readonly context: Readonly<CallingContext> | null;
   sleep(ms: number): Promise<void>;
   /**

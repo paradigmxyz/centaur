@@ -1,4 +1,5 @@
 mod cleanup;
+mod codemode;
 mod retention;
 mod title_generator;
 
@@ -15,9 +16,9 @@ use std::{
 
 use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
-    Mount, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME, SandboxBackend,
-    SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile, SandboxId,
-    SandboxIoGuard, SandboxRead, SandboxResult, SandboxSpec, SandboxStatus, SandboxWrite,
+    Mount, ObservedSandbox, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME,
+    SandboxBackend, SandboxCapabilities as BackendSandboxCapabilities, SandboxError, SandboxFile,
+    SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmClaim, WarmPool, WarmPoolConfig,
@@ -53,6 +54,7 @@ use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
 pub use cleanup::SessionSandboxCleanupConfig;
+pub use codemode::CodemodeEndpoint;
 pub use retention::SessionEventRetentionConfig;
 pub use title_generator::SessionTitleGenerationError;
 use title_generator::{
@@ -85,13 +87,9 @@ const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
 /// Tools that need the observability capability. Each user turn tells the
 /// agent whether they work; the sandbox network policy enforces it.
 const OBSERVABILITY_TOOLS: &str = "vlogs,vmetrics,grafana";
-const ARTIFACT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
->;
-type SandboxArtifactReader = Arc<
-    dyn Fn(SandboxId, String, usize) -> BoxFuture<'static, SandboxResult<Vec<u8>>> + Send + Sync,
 >;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
@@ -188,6 +186,9 @@ pub struct SessionRuntime {
     /// drain takes the write side; execution paths hold a read guard until
     /// their active row and stdout ownership are durable.
     execution_admission: Arc<RwLock<()>>,
+    /// MCP Code Mode configuration, endpoint cache, and single-flight table.
+    /// `None` means Code Mode is disabled on this control plane.
+    codemode: Option<codemode::CodemodeState>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -361,8 +362,6 @@ impl PersonaRegistry {
 pub struct SandboxRuntime {
     manager: Arc<SandboxManager>,
     spec_factory: SandboxSpecFactory,
-    /// Optional out-of-band transport supplied by runtimes that can read artifacts.
-    artifact_reader: Option<SandboxArtifactReader>,
     /// Builds the base spec a warm sandbox for a harness and optional persona
     /// boots from. Warm pools apply their repo-cache access on top of it.
     warm_spec_factory: Option<WarmHarnessSpecFactory>,
@@ -512,15 +511,12 @@ pub struct ToolHostCallInput {
 pub enum ToolHostInvocation {
     /// Invoke a Python client method through `centaur-tools call`.
     V1 { method: String, arguments: Value },
-    /// Run a tool CLI through `centaur-tools run`.
-    V2 { argv: Vec<String> },
 }
 
 impl ToolHostInvocation {
     fn method(&self) -> &str {
         match self {
             Self::V1 { method, .. } => method,
-            Self::V2 { .. } => "cli",
         }
     }
 }
@@ -553,12 +549,6 @@ pub struct ToolHostCallOutput {
     pub stderr: String,
     pub exit_status: Option<i32>,
     pub timed_out: bool,
-}
-
-#[derive(Debug)]
-pub struct SandboxArtifactOutput {
-    pub sandbox_id: String,
-    pub contents: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -754,10 +744,15 @@ impl SandboxCapacityController {
             .iter()
             .filter(|observed| {
                 status_consumes_running_slot(&observed.status)
+                    && !centaur_sandbox_core::is_codemode_workload(&observed.labels)
                     && !ready_warm.contains(observed.id.as_str())
             })
             .count())
     }
+}
+
+fn drain_skips_sandbox(sandbox: &ObservedSandbox, force: bool) -> bool {
+    !force && centaur_sandbox_core::is_codemode_workload(&sandbox.labels)
 }
 
 fn status_consumes_running_slot(status: &SandboxStatus) -> bool {
@@ -850,6 +845,7 @@ impl SessionRuntime {
             stdout_owner_id: format!("api-rs-{}", uuid::Uuid::new_v4().simple()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             execution_admission: Arc::new(RwLock::new(())),
+            codemode: None,
         }
     }
 
@@ -956,15 +952,6 @@ impl SessionRuntime {
                 method: method.trim().to_owned(),
                 arguments,
             },
-            ToolHostInvocation::V2 { argv } => {
-                if argv.iter().any(|arg| arg.contains('\0')) {
-                    return Err(SessionRuntimeError::BadRequest(
-                        "tool host argv must not contain NUL characters".to_owned(),
-                    )
-                    .into());
-                }
-                ToolHostInvocation::V2 { argv }
-            }
         };
         if principal_id.is_empty() {
             return Err(SessionRuntimeError::BadRequest(
@@ -1016,113 +1003,6 @@ impl SessionRuntime {
         self.tool_host_call_locks
             .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
         result
-    }
-
-    /// Read an artifact from an existing principal-bound MCP sandbox.
-    /// Artifact bytes remain transient, while lifecycle changes are recorded normally.
-    pub async fn read_sandbox_artifact(
-        &self,
-        principal_id: &str,
-        artifact_path: &str,
-        max_bytes: usize,
-    ) -> Result<SandboxArtifactOutput, SessionRuntimeError> {
-        let principal_id = principal_id.trim();
-        if principal_id.is_empty() {
-            return Err(SessionRuntimeError::BadRequest(
-                "tool host principal_id is required".to_owned(),
-            ));
-        }
-        if artifact_path.is_empty() {
-            return Err(SessionRuntimeError::BadRequest(
-                "artifact path is required".to_owned(),
-            ));
-        }
-        let thread_key = tool_host_thread_key(principal_id)?;
-        let call_lock = self.tool_host_call_lock(&thread_key);
-        let result = {
-            let _call_guard = call_lock.lock().await;
-            self.locked_read_sandbox_artifact(&thread_key, principal_id, artifact_path, max_bytes)
-                .await
-        };
-        drop(call_lock);
-        self.tool_host_call_locks
-            .remove_if(thread_key.as_str(), |_, lock| Arc::strong_count(lock) == 1);
-        result
-    }
-
-    async fn locked_read_sandbox_artifact(
-        &self,
-        thread_key: &ThreadKey,
-        principal_id: &str,
-        artifact_path: &str,
-        max_bytes: usize,
-    ) -> Result<SandboxArtifactOutput, SessionRuntimeError> {
-        let artifact_reader = self
-            .sandbox_runtime
-            .artifact_reader
-            .clone()
-            .ok_or_else(|| {
-                SessionRuntimeError::BadRequest(
-                    "artifact retrieval is not supported by the configured sandbox backend"
-                        .to_owned(),
-                )
-            })?;
-        let session = match self.store.get_session(thread_key).await {
-            Ok(session) => session,
-            Err(SessionStoreError::NotFound { .. }) => {
-                return Err(SessionRuntimeError::BadRequest(
-                    "no MCP sandbox exists for this principal".to_owned(),
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if session.iron_control_principal.as_deref() != Some(principal_id) {
-            return Err(SessionRuntimeError::BadRequest(
-                "MCP sandbox principal does not match the requester".to_owned(),
-            ));
-        }
-        let Some(sandbox_id) = session.sandbox_id else {
-            return Err(SessionRuntimeError::BadRequest(
-                "no MCP sandbox is currently assigned to this principal".to_owned(),
-            ));
-        };
-        let id = SandboxId::new(&sandbox_id);
-        require_running_artifact_sandbox(self.sandbox_runtime.manager.status(&id).await?)?;
-        if !self
-            .store
-            .touch_sandbox_activity(thread_key, &sandbox_id)
-            .await?
-        {
-            return Err(SessionRuntimeError::BadRequest(
-                "MCP sandbox assignment changed during artifact retrieval".to_owned(),
-            ));
-        }
-        let artifact = timeout(
-            ARTIFACT_READ_TIMEOUT,
-            artifact_reader(id, artifact_path.to_owned(), max_bytes),
-        )
-        .await
-        .map_err(|_| {
-            SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(format!(
-                "retrieval timed out after {} seconds",
-                ARTIFACT_READ_TIMEOUT.as_secs()
-            )))
-        })?;
-        let contents = artifact?;
-        self.store
-            .touch_sandbox_activity(thread_key, &sandbox_id)
-            .await?;
-        if contents.len() > max_bytes {
-            return Err(SessionRuntimeError::Sandbox(
-                SandboxError::ArtifactRejected(format!(
-                    "artifact exceeds the {max_bytes}-byte size limit"
-                )),
-            ));
-        }
-        Ok(SandboxArtifactOutput {
-            sandbox_id,
-            contents,
-        })
     }
 
     /// Resolve the principal once and return both the tool lists from its
@@ -2132,6 +2012,12 @@ impl SessionRuntime {
                 continue;
             }
             let id = sandbox.id.as_str().to_owned();
+            // Code Mode sandboxes serve no session execution, so idleness cannot
+            // be proven from durable state. A graceful drain leaves them for the
+            // reaper and the next call; a forced drain still stops them.
+            if drain_skips_sandbox(&sandbox, force) {
+                continue;
+            }
             if !force && !self.store.sandbox_is_idle_for_drain(&id).await? {
                 report.busy.push(id);
                 continue;
@@ -4539,7 +4425,6 @@ impl SandboxRuntime {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
-            artifact_reader: None,
             warm_spec_factory: None,
             default_harness: None,
         }
@@ -4560,22 +4445,9 @@ impl SandboxRuntime {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
-            artifact_reader: None,
             warm_spec_factory: Some(Arc::new(warm_spec_factory)),
             default_harness: None,
         }
-    }
-
-    /// Add an artifact transport without expanding the portable sandbox backend contract.
-    pub fn with_artifact_reader<F, Fut>(mut self, reader: F) -> Self
-    where
-        F: Fn(SandboxId, String, usize) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = SandboxResult<Vec<u8>>> + Send + 'static,
-    {
-        self.artifact_reader = Some(Arc::new(move |id, path, max_bytes| {
-            reader(id, path, max_bytes).boxed()
-        }));
-        self
     }
 }
 
@@ -6149,19 +6021,6 @@ fn should_pause_idle_sandbox(
     )
 }
 
-fn require_running_artifact_sandbox(status: SandboxStatus) -> Result<(), SessionRuntimeError> {
-    match status {
-        SandboxStatus::Running => Ok(()),
-        SandboxStatus::Created | SandboxStatus::Suspended => Err(SessionRuntimeError::BadRequest(
-            "transient artifact cannot be retrieved because the MCP sandbox is not running; run the producing tool again"
-                .to_owned(),
-        )),
-        status => Err(SessionRuntimeError::BadRequest(format!(
-            "MCP sandbox is not available for artifact retrieval: {status:?}"
-        ))),
-    }
-}
-
 fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -6439,7 +6298,6 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::NotFound(_)) => "sandbox_not_found",
         SessionRuntimeError::Sandbox(SandboxError::Unsupported { .. }) => "sandbox_unsupported",
         SessionRuntimeError::Sandbox(SandboxError::NotReady(_)) => "sandbox_not_ready",
-        SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(_)) => "artifact_rejected",
         SessionRuntimeError::Sandbox(SandboxError::Io { .. }) => "sandbox_io",
         SessionRuntimeError::Sandbox(SandboxError::Backend { .. }) => "sandbox_backend",
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
@@ -8084,35 +7942,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_host_request_serializes_cli_arguments() {
-        let request = ToolHostRequest {
-            id: "request".to_owned(),
-            tool: "demo".to_owned(),
-            invocation: ToolHostInvocation::V2 {
-                argv: vec![
-                    "search".to_owned(),
-                    " spaced query ".to_owned(),
-                    String::new(),
-                ],
-            },
-            principal_id: "prn_test".to_owned(),
-            token_id: None,
-            timeout_seconds: 120,
-        };
-        assert_eq!(
-            serde_json::to_value(request).unwrap(),
-            serde_json::json!({
-                "id": "request",
-                "tool": "demo",
-                "mode": "v2",
-                "argv": ["search", " spaced query ", ""],
-                "principal_id": "prn_test",
-                "timeout_seconds": 120,
-            })
-        );
-    }
-
-    #[test]
     fn unavailable_requested_persona_uses_deployment_fallback() {
         let default_registry = PersonaRegistry::new(
             [PersonaDefinition {
@@ -8830,22 +8659,6 @@ mod tests {
             "exe-1",
             "asbx-other"
         ));
-    }
-
-    #[test]
-    fn artifact_retrieval_requires_a_running_sandbox() {
-        assert!(require_running_artifact_sandbox(SandboxStatus::Running).is_ok());
-        for status in [SandboxStatus::Created, SandboxStatus::Suspended] {
-            let error = require_running_artifact_sandbox(status).unwrap_err();
-            assert!(error.to_string().contains("transient artifact"));
-        }
-        for status in [
-            SandboxStatus::Stopped,
-            SandboxStatus::Gone,
-            SandboxStatus::Unknown("unavailable".to_owned()),
-        ] {
-            assert!(require_running_artifact_sandbox(status).is_err());
-        }
     }
 
     #[test]

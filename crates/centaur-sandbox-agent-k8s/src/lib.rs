@@ -23,7 +23,7 @@ use kube::api::{
 };
 use kube::{Api, Client, Error, Resource};
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
@@ -47,8 +47,6 @@ const SANDBOX_ID_LABEL: &str = "centaur.ai/sandbox-id";
 const OBSERVABILITY_ENABLED_LABEL: &str = "centaur.ai/observability-enabled";
 const MANAGED_BY_VALUE: &str = "api-rs";
 const SANDBOX_FILES_VOLUME: &str = "sandbox-files";
-const ARTIFACT_GET_COMMAND: &str = "/usr/local/bin/centaur-artifact-get";
-const ARTIFACT_ERROR_MAX_BYTES: usize = 64 * 1024;
 /// Capacity of each attach stdin/stdout pipe. kube-rs services an attach
 /// connection from one loop that blocks while a pipe is full, so its 1 KiB
 /// default lets a modest burst of output in one direction stall the other.
@@ -721,6 +719,17 @@ impl SandboxBackend for AgentSandboxBackend {
         Ok(text.lines().map(str::to_owned).collect())
     }
 
+    /// Report the pod IP a sandbox workload listens on. The sandbox NetworkPolicy
+    /// keeps that address reachable only from inside the cluster.
+    async fn workload_address(&self, id: &SandboxId) -> SandboxResult<String> {
+        let pod = self.get_pod(id).await?.ok_or_else(|| {
+            SandboxError::NotReady(format!("sandbox {} has no pod yet", id.as_str()))
+        })?;
+        pod_workload_address(&pod).ok_or_else(|| {
+            SandboxError::NotReady(format!("sandbox {} pod has no address yet", id.as_str()))
+        })
+    }
+
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus> {
         let Some(sandbox) = self.get_sandbox(id).await? else {
             return Ok(SandboxStatus::Gone);
@@ -897,97 +906,6 @@ impl SandboxBackend for AgentSandboxBackend {
     }
 }
 
-impl AgentSandboxBackend {
-    /// Read an artifact through a one-shot pod exec whose stdout is the file body.
-    pub async fn read_artifact(
-        &self,
-        id: &SandboxId,
-        path: &str,
-        max_bytes: usize,
-    ) -> SandboxResult<Vec<u8>> {
-        let params = AttachParams::default()
-            .container(self.config.container_name.clone())
-            .stdin(false)
-            .stdout(true)
-            .stderr(true)
-            .tty(false);
-        let mut process = self
-            .pods()
-            .exec(id.as_str(), [ARTIFACT_GET_COMMAND, path], &params)
-            .await
-            .map_err(|error| map_kube_error("exec sandbox artifact reader", error))?;
-        let mut stdout = process
-            .stdout()
-            .ok_or_else(|| SandboxError::io("artifact reader stdout was not attached"))?;
-        let mut stderr = process
-            .stderr()
-            .ok_or_else(|| SandboxError::io("artifact reader stderr was not attached"))?;
-        let status = process
-            .take_status()
-            .ok_or_else(|| SandboxError::io("artifact reader status was not attached"))?;
-
-        let mut contents = Vec::new();
-        let mut error_output = Vec::new();
-        let (stdout_result, stderr_result, status) = tokio::join!(
-            read_stream_bounded(&mut stdout, &mut contents, max_bytes),
-            read_stream_bounded(&mut stderr, &mut error_output, ARTIFACT_ERROR_MAX_BYTES),
-            status,
-        );
-        let contents_exceeded = stdout_result.map_err(|error| {
-            SandboxError::io_source("read sandbox artifact command stdout", error)
-        })?;
-        let error_output_exceeded = stderr_result.map_err(|error| {
-            SandboxError::io_source("read sandbox artifact command stderr", error)
-        })?;
-        process.join().await.map_err(|error| {
-            SandboxError::backend_source("join sandbox artifact command", error)
-        })?;
-
-        if status.as_ref().and_then(|status| status.status.as_deref()) != Some("Success") {
-            return Err(artifact_command_rejection(
-                &error_output,
-                error_output_exceeded,
-            ));
-        }
-        if contents_exceeded {
-            return Err(SandboxError::ArtifactRejected(format!(
-                "artifact exceeds the {max_bytes}-byte size limit"
-            )));
-        }
-
-        Ok(contents)
-    }
-}
-
-fn artifact_command_rejection(error_output: &[u8], truncated: bool) -> SandboxError {
-    if !truncated {
-        let stderr = String::from_utf8_lossy(error_output);
-        if let Some(detail) = stderr.trim().strip_prefix("centaur-artifact-get: ")
-            && !detail.is_empty()
-        {
-            return SandboxError::ArtifactRejected(detail.to_owned());
-        }
-    }
-    SandboxError::ArtifactRejected(
-        "artifact retrieval is unavailable in the current sandbox".to_owned(),
-    )
-}
-
-async fn read_stream_bounded(
-    reader: &mut (impl AsyncRead + Unpin),
-    retained: &mut Vec<u8>,
-    max_bytes: usize,
-) -> std::io::Result<bool> {
-    let retained_limit = max_bytes.saturating_add(1) as u64;
-    reader.take(retained_limit).read_to_end(retained).await?;
-    let exceeded = retained.len() > max_bytes;
-    if exceeded {
-        retained.truncate(max_bytes);
-    }
-    tokio::io::copy(reader, &mut tokio::io::sink()).await?;
-    Ok(exceeded)
-}
-
 fn sandbox_pause_patch(paused_at: jiff::Timestamp) -> Value {
     json!({
         "spec": { "operatingMode": "Suspended" },
@@ -1159,6 +1077,7 @@ fn build_agent_sandbox(
     config: &AgentSandboxConfig,
 ) -> SandboxResult<crd::Sandbox> {
     config.validate()?;
+    let codemode = centaur_sandbox_core::is_codemode_workload(&spec.labels);
     let mut labels = config.labels.clone();
     labels.extend(spec.labels.clone());
     labels.insert(MANAGED_BY_LABEL.to_owned(), MANAGED_BY_VALUE.to_owned());
@@ -1202,10 +1121,10 @@ fn build_agent_sandbox(
     let scoped_tools = config
         .tools
         .as_ref()
-        .filter(|_| repo_cache_enabled)
+        .filter(|_| repo_cache_enabled && !codemode)
         .map(|tools| tools.scoped_for_repo_cache_access(&spec.capabilities.repo_cache));
     let repo_cache_tools = scoped_tools.as_ref().filter(|tools| tools.has_sources());
-    let baked_base_tools = config.tools.is_some() && repo_cache_tools.is_none();
+    let baked_base_tools = !codemode && config.tools.is_some() && repo_cache_tools.is_none();
 
     if repo_cache_tools.is_some() {
         for (name, value) in tools::agent_env(repo_cache_tools) {
@@ -1215,6 +1134,22 @@ fn build_agent_sandbox(
         for (name, value) in tools::baked_base_agent_env() {
             upsert_env(&mut agent_env, &name, value);
         }
+    }
+    if codemode {
+        // Code Mode verifies the proxy's CA itself rather than relying on
+        // tool-level env in the image; every proxy-enabled sandbox already
+        // mounts that CA.
+        if config.iron_proxy.is_some() {
+            upsert_env(
+                &mut agent_env,
+                "CENTAUR_CODEMODE_CA_FILE",
+                iron_proxy::FIREWALL_CA_CERT_PATH.to_owned(),
+            );
+        }
+        // The Code Mode server reports readiness on `/healthz`, so the pod's
+        // Ready condition -- and therefore `SandboxStatus::Running` -- means the
+        // process is accepting requests.
+        container["readinessProbe"] = codemode_readiness_probe();
     }
     insert_optional(
         &mut container,
@@ -1254,7 +1189,10 @@ fn build_agent_sandbox(
         }
     }
     let mut init_containers = Vec::new();
-    if let Some(state_volume) = &config.state_volume {
+    // Code Mode sandboxes are self-contained: no persistent state to keep and no
+    // tool shims to bootstrap.
+    let state_volume = config.state_volume.as_ref().filter(|_| !codemode);
+    if let Some(state_volume) = state_volume {
         volume_mounts.push(json!({
             "name": "state",
             "mountPath": state_volume.mount_path,
@@ -1306,8 +1244,9 @@ fn build_agent_sandbox(
         "enableServiceLinks": false,
     });
     insert_optional(&mut pod_spec, "hostUsers", config.host_users);
-    // fsGroup makes bootstrap emptyDirs and the state PVC writable by the agent UID.
-    if repo_cache_tools.is_some() || config.state_volume.is_some() {
+    // fsGroup makes bootstrap emptyDirs and the state PVC writable by the agent
+    // UID; Code Mode keeps it for its read-only repo-cache mounts.
+    if repo_cache_tools.is_some() || state_volume.is_some() || codemode {
         pod_spec["securityContext"] = tools::pod_security_context_json();
     }
     insert_optional(
@@ -1388,7 +1327,7 @@ fn build_agent_sandbox(
     insert_optional(
         &mut agent_spec,
         "volumeClaimTemplates",
-        config.state_volume.as_ref().map(state_volume_claim_json),
+        state_volume.map(state_volume_claim_json),
     );
 
     let mut annotations = config.annotations.clone();
@@ -1679,6 +1618,38 @@ fn is_not_found(err: &Error) -> bool {
     matches!(err, Error::Api(api_error) if api_error.code == 404)
 }
 
+/// Host part of a pod's address, with IPv6 literals bracketed so it can be
+/// embedded in a URL authority. `None` until the pod is assigned an IP.
+fn pod_workload_address(pod: &Pod) -> Option<String> {
+    let ip = pod
+        .status
+        .as_ref()
+        .and_then(|status| status.pod_ip.as_deref())
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())?;
+    Some(if ip.contains(':') {
+        format!("[{ip}]")
+    } else {
+        ip.to_owned()
+    })
+}
+
+/// Readiness probe for the Code Mode HTTP server. `SandboxStatus::Running` is
+/// this backend's serving signal, so the probe is what makes it mean the
+/// process accepts requests.
+fn codemode_readiness_probe() -> Value {
+    json!({
+        "httpGet": {
+            "path": "/healthz",
+            "port": centaur_sandbox_core::CODEMODE_PORT,
+        },
+        "periodSeconds": 2,
+        // Tolerate a minute of failed probes so a connector reload cannot
+        // flap a live sandbox out of `Running`.
+        "failureThreshold": 30,
+    })
+}
+
 fn map_kube_error(operation: &str, err: Error) -> SandboxError {
     if is_not_found(&err) {
         SandboxError::NotFound(operation.to_owned())
@@ -1694,7 +1665,6 @@ mod tests {
     };
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
     use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-    use tokio::io::AsyncWriteExt;
 
     use super::*;
 
@@ -1705,45 +1675,6 @@ mod tests {
         assert!(params.stdin && params.stdout && params.stderr && !params.tty);
         assert_eq!(params.max_stdin_buf_size, Some(ATTACH_STREAM_BUF_SIZE));
         assert_eq!(params.max_stdout_buf_size, Some(ATTACH_STREAM_BUF_SIZE));
-    }
-
-    #[test]
-    fn artifact_command_failures_are_safe_tool_rejections() {
-        let expected =
-            artifact_command_rejection(b"centaur-artifact-get: artifact does not exist\n", false);
-        assert!(matches!(
-            expected,
-            SandboxError::ArtifactRejected(message) if message == "artifact does not exist"
-        ));
-
-        for (stderr, truncated) in [
-            (b"executable file not found".as_slice(), false),
-            (b"centaur-artifact-get: partial".as_slice(), true),
-        ] {
-            let error = artifact_command_rejection(stderr, truncated);
-            assert!(matches!(
-                error,
-                SandboxError::ArtifactRejected(message)
-                    if message == "artifact retrieval is unavailable in the current sandbox"
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn bounded_stream_read_caps_retained_bytes_and_drains_the_stream() {
-        let (mut writer, mut reader) = tokio::io::duplex(4);
-        let write = tokio::spawn(async move {
-            writer.write_all(b"abcdef").await.unwrap();
-        });
-        let mut retained = Vec::new();
-
-        let exceeded = read_stream_bounded(&mut reader, &mut retained, 3)
-            .await
-            .unwrap();
-        write.await.unwrap();
-
-        assert!(exceeded);
-        assert_eq!(retained, b"abc");
     }
 
     #[test]
@@ -2553,6 +2484,169 @@ mod tests {
         assert_eq!(
             pod_termination_reason(&pod_with_phase_and_ready("Running", true)),
             None
+        );
+    }
+
+    fn pod_json(name: &str, phase: &str, ready: bool, pod_ip: Option<&str>) -> serde_json::Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": { "name": name, "namespace": "test-ns" },
+            "status": {
+                "phase": phase,
+                "podIP": pod_ip,
+                "conditions": [{ "type": "Ready", "status": if ready { "True" } else { "False" } }],
+            },
+        })
+    }
+
+    #[test]
+    fn pod_workload_address_brackets_ipv6_and_requires_an_ip() {
+        let pod = |json: serde_json::Value| serde_json::from_value::<Pod>(json).unwrap();
+
+        assert_eq!(
+            pod_workload_address(&pod(pod_json("sbx", "Running", true, Some("10.1.2.3")))),
+            Some("10.1.2.3".to_owned())
+        );
+        assert_eq!(
+            pod_workload_address(&pod(pod_json("sbx", "Running", true, Some("fd00::12")))),
+            Some("[fd00::12]".to_owned()),
+            "IPv6 literals must be bracketed to form a valid URL authority"
+        );
+        assert_eq!(
+            pod_workload_address(&pod(pod_json("sbx", "Pending", false, None))),
+            None
+        );
+    }
+
+    #[test]
+    fn codemode_sandbox_is_probed_and_skips_tools_and_state_wiring() {
+        let mut tools = ToolsConfig::new("acme/tools", "agent:test");
+        tools.github_token = Some(GitHubTokenRef {
+            secret_name: "gh-token".to_owned(),
+            secret_key: "token".to_owned(),
+        });
+        let config = AgentSandboxConfig::new("test-ns", test_iron_control_settings())
+            .iron_proxy(IronProxyConfig::new("proxy:test", "ca-cert", "ca-key"))
+            .state_volume(StateVolumeConfig::new("/home/agent/state", "10Gi"))
+            .tools(tools);
+        let spec = |codemode: bool| {
+            let mut spec = SandboxSpec::new("image:test").mount(centaur_sandbox_core::Mount::new(
+                MountKind::EmptyDir,
+                "/workspace",
+            ));
+            if codemode {
+                spec = spec.label(
+                    centaur_sandbox_core::WORKLOAD_LABEL,
+                    centaur_sandbox_core::CODEMODE_WORKLOAD,
+                );
+            }
+            spec
+        };
+        let build = |codemode: bool| {
+            let sandbox = build_agent_sandbox(
+                &SandboxId::new("sbx-test-0123456789"),
+                &spec(codemode),
+                &config,
+            )
+            .unwrap();
+            serde_json::to_value(&sandbox).unwrap()
+        };
+
+        let codemode = build(true);
+        let pod = &codemode["spec"]["podTemplate"]["spec"];
+        assert!(
+            pod.get("initContainers").is_none(),
+            "Code Mode needs no tools-bootstrap init container: {pod}"
+        );
+        assert!(
+            codemode["spec"].get("volumeClaimTemplates").is_none(),
+            "Code Mode keeps no state PVC"
+        );
+        assert_eq!(
+            pod["securityContext"]["fsGroup"],
+            json!(1001),
+            "Code Mode keeps the pod security context"
+        );
+        let container = &pod["containers"][0];
+        assert_eq!(
+            container["readinessProbe"]["httpGet"],
+            json!({ "path": "/healthz", "port": centaur_sandbox_core::CODEMODE_PORT }),
+            "Ready must mean the Code Mode server is serving"
+        );
+        let env = container["env"].as_array().expect("container env");
+        for name in [
+            "TOOL_DIRS",
+            "CENTAUR_TOOLS_AUTO_RELOAD",
+            "CENTAUR_TOOLS_GITHUB_TOKEN_FILE",
+        ] {
+            assert!(
+                !env.iter().any(|entry| entry["name"] == name),
+                "Code Mode must not receive tools env {name}: {env:?}"
+            );
+        }
+        assert!(
+            env.iter().any(|entry| {
+                entry["name"] == "CENTAUR_CODEMODE_CA_FILE"
+                    && entry["value"] == iron_proxy::FIREWALL_CA_CERT_PATH
+            }),
+            "Code Mode keeps the firewall CA env: {env:?}"
+        );
+        let mounts = container["volumeMounts"].as_array().expect("mounts");
+        for path in ["/app/tools", "/tools-github-token", "/home/agent/state"] {
+            assert!(
+                !mounts.iter().any(|mount| mount["mountPath"] == path),
+                "Code Mode must not mount {path}: {mounts:?}"
+            );
+        }
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount["mountPath"] == "/workspace")
+        );
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount["mountPath"] == "/firewall-certs")
+        );
+        let volumes = pod["volumes"].as_array().expect("volumes");
+        for name in ["tools-root", "tools-github-token", "state"] {
+            assert!(
+                !volumes.iter().any(|volume| volume["name"] == name),
+                "Code Mode must not get the {name} volume: {volumes:?}"
+            );
+        }
+
+        // Session sandboxes keep the tools bootstrap, state PVC, and tools env.
+        let session = build(false);
+        let pod = &session["spec"]["podTemplate"]["spec"];
+        assert!(
+            pod["initContainers"]
+                .as_array()
+                .is_some_and(|init| !init.is_empty())
+        );
+        assert_eq!(
+            session["spec"]["volumeClaimTemplates"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let container = &pod["containers"][0];
+        assert!(
+            container["env"]
+                .as_array()
+                .is_some_and(|env| env.iter().any(|entry| entry["name"] == "TOOL_DIRS"))
+        );
+        let mounts = container["volumeMounts"].as_array().expect("mounts");
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount["mountPath"] == "/app/tools")
+        );
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount["mountPath"] == "/home/agent/state")
         );
     }
 }

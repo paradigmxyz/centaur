@@ -326,7 +326,8 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
     CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
-    cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server
+    cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server \
+    && cargo +stable install --locked --path crates/centaur-codemode --root /home/agent/harness-server
 
 # ==============================================================================
 # Final thin stage: only frequently-changing local files below.
@@ -349,6 +350,8 @@ COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
 RUN python3 -m compileall -q /opt/centaur/centaur_sdk
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
+# Code Mode connectors; the chart's CENTAUR_CODEMODE_CONNECTORS lists this root first.
+COPY --link --chown=1001:1001 connectors/ /opt/centaur/connectors/
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/claude-credentials.default.json
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
@@ -357,7 +360,6 @@ COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
 COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth
-COPY --link --chmod=755 services/sandbox/centaur_artifact_get.py /usr/local/bin/centaur-artifact-get
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
@@ -368,6 +370,7 @@ COPY --link --chmod=755 services/sandbox/configure_codex_models.py /usr/local/bi
 COPY --link --chmod=644 services/sandbox/codex-base-instructions.md /etc/centaur/codex-base-instructions.md
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
+COPY --link --chmod=755 --from=harness-server-build /home/agent/harness-server/bin/centaur-codemode /usr/local/bin/centaur-codemode
 
 USER agent
 WORKDIR /home/agent

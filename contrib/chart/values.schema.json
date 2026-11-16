@@ -214,6 +214,7 @@
               "toolsSubdir": { "type": "string" },
               "workflowsSubdir": { "type": "string" },
               "skillsSubdir": { "type": "string" },
+              "connectorsSubdir": { "type": "string" },
               "promptPath": { "type": "string" },
               "personasSubdir": { "type": "string" }
             },
@@ -296,6 +297,18 @@
           "properties": {
             "captureTranscripts": { "type": "boolean" },
             "captureToolTraces": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "codemode": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" }
           }
         }
       }

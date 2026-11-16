@@ -2128,8 +2128,7 @@ class SlackClient:
     ) -> dict[str, Any]:
         """Stream a Slack file through the Centaur API server Slack proxy to disk.
 
-        Defaults to ``/tmp/downloads`` so MCP callers can fetch the result with
-        ``centaur_artifact_get``. Returns the written path plus filename,
+        Defaults to ``/tmp/downloads``. Returns the written path plus filename,
         content type, and size.
         """
         normalized_file_id = self._normalize_file_id(file_id)

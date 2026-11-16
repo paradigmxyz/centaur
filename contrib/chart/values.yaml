@@ -250,10 +250,11 @@ overlay:
 # toolServer.extraSources are mapped into this shape for compatibility.
 #
 # Subdirs default to the conventional layout — toolsSubdir: tools,
-# workflowsSubdir: workflows, skillsSubdir: .agents/skills — so most sources
-# only need `repo`; set `ref` to a branch, tag, or commit when you do not want
-# the repo's default branch. Directories missing from a repo are skipped at
-# runtime. Set a subdir to "" to explicitly disable that surface for a source.
+# workflowsSubdir: workflows, skillsSubdir: .agents/skills,
+# connectorsSubdir: connectors — so most sources only need `repo`; set `ref` to
+# a branch, tag, or commit when you do not want the repo's default branch.
+# Directories missing from a repo are skipped at runtime. Set a subdir to ""
+# to explicitly disable that surface for a source.
 # Repo visibility defaults to private; set visibility: public only for repos
 # safe to expose to principals with sandbox_repo_cache=public.
 overlays:
@@ -269,6 +270,7 @@ overlays:
   #   visibility: private
   #   toolsSubdir: ""
   #   skillsSubdir: ""
+  #   connectorsSubdir: ""
 
 codex:
   # Operator-defined OpenAI-compatible Responses providers. Each provider is
@@ -298,6 +300,15 @@ codex:
   #           defaultReasoning: high
   #           reasoningAliases: {max: high}
   customProviders: {}
+
+# Code Mode runtime image. api-rs builds one sandbox per principal from this
+# slim image when `apiRs.mcpV2Enabled` is true; it must be set then. Pull policy
+# and pull secrets reuse `sandbox.image.pullPolicy` and
+# `global.imagePullSecrets`. Rendered as CENTAUR_CODEMODE_IMAGE.
+codemode:
+  image:
+    repository: centaur-codemode
+    tag: latest
 
 sandbox:
   image:
@@ -655,7 +666,14 @@ apiRs:
   # incompatible with preapproved mode. Internal workflow/MCP sessions use
   # separate principal-provisioning paths.
   sessionPrincipalAdmission: automatic
-  # Expose the experimental centaur MCP dispatcher (currently action=list).
+  # Serve /mcp through Code Mode: a centaur-codemode sandbox per principal,
+  # with api-rs forwarding catalog search/load and centaur_execute over HTTP.
+  # A principal normally has one sandbox; with several api-rs replicas (or
+  # during a rolling deploy) it may briefly have more, which is harmless.
+  # Readiness is the sandbox pod's own readiness probe; api-rs neither polls the
+  # sandbox nor waits for one shared instance. false serves one MCP tool per
+  # Centaur CLI tool.
+  # Rendered as CENTAUR_MCP_V2_ENABLED.
   mcpV2Enabled: false
   sandboxReadyTimeoutSecs: 90
   # Warm pool of default-harness sandboxes with full repo-cache access.

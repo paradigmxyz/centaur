@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -13,10 +13,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_sandbox_core::SandboxError;
 use centaur_session_runtime::{
-    SessionRuntime, SessionRuntimeError, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy,
-    ToolHostInvocation, ToolHostToolFilter, tool_host_thread_key,
+    SessionRuntime, ToolHostCallInput, ToolHostCallOutput, ToolHostCallPolicy, ToolHostInvocation,
+    ToolHostToolFilter, tool_host_thread_key,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
@@ -32,7 +31,7 @@ use crate::{
     tool_discovery::{DiscoveredTool, ToolDiscoveryConfig, discover_tool_catalog},
 };
 
-mod search;
+mod codemode;
 
 #[cfg(test)]
 pub(crate) static MCP_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -86,30 +85,23 @@ struct CentaurToolMcpArguments {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CentaurCatalogSearchArguments {
-    query: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CentaurCatalogLoadArguments {
     tool: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CentaurToolCallArguments {
-    tool: String,
-    argv: Vec<String>,
+struct CentaurCodemodeSearchArguments {
+    query: String,
+    #[serde(default)]
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CentaurArtifactGetArguments {
-    path: String,
+struct CentaurCodemodeExecuteArguments {
+    code: String,
 }
-
-const MCP_ARTIFACT_MAX_BYTES: usize = 10 * 1024 * 1024;
 
 struct McpToolCallOutcome {
     result: Value,
@@ -147,11 +139,15 @@ pub(crate) async fn mcp_post(
     };
 
     let result = match request.method.as_str() {
-        "initialize" => mcp_initialize_result(&request.params),
+        "initialize" => {
+            prewarm_mcp_codemode(&state, &principal).await;
+            mcp_initialize_result(&request.params)
+        }
         "ping" => json!({}),
         "tools/list" => {
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
             let policy = mcp_tool_host_call_policy(&state, &principal).await?;
+            prewarm_mcp_codemode_policy(&state, &policy);
             let filter = parse_sandbox_tool_filter(policy.tool_filter());
             json!({
                 "tools": mcp_tool_entries(&filter)?,
@@ -161,11 +157,15 @@ pub(crate) async fn mcp_post(
             ensure_mcp_scope(&principal.scopes, "mcp:tools")?;
             let params = serde_json::from_value::<McpToolCallParams>(request.params.clone())
                 .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-            if mcp_v2_tool_name(&params.name) && !mcp_v2_enabled() {
+            // Code Mode tool names do not exist on the per-tool CLI surface.
+            if !mcp_codemode_enabled() && mcp_codemode_tool_name(&params.name) {
                 return Ok(mcp_json_error(id, -32602, "unknown tool"));
             }
             let tool = if mcp_builtin_tool_name(&params.name) {
                 None
+            } else if mcp_codemode_enabled() {
+                // Code Mode replaces the per-tool CLI surface entirely.
+                return Ok(mcp_json_error(id, -32602, "unknown tool"));
             } else {
                 let policy = mcp_tool_host_call_policy(&state, &principal).await?;
                 let filter = parse_sandbox_tool_filter(policy.tool_filter());
@@ -222,17 +222,14 @@ async fn mcp_tool_call_result(
             mcp_v1_tool_result(state, principal, tool, params.arguments, policy).await
         } else {
             match params.name.as_str() {
-                "centaur_catalog_search" => {
-                    mcp_v2_catalog_search_result(state, principal, params.arguments).await
+                "centaur_catalog_search" if mcp_codemode_enabled() => {
+                    mcp_codemode_search_result(state, principal, params.arguments).await
                 }
-                "centaur_catalog_load" => {
-                    mcp_v2_catalog_load_result(state, principal, params.arguments).await
+                "centaur_catalog_load" if mcp_codemode_enabled() => {
+                    mcp_codemode_load_result(state, principal, params.arguments).await
                 }
-                "centaur_tool_call" => {
-                    mcp_v2_tool_call_result(state, principal, params.arguments).await
-                }
-                "centaur_artifact_get" => {
-                    mcp_artifact_get_result(state, principal, params.arguments).await
+                "centaur_execute" => {
+                    mcp_codemode_execute_result(state, principal, params.arguments).await
                 }
                 "centaur_whoami" => mcp_whoami_result(principal, params.arguments).map(|result| {
                     McpToolCallOutcome {
@@ -324,30 +321,6 @@ fn mcp_whoami_tool() -> Value {
     })
 }
 
-fn mcp_artifact_get_tool() -> Value {
-    json!({
-        "name": "centaur_artifact_get",
-        "description": concat!(
-            "Retrieve a file created by a Centaur tool in the sandbox. Pass a relative path beneath ",
-            "/tmp/downloads. Subdirectories and symlinks are allowed when the opened regular file ",
-            "resolves within that directory. Files may be no larger than 10 MiB. Returns the file ",
-            "as an embedded MCP resource."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "required": ["path"],
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "A relative file path within /tmp/downloads.",
-                },
-            },
-            "additionalProperties": false,
-        },
-    })
-}
-
 fn mcp_initialize_result(params: &Value) -> Value {
     let mut result = json!({
         "protocolVersion": requested_mcp_protocol_version(params),
@@ -361,35 +334,35 @@ fn mcp_initialize_result(params: &Value) -> Value {
             "version": env!("CARGO_PKG_VERSION"),
         },
     });
-    if mcp_v2_enabled() {
+    if mcp_codemode_enabled() {
         result["instructions"] = Value::String(
             concat!(
-                "Centaur has a large tool catalog that changes dynamically. Representative ",
-                "tools include `company_context`, `slack`, `gsuite`, `linear`, `granola`, ",
-                "`websearch`, `figma`, `notion`, `dune`, `allium`, `grafana`, and `sentry`. ",
-                "Availability varies by Console policy, and these names are capability hints, ",
-                "not the complete catalog. Whenever you determine that you need to find or ",
-                "choose a tool, call `centaur_catalog_search`; do not infer catalog availability ",
-                "from the short MCP bootstrap tool list. In particular, search when a request ",
-                "involves an external service, private or current data, an external action, or ",
-                "a service URL. Load the selected tool with `centaur_catalog_load`, follow its ",
-                "help and skill instructions, then invoke it with `centaur_tool_call`. When the ",
-                "user needs a downloadable artifact, instruct the producing tool to write it ",
-                "beneath `/tmp/downloads`, then immediately call `centaur_artifact_get` with its ",
-                "relative path. Files in `/tmp/downloads` are transient and may not survive a ",
-                "sandbox pause, restart, or replacement."
+                "Centaur Code Mode exposes a large, dynamic connector catalog through a few tools. ",
+                "Whenever a task involves an external service, private or current data, an external ",
+                "action, or a service URL, first call `centaur_catalog_search` with the relevant ",
+                "service names, URLs, domains and action; results include each function's ",
+                "signature. Load a connector's full TypeScript declarations with ",
+                "`centaur_catalog_load` when the one-line signature is not enough. Then call ",
+                "connectors by writing JavaScript for `centaur_execute`: `code` is the body of an ",
+                "async function, call connectors as ",
+                "`await tools.<connector>.<function>(args)`, run independent calls together with ",
+                "`Promise.all` or `Promise.allSettled` in one cell instead of several tool calls, ",
+                "and `return` the JSON-serializable value you want back. `console.log` output is ",
+                "returned with the result. A cell has no `fetch`, no module imports, no file access ",
+                "and no state between calls, and is limited to 120 s, 1000 calls and 8 concurrent ",
+                "calls."
             )
             .to_owned(),
         );
+        return result;
     }
     result
 }
 
 fn mcp_builtin_tools() -> Vec<Value> {
     let mut tools = Vec::new();
-    if mcp_v2_enabled() {
-        tools.extend(mcp_v2_tools());
-        tools.push(mcp_artifact_get_tool());
+    if mcp_codemode_enabled() {
+        tools.extend(mcp_codemode_tools());
     }
     tools.push(mcp_whoami_tool());
     tools
@@ -397,34 +370,36 @@ fn mcp_builtin_tools() -> Vec<Value> {
 
 fn mcp_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
     let mut tools = mcp_builtin_tools();
-    if !mcp_v2_enabled() {
+    if !mcp_codemode_enabled() {
         tools.extend(mcp_v1_tool_entries(filter)?);
     }
     Ok(tools)
 }
 
-fn mcp_v2_tool_name(name: &str) -> bool {
+fn mcp_builtin_tool_name(name: &str) -> bool {
+    if mcp_codemode_enabled() {
+        return mcp_codemode_tool_name(name);
+    }
+    name == "centaur_whoami"
+}
+
+fn mcp_codemode_tool_name(name: &str) -> bool {
     matches!(
         name,
-        "centaur_catalog_search"
-            | "centaur_catalog_load"
-            | "centaur_tool_call"
-            | "centaur_artifact_get"
+        "centaur_catalog_search" | "centaur_catalog_load" | "centaur_execute" | "centaur_whoami"
     )
 }
 
-fn mcp_builtin_tool_name(name: &str) -> bool {
-    mcp_v2_tool_name(name) || matches!(name, "centaur_artifact_get" | "centaur_whoami")
-}
-
-fn mcp_v2_tools() -> Vec<Value> {
+fn mcp_codemode_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "centaur_catalog_search",
             "description": concat!(
-                "Search Centaur's live tool catalog. Use this when a request involves an external ",
-                "service, private or current data, an external action, or a service URL. Search ",
-                "terms should include relevant service names, URLs, domains, and the requested action."
+                "Search Centaur's live connector catalog. The catalog is large and dynamic, so ",
+                "search whenever a task involves an external service, private or current data, an ",
+                "external action, or a service URL; include service names, URLs, domains and the ",
+                "requested action as terms. Results include each function's signature. Load a ",
+                "connector's full TypeScript declarations with `centaur_catalog_load` when needed."
             ),
             "inputSchema": {
                 "type": "object",
@@ -432,12 +407,22 @@ fn mcp_v2_tools() -> Vec<Value> {
                 "additionalProperties": false,
                 "properties": {
                     "query": {"type": "string", "minLength": 1},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Maximum number of results (default 8).",
+                    },
                 },
             },
         }),
         json!({
             "name": "centaur_catalog_load",
-            "description": "Load a tool found by centaur_catalog_search. Returns its current description and CLI help. Read and follow the help before calling the tool.",
+            "description": concat!(
+                "Load a connector's full TypeScript declarations and JSDoc, for a connector found ",
+                "with `centaur_catalog_search`. Use it when the one-line signature from search is ",
+                "not enough to call the connector correctly."
+            ),
             "inputSchema": {
                 "type": "object",
                 "required": ["tool"],
@@ -448,18 +433,25 @@ fn mcp_v2_tools() -> Vec<Value> {
             },
         }),
         json!({
-            "name": "centaur_tool_call",
-            "description": "Call a tool after loading it with centaur_catalog_load. Arguments are passed literally to the tool CLI without shell expansion.",
+            "name": "centaur_execute",
+            "description": concat!(
+                "Run one JavaScript cell in the principal's Code Mode sandbox. `code` is the body of ",
+                "an async function: call connectors as `await tools.<connector>.<function>(args)`, ",
+                "run independent calls together with `Promise.all` or `Promise.allSettled` in the ",
+                "same cell instead of several tool calls, and `return` a JSON-serializable value, ",
+                "which becomes the result. `console.log` output is returned too. There is no ",
+                "`fetch`, no module imports, no file access and no state between cells. A cell is ",
+                "limited to 120 s, 1000 calls and 8 concurrent calls."
+            ),
             "inputSchema": {
                 "type": "object",
-                "required": ["tool", "argv"],
+                "required": ["code"],
                 "additionalProperties": false,
                 "properties": {
-                    "tool": {"type": "string", "minLength": 1},
-                    "argv": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "CLI arguments as separate tokens, preserving spaces within values.",
+                    "code": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Async function body; `return` value is the cell result.",
                     },
                 },
             },
@@ -467,126 +459,81 @@ fn mcp_v2_tools() -> Vec<Value> {
     ]
 }
 
-fn invalid_mcp_v2_arguments(error: impl std::fmt::Display) -> McpToolCallOutcome {
+fn invalid_mcp_arguments(error: impl std::fmt::Display) -> McpToolCallOutcome {
     McpToolCallOutcome {
         result: mcp_text_result(format!("invalid arguments: {error}"), true),
         timed_out: false,
     }
 }
 
-async fn mcp_v2_catalog_search_result(
+async fn mcp_codemode_search_result(
     state: &AppState,
     principal: &McpPrincipal,
     arguments: Value,
 ) -> Result<McpToolCallOutcome, ApiError> {
-    let args = match serde_json::from_value::<CentaurCatalogSearchArguments>(arguments) {
+    let args = match serde_json::from_value::<CentaurCodemodeSearchArguments>(arguments) {
         Ok(args) if !args.query.trim().is_empty() => args,
-        Ok(_) => return Ok(invalid_mcp_v2_arguments("query must not be blank")),
-        Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
+        Ok(_) => return Ok(invalid_mcp_arguments("query must not be blank")),
+        Err(error) => return Ok(invalid_mcp_arguments(error)),
     };
     record_mcp_tool_method(&Span::current(), "centaur_catalog_search", "search");
-    let policy = mcp_tool_host_call_policy(state, principal).await?;
-    let result = mcp_v2_catalog_search(
-        &parse_sandbox_tool_filter(policy.tool_filter()),
-        &args.query,
-    )?;
-    Ok(McpToolCallOutcome {
-        result,
-        timed_out: false,
-    })
+    mcp_codemode_result(
+        state,
+        principal,
+        codemode::CodemodeRequest::Search {
+            query: args.query,
+            limit: args.limit.unwrap_or(8).clamp(1, 50),
+        },
+    )
+    .await
 }
 
-async fn mcp_v2_catalog_load_result(
+async fn mcp_codemode_load_result(
     state: &AppState,
     principal: &McpPrincipal,
     arguments: Value,
 ) -> Result<McpToolCallOutcome, ApiError> {
     let args = match serde_json::from_value::<CentaurCatalogLoadArguments>(arguments) {
         Ok(args) if !args.tool.trim().is_empty() => args,
-        Ok(_) => return Ok(invalid_mcp_v2_arguments("tool must not be blank")),
-        Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
+        Ok(_) => return Ok(invalid_mcp_arguments("tool must not be blank")),
+        Err(error) => return Ok(invalid_mcp_arguments(error)),
     };
     record_mcp_tool_method(&Span::current(), "centaur_catalog_load", "load");
-    let policy = mcp_tool_host_call_policy(state, principal).await?;
-    let filter = parse_sandbox_tool_filter(policy.tool_filter());
-    let Some(tool) = mcp_find_centaur_tool(&args.tool, &filter)? else {
-        return Ok(unknown_mcp_v2_tool(&args.tool));
-    };
-    Span::current().record("tool.name", tool.name.as_str());
-    let output = run_mcp_tool_host(
-        state.runtime()?,
+    mcp_codemode_result(
+        state,
         principal,
-        &tool,
-        ToolHostInvocation::V2 {
-            argv: vec!["--help".to_owned()],
-        },
-        policy,
+        codemode::CodemodeRequest::Load { tool: args.tool },
     )
-    .await?;
-    mcp_v2_load_output_result(&tool, output)
+    .await
 }
 
-async fn mcp_v2_tool_call_result(
+async fn mcp_codemode_execute_result(
     state: &AppState,
     principal: &McpPrincipal,
     arguments: Value,
 ) -> Result<McpToolCallOutcome, ApiError> {
-    let args = match serde_json::from_value::<CentaurToolCallArguments>(arguments) {
-        Ok(args)
-            if !args.tool.trim().is_empty() && !args.argv.iter().any(|arg| arg.contains('\0')) =>
-        {
-            args
-        }
-        Ok(args) if args.tool.trim().is_empty() => {
-            return Ok(invalid_mcp_v2_arguments("tool must not be blank"));
-        }
-        Ok(_) => {
-            return Ok(invalid_mcp_v2_arguments(
-                "argv must not contain NUL characters",
-            ));
-        }
-        Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
+    let args = match serde_json::from_value::<CentaurCodemodeExecuteArguments>(arguments) {
+        Ok(args) if !args.code.trim().is_empty() => args,
+        Ok(_) => return Ok(invalid_mcp_arguments("code must not be blank")),
+        Err(error) => return Ok(invalid_mcp_arguments(error)),
     };
-    record_mcp_tool_method(&Span::current(), "centaur_tool_call", "call");
+    record_mcp_tool_method(&Span::current(), "centaur_execute", "exec");
+    mcp_codemode_result(
+        state,
+        principal,
+        codemode::CodemodeRequest::Exec { code: args.code },
+    )
+    .await
+}
+
+async fn mcp_codemode_result(
+    state: &AppState,
+    principal: &McpPrincipal,
+    request: codemode::CodemodeRequest,
+) -> Result<McpToolCallOutcome, ApiError> {
     let policy = mcp_tool_host_call_policy(state, principal).await?;
-    let filter = parse_sandbox_tool_filter(policy.tool_filter());
-    let Some(tool) = mcp_find_centaur_tool(&args.tool, &filter)? else {
-        return Ok(unknown_mcp_v2_tool(&args.tool));
-    };
-    Span::current().record("tool.name", tool.name.as_str());
-    run_mcp_v2_tool(state.runtime()?, principal, &tool, args.argv, policy).await
-}
-
-fn unknown_mcp_v2_tool(tool: &str) -> McpToolCallOutcome {
-    McpToolCallOutcome {
-        result: mcp_text_result(
-            format!(
-                "Unknown or unavailable tool {tool}. Use centaur_catalog_search to discover available tools."
-            ),
-            true,
-        ),
-        timed_out: false,
-    }
-}
-
-fn mcp_v2_catalog_search(filter: &SandboxToolFilter, query: &str) -> Result<Value, ApiError> {
-    mcp_v2_catalog_result(search::search(mcp_centaur_tool_catalog(filter)?, query))
-}
-
-fn mcp_v2_catalog_result(tools: Vec<DiscoveredTool>) -> Result<Value, ApiError> {
-    let tools = tools
-        .into_iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "description": tool.description,
-            })
-        })
-        .collect::<Vec<_>>();
-    let content = json!({"tools": tools});
-    let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, false);
-    result["structuredContent"] = content;
-    Ok(result)
+    let runtime = state.runtime()?;
+    codemode::call(&runtime, &principal.principal_id, &policy, request).await
 }
 
 fn mcp_v1_tool_entries(filter: &SandboxToolFilter) -> Result<Vec<Value>, ApiError> {
@@ -793,6 +740,34 @@ async fn mcp_tool_host_call_policy(
     Ok(policy)
 }
 
+/// Warm a principal's Code Mode sandbox while the client is still parsing the
+/// bootstrap response. Best effort: never fail the request.
+async fn prewarm_mcp_codemode(state: &AppState, principal: &McpPrincipal) {
+    if !mcp_codemode_enabled() {
+        return;
+    }
+    match mcp_tool_host_call_policy(state, principal).await {
+        Ok(policy) => prewarm_mcp_codemode_policy(state, &policy),
+        Err(error) => tracing::debug!(
+            error = %error,
+            "skipping MCP Code Mode prewarm: the call policy is not available yet"
+        ),
+    }
+}
+
+fn prewarm_mcp_codemode_policy(state: &AppState, policy: &ToolHostCallPolicy) {
+    if !mcp_codemode_enabled() {
+        return;
+    }
+    match state.runtime() {
+        Ok(runtime) => runtime.prewarm_codemode(policy.clone()),
+        Err(error) => tracing::debug!(
+            error = %error,
+            "skipping MCP Code Mode prewarm: the runtime is not ready yet"
+        ),
+    }
+}
+
 fn parse_sandbox_tool_filter(filter: &ToolHostToolFilter) -> SandboxToolFilter {
     SandboxToolFilter {
         allowlist: filter.allowlist.as_deref().and_then(split_tool_list),
@@ -848,44 +823,6 @@ fn mcp_whoami_result(principal: &McpPrincipal, arguments: Value) -> Result<Value
         }))?,
         false,
     ))
-}
-
-async fn mcp_artifact_get_result(
-    state: &AppState,
-    principal: &McpPrincipal,
-    arguments: Value,
-) -> Result<McpToolCallOutcome, ApiError> {
-    let args = match serde_json::from_value::<CentaurArtifactGetArguments>(arguments) {
-        Ok(args) if !args.path.trim().is_empty() => args,
-        Ok(_) => return Ok(invalid_mcp_v2_arguments("path must not be blank")),
-        Err(error) => return Ok(invalid_mcp_v2_arguments(error)),
-    };
-    record_mcp_tool_method(&Span::current(), "centaur_artifact_get", "get");
-    let output = match state
-        .runtime()?
-        .read_sandbox_artifact(&principal.principal_id, &args.path, MCP_ARTIFACT_MAX_BYTES)
-        .await
-    {
-        Ok(output) => output,
-        Err(error) => return mcp_artifact_get_error_result(error),
-    };
-    record_mcp_tool_correlation(&Span::current(), None, None, Some(&output.sandbox_id));
-    mcp_artifact_get_output_result(&args.path, output.contents)
-}
-
-fn mcp_artifact_get_error_result(
-    error: SessionRuntimeError,
-) -> Result<McpToolCallOutcome, ApiError> {
-    match error {
-        SessionRuntimeError::BadRequest(message)
-        | SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(message)) => {
-            Ok(McpToolCallOutcome {
-                result: mcp_text_result(format!("artifact retrieval failed: {message}"), true),
-                timed_out: false,
-            })
-        }
-        error => Err(error.into()),
-    }
 }
 
 async fn mcp_v1_tool_result(
@@ -1033,26 +970,7 @@ async fn run_mcp_v1_tool(
     mcp_v1_output_result(tool, &method, output)
 }
 
-// V2 runs tool CLIs and preserves both output streams and exit status.
-async fn run_mcp_v2_tool(
-    runtime: SessionRuntime,
-    principal: &McpPrincipal,
-    tool: &DiscoveredTool,
-    argv: Vec<String>,
-    policy: ToolHostCallPolicy,
-) -> Result<McpToolCallOutcome, ApiError> {
-    let output = run_mcp_tool_host(
-        runtime,
-        principal,
-        tool,
-        ToolHostInvocation::V2 { argv },
-        policy,
-    )
-    .await?;
-    mcp_v2_run_output_result(output)
-}
-
-// Both MCP versions share principal-bound sandbox execution and tracing.
+// The tool host runs every MCP call inside the principal's sandbox.
 async fn run_mcp_tool_host(
     runtime: SessionRuntime,
     principal: &McpPrincipal,
@@ -1160,114 +1078,6 @@ fn mcp_v1_output_result(
             timed_out: false,
         }),
     }
-}
-
-fn mcp_v2_run_output_result(output: ToolHostCallOutput) -> Result<McpToolCallOutcome, ApiError> {
-    let is_error = output.timed_out || output.exit_status != Some(0);
-    let content = json!({
-        "stdout": output.stdout,
-        "stderr": output.stderr,
-        "exit_status": output.exit_status,
-        "timed_out": output.timed_out,
-    });
-    let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, is_error);
-    result["structuredContent"] = content;
-    Ok(McpToolCallOutcome {
-        result,
-        timed_out: output.timed_out,
-    })
-}
-
-fn mcp_v2_load_output_result(
-    tool: &DiscoveredTool,
-    output: ToolHostCallOutput,
-) -> Result<McpToolCallOutcome, ApiError> {
-    let is_error = output.timed_out || output.exit_status != Some(0);
-    let content = json!({
-        "tool": tool.name,
-        "description": tool.description,
-        "help": output.stdout,
-        "stderr": output.stderr,
-        "exit_status": output.exit_status,
-        "timed_out": output.timed_out,
-    });
-    let mut result = mcp_text_result(serde_json::to_string_pretty(&content)?, is_error);
-    result["structuredContent"] = content;
-    Ok(McpToolCallOutcome {
-        result,
-        timed_out: output.timed_out,
-    })
-}
-
-fn mcp_artifact_mime_type(artifact_path: &str) -> &'static str {
-    match Path::new(artifact_path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("pdf") => "application/pdf",
-        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        Some("csv") => "text/csv",
-        Some("html" | "htm") => "text/html",
-        Some("json") => "application/json",
-        Some("md" | "markdown") => "text/markdown",
-        Some("txt") => "text/plain",
-        Some("gif") => "image/gif",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("png") => "image/png",
-        Some("svg") => "image/svg+xml",
-        Some("webp") => "image/webp",
-        Some("zip") => "application/zip",
-        _ => "application/octet-stream",
-    }
-}
-
-fn mcp_artifact_get_output_result(
-    artifact_path: &str,
-    contents: Vec<u8>,
-) -> Result<McpToolCallOutcome, ApiError> {
-    let data_base64 = general_purpose::STANDARD.encode(&contents);
-
-    let encoded_path = artifact_path
-        .split('/')
-        .map(|component| urlencoding::encode(component).into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
-    let uri = format!("file:///tmp/downloads/{encoded_path}");
-    let filename = Path::new(artifact_path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(artifact_path);
-    let metadata = json!({
-        "path": artifact_path,
-        "filename": filename,
-        "mime_type": mcp_artifact_mime_type(artifact_path),
-        "size_bytes": contents.len(),
-    });
-    Ok(McpToolCallOutcome {
-        result: json!({
-            "content": [
-                {
-                    "type": "resource",
-                    "resource": {
-                        "uri": uri,
-                        "mimeType": metadata["mime_type"],
-                        "blob": data_base64,
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&metadata)?,
-                },
-            ],
-            "structuredContent": metadata,
-            "isError": false,
-        }),
-        timed_out: false,
-    })
 }
 
 fn tool_host_error_context(output: &ToolHostCallOutput) -> String {
@@ -1606,7 +1416,12 @@ fn mcp_public_url_env() -> Option<String> {
     static_env(&CELL, "CENTAUR_MCP_PUBLIC_URL")
 }
 
-fn mcp_v2_enabled() -> bool {
+/// Which tools `/mcp` serves. The surfaces are mutually exclusive: `true`
+/// serves Code Mode (catalog search and load over Code Mode connectors, plus
+/// `centaur_execute` for JavaScript cells, in one sandbox per principal);
+/// anything else serves one MCP tool per Centaur CLI tool, plus
+/// `centaur_whoami`.
+pub fn mcp_codemode_enabled() -> bool {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
     static_env(&CELL, "CENTAUR_MCP_V2_ENABLED")
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
@@ -2182,7 +1997,7 @@ def search(query, limit=20):
     }
 
     #[test]
-    fn mcp_v2_feature_flag_gates_discovery_and_cached_calls() {
+    fn mcp_v2_flag_selects_the_codemode_surface() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
             ("CENTAUR_JWT_SIGNING_SECRET", "test-secret"),
@@ -2190,22 +2005,9 @@ def search(query, limit=20):
             ("CENTAUR_CONSOLE_PUBLIC_URL", "http://localhost:3001"),
             ("CENTAUR_MCP_V2_ENABLED", ""),
         ]);
-        // SAFETY: ENV_LOCK is held, and the guard restores the original value.
-        unsafe { env::remove_var("CENTAUR_MCP_V2_ENABLED") };
-        assert!(!mcp_v2_enabled());
+        assert!(!mcp_codemode_enabled());
 
-        let state = AppState::unready(crate::auth::ApiAuthConfig::testing("test-secret"));
-        let token = test_jwt(
-            "test-secret",
-            json!({
-                "iss": "http://localhost:3001",
-                "aud": "http://localhost:3000/mcp",
-                "exp": OffsetDateTime::now_utc().unix_timestamp() + 3600,
-                "principal_id": "prn_test",
-                "scope": "mcp:tools",
-            }),
-        );
-        for (flag, enabled) in [
+        for (flag, codemode) in [
             ("", false),
             ("false", false),
             ("invalid", false),
@@ -2213,76 +2015,40 @@ def search(query, limit=20):
             (" TRUE ", true),
         ] {
             let _flag = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", flag)]);
-            let names = mcp_builtin_tools()
-                .into_iter()
-                .map(|tool| tool["name"].as_str().unwrap().to_owned())
-                .collect::<Vec<_>>();
+            assert_eq!(mcp_codemode_enabled(), codemode, "flag: {flag:?}");
             assert_eq!(
-                names,
-                if enabled {
+                builtin_tool_names(),
+                if codemode {
                     vec![
                         "centaur_catalog_search",
                         "centaur_catalog_load",
-                        "centaur_tool_call",
-                        "centaur_artifact_get",
+                        "centaur_execute",
                         "centaur_whoami",
                     ]
                 } else {
                     vec!["centaur_whoami"]
                 }
             );
+
             let initialize = mcp_initialize_result(&json!({}));
-            if enabled {
+            if codemode {
                 let instructions = initialize["instructions"].as_str().unwrap();
-                assert!(instructions.contains("write it beneath `/tmp/downloads`"));
-                assert!(instructions.contains("`centaur_artifact_get`"));
-                assert!(instructions.contains("transient"));
+                for expected in [
+                    "centaur_execute",
+                    "await tools.<connector>.<function>(args)",
+                ] {
+                    assert!(instructions.contains(expected), "missing {expected}");
+                }
             } else {
                 assert!(initialize.get("instructions").is_none());
-            }
-
-            // Invalid arguments prove enabled requests reach the dispatcher
-            // without requiring a runtime. Disabled cached calls fail earlier.
-            let response = mcp_post(
-                State(state.clone()),
-                mcp_auth_headers(&token),
-                Json(McpJsonRpcRequest {
-                    jsonrpc: Some("2.0".to_owned()),
-                    id: Some(json!(1)),
-                    method: "tools/call".to_owned(),
-                    params: json!({"name": "centaur_catalog_search", "arguments": {}}),
-                }),
-            )
-            .now_or_never()
-            .unwrap()
-            .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .now_or_never()
-                .unwrap()
-                .unwrap();
-            let body: Value = serde_json::from_slice(&body).unwrap();
-            if enabled {
-                assert!(mcp_result_is_error(&body["result"]));
-                assert!(
-                    body["result"]["content"][0]["text"]
-                        .as_str()
-                        .unwrap()
-                        .contains("invalid arguments")
-                );
-            } else {
-                assert_eq!(
-                    body["error"],
-                    json!({"code": -32602, "message": "unknown tool"})
-                );
             }
         }
     }
 
     #[test]
-    fn mcp_v2_hides_legacy_tools_from_discovery_but_keeps_them_callable() {
+    fn mcp_codemode_hides_v1_tools_from_discovery_but_keeps_them_addressable() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let temp = temp_dir("centaur-api-rs-mcp-v2-legacy-tools");
+        let temp = temp_dir("centaur-api-rs-mcp-codemode-v1-tools");
         let package_dir = temp.join("demo");
         fs::create_dir_all(&package_dir).unwrap();
         fs::write(
@@ -2330,12 +2096,13 @@ def search(query, limit=20):
             vec![
                 "centaur_catalog_search",
                 "centaur_catalog_load",
-                "centaur_tool_call",
-                "centaur_artifact_get",
+                "centaur_execute",
                 "centaur_whoami",
             ]
         );
 
+        // The v1 catalog stays discoverable for the tool host even when the
+        // MCP surface hides it.
         let tool = mcp_find_centaur_tool("demo", &filter).unwrap().unwrap();
         let action =
             prepare_mcp_v1_tool_call(&tool, json!({"method": "ping", "arguments": {}})).unwrap();
@@ -2345,7 +2112,7 @@ def search(query, limit=20):
     }
 
     #[test]
-    fn mcp_catalog_search_returns_sorted_summaries_and_current_policy() {
+    fn mcp_tool_catalog_follows_the_sandbox_policy() {
         let _lock = ENV_LOCK.lock().unwrap();
         let temp = temp_dir("centaur-api-rs-service-list");
         for name in ["beta", "alpha", "centaur"] {
@@ -2363,75 +2130,95 @@ def search(query, limit=20):
             "TOOL_DIRS",
             Box::leak(temp.display().to_string().into_boxed_str()),
         )]);
-        let expected = json!({"tools": [
-            {"name": "alpha", "description": "alpha service"},
-            {"name": "beta", "description": "beta service"},
-        ]});
-        let search = mcp_v2_catalog_search(&SandboxToolFilter::default(), "service").unwrap();
-        assert_eq!(search["structuredContent"], expected);
-        assert!(!mcp_result_is_error(&search));
-        let text: Value =
-            serde_json::from_str(search["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(text, expected);
+        let names = |filter: &SandboxToolFilter| {
+            mcp_centaur_tool_catalog(filter)
+                .unwrap()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&SandboxToolFilter::default()), vec!["alpha", "beta"]);
 
+        // The allowlist matches the project name, and the blocklist wins.
         let mut filter = SandboxToolFilter {
             allowlist: Some(BTreeSet::from(["alpha-tool".to_owned()])),
             blocklist: BTreeSet::new(),
         };
-        assert_eq!(
-            mcp_v2_catalog_search(&filter, "service").unwrap()["structuredContent"],
-            json!({"tools": [{"name": "alpha", "description": "alpha service"}]})
-        );
-        assert_eq!(
-            mcp_v2_catalog_search(&filter, "beta").unwrap()["structuredContent"],
-            json!({"tools": []})
-        );
-        assert!(mcp_find_centaur_tool("alpha", &filter).unwrap().is_some());
+        assert_eq!(names(&filter), vec!["alpha"]);
         assert!(mcp_find_centaur_tool("beta", &filter).unwrap().is_none());
+        filter.allowlist = Some(BTreeSet::from(["alpha".to_owned()]));
         filter.blocklist.insert("alpha".to_owned());
-        assert!(mcp_find_centaur_tool("alpha", &filter).unwrap().is_none());
-        assert_eq!(
-            mcp_v2_catalog_search(&filter, "alpha").unwrap()["structuredContent"],
-            json!({"tools": []})
-        );
+        assert!(names(&filter).is_empty());
         fs::remove_dir_all(temp).unwrap();
     }
 
+    fn builtin_tool_names() -> Vec<String> {
+        mcp_builtin_tools()
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
     #[test]
-    fn mcp_catalog_search_reads_catalog_updates_and_optional_descriptions() {
+    fn mcp_codemode_rejects_tools_outside_its_surface() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let temp = temp_dir("centaur-api-rs-service-list-refresh");
-        fs::create_dir_all(&temp).unwrap();
-        let _env = EnvGuard::set(&[(
-            "TOOL_DIRS",
-            Box::leak(temp.display().to_string().into_boxed_str()),
-        )]);
-        let filter = SandboxToolFilter::default();
-        assert_eq!(
-            mcp_v2_catalog_search(&filter, "demo").unwrap()["structuredContent"],
-            json!({"tools": []})
+        let _env = EnvGuard::set(&[
+            ("CENTAUR_JWT_SIGNING_SECRET", "test-secret"),
+            ("CENTAUR_MCP_PUBLIC_URL", "http://localhost:3000/mcp"),
+            ("CENTAUR_CONSOLE_PUBLIC_URL", "http://localhost:3001"),
+            ("CENTAUR_MCP_V2_ENABLED", "true"),
+        ]);
+        let state = AppState::unready(crate::auth::ApiAuthConfig::testing("test-secret"));
+        let token = test_jwt(
+            "test-secret",
+            json!({
+                "iss": "http://localhost:3001",
+                "aud": "http://localhost:3000/mcp",
+                "exp": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+                "principal_id": "prn_test",
+                "scope": "mcp:tools",
+            }),
         );
-        let package_dir = temp.join("demo");
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(
-            package_dir.join("pyproject.toml"),
-            "[project]\nname = \"demo\"\n\n[project.scripts]\ndemo = \"demo.cli:main\"\n",
-        )
-        .unwrap();
-        assert_eq!(
-            mcp_v2_catalog_search(&filter, "demo").unwrap()["structuredContent"],
-            json!({"tools": [{"name": "demo", "description": null}]})
-        );
-        fs::remove_dir_all(package_dir).unwrap();
-        assert_eq!(
-            mcp_v2_catalog_search(&filter, "demo").unwrap()["structuredContent"],
-            json!({"tools": []})
-        );
-        fs::remove_dir_all(temp).unwrap();
+        let call = |name: &str| {
+            let response = mcp_post(
+                State(state.clone()),
+                mcp_auth_headers(&token),
+                Json(McpJsonRpcRequest {
+                    jsonrpc: Some("2.0".to_owned()),
+                    id: Some(json!(1)),
+                    method: "tools/call".to_owned(),
+                    params: json!({"name": name, "arguments": {}}),
+                }),
+            )
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        };
+        let unknown = json!({"code": -32602, "message": "unknown tool"});
+        for name in [
+            "centaur_artifact_get",
+            "centaur_tool_call",
+            "demo",
+            "centaur_unknown",
+        ] {
+            assert_eq!(call(name)["error"], unknown, "tool: {name}");
+        }
+
+        // With Code Mode off, its names are not addressable either.
+        {
+            let _v1 = EnvGuard::set(&[("CENTAUR_MCP_V2_ENABLED", "false")]);
+            assert_eq!(call("centaur_execute")["error"], unknown);
+        }
     }
 
     #[test]
-    fn mcp_v2_tools_report_invalid_arguments_as_tool_errors() {
+    fn mcp_codemode_tools_validate_arguments_before_resolving_the_endpoint() {
         let state = AppState::unready(crate::auth::ApiAuthConfig::testing("test-secret"));
         let principal = McpPrincipal {
             token_id: "test-token".to_owned(),
@@ -2444,202 +2231,28 @@ def search(query, limit=20):
         };
         for (tool, arguments) in [
             ("search", Value::Null),
-            ("search", json!({})),
             ("search", json!({"query": " \n\t "})),
             ("search", json!({"query": "slack", "extra": true})),
-            ("load", Value::Null),
+            ("load", json!({})),
             ("load", json!({"tool": ""})),
-            ("call", Value::Null),
-            ("call", json!({"tool": "slack"})),
-            ("call", json!({"tool": "", "argv": []})),
-            ("call", json!({"tool": "slack", "argv": ["nul\0byte"]})),
+            ("execute", json!({"code": "  "})),
         ] {
-            let result = match tool {
-                "search" => mcp_v2_catalog_search_result(&state, &principal, arguments.clone())
-                    .now_or_never(),
-                "load" => {
-                    mcp_v2_catalog_load_result(&state, &principal, arguments.clone()).now_or_never()
+            let result =
+                match tool {
+                    "search" => mcp_codemode_search_result(&state, &principal, arguments.clone())
+                        .now_or_never(),
+                    "load" => mcp_codemode_load_result(&state, &principal, arguments.clone())
+                        .now_or_never(),
+                    _ => mcp_codemode_execute_result(&state, &principal, arguments.clone())
+                        .now_or_never(),
                 }
-                _ => mcp_v2_tool_call_result(&state, &principal, arguments.clone()).now_or_never(),
-            }
-            .unwrap()
-            .unwrap()
-            .result;
+                .unwrap()
+                .unwrap()
+                .result;
             assert!(
                 mcp_result_is_error(&result),
                 "tool: {tool}, arguments: {arguments}"
             );
         }
-    }
-
-    #[test]
-    fn mcp_cli_output_preserves_streams_and_reports_exit_and_timeout() {
-        for (stdout, stderr, exit_status, timed_out, is_error) in [
-            ("Usage: demo [OPTIONS]\n", "", Some(0), false, false),
-            ("{\"ok\":true}\n", "warning\n", Some(0), false, false),
-            ("", "", Some(0), false, false),
-            ("partial\n", "invalid option\n", Some(2), false, true),
-            ("partial\n", "timed out\n", None, true, true),
-            ("", "terminated\n", None, false, true),
-        ] {
-            let outcome = mcp_v2_run_output_result(ToolHostCallOutput {
-                request_id: "request".to_owned(),
-                execution_id: "execution".to_owned(),
-                sandbox_id: "sandbox".to_owned(),
-                stdout: stdout.to_owned(),
-                stderr: stderr.to_owned(),
-                exit_status,
-                timed_out,
-            })
-            .unwrap();
-            assert_eq!(outcome.timed_out, timed_out);
-            assert_eq!(mcp_result_is_error(&outcome.result), is_error);
-            let expected = json!({"stdout": stdout, "stderr": stderr, "exit_status": exit_status, "timed_out": timed_out});
-            assert_eq!(outcome.result["structuredContent"], expected);
-            assert_eq!(
-                serde_json::from_str::<Value>(
-                    outcome.result["content"][0]["text"].as_str().unwrap()
-                )
-                .unwrap(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn mcp_catalog_load_returns_current_tool_help() {
-        let tool = test_tool(PathBuf::from("/tools/demo"));
-        let outcome = mcp_v2_load_output_result(
-            &tool,
-            ToolHostCallOutput {
-                request_id: "request".to_owned(),
-                execution_id: "execution".to_owned(),
-                sandbox_id: "sandbox".to_owned(),
-                stdout: "Usage: demo [OPTIONS]\n".to_owned(),
-                stderr: String::new(),
-                exit_status: Some(0),
-                timed_out: false,
-            },
-        )
-        .unwrap();
-
-        assert!(!mcp_result_is_error(&outcome.result));
-        assert_eq!(outcome.result["structuredContent"]["tool"], "demo");
-        assert_eq!(
-            outcome.result["structuredContent"]["description"],
-            "Demo tool"
-        );
-        assert_eq!(
-            outcome.result["structuredContent"]["help"],
-            "Usage: demo [OPTIONS]\n"
-        );
-    }
-
-    #[test]
-    fn mcp_artifact_failures_return_tool_errors() {
-        for error in [
-            SessionRuntimeError::BadRequest("no MCP sandbox exists".to_owned()),
-            SessionRuntimeError::Sandbox(SandboxError::ArtifactRejected(
-                "file was not found".to_owned(),
-            )),
-        ] {
-            let outcome = mcp_artifact_get_error_result(error).unwrap();
-            assert!(mcp_result_is_error(&outcome.result));
-            assert!(
-                outcome.result["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("artifact retrieval failed:")
-            );
-        }
-        assert!(
-            mcp_artifact_get_error_result(SessionRuntimeError::Sandbox(SandboxError::io(
-                "pod exec failed"
-            )))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn mcp_artifact_get_returns_an_embedded_resource_with_its_mime_type() {
-        for (path, contents, mime_type) in [
-            (
-                "reports/quarterly report.PDF",
-                b"%PDF-1.7\n".as_slice(),
-                "application/pdf",
-            ),
-            (
-                "reports/quarterly report.docx",
-                b"PK\x03\x04\0binary".as_slice(),
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ),
-        ] {
-            let outcome = mcp_artifact_get_output_result(path, contents.to_vec()).unwrap();
-
-            assert!(!mcp_result_is_error(&outcome.result));
-            assert_eq!(
-                outcome.result["content"][0]["resource"]["uri"],
-                format!("file:///tmp/downloads/{}", path.replace(' ', "%20"))
-            );
-            assert_eq!(
-                outcome.result["content"][0]["resource"]["mimeType"],
-                mime_type
-            );
-            assert_eq!(
-                outcome.result["content"][0]["resource"]["blob"],
-                general_purpose::STANDARD.encode(contents)
-            );
-            assert_eq!(outcome.result["structuredContent"]["path"], path);
-            assert_eq!(
-                outcome.result["structuredContent"]["filename"],
-                Path::new(path).file_name().unwrap().to_str().unwrap()
-            );
-            assert_eq!(outcome.result["structuredContent"]["mime_type"], mime_type);
-            assert_eq!(
-                outcome.result["structuredContent"]["size_bytes"],
-                contents.len()
-            );
-        }
-    }
-
-    #[test]
-    fn mcp_artifact_get_uses_octet_stream_for_unknown_extensions() {
-        assert_eq!(
-            mcp_artifact_mime_type("exports/archive.unknown"),
-            "application/octet-stream"
-        );
-    }
-
-    #[test]
-    fn mcp_tool_catalog_applies_sandbox_allowlist() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let temp = temp_dir("centaur-api-rs-mcp-allowlist");
-        for (dir, project) in [("alpha", "alpha-tool"), ("beta", "beta-tool")] {
-            let package_dir = temp.join(dir);
-            fs::create_dir_all(&package_dir).unwrap();
-            fs::write(
-                package_dir.join("pyproject.toml"),
-                format!(
-                    "[project]\nname = \"{project}\"\n\n[project.scripts]\n{dir} = \"{project}.cli:main\"\n"
-                ),
-            )
-            .unwrap();
-        }
-        let _env = EnvGuard::set(&[(
-            "TOOL_DIRS",
-            Box::leak(temp.display().to_string().into_boxed_str()),
-        )]);
-        let filter = SandboxToolFilter {
-            allowlist: Some(BTreeSet::from(["alpha".to_owned()])),
-            blocklist: BTreeSet::new(),
-        };
-
-        let names = mcp_centaur_tool_catalog(&filter)
-            .unwrap()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-
-        assert_eq!(names, vec!["alpha".to_owned()]);
     }
 }
