@@ -24,7 +24,7 @@ Use these as the main extension points:
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
-| `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, and skills; subdirs default to `tools`, `workflows`, and `.agents/skills`. |
+| `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, skills, and Code Mode connectors; subdirs default to `tools`, `workflows`, `.agents/skills`, and `connectors`. |
 | `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
 
 Tool credentials are not listed here. Tool plugins declare their own secrets in
@@ -116,6 +116,8 @@ created. Changing a default does not rewrite existing principals.
 | `OTEL_TRACES_EXPORTER` | `apiRs.extraEnv`. | Set to `otlp` to force OTLP trace export, or `none`/`off` to disable it. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `apiRs.extraEnv`. | Enables OTLP trace export to Tempo, Jaeger, or another OTLP collector. |
 | `apiRs.workflowHostSandbox`, `WORKFLOW_HOST_SANDBOX` | Helm value, default `true`; override with `apiRs.extraEnv`. | Runs workflow hosts in Kubernetes sandboxes instead of the api-rs process. Required for workflow-scoped principals. |
+| `apiRs.mcpV2Enabled` / `CENTAUR_MCP_V2_ENABLED` | Helm value, default `false`; override with `apiRs.extraEnv`. | `true` serves `/mcp` through Code Mode: api-rs runs a `centaur-codemode` sandbox per principal and forwards `centaur_catalog_search`, `centaur_catalog_load` and `centaur_execute` over HTTP. A principal normally has one sandbox; with several api-rs replicas or during a rolling deploy it may briefly have more, which is harmless. api-rs caches each endpoint for 30 seconds, adopts a running sandbox when its cache is cold, and otherwise creates one; readiness is the sandbox pod's readiness probe on `/healthz`, so api-rs never polls the sandbox. Replacing the engine image or changing a principal's sandbox capabilities builds a new sandbox (a new `centaur.ai/codemode-fingerprint` generation) and stops the old one after 12 minutes, longer than the longest cell. `false` serves one MCP tool per CLI tool. Connector credentials come from the deployment's tool secret declarations, so a connector works only if a tool declares the secrets it needs. |
+| `codemode.image` / `CENTAUR_CODEMODE_IMAGE` | Helm value (`repository:tag`), default `centaur-codemode:latest`; override with `apiRs.extraEnv`. | Dedicated slim Code Mode runtime image, required when `apiRs.mcpV2Enabled` is `true` (api-rs fails startup with a clear message otherwise). It contains the `centaur-codemode` binary and the repository connectors at `/opt/centaur/connectors`. Pull policy and pull secrets reuse `sandbox.image.pullPolicy` and `global.imagePullSecrets`. |
 | `apiRs.metrics.scrapeAnnotations` | Helm value, default `true`. | Adds Prometheus scrape annotations to the API-RS Pod template. The Service is not annotated, so collectors that scrape both pods and service endpoints scrape each pod once. |
 | `apiRs.metrics.path` | Helm value, default `/metrics`. | Metrics scrape path for annotation-based discovery. |
 | `apiRs.metrics.annotations` | Helm value. | Additional scrape annotations for Prometheus-compatible collectors. |
@@ -273,6 +275,7 @@ Sandbox entrypoint and wrappers:
 | --- | --- | --- |
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
+| `CENTAUR_CODEMODE_CONNECTORS` | Chart-rendered from `overlays.sources[*].connectorsSubdir` (default `connectors`) through `SESSION_SANDBOX_EXTRA_ENV`, appended to the image's `/opt/centaur/connectors` in source order. | Ordered connector roots for the Code Mode sandbox process; a later root shadows earlier ones, and missing roots are skipped. |
 | `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `experimentalCompanyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API the `company_context v2` commands call through the sandbox proxy, which injects the principal API JWT. Unset disables those commands. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |

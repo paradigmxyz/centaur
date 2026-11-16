@@ -39,6 +39,18 @@ pub trait SandboxBackend: Send + Sync {
         })
     }
 
+    /// Return the network address (`<host>`, with IPv6 literals bracketed)
+    /// where a running sandbox's workload accepts TCP connections.
+    ///
+    /// Backends that do not expose workload networking return
+    /// [`crate::SandboxError::Unsupported`]. Callers add the port.
+    async fn workload_address(&self, _id: &SandboxId) -> SandboxResult<String> {
+        Err(crate::SandboxError::Unsupported {
+            backend: self.name(),
+            operation: "workload_address",
+        })
+    }
+
     /// Return the portable, cheap lifecycle status for a sandbox.
     async fn status(&self, id: &SandboxId) -> SandboxResult<SandboxStatus>;
 

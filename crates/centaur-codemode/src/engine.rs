@@ -22,10 +22,10 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use eyre::{Result, WrapErr};
@@ -39,7 +39,7 @@ use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
 use crate::{
-    catalog::{Catalog, lib_name},
+    catalog::{Catalog, Policy, lib_name},
     files::{FileInfo, Files, MAX_FILE_BYTES},
 };
 
@@ -65,14 +65,49 @@ pub const MAX_RESULT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FETCH_BYTES: usize = 10 * 1024 * 1024;
 const MAX_LOG_LINES: usize = 1000;
 const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
+/// All log lines of one cell together.
+const MAX_LOG_BYTES: usize = 1024 * 1024;
+/// A cell's error message or stack. Thrown values bypass the result limit, so
+/// without this a cell could return an arbitrarily large error.
+const MAX_ERROR_BYTES: usize = 64 * 1024;
+/// One call record's error.
+const MAX_CALL_ERROR_BYTES: usize = 4 * 1024;
+
+/// Set in Code Mode sandboxes: Console's base URL, behind the principal's
+/// iron-proxy, which injects the sandbox token Console authenticates.
+const CONSOLE_URL_ENV: &str = "CENTAUR_CONSOLE_URL";
+const PERMISSIONS_PATH: &str = "/api/v1/sandbox/permissions";
+const CONTEXT_VERSION: u64 = 1;
+/// Refresh a successful Console context this long after the last success.
+const CONTEXT_TTL: Duration = Duration::from_secs(60);
+/// After a failed refresh, keep the last good context and try again later.
+const CONTEXT_RETRY: Duration = Duration::from_secs(5);
+/// One attempt. The background loop schedules retries.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTEXT_LOADING: &str = "Console permissions are still loading";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecRequest {
     pub code: String,
     /// Connectors the cell may use; `None` means every loaded connector.
     /// Credentials are not this runtime's concern: iron-proxy injects them.
+    /// The CLI uses this; api-rs sends `policy` instead.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+    /// The principal's tool filter, which wins over `tools` when present.
+    #[serde(default)]
+    pub policy: Option<Policy>,
+}
+
+impl ExecRequest {
+    /// The filter the cell runs under.
+    fn filter(&self) -> Option<Policy> {
+        match (&self.policy, &self.tools) {
+            (Some(policy), _) => Some(policy.clone()),
+            (None, Some(tools)) => Some(Policy::from_allowlist(tools.clone())),
+            (None, None) => None,
+        }
+    }
 }
 
 /// A failed cell or tool call.
@@ -150,9 +185,14 @@ pub struct ExecResponse {
 
 #[derive(Clone)]
 pub struct Engine {
-    catalog: Arc<Catalog>,
+    /// A hot reload swaps the inner catalog; a cell keeps the `Arc` it started
+    /// with, so its calls stay consistent while it runs.
+    catalog: Arc<RwLock<Arc<Catalog>>>,
     http: reqwest::Client,
     context_file: Option<PathBuf>,
+    /// Console permissions, used only when the context file is absent (`serve`
+    /// in a Code Mode sandbox).
+    console: Option<Arc<ConsoleContext>>,
     files: Option<Files>,
 }
 
@@ -178,53 +218,60 @@ impl Engine {
             }
         }
         Ok(Self {
-            catalog,
+            catalog: Arc::new(RwLock::new(catalog)),
             http: builder.build()?,
             context_file,
+            console: None,
             files: files_dir.map(Files::new).transpose()?,
         })
     }
 
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
-    }
-
-    /// The calling context for one cell. Informational: written by the
-    /// platform but readable and writable by agents in a sandbox, so it may
-    /// choose a route, never authorize anything. `null` when absent.
-    async fn calling_context(&self) -> String {
-        let Some(path) = &self.context_file else {
-            return "null".to_owned();
-        };
-        match tokio::fs::read(path).await {
-            Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
-                Ok(context @ Json::Object(_)) => context.to_string(),
-                _ => {
-                    tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
-                    "null".to_owned()
-                }
-            },
-            Err(_) => "null".to_owned(),
+    /// In `serve`, use Console's sandbox permissions as the calling context
+    /// when there is no context file. A Code Mode sandbox has no file: Console
+    /// knows the principal this runner serves, and iron-proxy injects its
+    /// token on the request. A context file, when present, still wins.
+    pub fn enable_console_context(&mut self) {
+        if self.console.is_some() {
+            return;
         }
+        let Some(url) = console_url() else {
+            return;
+        };
+        self.console = Some(Arc::new(ConsoleContext::new(url, self.http.clone())));
     }
 
-    pub async fn exec(&self, request: ExecRequest) -> ExecResponse {
-        let started = Instant::now();
-        let allowed: Vec<String> = self
-            .catalog
-            .visible(request.tools.as_deref())
+    /// Start the background Console refresh: fetch immediately, then keep the
+    /// snapshot fresh. Only `serve` calls this; `exec` and `brief` never do.
+    pub fn prefetch_context(&self) {
+        if self.context_file.as_deref().is_some_and(Path::exists) {
+            return;
+        }
+        let Some(console) = self.console.clone() else {
+            return;
+        };
+        console.start();
+    }
+
+    /// The active catalog. A cell takes one snapshot when it starts.
+    pub fn catalog(&self) -> Arc<Catalog> {
+        self.catalog.read().expect("catalog lock").clone()
+    }
+
+    /// Swap in a reloaded catalog; cells already running keep their own.
+    pub fn replace_catalog(&self, catalog: Arc<Catalog>) {
+        *self.catalog.write().expect("catalog lock") = catalog;
+    }
+
+    /// Per-cell state: the catalog snapshot, the connectors the policy makes
+    /// visible, and the bookkeeping the host records.
+    async fn cell(&self, policy: Option<&Policy>, started: Instant) -> Cell {
+        let catalog = self.catalog();
+        let allowed = catalog
+            .visible(policy)
             .map(|connector| connector.name.clone())
             .collect();
-        let connectors: BTreeMap<&str, Vec<&str>> = self
-            .catalog
-            .visible(request.tools.as_deref())
-            .map(|connector| {
-                let functions = connector.functions.iter().map(|f| f.name.as_str());
-                (connector.name.as_str(), functions.collect())
-            })
-            .collect();
-        let cell = Arc::new(Cell {
-            catalog: self.catalog.clone(),
+        Cell {
+            catalog,
             allowed,
             context: self.calling_context().await,
             http: self.http.clone(),
@@ -233,7 +280,51 @@ impl Engine {
             calls: Mutex::new(Vec::new()),
             deadline: Deadline::new(started + CELL_TIMEOUT),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
-        });
+        }
+    }
+
+    /// The calling context for one cell: the sandbox context file when it
+    /// exists, otherwise (in `serve`) Console's permissions, otherwise `null`.
+    /// Informational: the agent can write the file, so it may choose a route,
+    /// never authorize anything.
+    async fn calling_context(&self) -> String {
+        if let Some(path) = &self.context_file {
+            match tokio::fs::read(path).await {
+                Ok(bytes) => {
+                    return match serde_json::from_slice::<Json>(&bytes) {
+                        Ok(context @ Json::Object(_)) => context.to_string(),
+                        _ => {
+                            tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
+                            "null".to_owned()
+                        }
+                    };
+                }
+                // Any other read error keeps the old behavior: no context,
+                // rather than treating an unreadable file as absent.
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return "null".to_owned();
+                }
+                Err(_) => {}
+            }
+        }
+        match &self.console {
+            Some(console) => console.context().as_ref().to_owned(),
+            None => "null".to_owned(),
+        }
+    }
+
+    pub async fn exec(&self, request: ExecRequest) -> ExecResponse {
+        let started = Instant::now();
+        let filter = request.filter();
+        let cell = Arc::new(self.cell(filter.as_ref(), started).await);
+        let connectors: BTreeMap<&str, Vec<&str>> = cell
+            .catalog
+            .visible(filter.as_ref())
+            .map(|connector| {
+                let functions = connector.functions.iter().map(|f| f.name.as_str());
+                (connector.name.as_str(), functions.collect())
+            })
+            .collect();
         // No newline after the opening brace, so error line numbers match the cell.
         let code = format!("(async () => {{{}\n}})()", request.code);
         let realm = Realm {
@@ -247,34 +338,216 @@ impl Engine {
             deadline: cell.deadline.clone(),
             libs: None,
         };
-        let expired = async {
-            cell.deadline.passed().await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        };
         let outcome = tokio::select! {
             outcome = run_realm(&cell, realm) => outcome,
-            () = expired => Err(ExecError::new(format!(
+            () = expired(&cell.deadline) => Err(ExecError::new(format!(
                 "cell timed out after {}s",
                 started.elapsed().as_secs()
             ))),
         }
-        .and_then(|text| {
-            serde_json::from_str(&text)
-                .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
-        });
-        let (result, error) = match outcome {
-            Ok(result) => (Some(result), None),
-            Err(error) => (None, Some(error)),
-        };
-        ExecResponse {
-            ok: error.is_none(),
-            result,
-            error,
-            logs: std::mem::take(&mut *cell.logs.lock().expect("log lock")),
-            calls: cell.finished_calls(),
-            ms: started.elapsed().as_millis() as u64,
+        .and_then(parse_result);
+        response(&cell, started, outcome)
+    }
+}
+
+/// Console's sandbox permissions. A runner serves one principal for its whole
+/// life, so one snapshot is fetched at startup and refreshed in the background.
+/// Cells only read the snapshot; they never wait on Console.
+struct ConsoleContext {
+    url: String,
+    http: reqwest::Client,
+    snapshot: RwLock<ConsoleSnapshot>,
+    started: AtomicBool,
+}
+
+struct ConsoleSnapshot {
+    text: Arc<str>,
+    /// A success has landed; later failures keep this text instead of
+    /// replacing it with their error.
+    good: bool,
+}
+
+impl ConsoleContext {
+    fn new(url: String, http: reqwest::Client) -> Self {
+        let loading = build_console_context(Err(CONTEXT_LOADING.to_owned()), unix_now());
+        Self {
+            url,
+            http,
+            snapshot: RwLock::new(ConsoleSnapshot {
+                text: Arc::from(loading.to_string()),
+                good: false,
+            }),
+            started: AtomicBool::new(false),
         }
     }
+
+    /// The calling context as JSON text, synchronously. No network and no lock
+    /// is held across I/O, so a cell never waits for a refresh.
+    fn context(&self) -> Arc<str> {
+        self.snapshot
+            .read()
+            .expect("console context lock")
+            .text
+            .clone()
+    }
+
+    /// Fetch immediately, then refresh every `CONTEXT_TTL` after a success or
+    /// retry every `CONTEXT_RETRY` after a failure. The task lives as long as
+    /// the process; nothing else needs to cancel it.
+    fn start(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let console = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut delay = Duration::ZERO;
+            loop {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                delay = if console.refresh().await {
+                    CONTEXT_TTL
+                } else {
+                    CONTEXT_RETRY
+                };
+            }
+        });
+    }
+
+    /// One attempt. A failure keeps the last good context, or reports the
+    /// error while no success has landed yet.
+    async fn refresh(&self) -> bool {
+        let url = format!("{}{PERMISSIONS_PATH}", self.url);
+        match self.fetch_once(&url).await {
+            Ok(sandbox) => {
+                let context = build_console_context(Ok(sandbox), unix_now());
+                let mut snapshot = self.snapshot.write().expect("console context lock");
+                snapshot.text = Arc::from(context.to_string());
+                snapshot.good = true;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "reading Console sandbox permissions failed");
+                let mut snapshot = self.snapshot.write().expect("console context lock");
+                if !snapshot.good {
+                    snapshot.text =
+                        Arc::from(build_console_context(Err(error), unix_now()).to_string());
+                }
+                false
+            }
+        }
+    }
+
+    /// One attempt; the background loop schedules retries.
+    async fn fetch_once(&self, url: &str) -> Result<Json, String> {
+        let response = self
+            .http
+            .get(url)
+            .timeout(REQUEST_TIMEOUT)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| format!("GET {PERMISSIONS_PATH}: {}", transport(error)))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("GET {PERMISSIONS_PATH}: HTTP {status}"));
+        }
+        let body: Json = response
+            .json()
+            .await
+            .map_err(|error| format!("decoding {PERMISSIONS_PATH}: {}", transport(error)))?;
+        match body.get("data") {
+            Some(data) if data.is_object() => Ok(data.clone()),
+            _ => Err(format!(
+                "{PERMISSIONS_PATH} response did not include a data object"
+            )),
+        }
+    }
+}
+
+/// The same shape harness-server writes for session sandboxes. A Code Mode
+/// runner has no session thread or persona.
+fn build_console_context(console: Result<Json, String>, generated_at_unix: u64) -> Json {
+    let mut context = serde_json::Map::new();
+    context.insert("version".to_owned(), Json::from(CONTEXT_VERSION));
+    context.insert(
+        "generated_at_unix".to_owned(),
+        Json::from(generated_at_unix),
+    );
+    context.insert("harness".to_owned(), Json::from("codemode"));
+    context.insert("thread_key".to_owned(), Json::Null);
+    context.insert("persona".to_owned(), Json::Null);
+    match console {
+        Ok(sandbox) => {
+            context.insert("sandbox".to_owned(), sandbox);
+        }
+        Err(error) => {
+            context.insert("sandbox".to_owned(), Json::Null);
+            context.insert("sandbox_error".to_owned(), Json::from(error));
+        }
+    }
+    Json::Object(context)
+}
+
+fn console_url() -> Option<String> {
+    let url = std::env::var(CONSOLE_URL_ENV).ok()?;
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
+    }
+    Some(
+        if url.starts_with("http://") || url.starts_with("https://") {
+            url.to_owned()
+        } else {
+            format!("http://{url}")
+        },
+    )
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// One response for a finished cell: its result or error, plus its logs and
+/// call records.
+fn response(cell: &Cell, started: Instant, outcome: Result<Json, ExecError>) -> ExecResponse {
+    let (result, error) = match outcome {
+        Ok(result) => (Some(result), None),
+        Err(mut error) => {
+            error.message = truncate(error.message, MAX_ERROR_BYTES);
+            error.stack = error.stack.map(|stack| truncate(stack, MAX_ERROR_BYTES));
+            (None, Some(error))
+        }
+    };
+    let mut calls = cell.finished_calls();
+    for call in &mut calls {
+        call.error = call
+            .error
+            .take()
+            .map(|error| truncate(error, MAX_CALL_ERROR_BYTES));
+    }
+    ExecResponse {
+        ok: error.is_none(),
+        result,
+        error,
+        logs: std::mem::take(&mut *cell.logs.lock().expect("log lock")),
+        calls,
+        ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+fn parse_result(text: String) -> Result<Json, ExecError> {
+    serde_json::from_str(&text)
+        .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
+}
+
+/// Resolves one second after the deadline: the backstop for a realm that is
+/// stuck in host code the timer cannot interrupt.
+async fn expired(deadline: &Deadline) {
+    deadline.passed().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
 /// A deadline that long requests may push back, shared by the timers and the
@@ -344,8 +617,10 @@ struct Call {
 impl Cell {
     fn log(&self, line: String) {
         let mut logs = self.logs.lock().expect("log lock");
-        if logs.len() < MAX_LOG_LINES {
-            logs.push(truncate(line, MAX_LOG_LINE_BYTES));
+        let used: usize = logs.iter().map(String::len).sum();
+        if logs.len() < MAX_LOG_LINES && used < MAX_LOG_BYTES {
+            let room = (MAX_LOG_BYTES - used).min(MAX_LOG_LINE_BYTES);
+            logs.push(truncate(line, room));
         }
     }
 
@@ -1315,6 +1590,7 @@ async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     const CONNECTOR: &str = r#"
 import type { Ctx } from "../centaur";
@@ -1323,6 +1599,15 @@ import { loud } from "../_lib/text";
 /** Echo the args with the calling context's thread key. */
 export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string; thread_key: string | null }> {
   return { text: args.text, thread_key: ctx.context?.thread_key ?? null };
+}
+
+/** Report the calling principal and harness from the context. */
+export async function principal(args: {}, ctx: Ctx): Promise<{ principal: string | null; harness: string | null; error: string | null }> {
+  return {
+    principal: ctx.context?.sandbox?.principal.id ?? null,
+    harness: ctx.context?.harness ?? null,
+    error: ctx.context?.sandbox_error ?? null,
+  };
 }
 
 /** Uses a shared module. */
@@ -1394,10 +1679,18 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 "#;
 
     fn engine() -> (tempfile::TempDir, Engine) {
-        engine_with_files(false)
+        engine_with(false, true)
     }
 
     fn engine_with_files(files: bool) -> (tempfile::TempDir, Engine) {
+        engine_with(files, true)
+    }
+
+    fn engine_without_context_file() -> (tempfile::TempDir, Engine) {
+        engine_with(false, false)
+    }
+
+    fn engine_with(files: bool, write_context: bool) -> (tempfile::TempDir, Engine) {
         let dir = tempfile::tempdir().unwrap();
         let connector = dir.path().join("connectors").join("demo");
         std::fs::create_dir_all(&connector).unwrap();
@@ -1412,11 +1705,13 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         .unwrap();
         let catalog = Catalog::load(&[dir.path().join("connectors")]).unwrap();
         let context_file = dir.path().join("sandbox.json");
-        std::fs::write(
-            &context_file,
-            r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
-        )
-        .unwrap();
+        if write_context {
+            std::fs::write(
+                &context_file,
+                r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
+            )
+            .unwrap();
+        }
         let engine = Engine::new(
             Arc::new(catalog),
             None,
@@ -1432,8 +1727,255 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             .exec(ExecRequest {
                 code: code.to_owned(),
                 tools,
+                policy: None,
             })
             .await
+    }
+
+    /// A Console that serves one response and counts requests. A gate, when
+    /// set, holds the response until the test releases it.
+    #[derive(Clone)]
+    struct MockConsole {
+        response: Arc<Mutex<MockResponse>>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    struct MockResponse {
+        status: axum::http::StatusCode,
+        body: Json,
+        gate: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    async fn console_permissions(
+        axum::extract::State(state): axum::extract::State<MockConsole>,
+    ) -> (axum::http::StatusCode, axum::Json<Json>) {
+        state.requests.fetch_add(1, Ordering::SeqCst);
+        let (status, body, gate) = {
+            let response = state.response.lock().expect("mock console lock");
+            (
+                response.status,
+                response.body.clone(),
+                response.gate.clone(),
+            )
+        };
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        (status, axum::Json(body))
+    }
+
+    async fn mock_console(status: u16, body: Json) -> (String, MockConsole) {
+        mock_console_with_gate(status, body, None).await
+    }
+
+    async fn mock_console_with_gate(
+        status: u16,
+        body: Json,
+        gate: Option<Arc<tokio::sync::Notify>>,
+    ) -> (String, MockConsole) {
+        let console = MockConsole {
+            response: Arc::new(Mutex::new(MockResponse {
+                status: axum::http::StatusCode::from_u16(status).unwrap(),
+                body,
+                gate,
+            })),
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = axum::Router::new()
+            .route(PERMISSIONS_PATH, axum::routing::get(console_permissions))
+            .with_state(console.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), console)
+    }
+
+    impl MockConsole {
+        fn respond(&self, status: u16, body: Json) {
+            let mut response = self.response.lock().expect("mock console lock");
+            response.status = axum::http::StatusCode::from_u16(status).unwrap();
+            response.body = body;
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    fn console_engine(url: String) -> (tempfile::TempDir, Engine) {
+        let (dir, mut engine) = engine_without_context_file();
+        engine.console = Some(Arc::new(ConsoleContext::new(url, engine.http.clone())));
+        (dir, engine)
+    }
+
+    fn permissions(principal: &str) -> Json {
+        serde_json::json!({
+            "data": {
+                "principal_id": principal,
+                "principal": {"id": principal, "foreign_id": "C1", "name": "channel", "kind": "slack_channel"},
+                "capabilities": {},
+                "oauth_credentials": [],
+            }
+        })
+    }
+
+    async fn wait_for_requests(console: &MockConsole, count: usize) {
+        for _ in 0..200 {
+            if console.requests() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "Console got {} requests, wanted at least {count}",
+            console.requests()
+        );
+    }
+
+    async fn wait_for_context(engine: &Engine, check: impl Fn(&Json) -> bool) -> Json {
+        for _ in 0..200 {
+            let text = engine.console.as_ref().expect("console context").context();
+            let context: Json = serde_json::from_str(text.as_ref()).expect("console context JSON");
+            if check(&context) {
+                return context;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("Console context did not update");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cell_never_waits_for_the_first_console_fetch() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (url, console) =
+            mock_console_with_gate(200, permissions("prn_a"), Some(gate.clone())).await;
+        let (_dir, engine) = console_engine(url);
+        engine.prefetch_context();
+        wait_for_requests(&console, 1).await;
+
+        let code = r#"return {
+            harness: context.harness,
+            sandbox: context.sandbox,
+            error: context.sandbox_error,
+            connector: await tools.demo.principal({}),
+        };"#;
+        let first = exec(&engine, code, None).await;
+        assert!(first.ok, "{first:?}");
+        let result = first.result.as_ref().unwrap();
+        assert_eq!(result["harness"], "codemode");
+        assert_eq!(result["sandbox"], Json::Null);
+        assert!(
+            result["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("still loading")),
+            "{result}"
+        );
+        assert_eq!(result["connector"]["error"], result["error"]);
+        assert_eq!(
+            first.calls.len(),
+            1,
+            "the Console fetch is not a connector call"
+        );
+        assert!(first.calls[0].requests.is_empty());
+        assert_eq!(console.requests(), 1, "the fetch is still in flight");
+
+        gate.notify_one();
+        let context = wait_for_context(&engine, |context| context["sandbox"].is_object()).await;
+        assert_eq!(context["sandbox"]["principal"]["id"], "prn_a");
+
+        let second = exec(&engine, code, None).await;
+        assert!(second.ok, "{second:?}");
+        let result = second.result.as_ref().unwrap();
+        assert_eq!(result["sandbox"]["principal"]["id"], "prn_a");
+        assert_eq!(result["connector"]["principal"], "prn_a");
+        assert_eq!(result["connector"]["error"], Json::Null);
+        assert_eq!(console.requests(), 1, "the refresh sleeps after success");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failures_report_an_error_until_a_success_then_serve_it_stale() {
+        let (url, console) = mock_console(403, serde_json::json!({ "error": "forbidden" })).await;
+        let (_dir, engine) = console_engine(url);
+        let console_context = engine.console.clone().expect("console context");
+        let code = r#"return { sandbox: context.sandbox, error: context.sandbox_error };"#;
+        let context = |response: ExecResponse| {
+            assert!(response.ok, "{response:?}");
+            response.result.unwrap()
+        };
+
+        console_context.refresh().await;
+        let first = context(exec(&engine, code, None).await);
+        assert_eq!(first["sandbox"], Json::Null);
+        assert!(
+            first["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("HTTP 403")),
+            "{first}"
+        );
+
+        console.respond(200, permissions("prn_a"));
+        console_context.refresh().await;
+        assert_eq!(
+            context(exec(&engine, code, None).await)["sandbox"]["principal"]["id"],
+            "prn_a"
+        );
+
+        console.respond(500, serde_json::json!({ "error": "boom" }));
+        console_context.refresh().await;
+        let stale = context(exec(&engine, code, None).await);
+        assert_eq!(stale["sandbox"]["principal"]["id"], "prn_a");
+        assert_eq!(stale["error"], Json::Null);
+        assert_eq!(console.requests(), 3, "one attempt per refresh");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_context_file_wins_over_console() {
+        let (url, console) = mock_console(
+            200,
+            serde_json::json!({ "data": { "principal_id": "prn_console" } }),
+        )
+        .await;
+        let (_dir, mut engine) = engine();
+        engine.console = Some(Arc::new(ConsoleContext::new(url, engine.http.clone())));
+        engine.prefetch_context();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let response = exec(
+            &engine,
+            r#"return { thread_key: context.thread_key, sandbox: context.sandbox };"#,
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "thread_key": "slack:T1:C1:1.2", "sandbox": null })
+        );
+        assert_eq!(
+            console.requests(),
+            0,
+            "the file is read before Console, so no fetch starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn thrown_errors_and_logs_are_bounded() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"for (let i = 0; i < 200; i++) console.log("x".repeat(16000));
+               throw new Error("y".repeat(1 << 20));"#,
+            None,
+        )
+        .await;
+        assert!(!response.ok);
+        let error = response.error.expect("error");
+        assert!(
+            error.message.len() <= MAX_ERROR_BYTES + 32,
+            "{}",
+            error.message.len()
+        );
+        let logged: usize = response.logs.iter().map(String::len).sum();
+        assert!(logged <= MAX_LOG_BYTES + 64, "{logged}");
     }
 
     /// A one-route HTTP server for fetch tests.
@@ -1579,7 +2121,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         // bounded by MAX_REQUEST_TIMEOUT.
         let (_dir, engine) = engine();
         let cell = Cell {
-            catalog: engine.catalog.clone(),
+            catalog: engine.catalog(),
             allowed: Vec::new(),
             context: "null".to_owned(),
             http: engine.http.clone(),
@@ -1719,7 +2261,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 
         // `invoke` itself refuses, whatever JS calls it with.
         let cell = Arc::new(Cell {
-            catalog: engine.catalog.clone(),
+            catalog: engine.catalog(),
             allowed: vec!["other".to_owned()],
             context: "null".to_owned(),
             http: engine.http.clone(),
@@ -1802,5 +2344,33 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         assert!(!exec(&engine, "return {", None).await.ok);
         let response = exec(&engine, "return undefined;", None).await;
         assert_eq!(response.result.unwrap(), serde_json::Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn policy_wins_over_the_cli_tools_allowlist() {
+        let (_dir, engine) = engine();
+        let request = |tools: Option<Vec<String>>, policy: Option<Policy>| ExecRequest {
+            code: "return Object.keys(tools);".to_owned(),
+            tools,
+            policy,
+        };
+        let response = engine
+            .exec(request(
+                Some(vec!["other".to_owned()]),
+                Some(Policy::from_allowlist(vec!["demo".to_owned()])),
+            ))
+            .await;
+        assert_eq!(response.result.unwrap(), serde_json::json!(["demo"]));
+
+        let response = engine
+            .exec(request(
+                Some(vec!["demo".to_owned()]),
+                Some(Policy {
+                    allowlist: None,
+                    blocklist: Some(vec!["demo".to_owned()]),
+                }),
+            ))
+            .await;
+        assert_eq!(response.result.unwrap(), serde_json::json!([]));
     }
 }

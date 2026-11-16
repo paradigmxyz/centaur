@@ -134,9 +134,9 @@ the database endpoint can resolve to.
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- /*
 Subdir defaults: an omitted key falls back to the conventional layout
-(tools, workflows, .agents/skills); a key explicitly set to "" disables
-that surface for the source. Missing directories are skipped at runtime,
-so the defaults are safe for repos that only carry some surfaces.
+(tools, workflows, .agents/skills, connectors); a key explicitly set to ""
+disables that surface for the source. Missing directories are skipped at
+runtime, so the defaults are safe for repos that only carry some surfaces.
 */ -}}
 {{- if hasKey . "toolsSubdir" -}}
 {{- with .toolsSubdir }}{{- $_ := set $source "toolsSubdir" . -}}{{- end -}}
@@ -153,6 +153,11 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- else -}}
 {{- $_ := set $source "skillsSubdir" ".agents/skills" -}}
 {{- end -}}
+{{- if hasKey . "connectorsSubdir" -}}
+{{- with .connectorsSubdir }}{{- $_ := set $source "connectorsSubdir" . -}}{{- end -}}
+{{- else -}}
+{{- $_ := set $source "connectorsSubdir" "connectors" -}}
+{{- end -}}
 {{- with .promptPath }}{{- $_ := set $source "promptPath" . -}}{{- end -}}
 {{- with .personasSubdir }}{{- $_ := set $source "personasSubdir" . -}}{{- end -}}
 {{- $sources = append $sources $source -}}
@@ -160,13 +165,13 @@ so the defaults are safe for repos that only carry some surfaces.
 {{- end -}}
 {{- else -}}
 {{- if and .Values.toolServer.enabled .Values.toolServer.repo -}}
-{{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "skillsSubdir" ".agents/skills" -}}
+{{- $source := dict "repo" .Values.toolServer.repo "toolsSubdir" (default "tools" .Values.toolServer.subdir) "workflowsSubdir" "workflows" "skillsSubdir" ".agents/skills" "connectorsSubdir" "connectors" -}}
 {{- with .Values.toolServer.ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .Values.toolServer.visibility) -}}
 {{- $sources = append $sources $source -}}
 {{- range .Values.toolServer.extraSources -}}
 {{- if .repo -}}
-{{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) -}}
+{{- $source := dict "repo" .repo "toolsSubdir" (default "tools" .subdir) "workflowsSubdir" (default "workflows" .workflowsSubdir) "skillsSubdir" (default ".agents/skills" .skillsSubdir) "connectorsSubdir" (default "connectors" .connectorsSubdir) -}}
 {{- with .ref }}{{- $_ := set $source "ref" . -}}{{- end -}}
 {{- $_ := set $source "visibility" (include "centaur.repositoryVisibility" .visibility) -}}
 {{- $sources = append $sources $source -}}
