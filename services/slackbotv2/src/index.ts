@@ -2771,7 +2771,7 @@ async function renderFallbackFinalAnswer(
       slackSafeChatSdkStream(
         harnessToChatSdkStream(
           fallback.collectSource(stream),
-          fallbackRendererOptions(options)
+          fallback.withRendererOptions(fallbackRendererOptions(options))
         )
       )
     )
@@ -3822,7 +3822,9 @@ async function renderPlainTextExecutionStream(
           fallback.collectSource(
             restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace)
           ),
-          rendererOptions(thread, options, undefined, trace, statusTracker)
+          fallback.withRendererOptions(
+            rendererOptions(thread, options, undefined, trace, statusTracker)
+          )
         )
       )
     )
@@ -3881,6 +3883,22 @@ class SlackRenderFallback {
 
   isInterrupted(): boolean {
     return this.interrupted
+  }
+
+  /**
+   * Observes the renderer's terminal event as well. The renderer can finish on
+   * a native interrupted turn before the cancellation envelope is consumed.
+   */
+  withRendererOptions(
+    rendererOptions: CodexAppServerToChatStreamOptions
+  ): CodexAppServerToChatStreamOptions {
+    return {
+      ...rendererOptions,
+      onRendererEvent: async (event: RendererEvent) => {
+        if (event.type === 'renderer.done' && event.interrupted) this.interrupted = true
+        await rendererOptions.onRendererEvent?.(event)
+      }
+    }
   }
 
   private captureTerminalText(event: SlackbotV2RendererSource): void {
@@ -4915,6 +4933,8 @@ function rendererOptions(
   return {
     ...mapper,
     logInfo: rendererLogInfo(options, capture),
+    // A Slack stop ends the reply without an interruption notice.
+    silentInterrupt: true,
     async onRendererEvent(event: RendererEvent) {
       await mapper?.onRendererEvent?.(event)
       if (event.type === 'renderer.title.update') {
@@ -4942,6 +4962,7 @@ function fallbackRendererOptions(options: SlackbotV2Options): CodexAppServerToCh
   return {
     ...mapper,
     logInfo: rendererLogInfo(options),
+    silentInterrupt: true,
     async onRendererEvent(event: RendererEvent) {
       try {
         await mapper?.onRendererEvent?.(event)

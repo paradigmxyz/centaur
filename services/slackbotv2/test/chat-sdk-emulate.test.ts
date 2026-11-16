@@ -2030,6 +2030,36 @@ describe('slackbotv2', () => {
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
   })
 
+  it('posts nothing for a plain-text request stopped by a native interrupted turn', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a plain text interrupt.')
+    const mention = await sendMessage(
+      `<@${BOT_USER_ID}> Plain text only, no interactive blocks. Run until stopped.`,
+      { threadTs: parent.ts }
+    )
+
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({ type: 'turn.completed', turn: { id: 'turn-1', status: 'interrupted' } })
+    )
+    codexApi.emitSessionEvent(threadKey(parent.ts), 'session.execution_cancelled', {
+      execution_id: 'exe-interrupted',
+      status: 'cancelled',
+      reason: 'turn_interrupted'
+    })
+
+    await mention.finished()
+    const text = await threadText(parent.ts)
+    expect(text).not.toContain('Execution interrupted.')
+    expect(text).not.toContain('Execution completed, but no final text was captured.')
+    expect(slackApi.calls.filter(call => call.method === 'chat.postMessage')).toHaveLength(0)
+  })
+
   it('renders api-rs completion result text when no final answer delta streamed', async () => {
     codexApi.autoRespond = false
 

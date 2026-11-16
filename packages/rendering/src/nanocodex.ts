@@ -6,6 +6,7 @@ import {
 } from './chat-sdk'
 import {
   CodexAppServerRendererEventMapper,
+  INTERRUPTED_TEXT,
   type CodexAppServerToChatStreamOptions
 } from './codex-app-server'
 import type {
@@ -29,6 +30,12 @@ export class NanocodexRendererEventMapper
   private error = ''
   private requestId = ''
   private done = false
+  private interrupted = false
+  private readonly silentInterrupt: boolean
+
+  constructor(options: { silentInterrupt?: boolean } = {}) {
+    this.silentInterrupt = options.silentInterrupt === true
+  }
 
   process(source: RustSessionStreamEvent | unknown): RendererEvent[] {
     if (this.done) return []
@@ -103,7 +110,7 @@ export class NanocodexRendererEventMapper
         return this.complete()
       case 'run.failed':
         if (['cancelled', 'canceled'].includes(stringField(event.payload, 'status'))) {
-          return this.complete()
+          return this.interrupt()
         }
         return this.fail(this.error || 'Nanocodex run failed')
       default:
@@ -138,10 +145,15 @@ export class NanocodexRendererEventMapper
     ) {
       return this.fail(String(data.error ?? 'Execution failed'))
     }
-    // A stop keeps any answer text but adds no interruption notice.
-    if (kind === 'session.execution_cancelled') return this.complete()
+    if (kind === 'session.execution_cancelled') return this.interrupt()
     if (kind === 'session.execution_completed') return this.complete()
     return []
+  }
+
+  private interrupt(): RendererEvent[] {
+    this.interrupted = true
+    if (!this.answer && !this.silentInterrupt) this.answer = INTERRUPTED_TEXT
+    return this.complete()
   }
 
   private complete(): RendererEvent[] {
@@ -151,6 +163,7 @@ export class NanocodexRendererEventMapper
       {
         type: 'renderer.done',
         answerMarkdown: this.answer,
+        ...(this.interrupted ? { interrupted: true } : {}),
         streamFinalUpdates: true,
         threadId: this.requestId || undefined
       }
@@ -177,7 +190,7 @@ export async function* harnessToChatSdkStream(
   options: CodexAppServerToChatStreamOptions = {}
 ): AsyncIterable<ChatSDKStreamChunk> {
   const codex = new CodexAppServerRendererEventMapper(options)
-  const nano = new NanocodexRendererEventMapper()
+  const nano = new NanocodexRendererEventMapper({ silentInterrupt: options.silentInterrupt })
   const renderer = new ChatSDKRenderer()
   let selected: 'codex' | 'nanocodex' | null = null
 
