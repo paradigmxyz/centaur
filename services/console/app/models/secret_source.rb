@@ -68,7 +68,7 @@ class SecretSource < ApplicationRecord
   # injects it directly, and Principal.redact_live_secrets redacts it, with no
   # special handling for either). The credential reference never reaches the proxy.
   def to_proxy_source
-    return { "type" => "control_plane", "value" => brokered_credential&.access_token } if source_type == "token_broker"
+    return { "type" => "control_plane", "value" => brokered_access_token } if source_type == "token_broker"
 
     source = config.is_a?(Hash) ? config.dup : {}
     source["type"] = source_type
@@ -81,7 +81,7 @@ class SecretSource < ApplicationRecord
   # token yet (bootstrapping) or is dead -- those are omitted from sync so the
   # proxy never receives an empty inline value.
   def deliverable?
-    return brokered_credential&.access_token.present? if source_type == "token_broker"
+    return brokered_access_token.present? if source_type == "token_broker"
     true
   end
 
@@ -116,6 +116,19 @@ class SecretSource < ApplicationRecord
   validate :token_broker_reference_resolves
 
   private
+
+  # An owner-only token is delivered only while it is live, its app is
+  # enabled, its owner is active, and this source belongs to the credential's
+  # own wrapper. Other apps keep their existing delivery behavior.
+  def brokered_access_token
+    credential = brokered_credential
+    return credential&.access_token unless credential&.oauth_app&.owner_only?
+    return nil if credential.dead? || (credential.expires_at && credential.expires_at <= Time.current)
+    return nil unless credential.oauth_app.enabled? && credential.created_by&.active?
+    return nil unless static_secret&.broker_credential_id == credential.id
+
+    credential.access_token
+  end
 
   # The BrokerCredential a token_broker source references. credential_id is either
   # an opaque id (bcr_...) or a globally unique foreign_id. Returns nil when the

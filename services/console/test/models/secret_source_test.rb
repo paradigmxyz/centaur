@@ -220,6 +220,15 @@ class SecretSourceTest < ActiveSupport::TestCase
     assert_not s.deliverable?
   end
 
+  test "disabled non-Runlayer apps keep delivering existing tokens" do
+    credential = make_broker_credential(access_token: "synthetic-existing-token")
+    credential.update!(oauth_app: oauth_apps(:acme_google_disabled))
+    source = new_source(source_type: "token_broker", config: { "credential_id" => credential.oid })
+
+    assert source.deliverable?
+    assert_equal "synthetic-existing-token", source.to_proxy_source.fetch("value")
+  end
+
   # A persisted BrokerCredential. access_token is set via the model so encryption
   # applies.
   def make_broker_credential(access_token:)

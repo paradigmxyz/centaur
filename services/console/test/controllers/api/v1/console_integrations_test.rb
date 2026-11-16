@@ -41,8 +41,11 @@ module Api
         assert_equal "shared", shared["usage"]
         assert_equal "connected", shared.dig("connection", "status")
         assert_equal "http://www.example.com/oauth/shared-google/start", shared["start_url"]
-        assert_equal [ { "provider" => "mercator", "display_name" => "Mercator", "description" => "Shared with your agents." } ],
-                     json_body.dig("data", "presets")
+        presets = json_body.dig("data", "presets")
+        assert_equal %w[mercator runlayer], presets.pluck("provider")
+        assert_equal({ "provider" => "mercator", "display_name" => "Mercator", "description" => "Shared with your agents.",
+                       "inputs" => [] }, presets.first)
+        assert_equal [ "resource_url" ], presets.second["inputs"].pluck("name")
       end
 
       test "a non-admin sees enabled apps with their start links and providers, and no disabled apps" do
@@ -69,7 +72,9 @@ module Api
           provider_subject: "member-sub", provider_email: users(:member_user).email, external_user_key: "member-key")
 
         get api_v1_console_integrations_path
-        assert_equal({ "status" => "connected" }, app_entry("google")["connection"])
+        # Matched by email, not made in this session, so it can't be disconnected here.
+        assert_equal({ "id" => credential.oid, "status" => "connected", "can_disconnect" => false },
+                     app_entry("google")["connection"])
         assert_nil app_entry("slack")["connection"]
 
         # A dead credential asks the user to reconnect rather than claiming success.
