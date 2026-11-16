@@ -1,4 +1,4 @@
-description = "Google Sheets: create spreadsheets, read and write ranges, add tabs, batch read and write"
+description = "Google Sheets: create spreadsheets, read and write ranges, add tabs, batch read and write, format cells, freeze rows and columns"
 
 secrets = [
   { type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = [

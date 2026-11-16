@@ -804,3 +804,47 @@ def test_directory_json_takes_precedence_over_markdown(monkeypatch):
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == []
+
+
+def test_sheets_format_passes_tristate_style_flags(monkeypatch):
+    captured = {}
+
+    def fake_format(spreadsheet_id, range_notation, **kwargs):
+        captured.update(kwargs, spreadsheet_id=spreadsheet_id, range_notation=range_notation)
+        return {"range": range_notation, "fields": ["userEnteredFormat.textFormat.bold"]}
+
+    monkeypatch.setattr(client, "sheets_format", fake_format)
+    result = runner.invoke(
+        app,
+        ["sheets", "format", "sheet-123", "A1:B1", "--bold", "--no-italic", "--bg", "#ff0000"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["spreadsheet_id"] == "sheet-123"
+    assert captured["range_notation"] == "A1:B1"
+    assert captured["bold"] is True
+    assert captured["italic"] is False
+    assert captured["underline"] is None
+    assert captured["background_color"] == "#ff0000"
+
+
+def test_sheets_freeze_passes_tab_and_counts(monkeypatch):
+    fake_freeze = Mock(
+        return_value={"sheet_id": 7, "frozen_row_count": 1, "frozen_column_count": None}
+    )
+    monkeypatch.setattr(client, "sheets_freeze", fake_freeze)
+
+    result = runner.invoke(app, ["sheets", "freeze", "sheet-123", "--tab", "Data", "--rows", "1"])
+
+    assert result.exit_code == 0, result.output
+    fake_freeze.assert_called_once_with("sheet-123", sheet_title="Data", rows=1, columns=None)
+
+
+def test_sheets_raw_batch_update_requires_json_array(monkeypatch):
+    fake_update = Mock(return_value={"replies": []})
+    monkeypatch.setattr(client, "sheets_raw_batch_update", fake_update)
+
+    assert runner.invoke(app, ["sheets", "raw-batch-update", "s", '{"a": 1}']).exit_code == 1
+    result = runner.invoke(app, ["sheets", "raw-batch-update", "s", '[{"a": 1}]'])
+    assert result.exit_code == 0, result.output
+    fake_update.assert_called_once_with("s", [{"a": 1}])
