@@ -12,19 +12,23 @@ module Api
       end
 
       # Idempotent: re-assigning a role the principal already holds returns the
-      # existing assignment with 200 rather than a uniqueness 422.
+      # existing assignment with 200 rather than a uniqueness 422. Concurrent
+      # assignments of the same role are race-safe: whichever request loses the
+      # unique-index race (or the uniqueness validation) reloads the winning row
+      # and reports it with 200 instead of a 500 or 422.
       def create
         principal = Principal.find_by_oid!(params[:principal_id])
         role = Role.find_by_oid!(data_params.require(:role_id))
-        existing = principal.principal_roles.find_by(role: role)
-        if existing
-          render status: :ok, json: { data: role_payload(role) }
-        else
-          principal.principal_roles.create!(role: role)
-          render status: :created, json: { data: role_payload(role) }
-        end
+        assignment = principal.principal_roles.find_or_create_by!(role: role)
+        render status: assignment.previously_new_record? ? :created : :ok, json: { data: role_payload(role) }
+      rescue ActiveRecord::RecordNotUnique
+        render_existing_assignment(principal, role)
       rescue ActiveRecord::RecordInvalid => e
-        render_validation_error(e.record)
+        if principal.principal_roles.exists?(role: role)
+          render_existing_assignment(principal, role)
+        else
+          render_validation_error(e.record)
+        end
       end
 
       def destroy
@@ -36,6 +40,11 @@ module Api
       end
 
       private
+
+      def render_existing_assignment(principal, role)
+        principal.principal_roles.find_by!(role: role)
+        render status: :ok, json: { data: role_payload(role.reload) }
+      end
 
       def role_payload(role)
         {

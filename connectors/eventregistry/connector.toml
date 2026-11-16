@@ -1,0 +1,3 @@
+description = "NewsAPI.ai (Event Registry): search articles by keyword, concept, category, source, author, location or sentiment"
+
+secrets = [{type = "http", name = "EVENTREGISTRY_API_KEY", mode = "inject", inject_query_param = "apiKey", hosts = ["eventregistry.org"]}]

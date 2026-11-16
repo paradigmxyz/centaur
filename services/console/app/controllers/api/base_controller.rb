@@ -1,12 +1,39 @@
 module Api
+  # Base for the bearer operator API under /api/v1 (machine callers, CLIs,
+  # api-rs). Every action takes a bearer ApiKey whose owner is an active admin.
+  #
+  # The namespace decides the credential: controllers under
+  # Api::V1::Console (/api/v1/console/*, the browser SPA) include
+  # ConsoleApiAuthentication and take the console session cookie instead;
+  # sandbox controllers use their own JWT schemes. The two never mix:
+  #
+  # - a request with only the console session cookie is unauthenticated here
+  #   (401, as for any request without a valid key);
+  # - a controller or path in the console namespace that reaches this bearer
+  #   check fails closed, so a console controller cannot silently accept keys.
   class BaseController < ActionController::API
     include ApiRequestSupport
+    include ConsoleSession
+
+    CONSOLE_CONTROLLER_PREFIX = "api/v1/console/".freeze
+    CONSOLE_PATH_PREFIX = "/api/v1/console/".freeze
+
+    # Raised (in development and test) when a console-namespace request
+    # reaches the bearer check, i.e. a console controller that does not
+    # include ConsoleApiAuthentication or a misrouted path.
+    class CredentialNamespaceMismatch < StandardError; end
 
     before_action :authenticate_api_key!
 
     rescue_from ActiveRecord::RecordNotFound, with: :render_not_found
 
     attr_reader :current_api_key
+
+    # :bearer here; :session for controllers that include
+    # ConsoleApiAuthentication. Read by the route-sweep test.
+    def self.accepted_credential
+      :bearer
+    end
 
     def current_user
       current_api_key&.user
@@ -15,6 +42,8 @@ module Api
     private
 
     def authenticate_api_key!
+      return refuse_credential_namespace_mismatch! if console_namespace_request?
+
       token = bearer_token
       @current_api_key = ApiKey.find_by_token(token) if token.present?
       unless current_api_key&.user&.active?
@@ -23,6 +52,19 @@ module Api
       return if current_api_key.user.admin?
 
       render_error(status: :forbidden, message: "API key owner is not an admin")
+    end
+
+    def console_namespace_request?
+      controller_path.start_with?(CONSOLE_CONTROLLER_PREFIX) || request.path.start_with?(CONSOLE_PATH_PREFIX)
+    end
+
+    def refuse_credential_namespace_mismatch!
+      message = "#{self.class.name}##{action_name} (#{request.path}) mixes the console and bearer credential namespaces"
+      raise CredentialNamespaceMismatch, message if Rails.env.local?
+
+      Rails.logger.error(message)
+      render_error(status: :unauthorized, message: "endpoint credential misconfigured",
+                   details: { reason: "credential_namespace_mismatch" })
     end
 
     def render_not_found(e)
@@ -45,13 +87,23 @@ module Api
     # body always replaces the whole document. The identity column foreign_id
     # is the exception: an upsert by foreign_id sets it on the
     # record before assignment, so a blank body value must not wipe them.
+    # (The console API also lets an explicit null clear it; see
+    # #explicit_foreign_id_clear?.)
     def permit_document(ref, attrs, *scalars, **filters)
       permitted = attrs.permit(:foreign_id, *scalars, **filters)
-      permitted.delete(:foreign_id) if permitted[:foreign_id].blank? && ref.foreign_id.present?
+      if permitted[:foreign_id].blank? && ref.foreign_id.present? && !explicit_foreign_id_clear?(ref, attrs)
+        permitted.delete(:foreign_id)
+      end
 
       defaults = ref.class.column_defaults
       columns = (scalars + filters.keys).map(&:to_s)
       permitted.with_defaults(columns.index_with { |c| defaults[c] })
+    end
+
+    # The bearer API never clears foreign_id from a document write; the
+    # console secret controllers override this (ConsoleSecretDocumentWrites).
+    def explicit_foreign_id_clear?(_ref, _attrs)
+      false
     end
 
     # Resolves the target of a PUT/PATCH write so the verb behaves as an upsert.
@@ -106,7 +158,7 @@ module Api
     DEFAULT_PAGE_LIMIT = 50
     MAX_PAGE_LIMIT = 200
 
-    def paginated_label_search(scope, label_filter: nil)
+    def paginated_label_search(scope, label_filter: nil, order: { created_at: :asc, id: :asc })
       labels = label_filter_params
       filtered = if label_filter
         label_filter.call(scope, labels)
@@ -119,7 +171,7 @@ module Api
       limit = pagination_limit
       page = pagination_page
       total = filtered.count
-      records = filtered.order(created_at: :asc, id: :asc).limit(limit).offset((page - 1) * limit)
+      records = filtered.order(*Array.wrap(order)).limit(limit).offset((page - 1) * limit)
 
       total_pages = total.zero? ? 0 : ((total + limit - 1) / limit)
       meta = { page: page, limit: limit, total: total, total_pages: total_pages }

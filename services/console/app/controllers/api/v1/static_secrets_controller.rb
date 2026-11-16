@@ -1,6 +1,8 @@
 module Api
   module V1
     class StaticSecretsController < Api::BaseController
+      include SecretDocumentWrites
+
       def index
         records, meta = paginated_label_search(StaticSecret.all)
         render json: { data: records.map { |r| record_payload(r) }, meta: meta }
@@ -62,6 +64,15 @@ module Api
       end
 
       def assign_and_save!(ref, attrs)
+        StaticSecret.transaction do
+          # Lock (and reload) first so the retained inline value and kind are
+          # read after any concurrent write to this secret commits.
+          lock_secret_document!(ref)
+          write_document!(ref, attrs)
+        end
+      end
+
+      def write_document!(ref, attrs)
         ss_attrs = permit_document(
           ref, attrs, :name, :description, :kind,
           labels: {}, inject_config: {}, replace_config: {}
@@ -71,11 +82,8 @@ module Api
         # an explicitly supplied kind still replaces the existing value.
         ss_attrs[:kind] = ref.kind if ref.persisted? && !attrs.key?(:kind)
 
-        source_attrs = if attrs.key?(:source) && attrs[:source].present?
-          attrs.require(:source).permit(:source_type, :secret, config: {})
-        end
-
-        source = source_attrs ? SecretSource.new(source_attrs.to_h) : nil
+        # The console API keeps a stored inline source's `secret` a PATCH omits (SecretDocumentWrites).
+        source = build_secret_source(attrs, :source, ref.source)
         rules = build_rules(attrs)
 
         # Resolve profile defaults before the replacement guard so a repeated
@@ -90,26 +98,23 @@ module Api
           replace_config: candidate.replace_config
         )
 
-        StaticSecret.transaction do
-          with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
-            ref.assign_attributes(ss_attrs)
-            ref.kind_rules_for_validation = rules
-            ref.save!
+        with_sync_config_replacement_guard(ref, ss_attrs, source: source, rules: rules) do
+          ref.assign_attributes(ss_attrs)
+          ref.kind_rules_for_validation = rules
+          ref.save!
 
-            ref.source&.destroy!
-            if source
-              source.static_secret = ref
-              source.save!
-            end
+          ref.source&.destroy!
+          ref.rules.destroy_all
+          source&.static_secret = ref
+          rules.each { |rule| rule.static_secret = ref }
+          # Invalid nested records are reported (and rolled back) after the
+          # parent saved, keeping the error keys of the per-record save!.
+          validate_nested_secret_records!(ref, sources: { source: source }, rules: rules, legacy: :flat)
 
-            ref.rules.destroy_all
-            rules.each do |rule|
-              rule.static_secret = ref
-              rule.save!
-            end
+          source&.save!
+          rules.each(&:save!)
 
-            ref.reload
-          end
+          ref.reload
         end
       end
 

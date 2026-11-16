@@ -7,11 +7,9 @@ from typing import Any
 import typer
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
-app = PipeSafeTyper(name="laminar", help="Laminar trace investigation for Centaur agent executions")
+app = typer.Typer(name="laminar", help="Laminar trace investigation for Centaur agent executions")
 
 
 def _print(payload: Any) -> None:

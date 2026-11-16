@@ -1,0 +1,5 @@
+description = "Google Veo 3: start, poll and download AI video generation jobs"
+
+secrets = [
+    {type = "http", name = "GOOGLE_API_KEY", mode = "inject", inject_header = "x-goog-api-key", hosts = ["generativelanguage.googleapis.com"]},
+]

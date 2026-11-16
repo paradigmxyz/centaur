@@ -2,8 +2,6 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
@@ -14,7 +12,7 @@ from rich.table import Table
 
 from .client import PluralClient
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="plural",
     help="Plural (Open States) API — state legislation, legislators, committees, events",
 )

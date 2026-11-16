@@ -1,0 +1,3 @@
+description = "Tokenomist: token unlock schedules, allocations, daily emissions and fundraising rounds"
+
+secrets = [{type = "http", name = "TOKENOMIST_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.tokenomist.ai"]}]

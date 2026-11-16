@@ -7,8 +7,6 @@ import json
 import httpx
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import (
     DEFAULT_MODEL,
     DEFAULT_POLL_INTERVAL_SECONDS,
@@ -16,7 +14,7 @@ from .client import (
     _client,
 )
 
-app = PipeSafeTyper(name="pangram", help="Detect AI-generated or plagiarized text with Pangram.")
+app = typer.Typer(name="pangram", help="Detect AI-generated or plagiarized text with Pangram.")
 
 
 def _echo(payload: dict) -> None:

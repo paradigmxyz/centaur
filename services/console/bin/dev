@@ -8,8 +8,8 @@ export PORT="${PORT:-3000}"
 export RUBY_DEBUG_OPEN="true"
 export RUBY_DEBUG_LAZY="true"
 
-# Runs the web server alongside the Tailwind watcher (see Procfile.dev) so CSS
-# is rebuilt on every view/config change. Prefer overmind; fall back to foreman.
+# Runs the Rails server alongside the Vite dev server for the SPA (see
+# Procfile.dev). Prefer overmind; fall back to foreman.
 if command -v overmind >/dev/null 2>&1; then
   exec overmind start -f Procfile.dev "$@"
 elif command -v foreman >/dev/null 2>&1; then

@@ -116,6 +116,21 @@ fn custom_provider_default_model_is_optional() {
 }
 
 #[test]
+fn custom_provider_web_search_must_be_boolean() {
+    let provider = |web_search: serde_json::Value| {
+        serde_json::json!({"private": {
+            "name": "Private", "baseUrl": "https://inference.example.com/v1",
+            "apiKeyEnv": "PRIVATE_API_KEY", "webSearch": web_search
+        }})
+        .to_string()
+    };
+    for valid in [true, false] {
+        assert!(custom_provider_auth_fragments(&provider(valid.into())).is_ok());
+    }
+    assert!(custom_provider_auth_fragments(&provider("disabled".into())).is_err());
+}
+
+#[test]
 fn custom_provider_fragments_reject_unsafe_or_malformed_config() {
     for raw in [
         r#"{"bad.id":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,

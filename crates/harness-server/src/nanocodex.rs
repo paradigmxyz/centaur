@@ -64,6 +64,8 @@ async fn run() -> Result<()> {
                 thinking,
             } => {
                 if agent.is_none() {
+                    // Nanocodex blocks input carries no trace context.
+                    crate::session_prompt::run_session_prompt_hooks(None, "nanocodex");
                     let (new_agent, new_events) = build_agent(
                         &auth,
                         &cwd,

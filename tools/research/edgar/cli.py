@@ -8,11 +8,9 @@ from typing import Any, NoReturn
 import httpx
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import DEFAULT_MAX_CHARS, USER_AGENT_ENV, _client
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="edgar",
     help=(
         "SEC EDGAR: company lookup, filings, full-text search, filing documents, and XBRL "

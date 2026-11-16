@@ -5,11 +5,9 @@ import sys
 
 import typer
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import _client
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="prose-lint",
     help="Score drafts for wordiness, mannered prose, hedging, and citations.",
 )

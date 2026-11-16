@@ -18,7 +18,8 @@ module Api
         aws_auth_secret_id: AwsAuthSecret,
         oauth_token_secret_id: OauthTokenSecret,
         pg_dsn_secret_id: PgDsnSecret,
-        hmac_secret_id: HmacSecret
+        hmac_secret_id: HmacSecret,
+        ssh_key_secret_id: SshKeySecret
       }.freeze
 
       def create

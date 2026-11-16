@@ -6,13 +6,11 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import EodhdClient
 
 load_dotenv()
 
-app = PipeSafeTyper(name="eodhd", help="EODHD CLI for equity quotes and historical prices")
+app = typer.Typer(name="eodhd", help="EODHD CLI for equity quotes and historical prices")
 
 
 @app.command("health")

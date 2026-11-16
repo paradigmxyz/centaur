@@ -68,12 +68,56 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
 
   # --- login page -----------------------------------------------------------
 
-  test "the login form offers a button for each configured provider" do
+  test "the login page offers a button for each configured provider" do
     get login_url
     assert_response :ok
-    assert_select "a[href=?]", auth_start_path(provider: "google"), text: /Continue with Google/
+    assert_select "a[href=?]", auth_start_path(provider: "google"), text: "Continue with Google"
     # Slack has no credentials configured, so it must not appear.
     assert_select "a[href=?]", auth_start_path(provider: "slack"), count: 0
+  end
+
+  test "SSO failures reach the login page through the one-shot flash" do
+    get auth_start_url(provider: "slack")
+    assert_redirected_to login_path
+
+    get login_url
+    assert_select "[role=alert]", text: "That sign-in method is not available."
+    get login_url
+    assert_select "[role=alert]", count: 0
+  end
+
+  test "SSO success leaves the signed-in notice for the console" do
+    run_callback(sub: "notice-sub", email: "notice@example.com")
+    get api_v1_console_me_path
+    assert_equal "Signed in as notice@example.com.", json_body.dig("data", "flash", "notice")
+  end
+
+  test "callback replayed with the same state fails once the flow cookie is used" do
+    stub_exchange(status: 200, body: token_body(sub: "replay-sub", email: "replay@example.com"))
+    state = start_flow
+    get auth_callback_url(provider: "google"), params: { code: "the-code", state: state }
+    assert_redirected_to console_integrations_path
+    console_sign_out
+
+    get auth_callback_url(provider: "google"), params: { code: "the-code", state: state }
+    assert_redirected_to login_path
+    assert_equal "This sign-in link is invalid or expired. Start again.", flash[:alert]
+    assert_nil session[:user_id]
+  end
+
+  test "callback returns to a signed-out SPA deep link" do
+    get "/console/spa-only?x=1", headers: { "Accept" => "text/html" }
+    run_callback(sub: "deep-sub", email: "deep@example.com")
+    assert_redirected_to "/console/spa-only?x=1"
+  end
+
+  test "a disabled account returning from SSO is not signed in" do
+    user = User.create!(email: "gone@example.com", password: "password123456", status: :disabled)
+    user.user_identities.create!(provider: "google", subject: "gone-sub", email: user.email, email_verified: true)
+    run_callback(sub: "gone-sub", email: "gone@example.com")
+    assert_redirected_to login_path
+    assert_equal "Your account is disabled.", flash[:alert]
+    assert_nil session[:user_id]
   end
 
   # --- start ----------------------------------------------------------------
@@ -222,8 +266,8 @@ class SessionOauthControllerTest < ActionDispatch::IntegrationTest
   end
 
   test "callback redirects to the protected console URL the user first requested" do
-    get console_credentials_url(kind: "oauth")
-    assert_redirected_to login_path
+    # A signed-out SPA deep link remembers itself (SpaController).
+    get "/console/credentials?kind=oauth", headers: { "Accept" => "text/html" }
     assert_equal "/console/credentials?kind=oauth", session[:return_to]
 
     run_callback(sub: "returning-sub", email: "returning@example.com")

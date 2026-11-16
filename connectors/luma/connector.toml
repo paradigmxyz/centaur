@@ -1,0 +1,5 @@
+description = "Luma: read and manage calendars, events and guests, plus any other Luma API endpoint"
+
+secrets = [
+    {type = "http", name = "LUMA_API_KEY", mode = "inject", inject_header = "x-luma-api-key", hosts = ["public-api.luma.com"]},
+]

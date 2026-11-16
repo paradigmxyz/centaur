@@ -2,8 +2,6 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
@@ -15,7 +13,7 @@ from rich.table import Table
 
 from .client import AlliumClient, get_example_queries
 
-app = PipeSafeTyper(name="allium", help="Allium CLI for on-chain stablecoin and DeFi analytics")
+app = typer.Typer(name="allium", help="Allium CLI for on-chain stablecoin and DeFi analytics")
 
 
 @app.command("health")

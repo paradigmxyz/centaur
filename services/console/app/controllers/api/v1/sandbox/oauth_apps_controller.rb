@@ -3,6 +3,7 @@ module Api
     module Sandbox
       class OauthAppsController < ActionController::API
         include ApiRequestSupport
+        include OauthAppUrls
 
         before_action :authenticate_sandbox_jwt!
 
@@ -36,16 +37,8 @@ module Api
             labels: app.labels,
             provider: app.provider,
             allowed_scopes: app.allowed_scopes,
-            start_url: oauth_start_url_for(app)
+            start_url: oauth_start_url(app.slug)
           }
-        end
-
-        def oauth_start_url_for(app)
-          URI.join(public_base_url, "/oauth/#{app.slug}/start").to_s
-        end
-
-        def public_base_url
-          ConsoleEnv["PUBLIC_URL"].presence || request.base_url
         end
       end
     end

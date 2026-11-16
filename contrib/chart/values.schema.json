@@ -235,6 +235,7 @@
               "baseUrl": { "type": "string", "pattern": "^https://" },
               "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
               "defaultModel": { "type": "string", "minLength": 1 },
+              "webSearch": { "type": "boolean" },
               "models": {
                 "type": "object",
                 "propertyNames": { "pattern": "\\S" },

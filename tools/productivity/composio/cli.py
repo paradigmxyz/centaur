@@ -2,15 +2,12 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
-
 import typer
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="composio",
     help="Execute tools from 1000+ services via Composio (GitHub, Gmail, Slack, Notion, etc.)",
 )

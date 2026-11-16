@@ -3,7 +3,6 @@
 # ruff: noqa: E402, I001 -- dotenv must load before imports for standalone CLI use.
 
 from dotenv import load_dotenv
-from centaur_sdk.cli import PipeSafeTyper
 
 load_dotenv()
 
@@ -14,7 +13,7 @@ import typer
 from .client import EVENT_REGISTRY_DOCS_URL, EventRegistryClient, GetArticlesRequest
 
 
-app = PipeSafeTyper(name="eventregistry", help="Submit an Event Registry getArticles JSON request")
+app = typer.Typer(name="eventregistry", help="Submit an Event Registry getArticles JSON request")
 
 
 @app.command("get-articles")

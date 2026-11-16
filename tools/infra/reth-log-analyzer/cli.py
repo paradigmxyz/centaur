@@ -2,21 +2,19 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
-import json
 from pathlib import Path
 from typing import Optional
 
+import json
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from .client import _client
 
-app = PipeSafeTyper(help="Parse reth logs and generate performance graphs")
+app = typer.Typer(help="Parse reth logs and generate performance graphs")
 
 
 @app.command("health")

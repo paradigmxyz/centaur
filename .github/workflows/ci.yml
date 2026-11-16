@@ -33,6 +33,7 @@ jobs:
       discordbot_checks: ${{ steps.filter.outputs.discordbot_checks }}
       githubbot_checks: ${{ steps.filter.outputs.githubbot_checks }}
       teamsbot_checks: ${{ steps.filter.outputs.teamsbot_checks }}
+      connector_checks: ${{ steps.filter.outputs.connector_checks }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -160,6 +161,14 @@ jobs:
             '^\.github/workflows/ci\.yml$'
           set_output teamsbot_checks \
             '^services/teamsbot/' \
+            '^package\.json$' \
+            '^pnpm-lock\.yaml$' \
+            '^pnpm-workspace\.yaml$' \
+            '^\.github/workflows/ci\.yml$'
+          set_output connector_checks \
+            '^connectors/' \
+            '^crates/centaur-codemode/' \
+            '^Cargo\.(toml|lock)$' \
             '^package\.json$' \
             '^pnpm-lock\.yaml$' \
             '^pnpm-workspace\.yaml$' \
@@ -717,6 +726,46 @@ jobs:
         working-directory: services/teamsbot
         run: bun run test
 
+  connector-checks:
+    name: Code Mode connectors typecheck and tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.connector_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.9
+          run_install: false
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The runtime strips types without checking them, so this is the only
+      # place connector types are checked.
+      - name: Typecheck connectors
+        working-directory: connectors
+        run: pnpm run typecheck
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Includes loading every repository connector the way the runtime does.
+      - name: Test centaur-codemode
+        run: cargo test --locked -p centaur-codemode
+
   ci-success:
     name: CI success
     runs-on: depot-ubuntu-24.04
@@ -739,10 +788,11 @@ jobs:
       - discordbot-checks
       - githubbot-checks
       - teamsbot-checks
+      - connector-checks
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, rust-checks, harness-server-checks, harness-server-conformance, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, rust-checks, harness-server-checks, harness-server-conformance, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks, connector-checks
           jobs: ${{ toJSON(needs) }}

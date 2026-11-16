@@ -2,15 +2,12 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import json
-
 import typer
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="etherscan",
     help="Etherscan — Ethereum block explorer, transactions, contracts, and tokens",
 )

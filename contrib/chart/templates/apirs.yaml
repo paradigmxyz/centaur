@@ -16,10 +16,12 @@
 {{- $sandboxWorkflowDirList := list -}}
 {{- $skillDirs := list -}}
 {{- $publicSkillDirs := list -}}
+{{- $overlayRepoDirs := list -}}
 {{- range $source := $overlaySources -}}
 {{- $repo := get $source "repo" | default "" -}}
 {{- $visibility := get $source "visibility" | default "private" -}}
 {{- if $repo -}}
+{{- $overlayRepoDirs = append $overlayRepoDirs (printf "/home/agent/github/%s" $repo) -}}
 {{- with (get $source "toolsSubdir") -}}
 {{- $toolSource := dict "repo" $repo "subdir" . "visibility" $visibility -}}
 {{- with (get $source "ref") }}{{- $_ := set $toolSource "ref" . -}}{{- end -}}
@@ -351,19 +353,19 @@ spec:
             - name: SESSION_SANDBOX_RUNNING_LIMIT
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
             - name: SESSION_SANDBOX_MAX_LIFETIME_SECS
-              value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | quote }}
+              value: {{ .Values.apiRs.sandboxMaxLifetimeSecs | int64 | quote }}
             - name: SESSION_SANDBOX_REAP_INTERVAL_SECS
-              value: {{ .Values.apiRs.sandboxReapIntervalSecs | quote }}
+              value: {{ .Values.apiRs.sandboxReapIntervalSecs | int64 | quote }}
             - name: SESSION_EVENTS_RETENTION_DAYS
               value: {{ .Values.apiRs.sessionEventsRetentionDays | default 0 | quote }}
             - name: SESSION_EVENTS_RETENTION_SWEEP_INTERVAL_SECS
               value: {{ .Values.apiRs.sessionEventsRetentionSweepIntervalSecs | quote }}
             - name: SESSION_SANDBOX_ORPHAN_SWEEP_GRACE_SECS
-              value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | quote }}
+              value: {{ .Values.apiRs.sandboxOrphanSweepGraceSecs | int64 | quote }}
             - name: SESSION_SANDBOX_CLEANUP_INTERVAL_SECS
-              value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | quote }}
+              value: {{ .Values.apiRs.sandboxCleanupIntervalSecs | int64 | quote }}
             - name: SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS
-              value: {{ .Values.apiRs.sandboxIdleCleanupBackstopSecs | quote }}
+              value: {{ .Values.apiRs.sandboxIdleCleanupBackstopSecs | int64 | quote }}
             - name: SESSION_ACTIVITY_SUMMARY_ENABLED
               value: {{ .Values.apiRs.activitySummary.enabled | quote }}
 {{- if .Values.apiRs.activitySummary.enabled }}
@@ -566,6 +568,10 @@ spec:
 {{- end }}
 {{- if and .Values.repoCache.enabled (gt (len $publicSkillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_PUBLIC_SKILL_DIRS" "value" (join ":" $publicSkillDirs)) }}
+{{- end }}
+{{- /* Only configured overlay repos may run sandbox hooks. Public-only sessions mount only public repos, so private overlays' hooks are absent there. */}}
+{{- if and .Values.repoCache.enabled (gt (len $overlayRepoDirs) 0) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_OVERLAY_REPO_DIRS" "value" (join ":" $overlayRepoDirs)) }}
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_ENABLED") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" ($companyContextEmbeddingsEnabled | toString)) }}

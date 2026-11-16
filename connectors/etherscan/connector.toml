@@ -1,0 +1,3 @@
+description = "Etherscan: balances, transactions, token transfers, contracts, gas and event logs across chains"
+
+secrets = [{ type = "http", name = "ETHERSCAN_API_KEY", mode = "inject", inject_query_param = "apikey", hosts = ["api.etherscan.io"] }]

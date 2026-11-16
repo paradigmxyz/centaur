@@ -1,0 +1,6 @@
+description = "Datadog: log search, metric queries, monitors, hosts, and dashboards (read-only)"
+
+secrets = [
+  {type = "http", name = "DD_API_KEY", match_headers = ["DD-API-KEY"], hosts = ["api.datadoghq.com", "api.datadoghq.eu", "api.us3.datadoghq.com", "api.us5.datadoghq.com", "api.ap1.datadoghq.com", "api.ap2.datadoghq.com", "api.ddog-gov.com"]},
+  {type = "http", name = "DD_APP_KEY", match_headers = ["DD-APPLICATION-KEY"], hosts = ["api.datadoghq.com", "api.datadoghq.eu", "api.us3.datadoghq.com", "api.us5.datadoghq.com", "api.ap1.datadoghq.com", "api.ap2.datadoghq.com", "api.ddog-gov.com"]},
+]

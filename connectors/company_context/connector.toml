@@ -1,0 +1,4 @@
+description = "Company context: search and read indexed Slack messages and files, Google Docs, Calendar events, Granola notes and custom documents visible to the caller; create, update, list and delete your own custom documents (notes, memory)"
+
+# No secrets: iron-proxy injects the principal API JWT into every request to the
+# company-context service host (CENTAUR_API_SERVER_PROXY_HOSTS).

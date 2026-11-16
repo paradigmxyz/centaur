@@ -9,7 +9,7 @@ module Api
     class GranteeGrantsController < Api::BaseController
       def index
         grantee = resolve_grantee
-        scope = grantee.grants.order(created_at: :asc, id: :asc)
+        scope = grantee.grants.includes(Grant::GRANTABLE_ASSOCIATIONS).order(created_at: :asc, id: :asc)
 
         limit = pagination_limit
         page = pagination_page

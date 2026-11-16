@@ -5,15 +5,13 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-app = PipeSafeTyper(name="reth", help="Reth CLI for execution timings and performance metrics")
+app = typer.Typer(name="reth", help="Reth CLI for execution timings and performance metrics")
 
 
 @app.command("health")

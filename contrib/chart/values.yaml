@@ -283,6 +283,9 @@ codex:
   #       apiKeyEnv: PRIVATE_RESPONSES_API_KEY
   #       # Optional; callers must pass --model when omitted.
   #       defaultModel: example-model
+  #       # Optional (default true); false stops Codex from sending its hosted
+  #       # web_search tool to this provider, for endpoints that reject it.
+  #       webSearch: false
   #       # Optional metadata for natural-language selection and display.
   #       models:
   #         example-model:
@@ -457,6 +460,10 @@ agentSandbox:
 # for POST /api/v1/proxy/sync while all operator/admin traffic continues to use
 # Console. The service reads Console's database directly.
 proxySync:
+  # Deployment-owned WSS destinations that granted SSH keys may reach.
+  # Example: [{host: "*.dev.example.com", path: /events/events, username: dev}]
+  # Empty denies dynamic targets. Exact paths and TLS verification are mandatory.
+  sshTargets: []
   # Two replicas keep sync available during pod restarts and rolling updates.
   replicaCount: 2
   nodeSelector: {}

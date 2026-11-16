@@ -3,11 +3,20 @@ require "digest"
 require "uri"
 
 module Mcp
+  # MCP OAuth authorization server: metadata, dynamic client registration,
+  # the consent page, and the token endpoint.
+  #
+  # The consent page is intentionally server-rendered (layouts/oauth) rather
+  # than an SPA route, so installed MCP clients keep exactly the protocol
+  # behaviour they were built against.
   class OauthController < ApplicationController
-    layout "auth"
+    layout "oauth"
+    include ServerRenderedPagePolicy
 
     skip_before_action :require_login, only: %i[metadata register authorize token]
     skip_before_action :require_active_account, only: %i[metadata register authorize token]
+    # RFC 6749 section 5.1: token responses, errors included, must not be cached.
+    before_action :prevent_token_caching, only: :token
     skip_forgery_protection only: %i[register token]
 
     ACCESS_TOKEN_TTL_SECONDS = 1.hour.to_i
@@ -68,7 +77,7 @@ module Mcp
     def authorize
       return redirect_to_login unless current_user
       return redirect_to pending_path if current_user.pending?
-      return redirect_to login_path, alert: "Your account is disabled." if current_user.disabled?
+      return redirect_to login_path, alert: ConsoleSignIn::DISABLED_MESSAGE if current_user.disabled?
 
       authorization = validated_authorization_request
       return unless authorization
@@ -166,6 +175,7 @@ module Mcp
       @redirect_uri = params[:redirect_uri].to_s
       @redirect_host = redirect_uri_host(@redirect_uri)
       @authorization_params = authorization_form_params(authorization)
+      @signed_in_email = current_user.email
     end
 
     def issue_authorization_code(authorization)
@@ -382,7 +392,7 @@ module Mcp
     end
 
     def redirect_to_login
-      session[:return_to] = request.fullpath if request.request_method == "GET"
+      remember_console_return_path(request.fullpath) if request.request_method == "GET"
       redirect_to login_path
     end
 
@@ -398,6 +408,11 @@ module Mcp
       else
         render plain: description, status: :bad_request
       end
+    end
+
+    def prevent_token_caching
+      response.headers["Cache-Control"] = "no-store"
+      response.headers["Pragma"] = "no-cache"
     end
 
     def oauth_error(error, description, status:)

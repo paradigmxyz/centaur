@@ -6,9 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
-app = PipeSafeTyper(name="nansen", help="Nansen CLI for blockchain analytics and wallet labels")
+app = typer.Typer(name="nansen", help="Nansen CLI for blockchain analytics and wallet labels")
 
 
 @app.command("health")

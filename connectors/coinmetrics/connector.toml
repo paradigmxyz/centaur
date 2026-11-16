@@ -1,0 +1,3 @@
+description = "Coin Metrics: asset reference data, timeseries and on-chain metrics, market candles and trades"
+
+secrets = [{type = "http", name = "COINMETRICS_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.coinmetrics.io"]}]

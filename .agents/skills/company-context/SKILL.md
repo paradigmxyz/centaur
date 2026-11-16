@@ -23,11 +23,24 @@ When the company-context service is deployed, the preview `company_context v2 se
 
 ## Default Workflow
 
-1. Search company context first:
+1. Search company context first, before source-specific tools. Use `company_context v2 search`, then `company_context v2 read DOCUMENT_ID` to read a result in full. It combines keyword and semantic matching; narrow it with `--type`, `--after`/`--before`, or `--channel-id` when the question names a source, period, or channel. To enumerate every match, such as all mentions of a term in a channel, add `--keyword` and follow `next_cursor` with `--cursor`:
+
+```bash
+company_context v2 search "QUERY" --limit 10
+company_context v2 read "DOCUMENT_ID"
+```
+
+Fall back to the legacy search only when v2 is disabled: `COMPANY_CONTEXT_API_URL` is unset or v2 reports the API is not deployed. Report other v2 errors, and do not switch to legacy search for weak results. With legacy search, use `--no-hybrid` for exact identifiers, quoted phrases, filenames, or keyword comparisons:
 
 ```bash
 company_context search "QUERY" --limit 10 --json
 ```
+
+Query strategy:
+
+- Keep the user's wording first and add at most one or two semantic variants.
+- Add concrete domain anchors to ambiguous concepts and reject results matching only a broad neighbor.
+- If fewer than two of the top five results directly answer the question, run one narrower semantic variant.
 
 For DM-specific questions, use the dedicated DM search surface:
 
@@ -36,7 +49,7 @@ company_context search-dms "QUERY" --limit 10 --json
 company_context search-dm-conversations "PERSON OR QUERY" --limit 10 --json
 ```
 
-2. Read promising documents before answering:
+2. Read the highest-value sources before answering; do not infer conclusions from titles alone. Deduplicate repeated discussions:
 
 ```bash
 company_context read "DOCUMENT_ID" --max-chars 8000 --related --json
@@ -94,7 +107,9 @@ Use extra direct-tool depth after the default indexed-plus-live pass when:
 
 ## Answering Rules
 
-- Lead with the answer and include the evidence source when it matters: source, source type, date, title, and URL/permalink if present.
+- Distinguish direct internal views from AI-generated research or summaries; prefer human-authored discussion and primary notes.
+- If retrieval remains weak, say so rather than synthesizing a confident company position.
+- Lead with the answer and cite the underlying thread or document when it matters: source, source type, date, title, and URL/permalink if present.
 - Say how indexed context and live source-tool results agree, differ, or complement each other.
 - If freshness matters, use `latest-date` to inspect the indexed cutoff and direct source tools for live corroboration.
 - Do not copy long private documents or message dumps into the reply. Summarize narrowly and quote only short snippets when useful.

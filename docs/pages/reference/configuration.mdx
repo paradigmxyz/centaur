@@ -224,11 +224,21 @@ API-set variables:
 | --- | --- | --- |
 | `AGENT_IMAGE` | `sandbox.image.*`. | Sandbox image used by the Kubernetes backend. |
 | `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
-| `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY` | API sandbox creation. | API callback and thread key. |
+| `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY` | API sandbox creation. | API callback and thread key. Warm-pool sandboxes boot without `CENTAUR_THREAD_KEY`; read the sandbox context file instead. |
+| `CENTAUR_SANDBOX_CONTEXT_FILE` | Optional override. | Path of the sandbox context file; defaults to `~/.centaur/sandbox.json`. |
 | `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
 | `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
 | `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
 | `PG_PROXY_PASSWORD_<SECRET_NAME>`, `<PG_DSN_SECRET_NAME>` | API per-sandbox proxy creation. | Proxied Postgres credentials for tools that declare `pg_dsn` secrets. |
+
+Sandbox context file: before a sandbox's first turn, `harness-server` writes
+`~/.centaur/sandbox.json` with the session's `thread_key`, the harness, the
+persona, and under `sandbox` the Console principal, capabilities, and redacted
+grants from `GET /api/v1/sandbox/permissions`. If Console cannot be reached,
+`sandbox` is `null` and `sandbox_error` says why. Tools read it through
+`centaur_sdk.sandbox_context()` and `centaur_sdk.sandbox_thread_key()`. The file
+is informational and agent-writable; never base an authorization decision on
+it.
 
 Kubernetes backend:
 
@@ -269,7 +279,7 @@ Sandbox entrypoint and wrappers:
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
 | `CODEX_AUTH_MODE` | `sandbox.codexAuthMode`. | Codex auth flow: `api_key` (default, hits `api.openai.com`) or `access_token` (hits `chatgpt.com` via the brokered ChatGPT login). The chart sets this on api-rs, which propagates it into sandboxes. See [Codex Auth Modes](/deploying-in-production#codex-auth-modes). |
 | `META_AI_API_KEY` | Secret mounted into api-rs. | Meta AI direct credential for Codex provider `responses` and Slack or Linear `--meta` selection. |
-| `CODEX_CUSTOM_PROVIDERS` | Chart-rendered from `codex.customProviders`. | JSON provider catalog consumed by api-rs, sandboxes, chat ingresses, and Console. Prefer the chart value over setting this environment variable directly. Each entry supplies `name`, HTTPS `baseUrl`, `apiKeyEnv`, and an optional `defaultModel`; select it with `--provider <id>`. |
+| `CODEX_CUSTOM_PROVIDERS` | Chart-rendered from `codex.customProviders`. | JSON provider catalog consumed by api-rs, sandboxes, chat ingresses, and Console. Prefer the chart value over setting this environment variable directly. Each entry supplies `name`, HTTPS `baseUrl`, `apiKeyEnv`, an optional `defaultModel`, and an optional `webSearch` boolean (default `true`; `false` stops Codex from sending its hosted `web_search` tool to that provider); select it with `--provider <id>`. |
 | Custom provider `apiKeyEnv` | The configured iron-proxy secret source. | Bearer token for that provider. Sandboxes receive only a same-name placeholder, and replacement is restricted to the provider's `baseUrl` DNS host. |
 | `CODEX_MODEL_REASONING_SUMMARY` | `sandbox.extraEnv`. | Sets `model_reasoning_summary` in the Codex config (`auto`, `concise`, `detailed`, `none`). Codex >= 0.139 emits no reasoning summaries unless this is set, so renderers show no thinking trace. |
 | `CODEX_MODEL_REASONING_EFFORT` | `sandbox.extraEnv`. | Overrides the Codex `model_reasoning_effort` (baked into `harness/codex/config.toml`) and Nanocodex's default thinking effort. It is mirrored into Slackbot so the first response footer displays the effective level. One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; an unknown value is ignored (the config default stands). |

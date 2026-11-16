@@ -1,0 +1,7 @@
+description = "Web search: Parallel (default, free tier), Exa, or Tako"
+
+optional_secrets = [
+  {type = "http", name = "PARALLEL_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.parallel.ai"]},
+  {type = "http", name = "EXA_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.exa.ai"]},
+  {type = "http", name = "TAKO_API_KEY", mode = "inject", inject_header = "X-API-Key", hosts = ["tako.com"]},
+]

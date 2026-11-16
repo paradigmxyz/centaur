@@ -1,0 +1,5 @@
+description = "Granola: meeting notes, summaries, transcripts, folders and meeting Q&A"
+
+secrets = [
+  { type = "http", name = "GRANOLA_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["public-api.granola.ai"] },
+]

@@ -18,8 +18,13 @@ module Oauth
   #
   # SECURITY: never logs the code, tokens, client_secret, or response bodies --
   # only oids and error codes, like the rest of the Broker/Oauth subsystem.
+  #
+  # The failure page is intentionally server-rendered (layouts/oauth), like the
+  # MCP OAuth consent page: the IdP redirects straight back here, and the
+  # outcome is rendered in the same response instead of being handed to the SPA.
   class FlowsController < ApplicationController
-    layout "auth"
+    layout "oauth"
+    include ServerRenderedPagePolicy
 
     # The message_verifier purpose binding the signed state to this flow, the
     # state/cookie lifetime, and the encrypted cookie that ties a callback back to
@@ -38,11 +43,11 @@ module Oauth
 
     # GET /oauth/:slug/start?scopes=
     def start
-      return render_result(:error, status: :unprocessable_entity, message: "This integration is disabled.") unless @app.enabled?
+      return render_result(:error, status: :unprocessable_content, message: "This integration is disabled.") unless @app.enabled?
 
       requested_scopes = parse_scopes(params[:scopes]) || Array(@app.allowed_scopes)
       unless @app.scopes_allowed?(requested_scopes)
-        return render_result(:error, status: :unprocessable_entity, message: "One or more requested scopes are not allowed for this integration.")
+        return render_result(:error, status: :unprocessable_content, message: "One or more requested scopes are not allowed for this integration.")
       end
       consent_scopes = requested_scopes | provider_required_scopes
 
@@ -340,7 +345,7 @@ module Oauth
     # status defaults to 422 but callers override it for the 4xx pre-consent
     # rejections. Success does not come through here -- the happy path
     # redirects back to the console Integrations page.
-    def render_result(kind, status: :unprocessable_entity, message: nil)
+    def render_result(kind, status: :unprocessable_content, message: nil)
       @kind = kind
       @message = message
       render :result, status: status

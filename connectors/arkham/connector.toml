@@ -1,0 +1,3 @@
+description = "Arkham Intelligence: address, entity, token and transaction analytics, portfolios, transfers and flows"
+
+secrets = [{type = "http", name = "ARKHAM_API_KEY", mode = "inject", inject_header = "API-Key", hosts = ["api.arkm.com"]}]

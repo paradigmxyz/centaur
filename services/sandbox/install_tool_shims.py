@@ -506,7 +506,7 @@ import os
 from pathlib import Path
 import sys
 
-from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, set_tool_context
+from centaur_sdk.tool_sdk import ToolContext, reset_tool_context, sandbox_thread_key, set_tool_context
 
 project_dir = Path(sys.argv[1])
 client_module = sys.argv[2]
@@ -563,7 +563,7 @@ if isinstance(payload, dict) and callable(target):
             raise SystemExit(2)
 
 ctx_token = None
-thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
+thread_key = sandbox_thread_key()
 if thread_key:
     ctx_token = set_tool_context(ToolContext(name=project_dir.name, thread_key=thread_key))
 try:
@@ -596,6 +596,23 @@ def tool_env():
     # PYTHONPYCACHEPREFIX would redirect reads too and lose the stdlib's.
     env.pop("PYTHONDONTWRITEBYTECODE", None)
     return env
+
+
+def current_thread_key():
+    # Mirrors centaur_sdk.sandbox_thread_key without importing the SDK: warm
+    # sandboxes learn their thread key from the context file harness-server
+    # writes before the first turn.
+    thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
+    if thread_key:
+        return thread_key
+    path = os.environ.get("CENTAUR_SANDBOX_CONTEXT_FILE", "").strip()
+    try:
+        context_path = Path(path) if path else Path.home() / ".centaur" / "sandbox.json"
+        context = json.loads(context_path.read_text())
+    except (OSError, ValueError, RuntimeError):
+        return ""
+    thread_key = context.get("thread_key") if isinstance(context, dict) else None
+    return thread_key.strip() if isinstance(thread_key, str) else ""
 
 
 def analytics_log_path():
@@ -654,7 +671,7 @@ def emit_tool_call_event(event, tool, method, tool_args=None, started_at=None, r
         payload["tool_args_count"] = arg_count
         if args_truncated:
             payload["tool_args_truncated"] = "true"
-    thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
+    thread_key = current_thread_key()
     if thread_key:
         payload["thread_key"] = thread_key
     if started_at is not None:

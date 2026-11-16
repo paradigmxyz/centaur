@@ -4,10 +4,6 @@ source "https://rubygems.org"
 # Rails 8.1.4 cannot validate foreign keys in extension schemas outside the search path.
 # Fixed upstream by rails/rails#58875; 8.1.4.1 is used with a test-helper backport.
 gem "rails", "~> 8.1.4", "!= 8.1.4"
-# The modern asset pipeline for Rails [https://github.com/rails/propshaft]
-gem "propshaft"
-# Tailwind CSS, compiled by a standalone binary into app/assets/builds.
-gem "tailwindcss-rails", "4.7.0"
 # Use pg as the database for Active Record
 gem "pg", "~> 1.7"
 # Opaque ID encoding (bigint <-> short string) for externally-exposed IDs
@@ -18,12 +14,6 @@ gem "json_schemer", "~> 2.3"
 gem "nokogiri", "~> 1.19"
 # Use the Puma web server [https://github.com/puma/puma]
 gem "puma", ">= 5.0"
-# Use JavaScript with ESM import maps [https://github.com/rails/importmap-rails]
-gem "importmap-rails"
-# Hotwire's SPA-like page accelerator [https://turbo.hotwired.dev]
-gem "turbo-rails"
-# Hotwire's modest JavaScript framework [https://stimulus.hotwired.dev]
-gem "stimulus-rails"
 # Build JSON APIs with ease [https://github.com/rails/jbuilder]
 gem "jbuilder"
 # Collapse multi-line request logs into a single JSON event [https://github.com/roidrage/lograge]
@@ -37,6 +27,12 @@ gem "bcrypt", "~> 3.1.7"
 
 # JSON Web Tokens (HS256) for proxy sync, sandbox entitlement, and MCP tokens [https://github.com/jwt/ruby-jwt]
 gem "jwt", "~> 3.3"
+
+# Parse saved SSH private keys (OpenSSH and PEM) to derive their public keys.
+# net-ssh needs ed25519 and bcrypt_pbkdf to read the OpenSSH key format.
+gem "net-ssh", "~> 7.3", require: false
+gem "ed25519", "~> 1.4", require: false
+gem "bcrypt_pbkdf", "~> 1.1", require: false
 
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
@@ -79,8 +75,5 @@ group :development do
 end
 
 group :test do
-  # Use system testing [https://guides.rubyonrails.org/testing.html#system-testing]
-  gem "capybara"
   gem "minitest-mock", "~> 5.27", require: false
-  gem "selenium-webdriver"
 end

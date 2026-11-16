@@ -1,0 +1,3 @@
+description = "Allium: SQL over on-chain data, schema search, saved Explorer queries and raw API calls"
+
+secrets = [{type = "http", name = "ALLIUM_API_KEY", mode = "inject", inject_header = "X-API-KEY", hosts = ["api.allium.so", "mcp.allium.so"]}]

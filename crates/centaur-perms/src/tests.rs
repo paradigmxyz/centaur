@@ -41,6 +41,10 @@ fn secret_type_routes_by_oid_prefix() {
         secret_type_for_oid("aas_6").map(|t| t.1),
         Some("aws_auth_secrets")
     );
+    assert_eq!(
+        secret_type_for_oid("sks_8").map(|t| t.1),
+        Some("ssh_key_secrets")
+    );
     // A bare foreign_id is not an OID — callers fall back to lookup.
     assert!(secret_type_for_oid("falconx-hmac").is_none());
 }

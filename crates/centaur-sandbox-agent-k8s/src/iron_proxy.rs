@@ -103,6 +103,8 @@ pub struct IronProxyConfig {
     pub env_from_secret_names: Vec<String>,
     pub extra_env: BTreeMap<String, String>,
     pub upstream_deny_cidrs: Vec<String>,
+    /// SSH listener settings for paired proxies; `None` leaves SSH off.
+    pub ssh: Option<crate::ssh::SshProxyConfig>,
     /// Address ranges of an external core database (for example RDS or Cloud
     /// SQL). Proxies may reach them on `database_port`; the public-upstream rule
     /// excludes private ranges, where managed databases usually live.
@@ -144,6 +146,7 @@ impl IronProxyConfig {
             env_from_secret_names: Vec::new(),
             extra_env: BTreeMap::new(),
             upstream_deny_cidrs: Vec::new(),
+            ssh: None,
             database_cidrs: Vec::new(),
             database_pod_labels: BTreeMap::new(),
             database_namespace: None,
@@ -174,6 +177,7 @@ impl IronProxyConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedIronProxy {
+    ssh: Option<crate::ssh::Identity>,
     proxy_host: String,
     proxy_pod_name: String,
     proxy_port: u16,
@@ -271,7 +275,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled: spec.capabilities.observability_enabled,
             },
-        )))
+        )?))
     }
 
     /// Read the principal's effective config from iron-control for the
@@ -356,7 +360,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
             },
-        )))
+        )?))
     }
 
     fn resolved_iron_proxy_for_principal(
@@ -366,8 +370,16 @@ impl AgentSandboxBackend {
         requester_principal_id: Option<String>,
         labels: BTreeMap<String, String>,
         runtime: ResolvedIronProxyRuntime,
-    ) -> ResolvedIronProxy {
-        ResolvedIronProxy {
+    ) -> SandboxResult<ResolvedIronProxy> {
+        let ssh = self
+            .config
+            .iron_proxy
+            .as_ref()
+            .and_then(|c| c.ssh.as_ref())
+            .map(|ssh| crate::ssh::Identity::derive(ssh, &iron_proxy_service_name(id)))
+            .transpose()?;
+        Ok(ResolvedIronProxy {
+            ssh,
             proxy_host: iron_proxy_service_name(id),
             proxy_pod_name: new_iron_proxy_pod_name(id),
             proxy_port: PROXY_TUNNEL_PORT,
@@ -379,7 +391,7 @@ impl AgentSandboxBackend {
             replace_placeholders: runtime.replace_placeholders,
             management_api_key: new_proxy_management_api_key(),
             observability_enabled: runtime.observability_enabled,
-        }
+        })
     }
 
     pub(crate) async fn create_iron_proxy_resources(
@@ -908,7 +920,7 @@ impl AgentSandboxBackend {
                 replace_placeholders,
                 observability_enabled,
             },
-        );
+        )?;
         self.create_iron_proxy_resources(id, Some(&resolved))
             .await?;
         if let Some(sandbox) = sandbox
@@ -1475,6 +1487,13 @@ fn new_proxy_management_api_key() -> String {
 }
 
 pub(crate) fn apply_proxy_env(spec: &mut SandboxSpec, resolved: &ResolvedIronProxy) {
+    if let Some(ssh) = &resolved.ssh {
+        set_env(
+            spec,
+            "CENTAUR_SSH",
+            &ssh.sandbox(&resolved.proxy_host).to_string(),
+        );
+    }
     let mut no_proxy_extra = current_env_values(spec, ["NO_PROXY", "no_proxy"]);
     // The harness exports OTLP traces (usage/cost spans) straight to the
     // collector; routing them through iron-proxy fails (plain-HTTP forwards
@@ -1744,6 +1763,15 @@ fn iron_proxy_env_vars(
             env.insert(name.to_owned(), env_var(name, value));
         }
     }
+    if let Some(ssh) = &resolved.ssh {
+        env.insert(
+            "IRON_SSH_CONFIG_JSON".into(),
+            env_var(
+                "IRON_SSH_CONFIG_JSON",
+                &ssh.proxy(&sync.control_url).to_string(),
+            ),
+        );
+    }
     env.into_values().collect()
 }
 
@@ -1807,6 +1835,9 @@ fn secret_file_projection(secret_name: &str, key: &str, path: &str) -> VolumePro
 
 fn build_iron_proxy_service(id: &SandboxId, resolved: &ResolvedIronProxy) -> Service {
     let mut ports = vec![service_port("proxy", resolved.proxy_port)];
+    if resolved.ssh.is_some() {
+        ports.push(service_port("ssh", 2222));
+    }
     if let Some(pg) = &resolved.pg {
         ports.push(service_port("pg", pg.port));
     }
@@ -1892,6 +1923,7 @@ fn build_iron_proxy_network_policies(
 fn sandbox_to_proxy_ports(resolved: &ResolvedIronProxy) -> Vec<NetworkPolicyPort> {
     std::iter::once(network_port(resolved.proxy_port))
         .chain(resolved.pg.as_ref().map(|pg| network_port(pg.port)))
+        .chain(resolved.ssh.as_ref().map(|_| network_port(2222)))
         .collect()
 }
 
@@ -2493,6 +2525,7 @@ mod tests {
 
     fn resolved() -> ResolvedIronProxy {
         ResolvedIronProxy {
+            ssh: None,
             proxy_host: "asbx-test-iron-proxy".to_owned(),
             proxy_pod_name: "asbx-test-iron-proxy-1".to_owned(),
             proxy_port: 8080,
@@ -2505,6 +2538,34 @@ mod tests {
             management_api_key: "test-management-key".to_owned(),
             observability_enabled: true,
         }
+    }
+
+    #[test]
+    fn ssh_ports_and_credentials_are_scoped_to_the_paired_proxy() {
+        let mut target = resolved();
+        target.ssh = Some(crate::ssh::Identity::fixture("test-sandbox"));
+        let service = build_iron_proxy_service(&SandboxId::new("test"), &target);
+        assert!(
+            service
+                .spec
+                .unwrap()
+                .ports
+                .unwrap()
+                .iter()
+                .any(|p| p.port == 2222)
+        );
+        assert!(
+            sandbox_to_proxy_ports(&target)
+                .iter()
+                .any(|p| p.port == Some(IntOrString::Int(2222)))
+        );
+        let identity = target.ssh.as_ref().unwrap();
+        let sandbox = identity.sandbox(&target.proxy_host);
+        let proxy = identity.proxy("http://sync");
+        assert_ne!(sandbox["private_key"], proxy["host_key"]["value"]);
+        assert!(proxy.get("upstream_deny_cidrs").is_none());
+        assert!(sandbox.get("host_key").is_some());
+        assert!(!sandbox.to_string().contains("control_plane"));
     }
 
     fn resolved_with_observability(observability_enabled: bool) -> ResolvedIronProxy {

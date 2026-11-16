@@ -1,20 +1,20 @@
 <%
-  heading, accent =
+  heading, tone =
     case @kind
-    when :denied then [ "Not connected", "text-amber-300" ]
-    else              [ "Something went wrong", "text-red-300" ]
+    when :denied then [ "Not connected", "is-denied" ]
+    else              [ "Something went wrong", "is-error" ]
     end
 %>
 <% content_for :title, "#{heading} · Centaur Console" %>
 
-<div class="rounded-xl border border-ink-600 bg-ink-850/60 p-6">
-  <div class="mb-3">
-    <%= image_tag "centaur-lockup-white.svg", alt: "Centaur", class: "h-6 w-auto", width: 497, height: 127 %>
-  </div>
-  <h1 class="text-lg font-bold <%= accent %>"><%= heading %></h1>
+<section class="oauth-card" aria-labelledby="oauth-result-heading">
+  <img src="<%= OauthPageAssets.path("centaur-lockup-white.svg") %>" alt="Centaur" class="oauth-logo-small" width="497" height="127">
+  <h1 id="oauth-result-heading" class="oauth-result-heading <%= tone %>"><%= heading %></h1>
 
-  <p class="mt-3 text-sm text-zinc-400"><%= @message %></p>
+  <p class="oauth-result-message"><%= @message %></p>
   <% if @app&.enabled? %>
-    <a href="<%= oauth_start_path(slug: @app.slug) %>" class="mt-4 inline-block text-sm console-link">Try again</a>
+    <div class="oauth-result-retry">
+      <a href="<%= oauth_start_path(slug: @app.slug) %>" class="oauth-button oauth-button-primary">Try again</a>
+    </div>
   <% end %>
-</div>
+</section>

@@ -6,8 +6,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from centaur_sdk.cli import PipeSafeTyper
-
 from .client import (
     TenderlyClient,
     error_path,
@@ -17,7 +15,7 @@ from .client import (
     trace_skeleton,
 )
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="tenderly",
     help="Tenderly CLI for transaction simulation, tracing, and Virtual TestNets",
 )

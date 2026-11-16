@@ -8,9 +8,10 @@
 #   e2e/stack.sh down          delete the cluster
 #
 # The stack is the chart's Slack path (Postgres, console, proxy-sync, api-rs,
-# slackbotv2, sandboxes, per-sandbox iron-proxies) plus two fakes for the
-# outside world: Slack, and the model providers, which CoreDNS resolves to an
-# in-cluster scripted model server. The test runner reaches the fakes,
+# slackbotv2, sandboxes, per-sandbox iron-proxies) plus fakes for the outside
+# world: Slack, the model providers, which CoreDNS resolves to an in-cluster
+# scripted model server, and a remote development environment behind a WSS SSH
+# gateway, which CoreDNS resolves the same way. The test runner reaches the fakes,
 # Postgres, api-rs, and the console on localhost through NodePorts mapped by
 # e2e/infra/kind.yaml.
 #
@@ -34,6 +35,7 @@ RELEASE=centaur # contrib/scripts/bootstrap-k8s-secrets.sh assumes this name
 NAMESPACE=centaur
 SLACK_NAMESPACE=centaur-e2e-slack
 MODEL_NAMESPACE=centaur-e2e-model
+SSH_NAMESPACE=centaur-e2e-ssh
 # Fixture values, not credentials: the fakes and the stack must agree on them.
 SLACK_BOT_TOKEN=xoxb-centaur-e2e
 SLACK_SIGNING_SECRET=centaur-e2e-signing-secret
@@ -47,6 +49,8 @@ CUSTOM_TEST_KEY=e2e-custom-provider-test-key
 CODEX_ACCESS_TOKEN=e2e-chatgpt-access-token
 CLAUDE_ACCESS_TOKEN=e2e-claude-access-token
 CHATGPT_ACCOUNT_ID=e2e00000-0000-4000-8000-00000000c0de
+# Derives every sandbox's disposable SSH identity (at least 32 bytes).
+SSH_SEED=centaur-e2e-ssh-seed-fixture-0123456789
 AUTH_MODE="${CENTAUR_E2E_AUTH_MODE:-api_key}"
 # Full component logs, including those of pods a test restarted.
 LOG_DIR="${CENTAUR_E2E_LOG_DIR:-${TMPDIR:-/tmp}/${CLUSTER}-logs}"
@@ -124,14 +128,16 @@ up() {
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace "$NAMESPACE"
   # iron-proxy's env secret source resolves the provider keys from here.
   kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p \
-    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\",\"E2E_CUSTOM_API_KEY\":\"$CUSTOM_TEST_KEY\",\"OPENAI_CODEX_ACCOUNT_ID\":\"$CHATGPT_ACCOUNT_ID\",\"CENTAUR_APIRS_ADMIN_API_KEY\":\"$API_ADMIN_KEY\"}}" > /dev/null
+    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\",\"E2E_CUSTOM_API_KEY\":\"$CUSTOM_TEST_KEY\",\"OPENAI_CODEX_ACCOUNT_ID\":\"$CHATGPT_ACCOUNT_ID\",\"CENTAUR_APIRS_ADMIN_API_KEY\":\"$API_ADMIN_KEY\",\"CENTAUR_SSH_SEED\":\"$SSH_SEED\"}}" > /dev/null
   # iron-proxy pods mount the release CA at this path; trusting it lets them
   # verify the model server, whose certificate the same CA signs below.
   kubectl -n "$NAMESPACE" create secret generic centaur-e2e-iron-proxy-env \
     --from-literal=SSL_CERT_FILE=/etc/iron-proxy-ca/ca-cert.pem \
     --dry-run=client -o yaml | apply_stdin
 
+  load_release_ca
   deploy_model_server
+  deploy_ssh_gateway
   deploy_fake_slack
 
   # An interrupted install leaves the release locked as pending; start it over.
@@ -195,21 +201,33 @@ seed_broker_credentials() {
   kubectl -n "$NAMESPACE" delete pod -l app.kubernetes.io/component=api-rs --wait=false > /dev/null
 }
 
-deploy_model_server() {
+# The release's iron-proxy CA, which iron-proxy pods trust (see
+# centaur-e2e-iron-proxy-env); the fakes they reach present certificates it signs.
+load_release_ca() {
   kubectl -n "$NAMESPACE" get secret centaur-firewall-ca-key -o jsonpath='{.data.ca-cert\.pem}' \
     | base64 -d > "$WORK/ca.pem"
   kubectl -n "$NAMESPACE" get secret centaur-firewall-ca-key -o jsonpath='{.data.ca-key\.pem}' \
     | base64 -d > "$WORK/ca-key.pem"
-  openssl req -new -newkey rsa:2048 -nodes -subj /CN=api.openai.com \
-    -keyout "$WORK/tls.key" -out "$WORK/tls.csr" 2> /dev/null
-  printf 'subjectAltName=DNS:api.openai.com,DNS:chatgpt.com,DNS:api.anthropic.com,DNS:custom-provider.test\nextendedKeyUsage=serverAuth\n' \
-    > "$WORK/ext.cnf"
-  openssl x509 -req -in "$WORK/tls.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca-key.pem" \
-    -CAcreateserial -days 30 -sha256 -extfile "$WORK/ext.cnf" -out "$WORK/tls.crt" 2> /dev/null
+}
+
+# issue_cert NAME DNS... writes $WORK/NAME.crt and $WORK/NAME.key, signed by the release CA.
+issue_cert() {
+  local name="$1" sans
+  shift
+  sans="$(printf 'DNS:%s,' "$@")"
+  openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$1" \
+    -keyout "$WORK/$name.key" -out "$WORK/$name.csr" 2> /dev/null
+  printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "${sans%,}" > "$WORK/$name.cnf"
+  openssl x509 -req -in "$WORK/$name.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca-key.pem" \
+    -CAcreateserial -days 30 -sha256 -extfile "$WORK/$name.cnf" -out "$WORK/$name.crt" 2> /dev/null
+}
+
+deploy_model_server() {
+  issue_cert model-server api.openai.com chatgpt.com api.anthropic.com custom-provider.test
 
   kubectl create namespace "$MODEL_NAMESPACE" --dry-run=client -o yaml | apply_stdin
   kubectl -n "$MODEL_NAMESPACE" create secret tls model-server-tls \
-    --cert="$WORK/tls.crt" --key="$WORK/tls.key" --dry-run=client -o yaml | apply_stdin
+    --cert="$WORK/model-server.crt" --key="$WORK/model-server.key" --dry-run=client -o yaml | apply_stdin
   kubectl -n "$MODEL_NAMESPACE" create secret generic model-server \
     --from-literal=CHATGPT_ACCOUNT_ID="$CHATGPT_ACCOUNT_ID" --dry-run=client -o yaml | apply_stdin
   kubectl -n "$MODEL_NAMESPACE" create configmap model-server \
@@ -217,6 +235,29 @@ deploy_model_server() {
   kubectl apply -f e2e/infra/model-server.yaml > /dev/null
   kubectl -n "$MODEL_NAMESPACE" rollout restart deploy/model-server > /dev/null
   kubectl -n "$MODEL_NAMESPACE" rollout status deploy/model-server --timeout=180s
+}
+
+# The remote development environment e2e/tests/ssh.test.ts reaches through
+# iron-proxy's SSH listener. Its fixture key pair is generated once per
+# cluster: the gateway authorizes the public half, and tests grant the private
+# half to the principals that may use it.
+deploy_ssh_gateway() {
+  docker build -q -t centaur-e2e-ssh-gateway:latest e2e/infra/ssh-gateway > /dev/null
+  kind load docker-image --name "$CLUSTER" centaur-e2e-ssh-gateway:latest
+  issue_cert ssh-gateway workspace.ssh-gateway.test
+
+  kubectl create namespace "$SSH_NAMESPACE" --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$SSH_NAMESPACE" create secret tls ssh-gateway-tls \
+    --cert="$WORK/ssh-gateway.crt" --key="$WORK/ssh-gateway.key" --dry-run=client -o yaml | apply_stdin
+  if ! kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key > /dev/null 2>&1; then
+    ssh-keygen -q -t ed25519 -N '' -C centaur-e2e -f "$WORK/ssh-gateway-key"
+    kubectl -n "$SSH_NAMESPACE" create secret generic ssh-gateway-key \
+      --from-file=id_ed25519="$WORK/ssh-gateway-key" \
+      --from-file=authorized_keys="$WORK/ssh-gateway-key.pub" > /dev/null
+  fi
+  kubectl apply -f e2e/infra/ssh-gateway.yaml > /dev/null
+  kubectl -n "$SSH_NAMESPACE" rollout restart deploy/ssh-gateway > /dev/null
+  kubectl -n "$SSH_NAMESPACE" rollout status deploy/ssh-gateway --timeout=180s
 }
 
 deploy_fake_slack() {
@@ -247,6 +288,9 @@ run_tests() {
   # The key api-rs administers the console with.
   E2E_CONSOLE_API_KEY="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_API_KEY}' | base64 -d)"
   export E2E_CONSOLE_URL=http://127.0.0.1:30082 E2E_CONSOLE_API_KEY
+  # The private key the SSH gateway authorizes, for tests to store and grant.
+  E2E_SSH_PRIVATE_KEY="$(kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key -o jsonpath='{.data.id_ed25519}' | base64 -d)"
+  export E2E_SSH_PRIVATE_KEY
   # Expect the credentials of the auth mode the stack runs in.
   E2E_AUTH_MODE="$(kubectl -n "$NAMESPACE" get "deploy/${RELEASE}-centaur-api-rs" \
     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CODEX_AUTH_MODE")].value}')"
@@ -282,6 +326,7 @@ dump_logs() {
   kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \
     | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
   kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
+  kubectl -n "$SSH_NAMESPACE" logs deploy/ssh-gateway --all-containers --prefix --tail=50 || true
   kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 | grep -v '_delivered"' | tail -100 || true
   # In-cluster lookups (Postgres, the fakes, the model server) all go through
   # CoreDNS; its errors plugin logs failed upstream and plugin lookups.
@@ -295,6 +340,7 @@ dump_logs() {
   done
   kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 > "$LOG_DIR/fake-slack.log" 2>&1 || true
   kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=-1 > "$LOG_DIR/model-server.log" 2>&1 || true
+  kubectl -n "$SSH_NAMESPACE" logs deploy/ssh-gateway --all-containers --prefix --tail=-1 > "$LOG_DIR/ssh-gateway.log" 2>&1 || true
   kubectl -n kube-system logs -l k8s-app=kube-dns --prefix --tail=-1 > "$LOG_DIR/coredns.log" 2>&1 || true
   echo "full logs: $LOG_DIR"
 }

@@ -1,0 +1,11 @@
+description = "AWS CloudWatch: log groups, log events, Logs Insights queries, metrics, and alarms (read-only)"
+
+secrets = [
+  { type = "aws_auth", name = "cloudwatch", access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY", hosts = [
+    "logs.*.amazonaws.com",
+    "monitoring.*.amazonaws.com",
+  ], allowed_services = [
+    "logs",
+    "monitoring",
+  ] },
+]

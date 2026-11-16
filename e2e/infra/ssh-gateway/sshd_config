@@ -1,0 +1,18 @@
+# Only wstunnel, in the same pod, reaches sshd; it forwards to 127.0.0.1:22,
+# the fixed target iron-proxy names in its tunnel request.
+Port 22
+ListenAddress 127.0.0.1
+HostKey /etc/ssh/ssh_host_ed25519_key
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+# The fixture key e2e/stack.sh generates; tests grant its private half.
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+# Secret volumes are world-writable tmpfs directories, which StrictModes refuses.
+StrictModes no
+AllowUsers dev
+PermitTTY no
+AllowTcpForwarding no
+X11Forwarding no
+LogLevel VERBOSE

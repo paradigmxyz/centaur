@@ -23,7 +23,9 @@ class SecretSource < ApplicationRecord
   # one oauth_token entry's credential fields and token-endpoint headers;
   # gcp_id_token_secret is a gcp_id_token keyfile;
   # pg_dsn_secret is a Postgres upstream's connection string; hmac_secret holds
-  # one hmac_sign entry's HMAC key and any additional named credentials.
+  # one hmac_sign entry's HMAC key and any additional named credentials;
+  # ssh_key_secret is an SSH private key, and touching it on change lets
+  # proxy-sync end connections that still use the previous key.
   belongs_to :static_secret, optional: true
   belongs_to :gcp_auth_secret, optional: true
   belongs_to :gcp_id_token_secret, optional: true
@@ -31,6 +33,7 @@ class SecretSource < ApplicationRecord
   belongs_to :oauth_token_secret, optional: true
   belongs_to :pg_dsn_secret, optional: true
   belongs_to :hmac_secret, optional: true
+  belongs_to :ssh_key_secret, optional: true, touch: true
   belongs_to :broker_credential, optional: true
 
   # Only set for oauth_token_secret- and hmac_secret-owned sources: whether
@@ -96,6 +99,7 @@ class SecretSource < ApplicationRecord
 
   OWNER_ASSOCIATIONS = %i[
     static_secret gcp_auth_secret gcp_id_token_secret aws_auth_secret oauth_token_secret pg_dsn_secret hmac_secret
+    ssh_key_secret
   ].freeze
 
   # Owners whose sources fill a named role (credential field or endpoint header).

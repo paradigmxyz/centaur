@@ -2,8 +2,6 @@
 
 from dotenv import load_dotenv
 
-from centaur_sdk.cli import PipeSafeTyper
-
 load_dotenv()
 
 import base64  # noqa: E402
@@ -12,7 +10,7 @@ from pathlib import Path  # noqa: E402
 
 import typer  # noqa: E402
 
-app = PipeSafeTyper(
+app = typer.Typer(
     name="docsend",
     help=(
         "DocSend downloader — Browserbase + Playwright. "

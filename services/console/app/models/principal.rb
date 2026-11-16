@@ -23,6 +23,7 @@ class Principal < ApplicationRecord
   include SlackChannelPermissionOwner
 
   after_commit :auto_grant_matching_oauth_credentials, on: %i[create update]
+  after_commit :grant_personal_ssh_key, on: %i[create update], if: :personal_ssh_key_identity_changed?
   after_create_commit :enqueue_slack_channel_catalog_refresh, if: :slack_channel_catalog_refreshable?
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
@@ -96,7 +97,8 @@ class Principal < ApplicationRecord
       "aws_auth" => granted_aws_auth_secrets,
       "oauth_token" => granted_oauth_token_secrets,
       "pg_dsn" => granted_pg_dsn_secrets,
-      "hmac" => granted_hmac_secrets
+      "hmac" => granted_hmac_secrets,
+      "ssh_key" => granted_ssh_key_secrets
     }
   end
 
@@ -149,6 +151,11 @@ class Principal < ApplicationRecord
   # hmac_sign credentials this principal resolves to, via its effective grants.
   def granted_hmac_secrets
     granted_secrets_by_priority(HmacSecret, :hmac_secret_id, includes: %i[sources rules])
+  end
+
+  # SSH keys this principal resolves to, via its effective grants.
+  def granted_ssh_key_secrets
+    granted_secrets_by_priority(SshKeySecret, :ssh_key_secret_id, includes: %i[key_source])
   end
 
   # Postgres upstreams this principal resolves to, via its effective grants.
@@ -303,6 +310,19 @@ class Principal < ApplicationRecord
 
   def auto_grant_matching_oauth_credentials
     PrincipalCredentialReconciliation.new.apply_for_principal(self)
+  end
+
+  PERSONAL_SSH_KEY_IDENTITY_FIELDS = %w[kind console_user_id slack_user_id slack_team_id].freeze
+
+  def personal_ssh_key_identity_changed?
+    previously_new_record? || saved_changes.keys.intersect?(PERSONAL_SSH_KEY_IDENTITY_FIELDS)
+  end
+
+  # Never let personal key grants abort the principal write that triggered them.
+  def grant_personal_ssh_key
+    PersonalSshKeyGrants.new.apply_for_principal(self)
+  rescue StandardError => e
+    Rails.logger.warn("personal_ssh_key_grant_failed error=#{e.class}")
   end
 
   def apply_sandbox_repo_cache_label

@@ -14,7 +14,10 @@ from centaur_sdk import (
     current_linear_thread,
     current_session_context,
     current_slack_thread,
+    current_thread_key,
     reset_tool_context,
+    sandbox_context,
+    sandbox_thread_key,
     save_attachment,
     secret,
     set_tool_context,
@@ -363,6 +366,45 @@ def test_current_discord_thread_rejects_slack_thread(monkeypatch: pytest.MonkeyP
             current_discord_thread()
     finally:
         reset_tool_context(token)
+
+
+def test_thread_key_falls_back_to_the_sandbox_context_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    context_file = tmp_path / "sandbox.json"
+    context_file.write_text(
+        '{"version": 1, "thread_key": "slack:T1:C1:1.0", "sandbox": {"principal_id": "prn_a"}}'
+    )
+    monkeypatch.delenv("CENTAUR_THREAD_KEY", raising=False)
+    monkeypatch.setenv("CENTAUR_SANDBOX_CONTEXT_FILE", str(context_file))
+
+    assert sandbox_context()["sandbox"] == {"principal_id": "prn_a"}
+    assert sandbox_thread_key() == "slack:T1:C1:1.0"
+    assert current_thread_key() == "slack:T1:C1:1.0"
+
+    # The environment wins where it is set, and the tool context over both.
+    monkeypatch.setenv("CENTAUR_THREAD_KEY", "slack:T1:C1:2.0")
+    assert current_thread_key() == "slack:T1:C1:2.0"
+    token = set_tool_context(ToolContext(name="test", thread_key="slack:T1:C1:3.0"))
+    try:
+        assert current_thread_key() == "slack:T1:C1:3.0"
+    finally:
+        reset_tool_context(token)
+
+
+def test_thread_key_is_missing_without_env_or_context_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.delenv("CENTAUR_THREAD_KEY", raising=False)
+    monkeypatch.setenv("CENTAUR_SANDBOX_CONTEXT_FILE", str(tmp_path / "missing.json"))
+
+    assert sandbox_context() == {}
+    assert sandbox_thread_key() is None
+    with pytest.raises(RuntimeError, match="scoped thread"):
+        current_thread_key()
+
+    (tmp_path / "missing.json").write_text("not json")
+    assert sandbox_context() == {}
 
 
 def test_save_attachment_writes_to_sandbox_uploads_dir(

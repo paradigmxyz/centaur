@@ -594,6 +594,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slack_proxy_user_message_and_reaction_routes_are_principal_only() {
+        let routes = [
+            (Method::GET, "/api/slack/users"),
+            (Method::GET, "/api/slack/users?limit=10&cursor=next"),
+            (Method::GET, "/api/slack/users/U123456789"),
+            (
+                Method::GET,
+                "/api/slack/channels/C123456789/messages/1700000000.000001/permalink",
+            ),
+            (
+                Method::POST,
+                "/api/slack/channels/C123456789/messages/1700000000.000001/reactions/eyes",
+            ),
+            (
+                Method::DELETE,
+                "/api/slack/channels/C123456789/messages/1700000000.000001/reactions/eyes",
+            ),
+            (
+                Method::POST,
+                "/api/slack/channels/C123456789/messages/1700000000.000001/reactions/%2B1",
+            ),
+        ];
+        let forged = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": "centaur-console",
+                "sub": "prn_sandbox",
+                "aud": "centaur-api",
+                "iat": 1_700_000_000i64,
+                "exp": 4_102_444_800i64,
+            }),
+            &EncodingKey::from_secret(b"wrong-secret"),
+        )
+        .unwrap();
+        let principal = principal_token("prn_sandbox");
+
+        for (method, uri) in routes {
+            for (authorization, expected) in [
+                (None, Some(StatusCode::UNAUTHORIZED)),
+                (Some(forged.clone()), Some(StatusCode::UNAUTHORIZED)),
+                (
+                    Some("test-slackbot-key".to_owned()),
+                    Some(StatusCode::FORBIDDEN),
+                ),
+                (Some(console_token()), Some(StatusCode::FORBIDDEN)),
+                // Principals pass the gate; the handler then needs Slack config.
+                (Some(principal.clone()), None),
+            ] {
+                let mut request = Request::builder().method(&method).uri(uri);
+                if let Some(token) = &authorization {
+                    request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+                }
+                let response =
+                    build_router_with_app_state(AppState::unready(test_auth_with_slack()))
+                        .oneshot(request.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                let status = response.status();
+                match expected {
+                    Some(expected) => assert_eq!(status, expected, "{method} {uri}"),
+                    None => {
+                        assert_ne!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
+                        assert_ne!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+                        assert_ne!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+                        assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {uri}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn healthz_decodes_slack_client_bearer_jwt_when_present() {
         let app = build_router_with_app_state(AppState::unready(test_auth()));
         let token = encode(

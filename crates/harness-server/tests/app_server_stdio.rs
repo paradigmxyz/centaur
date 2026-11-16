@@ -625,6 +625,141 @@ fn fake_claude_blocks_mode_accepts_user_blocks_by_default() {
 }
 
 #[test]
+fn blocks_mode_runs_session_prompt_hooks_once_before_the_harness_starts() {
+    // A real overlay hook prints to stdout, which must never reach the protocol
+    // channel. The fake composer records each run and copies the hook output it
+    // is given into the prompt the fake harness reads.
+    let overlay = temp_path("session-prompt-overlay");
+    let hook = overlay.join("services/sandbox/hooks/session-prompt.sh");
+    std::fs::create_dir_all(hook.parent().expect("hook dir")).expect("create hook dir");
+    std::fs::write(&hook, "printf hooked\n").expect("write hook");
+    let prompt = temp_path("session-prompt.md");
+    let runs = temp_path("session-prompt-runs.log");
+    let composer = temp_path("fake-compose-system-prompt.sh");
+    std::fs::write(
+        &composer,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "echo \"$1 $2 $3\" >> {runs}\n",
+                "cat \"$4\" > {prompt}\n",
+                "echo not-json\n"
+            ),
+            runs = shell_quote(&runs),
+            prompt = shell_quote(&prompt),
+        ),
+    )
+    .expect("write fake composer");
+    let mut permissions = std::fs::metadata(&composer)
+        .expect("composer metadata")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    let fake_claude = format!(
+        concat!(
+            "text=$(cat {prompt}); ",
+            "printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}' ",
+            "\"{{\\\"type\\\":\\\"assistant\\\",\\\"is_partial\\\":false,\\\"message\\\":{{\\\"id\\\":\\\"msg_1\\\",\\\"content\\\":[{{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"$text\\\"}}]}}}}\" ",
+            "\"{{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"result\\\":\\\"$text\\\"}}\""
+        ),
+        prompt = shell_quote(&prompt),
+    );
+    let overlay_path = overlay.to_string_lossy().into_owned();
+    let composer_path = composer.to_string_lossy().into_owned();
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::ClaudeCode,
+        Some(fake_claude),
+        None,
+        &[
+            ("CENTAUR_OVERLAY_REPO_DIRS", &overlay_path),
+            ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
+        ],
+    );
+    let first = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
+    let second = bridge.run_blocks_user_turn("second", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&first);
+    assert_eq!(first.text_from_deltas, "hooked");
+    assert_completed_turn(&second);
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("composer runs"),
+        "--target-prompt AGENTS.md --session-prompt\n"
+    );
+    for path in [&prompt, &runs, &composer] {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = std::fs::remove_dir_all(&overlay);
+}
+
+#[test]
+fn blocks_mode_recomposes_the_prompt_without_hook_output() {
+    // A warm sandbox composes its prompt at boot; an overlay prompt changed
+    // since then must still reach the first turn, even with no hook to run.
+    let overlay = temp_path("session-prompt-no-hook-overlay");
+    std::fs::create_dir_all(&overlay).expect("create overlay dir");
+    let prompt = temp_path("session-prompt-no-hook.md");
+    std::fs::write(&prompt, "boot").expect("write boot prompt");
+    let runs = temp_path("session-prompt-no-hook-runs.log");
+    let composer = temp_path("fake-compose-system-prompt-no-hook.sh");
+    std::fs::write(
+        &composer,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "echo \"$*\" >> {runs}\n",
+                "printf recomposed > {prompt}\n"
+            ),
+            runs = shell_quote(&runs),
+            prompt = shell_quote(&prompt),
+        ),
+    )
+    .expect("write fake composer");
+    let mut permissions = std::fs::metadata(&composer)
+        .expect("composer metadata")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    let fake_claude = format!(
+        concat!(
+            "text=$(cat {prompt}); ",
+            "printf '%s\\n' ",
+            "'{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session\"}}' ",
+            "\"{{\\\"type\\\":\\\"assistant\\\",\\\"is_partial\\\":false,\\\"message\\\":{{\\\"id\\\":\\\"msg_1\\\",\\\"content\\\":[{{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"$text\\\"}}]}}}}\" ",
+            "\"{{\\\"type\\\":\\\"result\\\",\\\"subtype\\\":\\\"success\\\",\\\"result\\\":\\\"$text\\\"}}\""
+        ),
+        prompt = shell_quote(&prompt),
+    );
+    let overlay_path = overlay.to_string_lossy().into_owned();
+    let composer_path = composer.to_string_lossy().into_owned();
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::ClaudeCode,
+        Some(fake_claude),
+        None,
+        &[
+            ("CENTAUR_OVERLAY_REPO_DIRS", &overlay_path),
+            ("CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN", &composer_path),
+        ],
+    );
+    let first = bridge.run_blocks_user_turn("first", Duration::from_secs(10));
+    bridge.finish_successfully();
+
+    assert_completed_turn(&first);
+    assert_eq!(first.text_from_deltas, "recomposed");
+    assert_eq!(
+        std::fs::read_to_string(&runs).expect("composer runs"),
+        "--target-prompt AGENTS.md\n"
+    );
+    for path in [&prompt, &runs, &composer] {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = std::fs::remove_dir_all(&overlay);
+}
+
+#[test]
 fn fake_claude_blocks_mode_applies_reasoning_effort_per_turn() {
     // Claude Code outlives each turn, so the blocks `reasoning` field reaches it
     // in-band as an `apply_flag_settings` control request ahead of the user
@@ -1628,6 +1763,8 @@ impl BridgeProcess {
         for env_key in [
             "CENTAUR_CLAUDE_APP_BRIDGE_COMMAND",
             "CENTAUR_AMP_APP_BRIDGE_COMMAND",
+            "CENTAUR_COMPOSE_SYSTEM_PROMPT_BIN",
+            "CENTAUR_OVERLAY_REPO_DIRS",
             "CODEX_MODEL",
             "CODEX_MODEL_PROVIDER",
             "FAKE_CODEX_TURN_DELAY",
@@ -2763,7 +2900,10 @@ fn spawn_fake_codex_recovery(name: &str) -> (BridgeProcess, PathBuf, PathBuf) {
     let fake_codex = temp_path(&format!("{name}.sh"));
     let log = temp_path(&format!("{name}-requests.jsonl"));
     let script = fake_codex_app_server_script(&log)
-        .replace("request_id() {", "echo $$ > \"$log.pid\"\n\nrequest_id() {")
+        .replace(
+            "request_id() {",
+            "echo $$ > \"$log.pid\"\nprintf '%s\\n' \"$*\" >> \"$log.args\"\n\nrequest_id() {",
+        )
         .replace(
             "    *'\"method\":\"turn/start\"'*)\n",
             "    *'\"method\":\"turn/start\"'*)\n      case \"$line\" in *'die mid turn'*) exit 7;; esac\n",
@@ -2780,6 +2920,40 @@ fn spawn_fake_codex_recovery(name: &str) -> (BridgeProcess, PathBuf, PathBuf) {
         Some(("CODEX_BIN", fake_codex.to_str().unwrap())),
     );
     (bridge, fake_codex, log)
+}
+
+/// Makes the fake app-server report each thread's provider, give every fork a
+/// new id (`<parent>.<provider>`), and stream a turn only on the thread it was
+/// started on, so a harness that keeps using a stale thread id never completes.
+fn track_fake_codex_thread_providers(fake_codex: &Path) {
+    let script = std::fs::read_to_string(fake_codex).unwrap();
+    let provider =
+        r#"provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')"#;
+    let thread = r#"tid=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p')"#;
+    let script = script
+        .replace(
+            "    *'\"method\":\"thread/start\"'*)\n      id=$(request_id \"$line\")\n      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"\n",
+            &format!(
+                "    *'\"method\":\"thread/start\"'*)\n      id=$(request_id \"$line\")\n      {provider}\n      printf '{{\"id\":%s,\"result\":{{\"thread\":{{\"id\":\"thread-1\"}},\"modelProvider\":\"%s\"}}}}\\n' \"$id\" \"$provider\"\n"
+            ),
+        )
+        .replace(
+            "    *'\"method\":\"thread/resume\"'*|*'\"method\":\"thread/fork\"'*)\n      id=$(request_id \"$line\")\n      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"\n",
+            &format!(
+                "    *'\"method\":\"thread/resume\"'*|*'\"method\":\"thread/fork\"'*)\n      id=$(request_id \"$line\")\n      {provider}\n      {thread}\n      case \"$line\" in *'\"method\":\"thread/fork\"'*) tid=\"$tid.$provider\";; esac\n      printf '{{\"id\":%s,\"result\":{{\"thread\":{{\"id\":\"%s\"}},\"modelProvider\":\"%s\"}}}}\\n' \"$id\" \"$tid\" \"$provider\"\n"
+            ),
+        );
+    let turn_start = "    *'\"method\":\"turn/start\"'*)\n";
+    let turn_steer = "    *'\"method\":\"turn/steer\"'*)\n";
+    let (head, rest) = script.split_once(turn_start).unwrap();
+    let (turn, tail) = rest.split_once(turn_steer).unwrap();
+    let turn = turn.replace(r#""threadId":"thread-1""#, r#""threadId":"'"$tid"'""#);
+    let script = format!("{head}{turn_start}      {thread}\n{turn}{turn_steer}{tail}");
+    assert!(
+        script.contains("tid=\"$tid.$provider\""),
+        "fake app-server fork patch did not apply"
+    );
+    std::fs::write(fake_codex, script).unwrap();
 }
 
 fn read_requests(log: &Path) -> Vec<Value> {
@@ -2814,43 +2988,73 @@ fn wait_for_fake_codex_exit(log: &Path) {
 }
 
 #[test]
-fn fake_codex_blocks_mode_switches_provider_by_resuming_same_thread() {
+fn fake_codex_blocks_mode_switches_provider_by_forking_the_thread() {
     let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-switch");
-    let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
-        "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
-        r#"      provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')
-      printf '{"id":%s,"result":{"thread":{"id":"thread-1"},"modelProvider":"%s"}}\n' "$id" "$provider""#,
-    );
-    std::fs::write(&fake_codex, script).unwrap();
-    let user_line = |provider: &str, model: &str| {
+    track_fake_codex_thread_providers(&fake_codex);
+    let user_line = |provider: &str, model: &str, text: &str| {
         json!({
             "type": "user", "provider": provider, "model": model,
-            "message": {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
         })
     };
-    for (provider, model) in [
-        ("original", "original-model"),
-        ("other", "other-model"),
-        ("other", "other-model"),
-        ("openai", "default-model"),
+    for (provider, model, text) in [
+        ("original", "original-model", "continue"),
+        ("other", "other-model", "continue"),
+        // The app-server exits after this turn, so the next one must resume the fork.
+        ("other", "other-model", "exit after turn"),
+        ("other", "other-model", "continue"),
+        ("openai", "default-model", "continue"),
     ] {
         assert_completed_turn(
-            &bridge.run_blocks_user_line(user_line(provider, model), Duration::from_secs(10)),
+            &bridge.run_blocks_user_line(user_line(provider, model, text), Duration::from_secs(10)),
         );
+        if text == "exit after turn" {
+            wait_for_fake_codex_exit(&log);
+        }
     }
     bridge.finish_successfully();
     let requests = read_requests(&log);
-    assert_eq!(count_method(&requests, "initialize"), 3);
+    let thread_ids = |method: &str| {
+        requests
+            .iter()
+            .filter(|request| request["method"] == method)
+            .map(|request| request["params"]["threadId"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(count_method(&requests, "initialize"), 4);
     assert_eq!(count_method(&requests, "thread/start"), 1);
-    assert_eq!(count_method(&requests, "thread/resume"), 2);
-    assert_eq!(count_method(&requests, "turn/start"), 4);
-    let resume = requests
+    // Codex rejects resuming a thread on another provider; a switch forks it,
+    // and every later request uses the fork's id.
+    assert_eq!(thread_ids("thread/fork"), ["thread-1", "thread-1.other"]);
+    assert_eq!(thread_ids("thread/resume"), ["thread-1.other"]);
+    assert_eq!(
+        thread_ids("turn/start"),
+        [
+            "thread-1",
+            "thread-1.other",
+            "thread-1.other",
+            "thread-1.other",
+            "thread-1.other.openai",
+        ]
+    );
+    let fork = requests
         .iter()
-        .find(|request| request["method"] == "thread/resume")
+        .find(|request| request["method"] == "thread/fork")
         .unwrap();
-    assert_eq!(resume["params"]["threadId"], "thread-1");
-    assert_eq!(resume["params"]["modelProvider"], "other");
-    assert_eq!(resume["params"]["model"], "other-model");
+    assert_eq!(fork["params"]["modelProvider"], "other");
+    assert_eq!(fork["params"]["model"], "other-model");
+    // Codex admits input only on the provider its app-server was launched on.
+    let launches = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+    assert_eq!(
+        launches.lines().collect::<Vec<_>>(),
+        [
+            r#"app-server --listen stdio:// -c model_provider="original""#,
+            r#"app-server --listen stdio:// -c model_provider="other""#,
+            r#"app-server --listen stdio:// -c model_provider="other""#,
+            r#"app-server --listen stdio:// -c model_provider="openai""#,
+        ]
+    );
+    let _ = std::fs::remove_file(format!("{}.args", log.display()));
     let _ = std::fs::remove_file(fake_codex);
     let _ = std::fs::remove_file(log);
 }
@@ -2858,12 +3062,7 @@ fn fake_codex_blocks_mode_switches_provider_by_resuming_same_thread() {
 #[test]
 fn fake_codex_blocks_mode_resolves_default_provider_for_a_new_model_without_provider() {
     let (mut bridge, fake_codex, log) = spawn_fake_codex_recovery("fake-provider-default");
-    let script = std::fs::read_to_string(&fake_codex).unwrap().replace(
-        "      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"",
-        r#"      provider=$(printf '%s' "$line" | sed -n 's/.*"modelProvider":"\([^" ]*\)".*/\1/p')
-      printf '{"id":%s,"result":{"thread":{"id":"thread-1"},"modelProvider":"%s"}}\n' "$id" "$provider""#,
-    );
-    std::fs::write(&fake_codex, script).unwrap();
+    track_fake_codex_thread_providers(&fake_codex);
     let user_line = |provider: Option<&str>, model: Option<&str>| {
         let mut line = json!({
             "type": "user",
@@ -2893,14 +3092,14 @@ fn fake_codex_blocks_mode_resolves_default_provider_for_a_new_model_without_prov
     bridge.finish_successfully();
     let requests = read_requests(&log);
     assert_eq!(count_method(&requests, "thread/start"), 1);
-    assert_eq!(count_method(&requests, "thread/resume"), 1);
+    assert_eq!(count_method(&requests, "thread/fork"), 1);
     assert_eq!(count_method(&requests, "turn/start"), 5);
-    let resume = requests
+    let fork = requests
         .iter()
-        .find(|request| request["method"] == "thread/resume")
+        .find(|request| request["method"] == "thread/fork")
         .unwrap();
-    assert_eq!(resume["params"]["modelProvider"], "openai");
-    assert_eq!(resume["params"]["model"], "default-model");
+    assert_eq!(fork["params"]["modelProvider"], "openai");
+    assert_eq!(fork["params"]["model"], "default-model");
     let _ = std::fs::remove_file(fake_codex);
     let _ = std::fs::remove_file(log);
 }
@@ -3040,7 +3239,7 @@ while IFS= read -r line; do
       id=$(request_id "$line")
       printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
       ;;
-    *'"method":"thread/resume"'*)
+    *'"method":"thread/resume"'*|*'"method":"thread/fork"'*)
       id=$(request_id "$line")
       printf '{"id":%s,"result":{"thread":{"id":"thread-1"}}}\n' "$id"
       ;;

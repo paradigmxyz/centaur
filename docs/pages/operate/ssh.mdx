@@ -1,0 +1,68 @@
+---
+title: SSH access
+description: Grant SSH keys for remote development environments.
+---
+
+SSH keys are secrets like any other: a principal can use a key only when the key
+is granted to it, directly or through a role.
+
+Save a dedicated, unencrypted private key in **Integrations → SSH key** and
+register the displayed public key with your remote environment. Saving grants the
+key to your Console principal and, if your account has one verified Slack identity,
+to your Slack DM principal. Leaving the key blank when editing preserves it, and
+deleting it revokes every grant.
+
+Use `remote-ssh exec --url wss://dev.example.com/events/events -- pwd` to connect.
+The URL must include the gateway's full SSH tunnel path. One saved key works
+across destinations permitted by the deployment. If `TOOL_ALLOWLIST` is set,
+include `ssh` to expose this tool.
+
+## Deployment
+
+Deploy Console's database migrations before proxy-sync. SSH needs iron-proxy
+0.56.0 or newer and is disabled by default. Configure api-rs with:
+
+- `KUBERNETES_IRON_PROXY_SSH_ENABLED=true`
+- `KUBERNETES_IRON_PROXY_SSH_WORKSPACE=/workspace`
+- `CENTAUR_SSH_SEED`, a stable secret of at least 32 bytes. Add it to the
+  infrastructure Secret api-rs already loads (`secretManager.existingSecretName`,
+  `centaur-infra-env` by default). api-rs refuses to start with SSH enabled and no
+  valid seed. Changing it requires replacing retained sandboxes and proxies,
+  because it derives their identities.
+
+Set the allowed destinations in Helm:
+
+```yaml
+proxySync:
+  sshTargets:
+    - host: "*.dev.example.com"
+      path: /events/events
+      username: dev
+```
+
+Hosts support exact names or `*.` subdomains; paths are exact. Each URL must match
+one policy. An empty policy denies access. Only WSS on port 443 is accepted,
+without credentials, queries, or fragments. Iron verifies the gateway's TLS
+identity and trusts it to route to the container; there is no per-container host pin.
+
+## Granting keys
+
+A personal key is never used by a shared principal on its own: a channel turn
+uses only keys granted to the channel, never the requester's. To give a channel,
+workflow, or role access, create an operator key with
+`POST /api/v1/ssh_key_secrets` (inline or from an external secret store) and grant
+it like any other secret. If a principal holds several keys, the highest grant
+priority wins; equal top priorities deny access. A personal key whose owner is
+disabled stops working.
+
+The proxy renews authorization every five seconds with leases of at most 30
+seconds. Revoking a grant, replacing or deleting the key, changing the policy, and
+reassigning the proxy all end access. Rotating a key inside an external secret
+store only affects new connections; revoke the grant or edit the key in Console to
+end existing sessions.
+
+The sandbox gets a disposable key; the real key stays in Console (or its external
+store) and is released only to the proxy. Remote commands inherit the remote
+environment's permissions. Deleting a key does not remove its registered public
+key or guarantee that detached remote processes have stopped. Inspect results
+before retrying.
