@@ -316,7 +316,27 @@ function slackRawFileAttachment(
   }
 }
 
+// Where Slack serves private file downloads (url_private and
+// url_private_download). A file's URL comes from event or API payload data, so
+// it must not decide where the bot token goes, nor make the bot call a Web API
+// method with it. Any other URL is refused rather than fetched without the
+// token, so file metadata cannot point the bot at arbitrary hosts either. Only
+// the first URL needs checking: fetch drops Authorization when a redirect
+// leaves the origin.
+const SLACK_FILE_ORIGINS = new Set(['https://files.slack.com', 'https://files.slack-gov.com'])
+
+export const NON_SLACK_FILE_URL_ERROR = 'refusing to fetch a file outside Slack with the bot token'
+
+export function isSlackFileUrl(url: string): boolean {
+  try {
+    return SLACK_FILE_ORIGINS.has(new URL(url).origin)
+  } catch {
+    return false
+  }
+}
+
 async function fetchSlackRawFile(options: SlackbotV2Options, url: string): Promise<Buffer> {
+  if (!isSlackFileUrl(url)) throw new Error(NON_SLACK_FILE_URL_ERROR)
   const fetchFn = options.fetch ?? fetch
   const response = await fetchFn(url, {
     headers: { authorization: `Bearer ${options.botToken}` }

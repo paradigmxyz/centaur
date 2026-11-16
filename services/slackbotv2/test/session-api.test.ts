@@ -7,6 +7,8 @@ import {
   harnessRestartPreamble,
   interruptSessionExecution,
   isSessionPrincipalAdmissionDenied,
+  isSlackFileUrl,
+  NON_SLACK_FILE_URL_ERROR,
   openSessionEventStream,
   resolveSlackHomeTeamId,
   SessionApiError,
@@ -624,6 +626,82 @@ describe('Slack attachment serialization', () => {
 
     expect(Date.now() - startedAt).toBeLessThan(500)
     expect(attachment.fetchError).toBe('fetch Slack attachment timed out after 25ms')
+  })
+
+  test('trusts only Slack file origins', () => {
+    for (const url of [
+      'https://files.slack.com/files-pri/T1-F1/download/a.png',
+      'https://files.slack-gov.com/files-pri/T1-F1/a.png'
+    ]) {
+      expect(isSlackFileUrl(url), url).toBe(true)
+    }
+    for (const url of [
+      'https://slack.com/api/auth.test',
+      'https://slack.com/files/a.png',
+      'http://slack.test/files/a.png',
+      'https://files.example/a.png',
+      'https://files.slack.com.example/a.png',
+      'https://files.slack.com@files.example/a.png',
+      'http://files.slack.com/a.png',
+      'not a url'
+    ]) {
+      expect(isSlackFileUrl(url), url).toBe(false)
+    }
+  })
+
+  test('sends the bot token only to Slack-hosted raw event files', async () => {
+    const requests: { authorization: string | null; url: string }[] = []
+    const fetchFn = (async (input, init) => {
+      requests.push({
+        authorization: new Headers(init?.headers).get('authorization'),
+        url: String(input)
+      })
+      return new Response('file-bytes')
+    }) as SlackbotV2Options['fetch']
+    const slackFileUrl = 'https://files.slack.com/files-pri/T1-F1/download/slack.png'
+
+    const message = await serializeMessage(
+      {
+        attachments: [],
+        author: {
+          fullName: 'Test User',
+          isBot: false,
+          isMe: false,
+          userId: 'U1',
+          userName: 'test'
+        },
+        id: '1700000000.000100',
+        isMention: true,
+        links: [],
+        metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+        raw: {
+          files: [
+            { id: 'F1', mimetype: 'image/png', name: 'slack.png', url_private_download: slackFileUrl },
+            {
+              id: 'F2',
+              mimetype: 'image/png',
+              name: 'elsewhere.png',
+              url_private_download: 'https://files.example/elsewhere.png'
+            }
+          ],
+          team_id: 'T1',
+          text: 'see attached'
+        },
+        text: 'see attached',
+        threadId: 'slack:C1:1700000000.000100'
+      } as unknown as Parameters<typeof serializeMessage>[0],
+      options(fetchFn)
+    )
+
+    expect(requests).toEqual([{ authorization: 'Bearer xoxb-test', url: slackFileUrl }])
+    expect(message.attachments).toEqual([
+      expect.objectContaining({
+        dataBase64: Buffer.from('file-bytes').toString('base64'),
+        name: 'slack.png'
+      }),
+      expect.objectContaining({ fetchError: NON_SLACK_FILE_URL_ERROR, name: 'elsewhere.png' })
+    ])
+    expect(message.attachments[1]).not.toHaveProperty('dataBase64')
   })
 })
 
