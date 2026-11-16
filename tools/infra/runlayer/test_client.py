@@ -167,6 +167,27 @@ def test_unsupported_negotiated_protocol_stops_before_discovery():
     assert len(calls) == 1
 
 
+def test_newer_negotiated_protocol_is_sent_on_later_requests():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        body = json.loads(request.content)
+        if body["method"] == "initialize":
+            assert body["params"]["protocolVersion"] == "2025-03-26"
+            return response(request, {"protocolVersion": "2025-06-18"})
+        if body["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        return response(request, {"tools": [TOOL]})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as http,
+        RunlayerClient(URL, http_client=http) as client,
+    ):
+        assert client.list_tools() == [TOOL]
+    assert seen[-1].headers["MCP-Protocol-Version"] == "2025-06-18"
+
+
 @pytest.mark.parametrize("resource", [None, "http://tenant/mcp", "https://tenant/other"])
 def test_catalog_resource_must_be_an_exact_mcp_url(monkeypatch, resource):
     monkeypatch.setenv("CENTAUR_CONSOLE_URL", "http://console.local")

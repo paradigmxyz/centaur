@@ -281,6 +281,15 @@ class OwnerOnlyConnectionsTest < ActionDispatch::IntegrationTest
       assert_response :unprocessable_entity
       assert_equal "Enter a valid Runlayer MCP URL.", json_body.dig("error", "message")
     end
+    # Malformed input bodies are rejected the same way instead of erroring.
+    [ "https://tenant.runlayer.test/mcp", [ "https://tenant.runlayer.test/mcp" ] ].each do |data|
+      assert_no_difference "OauthApp.count" do
+        post preset_api_v1_console_oauth_apps_path(provider: "runlayer"), params: { data: data },
+          headers: csrf_headers, as: :json
+      end
+      assert_response :unprocessable_entity
+      assert_equal "Enter a valid Runlayer MCP URL.", json_body.dig("error", "message")
+    end
     assert_empty calls
     assert_difference "OauthApp.count", 1 do
       post preset_api_v1_console_oauth_apps_path(provider: "runlayer"),

@@ -61,7 +61,10 @@ module Api
           source = Oauth::Presets.fetch(params[:provider])
           return render_error(status: :not_found, message: "no preset for this provider") unless source
 
-          input = params.fetch(:data, {}).permit(:resource_url).to_h
+          data = params[:data]
+          raise OauthPresetSetup::InvalidInput unless data.nil? || data.is_a?(ActionController::Parameters)
+
+          input = data ? data.permit(:resource_url).to_h : {}
           app = OauthPresetSetup.new(
             preset: source, user: current_user, input: input,
             redirect_uri_for: method(:oauth_callback_redirect_uri),

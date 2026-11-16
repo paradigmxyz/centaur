@@ -162,7 +162,7 @@ function AppCard({ app }: { app: IntegrationApp }) {
               {app.connection.can_disconnect && (
                 <ConfirmDialog
                   title={`Disconnect ${app.slug}?`}
-                  description="Centaur stops using this connection right away and asks the provider to revoke its tokens. Connect again at any time."
+                  description="Centaur stops using this connection right away and, if the provider supports it, asks the provider to revoke its tokens. Connect again at any time."
                   confirmLabel="Disconnect"
                   onConfirm={disconnect}
                   trigger={<Button variant="outline">Disconnect</Button>}

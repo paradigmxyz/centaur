@@ -15,6 +15,10 @@ from referencing.exceptions import Unresolvable
 
 MAX_BYTES = 8 * 1024 * 1024
 PROTOCOL = "2025-03-26"
+# Versions a server may negotiate instead of PROTOCOL. The client uses only
+# initialize, tools/list, tools/call, and session headers, which are unchanged
+# across these revisions.
+SUPPORTED_PROTOCOLS = frozenset({"2025-03-26", "2025-06-18", "2025-11-25"})
 APP_SLUG = "runlayer"
 
 
@@ -118,7 +122,7 @@ class RunlayerClient:
         )
         if not isinstance(result, dict) or not isinstance(result.get("protocolVersion"), str):
             raise RunlayerError("Runlayer returned an invalid initialize response.")
-        if result["protocolVersion"] != PROTOCOL:
+        if result["protocolVersion"] not in SUPPORTED_PROTOCOLS:
             raise RunlayerError("Runlayer selected an unsupported MCP protocol version.")
         self._protocol = result["protocolVersion"]
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"}, request_id=None)
