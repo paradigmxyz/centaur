@@ -2258,6 +2258,12 @@ impl SessionRuntime {
                 Some(model) => input_lines_with_persona_model(input_lines, model),
                 None => input_lines,
             };
+            let input_lines = match session.harness_thread_id.as_deref() {
+                Some(harness_thread_id) => {
+                    input_lines_with_harness_thread_id(input_lines, harness_thread_id)
+                }
+                None => input_lines,
+            };
 
             let claim = if let Some(execution_id) = persisted_execution_id {
                 span.record("centaur.execution_id", execution_id);
@@ -2780,6 +2786,17 @@ impl SessionRuntime {
             .and_then(|session| self.persona_model(session))
         {
             Some(model) => input_lines_with_persona_model(input_lines, model),
+            None => input_lines,
+        };
+        // A steer delivered ahead of the execution's own input is the first
+        // turn a restarted harness process sees.
+        let input_lines = match session
+            .as_ref()
+            .and_then(|session| session.harness_thread_id.as_deref())
+        {
+            Some(harness_thread_id) => {
+                input_lines_with_harness_thread_id(input_lines, harness_thread_id)
+            }
             None => input_lines,
         };
 
@@ -6884,6 +6901,28 @@ fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<
         .collect()
 }
 
+/// Offers the harness thread recorded for the session to every user turn. A
+/// harness process that starts without one (sandbox resume, pod replacement)
+/// resumes it instead of opening an empty thread.
+fn input_lines_with_harness_thread_id(
+    input_lines: Vec<String>,
+    harness_thread_id: &str,
+) -> Vec<String> {
+    input_lines
+        .into_iter()
+        .map(|line| {
+            let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(&line) else {
+                return line;
+            };
+            if map.get("type").and_then(Value::as_str) != Some("user") {
+                return line;
+            }
+            map.insert("harness_thread_id".to_owned(), json!(harness_thread_id));
+            Value::Object(map).to_string()
+        })
+        .collect()
+}
+
 fn input_lines_with_session_context(
     thread_key: &ThreadKey,
     trace: &SessionTraceContext,
@@ -7314,6 +7353,15 @@ fn is_transient_steering_startup_error(error: &SessionRuntimeError) -> bool {
 
 fn harness_thread_id_from_output_line(line: &str) -> Option<String> {
     let value: Value = serde_json::from_str(line).ok()?;
+    // harness-server forwards the app-server notification unchanged.
+    if value.get("method").and_then(Value::as_str) == Some("thread/started") {
+        return value
+            .pointer("/params/thread/id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|thread_id| !thread_id.is_empty())
+            .map(ToOwned::to_owned);
+    }
     let event_type = value.get("type").and_then(Value::as_str);
     if event_type == Some("run.started") {
         return value
@@ -8823,6 +8871,40 @@ mod tests {
             harness_thread_id_from_output_line(r#"{"type":"turn.started","turn_id":"turn-1"}"#),
             None
         );
+    }
+
+    #[test]
+    fn harness_thread_id_is_extracted_from_app_server_thread_started_notification() {
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{"id":"0199a213-81c0-7800-8aa1-bbab2a035a53","preview":"","turns":[]}}}"#
+            ),
+            Some("0199a213-81c0-7800-8aa1-bbab2a035a53".to_owned())
+        );
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn recorded_harness_thread_id_is_offered_on_user_turns_only() {
+        let lines = input_lines_with_harness_thread_id(
+            vec![
+                r#"{"type":"user","text":"hi"}"#.to_owned(),
+                r#"{"type":"interrupt"}"#.to_owned(),
+                "not json".to_owned(),
+            ],
+            "codex-thread-1",
+        );
+
+        let user: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(user["harness_thread_id"], "codex-thread-1");
+        assert_eq!(user["text"], "hi");
+        assert_eq!(lines[1], r#"{"type":"interrupt"}"#);
+        assert_eq!(lines[2], "not json");
     }
 
     #[test]
@@ -12075,6 +12157,65 @@ mod adoption_tests {
             all.iter()
                 .any(|event| event.event_type == "session.sandbox_resume_failed")
         );
+        reset_test_store(&store).await;
+    }
+
+    /// The harness process does not outlive a sandbox pause, so the thread its
+    /// first turn reports has to come back on the next turn's input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_turn_input_carries_the_thread_the_harness_reported() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:thread-roundtrip-{}", uuid::Uuid::new_v4())).unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend);
+        runtime
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                None,
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .expect("create session");
+        use tokio::io::AsyncBufReadExt;
+        let mut input_lines = tokio::io::BufReader::new(stdin).lines();
+
+        execute_with_metadata(&runtime, &thread_key, json!({})).await;
+        let first = timeout(Duration::from_secs(5), input_lines.next_line())
+            .await
+            .expect("first input line written")
+            .expect("read first input line")
+            .expect("first input line present");
+        let first: Value = serde_json::from_str(&first).unwrap();
+        assert!(first.get("harness_thread_id").is_none());
+
+        stdout
+            .write_all(
+                b"{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"codex-thread-1\"}}}\n",
+            )
+            .await
+            .unwrap();
+        stdout
+            .write_all(&completed_output_bytes("First turn done."))
+            .await
+            .unwrap();
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+
+        execute_with_metadata(&runtime, &thread_key, json!({})).await;
+        let second = timeout(Duration::from_secs(5), input_lines.next_line())
+            .await
+            .expect("second input line written")
+            .expect("read second input line")
+            .expect("second input line present");
+        let second: Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(second["harness_thread_id"], "codex-thread-1");
         reset_test_store(&store).await;
     }
 

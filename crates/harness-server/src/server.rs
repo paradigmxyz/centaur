@@ -135,6 +135,8 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 // per turn by harnesses that support it.
                 provider: _,
                 reasoning,
+                // Only the codex harness resumes a thread by its recorded id.
+                harness_thread_id: _,
                 trace_context,
             }) => {
                 crate::session_prompt::run_session_prompt_hooks(
@@ -289,6 +291,8 @@ pub(crate) enum BlocksCommand {
         model: Option<String>,
         provider: Option<String>,
         reasoning: Option<String>,
+        /// The harness thread the control plane recorded for this session.
+        harness_thread_id: Option<String>,
         trace_context: TraceContext,
     },
     Interrupt,
@@ -326,6 +330,8 @@ struct BlocksLine {
     provider: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    harness_thread_id: Option<String>,
     #[serde(default)]
     thread_key: Option<String>,
     #[serde(default)]
@@ -477,6 +483,10 @@ pub(crate) fn parse_blocks_line_with_state(
                     .reasoning
                     .map(|reasoning| reasoning.trim().to_owned())
                     .filter(|reasoning| !reasoning.is_empty()),
+                harness_thread_id: parsed
+                    .harness_thread_id
+                    .map(|thread_id| thread_id.trim().to_owned())
+                    .filter(|thread_id| !thread_id.is_empty()),
                 trace_context,
             })
         }
