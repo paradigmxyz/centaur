@@ -456,7 +456,7 @@ function sha256Hex(input: string): string {
     padded[padded.length - 4 + index] = (bitLength >>> (24 - index * 8)) & 0xff;
   }
   const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-  const words = new Array<number>(64).fill(0);
+  const words = Array.from<number>({ length: 64 }).fill(0);
   for (let offset = 0; offset < padded.length; offset += 64) {
     for (let index = 0; index < 16; index += 1) {
       const at = offset + index * 4;

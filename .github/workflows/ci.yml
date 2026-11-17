@@ -727,7 +727,7 @@ jobs:
         run: bun run test
 
   connector-checks:
-    name: Code Mode connectors typecheck and tests
+    name: Code Mode connectors lint, typecheck, and tests
     runs-on: depot-ubuntu-24.04-16
     needs: ci_changes
     if: needs.ci_changes.outputs.connector_checks == 'true'
@@ -753,6 +753,10 @@ jobs:
       - name: Typecheck connectors
         working-directory: connectors
         run: pnpm run typecheck
+
+      - name: Lint connectors
+        working-directory: connectors
+        run: pnpm run lint
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:

@@ -85,7 +85,8 @@ Ownership by tree:
   `connector.toml` (description and secrets, in the `[tool.centaur]` schema)
   plus an `index.ts` whose exported async functions are tools; helpers shared
   by connectors live in `connectors/_lib/`. Return upstream data as the API
-  sends it. Check with `pnpm --filter @centaur/connectors typecheck` and
+  sends it. Check with `pnpm --filter @centaur/connectors lint`,
+  `pnpm --filter @centaur/connectors typecheck`, and
   `cargo test -p centaur-codemode`; the runtime's security invariants are in
   `crates/centaur-codemode/README.md`.
 - `workflows/`: discoverable workflow definitions.
