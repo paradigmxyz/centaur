@@ -546,7 +546,7 @@ export async function llm_respond(
   ctx: Ctx,
 ): Promise<{ output_text: string; response: ModelResponse }> {
   if (args.input === undefined || args.input === "") throw new Error("input is required");
-  const body: Record<string, unknown> = { ...(args.options ?? {}), model: args.model || DEFAULT_MODEL, input: args.input };
+  const body: Record<string, unknown> = { ...args.options, model: args.model || DEFAULT_MODEL, input: args.input };
   if (args.instructions) body.instructions = args.instructions;
   if (args.json_schema) {
     body.text = {
