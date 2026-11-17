@@ -3991,6 +3991,30 @@ mod tests {
         );
     }
 
+    // The chart renders an empty name when ironProxy.envSecret.enabled=false.
+    #[test]
+    fn empty_secret_env_name_gives_iron_proxy_no_env_secret() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("KUBERNETES_SECRET_ENV_NAME", ""),
+            ("KUBERNETES_BOOTSTRAP_SECRET_NAME", ""),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--kubernetes-firewall-ca-secret-name",
+            "centaur-firewall-ca",
+            "--kubernetes-firewall-ca-key-secret-name",
+            "centaur-firewall-ca-key",
+            "--kubernetes-firewall-manager-secret-source",
+            "env",
+        ])
+        .unwrap();
+
+        assert!(args.sandbox.iron_proxy.env_from_secret_names().is_empty());
+    }
+
     #[test]
     fn iron_proxy_database_cidrs_are_parsed_and_validated() {
         let parse = |cidrs: &str| {

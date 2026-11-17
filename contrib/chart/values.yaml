@@ -43,6 +43,17 @@ ironProxy:
     - "10.42.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
+  # Secret each per-sandbox iron-proxy imports as environment variables: the
+  # `env` source reads credentials from it, and the 1Password sources read
+  # their token from it. A Secret holding only those keeps the infrastructure
+  # secrets of secretManager.existingSecretName out of proxy pods.
+  envSecret:
+    # false imports no Secret. Use it only when no credential has the `env`
+    # source and no 1Password token comes from here; the firewall CA mounts
+    # and secrets.bootstrapSecretName are unaffected.
+    enabled: true
+    # Empty uses secretManager.existingSecretName.
+    existingSecretName: ""
   # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
   resources: {}
 

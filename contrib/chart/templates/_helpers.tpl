@@ -87,6 +87,18 @@ the database endpoint can resolve to.
 {{- required "secretManager.existingSecretName is required" .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- /* Empty when disabled: api-rs then gives iron-proxy pods no envFrom. */ -}}
+{{- define "centaur.ironProxySecretEnvName" -}}
+{{- $envSecret := .Values.ironProxy.envSecret | default dict -}}
+{{- if or (not (hasKey $envSecret "enabled")) $envSecret.enabled -}}
+{{- $envSecret.existingSecretName | default (include "centaur.secretEnvName" .) | trunc 63 | trimSuffix "-" -}}
+{{- else if eq .Values.ironProxy.secretSource "onepassword-connect" -}}
+{{- fail "ironProxy.envSecret.enabled=false: the onepassword-connect source reads OP_CONNECT_TOKEN from that Secret" -}}
+{{- else if and (eq .Values.ironProxy.secretSource "onepassword") (not .Values.secrets.bootstrapSecretName) -}}
+{{- fail "ironProxy.envSecret.enabled=false: the onepassword source reads OP_SERVICE_ACCOUNT_TOKEN from that Secret unless secrets.bootstrapSecretName is set" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.trustedCaSecretName" -}}
 {{- required "firewall.existingCaSecretName is required" .Values.firewall.existingCaSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

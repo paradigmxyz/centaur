@@ -149,6 +149,13 @@
         },
         "secretSource": { "type": "string" },
         "secretTtl": { "type": "string" },
+        "envSecret": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecretName": { "type": "string" }
+          }
+        },
         "upstreamDenyCidrs": {
           "type": "array",
           "items": { "type": "string" }

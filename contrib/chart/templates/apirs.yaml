@@ -523,7 +523,7 @@ spec:
             - name: KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY
               value: {{ .Values.firewall.existingCaKeySecretKey | default "ca-key.pem" | quote }}
             - name: KUBERNETES_SECRET_ENV_NAME
-              value: {{ include "centaur.secretEnvName" . | quote }}
+              value: {{ include "centaur.ironProxySecretEnvName" . | quote }}
 {{- if .Values.secrets.bootstrapSecretName }}
             - name: KUBERNETES_BOOTSTRAP_SECRET_NAME
               value: {{ .Values.secrets.bootstrapSecretName | quote }}
