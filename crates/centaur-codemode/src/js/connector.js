@@ -47,19 +47,15 @@
     return new Response(raw.status, JSON.parse(raw.headers), raw.body);
   };
 
-  // A WebSocket bound to this call. The host owns the socket; this is a handle
-  // it closes when the call ends.
+  // A text WebSocket bound to this call. The host owns the socket; this is a
+  // handle it closes when the call ends.
+  const wait = (timeout_ms) => Math.max(0, Number(timeout_ms ?? 0) || 0);
   const websocket = async (url, init = {}) => {
-    const protocols = JSON.stringify((init.protocols ?? []).map(String));
-    const { id, protocol } = await host.wsConnect(String(url), requestHeaders(init), protocols, requestTimeout(init));
-    const wait = (timeout_ms) => Math.max(0, Number(timeout_ms ?? 0) || 0);
+    const id = await host.wsConnect(String(url), wait(init.timeout_ms));
     return Object.freeze({
-      protocol: protocol ?? null,
-      send: (data) => host.wsSend(id, typeof data === "string" ? data : toBytes(data)),
-      recv: (timeout_ms) => host.wsRecv(id, wait(timeout_ms)),
-      close: (code, reason) => code === undefined
-        ? host.wsClose(id)
-        : host.wsClose(id, Number(code), String(reason ?? "")),
+      send: (text) => host.wsSend(id, String(text)),
+      recv: async (timeout_ms) => (await host.wsRecv(id, wait(timeout_ms))) ?? null,
+      close: () => host.wsClose(id),
     });
   };
 

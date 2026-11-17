@@ -6,15 +6,6 @@ import type { Ctx, WebSocketConn } from "../centaur";
 
 /** How long one command waits for its reply by default. */
 export const COMMAND_TIMEOUT_MS: number = 30000;
-/** Events kept while waiting for replies; older ones are dropped. */
-const MAX_EVENTS = 500;
-
-/** A CDP event (`Page.loadEventFired`, ...). */
-export interface CdpEvent {
-  method: string;
-  params: any;
-  sessionId?: string;
-}
 
 /** A page target as `Target.getTargets` lists it. */
 export interface PageTarget {
@@ -26,11 +17,10 @@ export interface PageTarget {
   [field: string]: unknown;
 }
 
-/** One browser-level CDP connection. */
+/** One browser-level CDP connection. Events are not subscribed to; wait by polling the page. */
 export class Cdp {
   private socket: WebSocketConn;
   private nextId: number = 1;
-  private events: CdpEvent[] = [];
 
   constructor(socket: WebSocketConn) {
     this.socket = socket;
@@ -52,38 +42,14 @@ export class Cdp {
       const left = deadline - Date.now();
       const raw = left > 0 ? await this.socket.recv(left) : null;
       if (raw === null) throw new Error(`CDP ${method} got no reply within ${timeout_ms} ms`);
-      const reply = this.parse(raw);
-      if (reply === undefined) continue;
+      // Anything else is an event or another command's reply.
+      const reply = JSON.parse(raw);
       if (reply.id === id) {
         if (reply.error) {
           throw new Error(`CDP ${method} failed: ${reply.error.message ?? JSON.stringify(reply.error)}`);
         }
         return reply.result ?? {};
       }
-    }
-  }
-
-  /** Forget the events seen so far, before a command whose events matter. */
-  clearEvents(): void {
-    this.events = [];
-  }
-
-  /**
-   * The first event named `method` (for `sessionId`, when set) since the last `clearEvents`,
-   * waiting up to `timeout_ms`; null when none arrives.
-   */
-  async waitFor(method: string, sessionId: string | undefined, timeout_ms: number): Promise<CdpEvent | null> {
-    const matches = (event: CdpEvent): boolean =>
-      event.method === method && (!sessionId || event.sessionId === sessionId);
-    const deadline = Date.now() + timeout_ms;
-    for (;;) {
-      const index = this.events.findIndex(matches);
-      if (index >= 0) return this.events.splice(index, 1)[0];
-      const left = deadline - Date.now();
-      if (left <= 0) return null;
-      const raw = await this.socket.recv(left);
-      if (raw === null) return null;
-      this.parse(raw);
     }
   }
 
@@ -115,19 +81,6 @@ export class Cdp {
     } catch {
       // already closed
     }
-  }
-
-  /** A reply, or undefined after buffering an event. */
-  private parse(raw: string | Uint8Array): any {
-    // CDP speaks JSON text frames.
-    if (typeof raw !== "string") throw new Error("CDP sent a binary message");
-    const message = JSON.parse(raw);
-    if (message.id !== undefined) return message;
-    if (typeof message.method === "string") {
-      this.events.push({ method: message.method, params: message.params, sessionId: message.sessionId });
-      if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
-    }
-    return undefined;
   }
 }
 

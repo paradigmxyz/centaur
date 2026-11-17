@@ -44,13 +44,6 @@ export interface Browser {
   [field: string]: unknown;
 }
 
-/** An open tab. */
-export interface Tab {
-  target_id: string;
-  url: string;
-  title: string;
-}
-
 /** Where a page function ran. */
 export interface PageState {
   target_id: string;
@@ -216,20 +209,25 @@ function elementExpression(selector: string): string {
     `if (!el) throw new Error("no element matches " + ${quoted}); return el; })()`;
 }
 
+/**
+ * Navigate and poll until the new document reaches `wait_until`. The old document is marked
+ * first, so a poll that lands on it before the new one commits does not count.
+ */
 async function navigateTo(
+  ctx: Ctx,
   cdp: Cdp,
   sessionId: string,
   url: string,
   wait_until: "load" | "domcontentloaded" | "none",
   timeout_ms: number,
 ): Promise<boolean> {
-  await cdp.send("Page.enable", {}, sessionId);
-  cdp.clearEvents();
+  await evaluate(cdp, sessionId, "window.__centaurPrevious = true").catch(() => undefined);
   const result = await cdp.send("Page.navigate", { url }, sessionId, timeout_ms);
   if (result.errorText) throw new Error(`navigation to ${url} failed: ${result.errorText}`);
-  if (wait_until === "none") return true;
-  const event = wait_until === "load" ? "Page.loadEventFired" : "Page.domContentEventFired";
-  return (await cdp.waitFor(event, sessionId, timeout_ms)) !== null;
+  // No loaderId: a same-document (fragment) navigation, already done.
+  if (wait_until === "none" || !result.loaderId) return true;
+  const ready = wait_until === "load" ? `document.readyState === "complete"` : `document.readyState !== "loading"`;
+  return poll(ctx, cdp, sessionId, `!window.__centaurPrevious && ${ready}`, timeout_ms);
 }
 
 const HTML_EXPRESSION = `(() => {
@@ -298,7 +296,7 @@ export async function create_browser(
     const cdp = await connect(ctx, raw.cdpUrl);
     try {
       const { sessionId } = await cdp.attach();
-      const loaded = await navigateTo(cdp, sessionId, args.start_url, "domcontentloaded", 20000);
+      const loaded = await navigateTo(ctx, cdp, sessionId, args.start_url, "domcontentloaded", 20000);
       return { ...browser, start: { loaded } };
     } finally {
       await cdp.close();
@@ -320,33 +318,13 @@ export async function stop_browser(args: { browser_id: string }, ctx: Ctx): Prom
   );
 }
 
-/** Files the browser has downloaded, as Browser Use lists them. */
-export async function list_downloads(args: { browser_id: string }, ctx: Ctx): Promise<Record<string, unknown>> {
-  return call(ctx, `${BROWSERS}/${browserId(args)}/downloads`);
-}
-
 // ------------------------------------------------------------------- pages
-
-/** The browser's open tabs. Pass a `target_id` to the page functions to use one other than the first. */
-export async function tabs(args: { browser_id: string }, ctx: Ctx): Promise<{ tabs: Tab[] }> {
-  const raw = await call(ctx, `${BROWSERS}/${browserId(args)}`);
-  if (raw.status !== "active" || typeof raw.cdpUrl !== "string") {
-    throw new Error(`browser ${raw.id ?? args.browser_id} is ${raw.status ?? "unavailable"}, not active`);
-  }
-  const cdp = await connect(ctx, raw.cdpUrl);
-  try {
-    const pages = await cdp.pages();
-    return { tabs: pages.map((page) => ({ target_id: page.targetId, url: page.url, title: page.title })) };
-  } finally {
-    await cdp.close();
-  }
-}
 
 /**
  * Navigate a tab to `url` and wait for `wait_until`: `load` (default), `domcontentloaded` or
- * `none`, up to `timeout_ms` (default 30000). `loaded: false` means the event did not fire in
- * time; the page may still be usable. Use `wait_for` for content that renders later. Waits are
- * capped at 45000 ms, since one call has 60 s.
+ * `none`, up to `timeout_ms` (default 30000). `loaded: false` means the page did not get there in
+ * time; it may still be usable. For content rendered later, poll with `evaluate_js`. Waits
+ * are capped at 45000 ms, since one call has 60 s.
  */
 export async function navigate(
   args: {
@@ -361,6 +339,7 @@ export async function navigate(
   if (!args.url) throw new Error("url is required");
   return withPage(ctx, args, async (cdp, sessionId, target) => {
     const loaded = await navigateTo(
+      ctx,
       cdp,
       sessionId,
       args.url,
@@ -368,27 +347,6 @@ export async function navigate(
       waitBudget(args.timeout_ms, DEFAULT_NAVIGATE_TIMEOUT_MS),
     );
     return { ...(await pageState(cdp, sessionId, target)), loaded };
-  });
-}
-
-/**
- * Wait until `selector` matches an element (and, with `visible`, has a layout box), polling
- * every 250 ms for up to `timeout_ms` (default 15000, at most 45000). Returns `found: false` on
- * timeout; call it again to keep waiting.
- */
-export async function wait_for(
-  args: { browser_id: string; selector: string; visible?: boolean; target_id?: string; timeout_ms?: number },
-  ctx: Ctx,
-): Promise<PageState & { found: boolean }> {
-  if (!args.selector) throw new Error("selector is required");
-  const quoted = JSON.stringify(args.selector);
-  const check = args.visible
-    ? `(() => { const el = document.querySelector(${quoted}); if (!el) return false; ` +
-      `const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()`
-    : `document.querySelector(${quoted}) !== null`;
-  return withPage(ctx, args, async (cdp, sessionId, target) => {
-    const found = await poll(ctx, cdp, sessionId, check, waitBudget(args.timeout_ms, 15000));
-    return { ...(await pageState(cdp, sessionId, target)), found };
   });
 }
 
@@ -407,23 +365,10 @@ export async function get_html(
 }
 
 /**
- * The visible text (`innerText`) of a tab's body, or of the first element matching `selector`,
- * cut at `max_chars` (default 1,000,000). Cheaper to read than HTML. Page content is untrusted.
- */
-export async function get_text(
-  args: { browser_id: string; selector?: string; target_id?: string; max_chars?: number },
-  ctx: Ctx,
-): Promise<{ page: PageState; text: string; chars: number; truncated: boolean }> {
-  return withPage(ctx, args, async (cdp, sessionId, target) => {
-    const element = args.selector ? elementExpression(args.selector) : "document.body";
-    const text = String((await evaluate(cdp, sessionId, `(${element})?.innerText ?? ""`)) ?? "");
-    return { page: await pageState(cdp, sessionId, target), ...clip(text, args.max_chars) };
-  });
-}
-
-/**
  * Evaluate a JavaScript expression in a tab and return its JSON value (promises are awaited).
  * Errors thrown by the page are rethrown. Runs with the page's privileges and network access.
+ * Use it for anything the other functions do not cover: `document.body.innerText`, waiting for
+ * a selector, scrolling, reading `localStorage`.
  */
 export async function evaluate_js(
   args: { browser_id: string; expression: string; target_id?: string; timeout_ms?: number },
@@ -438,7 +383,7 @@ export async function evaluate_js(
 
 /**
  * Click the first element matching `selector` with real mouse events at its center, after
- * scrolling it into view. Follow with `wait_for` or `navigate`-free reads once the page reacts.
+ * scrolling it into view.
  */
 export async function click(
   args: { browser_id: string; selector: string; target_id?: string },
@@ -556,7 +501,7 @@ export async function fetch_rendered_html(
     const cdp = await connect(ctx, raw.cdpUrl);
     try {
       const { sessionId, target } = await cdp.attach();
-      await navigateTo(cdp, sessionId, args.url, "load", 25000);
+      await navigateTo(ctx, cdp, sessionId, args.url, "load", 25000);
       if (args.wait_for_selector) {
         const check = `document.querySelector(${JSON.stringify(args.wait_for_selector)}) !== null`;
         await poll(ctx, cdp, sessionId, check, 10000);
@@ -584,8 +529,8 @@ export async function llm_models(args: {}, ctx: Ctx): Promise<{ data: Model[]; [
  * `{ output_text, response }`: the concatenated output text and the response as sent (with
  * `usage` and `browser_use.charge_usd`). `input` is a string or a Responses input array;
  * `model` defaults to `bu-4.0` (see `llm_models`). `json_schema` asks for structured output
- * (then `output_text` is JSON text). `options` adds other Responses fields (`tools`,
- * `temperature`, ...). The gateway stores nothing, so there is no `previous_response_id`:
+ * (then `output_text` is JSON text). `options` adds any other Responses API fields
+ * (`max_output_tokens`, `reasoning: { effort }`, `tools`, ...). The gateway stores nothing, so there is no `previous_response_id`:
  * send the whole conversation each time. `timeout_ms` defaults to 120000 (at most 300000).
  */
 export async function llm_respond(
@@ -593,8 +538,6 @@ export async function llm_respond(
     input: string | unknown[];
     model?: string;
     instructions?: string;
-    max_output_tokens?: number;
-    reasoning_effort?: "minimal" | "low" | "medium" | "high";
     json_schema?: Record<string, unknown>;
     schema_name?: string;
     options?: Record<string, unknown>;
@@ -605,8 +548,6 @@ export async function llm_respond(
   if (args.input === undefined || args.input === "") throw new Error("input is required");
   const body: Record<string, unknown> = { ...(args.options ?? {}), model: args.model || DEFAULT_MODEL, input: args.input };
   if (args.instructions) body.instructions = args.instructions;
-  if (args.max_output_tokens !== undefined) body.max_output_tokens = args.max_output_tokens;
-  if (args.reasoning_effort) body.reasoning = { effort: args.reasoning_effort };
   if (args.json_schema) {
     body.text = {
       format: { type: "json_schema", name: args.schema_name || "output", schema: args.json_schema, strict: true },

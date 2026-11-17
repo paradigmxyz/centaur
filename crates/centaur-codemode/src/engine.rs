@@ -42,7 +42,7 @@ use tokio::sync::Semaphore;
 use crate::{
     catalog::{Catalog, Policy, lib_name},
     files::{FileInfo, Files, MAX_FILE_BYTES},
-    websocket::{self, Closed, Incoming, Outgoing, RecvError, Sockets, WebSocketStats},
+    websocket::{self, Sockets},
 };
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
@@ -170,12 +170,7 @@ pub struct RequestRecord {
     pub status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// For a websocket (`method: "WS"`): how long it was open, so `ms`
-    /// covers the socket's life rather than its handshake.
     pub ms: u64,
-    /// For a websocket: what it carried and how it ended.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub websocket: Option<WebSocketStats>,
 }
 
 #[derive(Debug, Serialize)]
@@ -670,33 +665,16 @@ impl Cell {
         url: &str,
         started: Instant,
         status: std::result::Result<u16, &String>,
-    ) -> usize {
+    ) {
         let request = RequestRecord {
             method: method.to_ascii_uppercase(),
             url: redact_url(url),
             status: status.ok(),
             error: status.err().cloned(),
             ms: started.elapsed().as_millis() as u64,
-            websocket: None,
         };
-        match self.calls.lock().expect("calls lock").get_mut(call) {
-            Some(call) => {
-                call.requests.push(request);
-                call.requests.len() - 1
-            }
-            None => usize::MAX,
-        }
-    }
-
-    /// Fill in a websocket's connect record once it has closed.
-    fn record_websocket(&self, call: usize, closed: Closed) {
-        let mut calls = self.calls.lock().expect("calls lock");
-        if let Some(request) = calls
-            .get_mut(call)
-            .and_then(|call| call.requests.get_mut(closed.record))
-        {
-            request.ms = closed.ms;
-            request.websocket = Some(closed.stats);
+        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
+            call.requests.push(request);
         }
     }
 
@@ -833,9 +811,7 @@ impl Cell {
             ))),
         };
         // However the call ended, its sockets end with it.
-        for closed in sockets.close_all().await {
-            self.record_websocket(id, closed);
-        }
+        sockets.close_all().await;
         result
     }
 
@@ -1482,55 +1458,23 @@ fn websocket_host<'js>(
         }
     };
 
-    let (connect_cell, connect_sockets, connect_deadline) =
-        (cell.clone(), sockets.clone(), deadline.clone());
+    let (connect_sockets, connect_deadline) = (sockets.clone(), deadline.clone());
     host.set(
         "wsConnect",
         Function::new(
             ctx.clone(),
-            Async(
-                move |ctx: Ctx<'js>,
-                      url: String,
-                      headers: String,
-                      protocols: String,
-                      timeout_ms: f64| {
-                    let (cell, sockets) = (connect_cell.clone(), connect_sockets.clone());
-                    let timeout = remaining(&connect_deadline, timeout_ms);
-                    async move {
-                        let throw = |message: String| Exception::throw_message(&ctx, &message);
-                        let headers: BTreeMap<String, String> = serde_json::from_str(&headers)
-                            .map_err(|error| throw(format!("invalid headers: {error}")))?;
-                        let protocols: Vec<String> = serde_json::from_str(&protocols)
-                            .map_err(|error| throw(format!("invalid protocols: {error}")))?;
-                        sockets.reserve().map_err(throw)?;
-                        let started = Instant::now();
-                        let result = websocket::connect(
-                            &cell.ws_http,
-                            &url,
-                            &headers,
-                            &protocols,
-                            Some(timeout),
-                        )
-                        .await;
-                        let record = cell.record_request(
-                            call,
-                            "WS",
-                            &url,
-                            started,
-                            result.as_ref().map(|_| 101),
-                        );
-                        let connected = result.map_err(|message| {
-                            sockets.release();
-                            throw(message)
-                        })?;
-                        let id = sockets.insert(connected.stream, record);
-                        let object = Object::new(ctx.clone())?;
-                        object.set("id", id)?;
-                        object.set("protocol", connected.protocol)?;
-                        Ok::<_, rquickjs::Error>(object)
-                    }
-                },
-            ),
+            Async(move |ctx: Ctx<'js>, url: String, timeout_ms: f64| {
+                let (cell, sockets) = (cell.clone(), connect_sockets.clone());
+                let timeout = remaining(&connect_deadline, timeout_ms);
+                async move {
+                    let throw = |message: String| Exception::throw_message(&ctx, &message);
+                    sockets.attempt().map_err(throw)?;
+                    let started = Instant::now();
+                    let result = websocket::connect(&cell.ws_http, &url, timeout).await;
+                    cell.record_request(call, "WS", &url, started, result.as_ref().map(|_| 101));
+                    Ok::<_, rquickjs::Error>(sockets.insert(result.map_err(throw)?))
+                }
+            }),
         )?,
     )?;
 
@@ -1539,55 +1483,31 @@ fn websocket_host<'js>(
         "wsSend",
         Function::new(
             ctx.clone(),
-            Async(move |ctx: Ctx<'js>, id: u32, data: Value<'js>| {
+            Async(move |ctx: Ctx<'js>, id: u32, text: String| {
                 let sockets = send_sockets.clone();
-                let message = if let Some(text) = data.as_string() {
-                    text.to_string()
-                        .map(Outgoing::Text)
-                        .map_err(|e| e.to_string())
-                } else if let Ok(array) = TypedArray::<u8>::from_value(data.clone()) {
-                    Ok(Outgoing::Binary(copy_bytes(&array)))
-                } else {
-                    Err("websocket messages must be strings or bytes".to_owned())
-                };
                 async move {
-                    let message = message.map_err(|m| Exception::throw_type(&ctx, &m))?;
                     sockets
-                        .send(id, message)
+                        .send(id, text)
                         .await
-                        .map_err(|m| Exception::throw_message(&ctx, &m))
+                        .map_err(|message| Exception::throw_message(&ctx, &message))
                 }
             }),
         )?,
     )?;
 
-    let (recv_cell, recv_sockets) = (cell.clone(), sockets.clone());
+    let recv_sockets = sockets.clone();
     host.set(
         "wsRecv",
         Function::new(
             ctx.clone(),
             Async(move |ctx: Ctx<'js>, id: u32, timeout_ms: f64| {
-                let (cell, sockets) = (recv_cell.clone(), recv_sockets.clone());
+                let sockets = recv_sockets.clone();
                 let timeout = remaining(&deadline, timeout_ms);
                 async move {
-                    match sockets.recv(id, timeout).await {
-                        Ok(Incoming::Timeout) => Ok(Value::new_null(ctx.clone())),
-                        Ok(Incoming::Text(text)) => text.into_js(&ctx),
-                        Ok(Incoming::Binary(data)) => {
-                            Ok(TypedArray::<u8>::new(ctx.clone(), data)?.into_value())
-                        }
-                        Err(RecvError::Failed(message)) => {
-                            Err(Exception::throw_message(&ctx, &message))
-                        }
-                        Err(RecvError::Closed(closed)) => {
-                            let reason = closed.stats.close.clone().unwrap_or_default();
-                            cell.record_websocket(call, closed);
-                            Err(Exception::throw_message(
-                                &ctx,
-                                &format!("websocket {id} {reason}"),
-                            ))
-                        }
-                    }
+                    sockets
+                        .recv(id, timeout)
+                        .await
+                        .map_err(|message| Exception::throw_message(&ctx, &message))
                 }
             }),
         )?,
@@ -1597,27 +1517,10 @@ fn websocket_host<'js>(
         "wsClose",
         Function::new(
             ctx.clone(),
-            Async(
-                move |ctx: Ctx<'js>, id: u32, code: Opt<f64>, reason: Opt<String>| {
-                    let (cell, sockets) = (cell.clone(), sockets.clone());
-                    let code = match code.0 {
-                        None => Ok(None),
-                        Some(code) if code == 1000.0 || (3000.0..=4999.0).contains(&code) => {
-                            Ok(Some(code as u16))
-                        }
-                        Some(_) => Err("close code must be 1000 or 3000-4999".to_owned()),
-                    };
-                    async move {
-                        let code = code.map_err(|m| Exception::throw_range(&ctx, &m))?;
-                        if let Some(closed) =
-                            sockets.close(id, code, reason.0.unwrap_or_default()).await
-                        {
-                            cell.record_websocket(call, closed);
-                        }
-                        Ok::<_, rquickjs::Error>(())
-                    }
-                },
-            ),
+            Async(move |id: u32| {
+                let sockets = sockets.clone();
+                async move { sockets.close(id).await }
+            }),
         )?,
     )?;
     Ok(())
@@ -1888,18 +1791,16 @@ export async function files(args: { base: string }, ctx: Ctx): Promise<unknown> 
 
 /** Talk to a websocket echo server. */
 export async function ws(args: { url: string; leave_open?: boolean }, ctx: Ctx): Promise<unknown> {
-  const socket = await ctx.websocket(args.url, { protocols: ["echo", "other"], headers: { "x-demo": "1" } });
+  const socket = await ctx.websocket(args.url);
   await socket.send("hello");
   const text = await socket.recv(2000);
-  await socket.send(new Uint8Array([1, 2, 3]));
-  const bytes = await socket.recv(2000);
   const idle = await socket.recv(100);
   let closed = "";
   if (!args.leave_open) {
     await socket.send("close");
     try { await socket.recv(2000); } catch (e) { closed = String(e); }
   }
-  return { protocol: socket.protocol, text, bytes: Array.from(bytes as Uint8Array), idle, closed };
+  return { text, idle, closed };
 }
 
 /** Websocket misuse, each refused. */
@@ -1909,14 +1810,10 @@ export async function ws_refusals(args: { url: string }, ctx: Ctx): Promise<unkn
     try { await run(); out[name] = "allowed"; } catch (e) { out[name] = String(e); }
   };
   await attempt("scheme", () => ctx.websocket(args.url.replace("ws://", "http://")));
-  await attempt("header", () => ctx.websocket(args.url, { headers: { "Sec-WebSocket-Key": "x" } }));
   await attempt("refused", () => ctx.websocket(args.url.replace("/ws", "/nope")));
   const socket = await ctx.websocket(args.url);
   await socket.close();
   await attempt("after_close", () => socket.send("x"));
-  await attempt("bad_code", () => socket.close(1006));
-  await ctx.websocket(args.url);
-  await ctx.websocket(args.url);
   await ctx.websocket(args.url);
   await attempt("too_many", () => ctx.websocket(args.url));
   return out;
@@ -2283,21 +2180,11 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
                 let (tcp, _) = listener.accept().await.unwrap();
                 let log = log.clone();
                 tokio::spawn(async move {
-                    let callback = |request: &Request, mut response: Response| {
+                    let callback = |request: &Request, response: Response| {
                         if request.uri().path() != "/ws" {
                             let mut refused = ErrorResponse::new(Some("no socket here".to_owned()));
                             *refused.status_mut() = StatusCode::NOT_FOUND;
                             return Err(refused);
-                        }
-                        let offered = request
-                            .headers()
-                            .get("sec-websocket-protocol")
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or("");
-                        if offered.split(',').any(|p| p.trim() == "echo") {
-                            response
-                                .headers_mut()
-                                .insert("sec-websocket-protocol", "echo".parse().unwrap());
                         }
                         Ok(response)
                     };
@@ -2337,43 +2224,21 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
     async fn connectors_talk_over_websockets_and_record_them() {
         let (url, events) = websocket_upstream().await;
         let (_dir, engine) = engine();
-        let response = exec(
-            &engine,
-            &format!(
-                "return await tools.demo.ws({{ url: {:?} }});",
-                format!("{url}?token=secret")
-            ),
-            None,
-        )
-        .await;
+        let code = format!(
+            "return await tools.demo.ws({{ url: {:?} }});",
+            format!("{url}?token=secret")
+        );
+        let response = exec(&engine, &code, None).await;
         assert!(response.ok, "{response:?}");
-        let result = response.result.unwrap();
-        assert_eq!(result["protocol"], "echo");
-        assert_eq!(result["text"], "hello");
-        assert_eq!(result["bytes"], serde_json::json!([1, 2, 3]));
-        assert_eq!(result["idle"], Json::Null);
-        assert!(
-            result["closed"]
-                .as_str()
-                .unwrap()
-                .contains("closed by peer"),
-            "{result}"
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "text": "hello", "idle": null, "closed": "Error: websocket 1 closed" })
         );
         let requests = &response.calls[0].requests;
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, "WS");
         assert_eq!(requests[0].status, Some(101));
         assert_eq!(requests[0].url, url, "query string is dropped");
-        let stats = requests[0].websocket.as_ref().expect("websocket stats");
-        assert_eq!((stats.messages_sent, stats.messages_received), (3, 2));
-        assert_eq!((stats.bytes_sent, stats.bytes_received), (13, 8));
-        assert!(
-            stats
-                .close
-                .as_deref()
-                .unwrap()
-                .starts_with("closed by peer")
-        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(*events.lock().unwrap(), vec!["server closed"]);
     }
@@ -2382,15 +2247,9 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
     async fn websockets_close_when_their_call_ends() {
         let (url, events) = websocket_upstream().await;
         let (_dir, engine) = engine();
-        let response = exec(
-            &engine,
-            &format!("return await tools.demo.ws({{ url: {url:?}, leave_open: true }});"),
-            None,
-        )
-        .await;
+        let code = format!("return await tools.demo.ws({{ url: {url:?}, leave_open: true }});");
+        let response = exec(&engine, &code, None).await;
         assert!(response.ok, "{response:?}");
-        let stats = response.calls[0].requests[0].websocket.as_ref().unwrap();
-        assert_eq!(stats.close.as_deref(), Some("closed when the call ended"));
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(*events.lock().unwrap(), vec!["client closed"]);
     }
@@ -2399,12 +2258,8 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
     async fn websocket_misuse_is_refused() {
         let (url, _events) = websocket_upstream().await;
         let (_dir, engine) = engine();
-        let response = exec(
-            &engine,
-            &format!("return await tools.demo.ws_refusals({{ url: {url:?} }});"),
-            None,
-        )
-        .await;
+        let code = format!("return await tools.demo.ws_refusals({{ url: {url:?} }});");
+        let response = exec(&engine, &code, None).await;
         assert!(response.ok, "{response:?}");
         let result = response.result.unwrap();
         let expect = |name: &str, needle: &str| {
@@ -2412,20 +2267,17 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             assert!(got.contains(needle), "{name}: {got}");
         };
         expect("scheme", "unsupported websocket URL scheme");
-        expect("header", "set by the websocket handshake");
         expect("refused", "HTTP 404");
         expect("after_close", "is not open");
-        expect("bad_code", "close code");
         expect("too_many", "at most 4 websockets");
-        let requests = &response.calls[0].requests;
-        // Failed attempts are recorded but do not count against the limit:
-        // four sockets connected, and the fifth was refused before any I/O.
-        let statuses: Vec<Option<u16>> = requests.iter().map(|r| r.status).collect();
-        assert_eq!(
-            statuses,
-            vec![None, None, None, Some(101), Some(101), Some(101), Some(101)],
-            "{requests:?}"
-        );
+        // Every attempt is recorded and counts against the limit; the fifth
+        // was refused before any I/O.
+        let statuses: Vec<Option<u16>> = response.calls[0]
+            .requests
+            .iter()
+            .map(|request| request.status)
+            .collect();
+        assert_eq!(statuses, vec![None, None, Some(101), Some(101)]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
