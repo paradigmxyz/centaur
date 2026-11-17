@@ -146,17 +146,22 @@ function publicBrowser(raw: any): Browser {
   return rest as Browser;
 }
 
-/** Run `fn` on one tab of a browser over a fresh CDP connection. */
+/** A fresh CDP connection to an active browser. */
+async function connectBrowser(ctx: Ctx, args: { browser_id: string }): Promise<Cdp> {
+  const raw = await call(ctx, `${BROWSERS}/${browserId(args)}`);
+  if (raw.status !== "active" || typeof raw.cdpUrl !== "string" || !raw.cdpUrl) {
+    throw new Error(`browser ${raw.id ?? args.browser_id} is ${raw.status ?? "unavailable"}, not active`);
+  }
+  return connect(ctx, raw.cdpUrl);
+}
+
+/** Run `fn` on one tab (or iframe target) of a browser over a fresh CDP connection. */
 async function withPage<T>(
   ctx: Ctx,
   args: { browser_id: string; target_id?: string },
   fn: (cdp: Cdp, sessionId: string, target: PageTarget) => Promise<T>,
 ): Promise<T> {
-  const raw = await call(ctx, `${BROWSERS}/${browserId(args)}`);
-  if (raw.status !== "active" || typeof raw.cdpUrl !== "string" || !raw.cdpUrl) {
-    throw new Error(`browser ${raw.id ?? args.browser_id} is ${raw.status ?? "unavailable"}, not active`);
-  }
-  const cdp = await connect(ctx, raw.cdpUrl);
+  const cdp = await connectBrowser(ctx, args);
   try {
     const { sessionId, target } = await cdp.attach(args.target_id);
     return await fn(cdp, sessionId, target);
@@ -320,6 +325,37 @@ export async function stop_browser(args: { browser_id: string }, ctx: Ctx): Prom
 
 // ------------------------------------------------------------------- pages
 
+/** A tab, or a cross-origin iframe the browser runs as its own target. */
+export interface Target {
+  target_id: string;
+  /** `page` (a tab) or `iframe`. */
+  type: string;
+  url: string;
+  title: string;
+}
+
+/**
+ * The browser's tabs and its out-of-process iframes, in the browser's order. A cross-origin
+ * iframe's document is out of reach from its tab (`get_html` and `evaluate_js` on the tab see
+ * only the `<iframe>` element), so pass an iframe's `target_id` to `evaluate_js`, `get_html` or
+ * `click` to run inside it. Iframe targets come and go as frames load; list them again after
+ * navigating. `screenshot` works only on tabs, and `click_at` and `scroll_at` coordinates come
+ * from tab screenshots, so use those on the tab.
+ */
+export async function list_targets(args: { browser_id: string }, ctx: Ctx): Promise<Target[]> {
+  const cdp = await connectBrowser(ctx, args);
+  try {
+    return (await cdp.targets()).map((target) => ({
+      target_id: target.targetId,
+      type: target.type,
+      url: target.url,
+      title: target.title,
+    }));
+  } finally {
+    await cdp.close();
+  }
+}
+
 /**
  * Navigate a tab to `url` and wait for `wait_until`: `load` (default), `domcontentloaded` or
  * `none`, up to `timeout_ms` (default 30000). `loaded: false` means the page did not get there in
@@ -369,6 +405,7 @@ export async function get_html(
  * Errors thrown by the page are rethrown. Runs with the page's privileges and network access.
  * Use it for anything the other functions do not cover: `document.body.innerText`, waiting for
  * a selector, reading `localStorage`. For scrolling a specific panel or grid, use `scroll_at`.
+ * To run inside a cross-origin iframe, pass its `target_id` from `list_targets`.
  */
 export async function evaluate_js(
   args: { browser_id: string; expression: string; target_id?: string; timeout_ms?: number },
@@ -489,7 +526,8 @@ export async function type_text(
 
 /**
  * Save a screenshot of a tab to the workspace (`path`, default `downloads/browser_use/...`) as
- * `png` (default) or `jpeg`; `full_page` captures beyond the viewport. Needs a Centaur sandbox.
+ * `png` (default) or `jpeg`; `full_page` captures beyond the viewport. Tabs only: an iframe
+ * target cannot be captured, but it shows in its tab's screenshot. Needs a Centaur sandbox.
  */
 export async function screenshot(
   args: { browser_id: string; path?: string; full_page?: boolean; format?: "png" | "jpeg"; quality?: number; target_id?: string },

@@ -55,18 +55,30 @@ export class Cdp {
 
   /** The page targets, in the browser's order. */
   async pages(): Promise<PageTarget[]> {
-    const { targetInfos } = await this.send("Target.getTargets");
-    return (targetInfos as PageTarget[]).filter((target) => target.type === "page");
+    return (await this.targets()).filter((target) => target.type === "page");
   }
 
   /**
-   * Attach to `target_id`, or to the first page (opening a blank one when there is none), in
-   * flat mode, and return the page session to send page commands to.
+   * The page targets and the out-of-process iframe targets (cross-origin frames the browser
+   * runs in their own process), in the browser's order.
+   */
+  async targets(): Promise<PageTarget[]> {
+    const { targetInfos } = await this.send("Target.getTargets");
+    return (targetInfos as PageTarget[]).filter((target) => target.type === "page" || target.type === "iframe");
+  }
+
+  /**
+   * Attach to `target_id` (a page or an iframe target), or to the first page (opening a blank one
+   * when there is none), in flat mode, and return the session to send page commands to.
    */
   async attach(target_id?: string): Promise<{ sessionId: string; target: PageTarget }> {
-    const pages = await this.pages();
-    let target = target_id ? pages.find((page) => page.targetId === target_id) : pages[0];
-    if (target_id && !target) throw new Error(`no page with target_id ${target_id}`);
+    let target: PageTarget | undefined;
+    if (target_id) {
+      target = (await this.targets()).find((candidate) => candidate.targetId === target_id);
+      if (!target) throw new Error(`no page or iframe with target_id ${target_id}`);
+    } else {
+      target = (await this.pages())[0];
+    }
     if (!target) {
       const { targetId } = await this.send("Target.createTarget", { url: "about:blank" });
       target = { targetId, type: "page", title: "", url: "about:blank" };
