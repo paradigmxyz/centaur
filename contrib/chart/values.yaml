@@ -840,6 +840,14 @@ apiRs:
     periodSeconds: 10
     timeoutSeconds: 5
   terminationGracePeriodSeconds: 35
+  # Extra environment variables: strings or Kubernetes valueFrom objects.
+  # extraEnv:
+  #   LOG_LEVEL: "info"
+  #   EXAMPLE_TOKEN:
+  #     valueFrom:
+  #       secretKeyRef:
+  #         name: example-secret
+  #         key: example-key
   extraEnv: {}
   resources: {}
   # PriorityClass for the api-rs control plane pod itself. Pair with
