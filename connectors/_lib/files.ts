@@ -21,6 +21,7 @@ export function requireFiles(ctx: Ctx, what: string): Files {
 /** A file name safe to use as one path segment. */
 export function safeFilename(name: string, fallback = "file"): string {
   const cleaned = name
+    // oxlint-disable-next-line no-control-regex -- control characters are what this strips.
     .replace(/[\u0000-\u001f\u007f/\\]+/g, "_")
     .replace(/^\.+/, "")
     .trim()

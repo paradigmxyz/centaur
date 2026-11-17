@@ -1,5 +1,5 @@
 import type { Ctx } from "../centaur";
-import { encode, query as queryString } from "../_lib/http";
+import { encode } from "../_lib/http";
 
 // Log entries are VictoriaLogs' own fields, passed through: `_time`, `_msg`,
 // `_stream` and whatever the stream's log lines carry. The analytics helpers

@@ -176,7 +176,7 @@ const KNOWN_FIELDS = [
 
 // Compile-time check that KNOWN_FIELDS lists every request field.
 type UnlistedField = Exclude<keyof GetArticlesRequest, (typeof KNOWN_FIELDS)[number]>;
-const allFieldsListed: UnlistedField extends never ? true : never = true;
+const _allFieldsListed: UnlistedField extends never ? true : never = true;
 
 const DEFAULTS: GetArticlesRequest = {
   action: "getArticles",
