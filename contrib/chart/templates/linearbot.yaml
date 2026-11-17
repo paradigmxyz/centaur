@@ -14,6 +14,9 @@ spec:
   template:
     metadata:
       annotations:
+{{- if .Values.linearbot.extraCaCertificates }}
+        checksum/extra-ca-certificates: {{ .Values.linearbot.extraCaCertificates | sha256sum }}
+{{- end }}
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "linearbot") | nindent 8 }}
@@ -28,6 +31,10 @@ spec:
           image: {{ printf "%s:%s" .Values.linearbot.image.repository .Values.linearbot.image.tag | quote }}
           imagePullPolicy: {{ .Values.linearbot.image.pullPolicy }}
           env:
+{{- if .Values.linearbot.extraCaCertificates }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/centaur/ca/extra-ca-certificates.pem
+{{- end }}
             - name: PORT
               value: "3001"
             - name: CENTAUR_API_URL
@@ -98,6 +105,26 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.linearbot.resources | nindent 12 }}
+{{- if .Values.linearbot.extraCaCertificates }}
+          volumeMounts:
+            - name: extra-ca-certificates
+              mountPath: /etc/centaur/ca
+              readOnly: true
+      volumes:
+        - name: extra-ca-certificates
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "linearbot-ca") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "linearbot-ca") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "linearbot") | nindent 4 }}
+data:
+  extra-ca-certificates.pem: |
+{{ .Values.linearbot.extraCaCertificates | indent 4 }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
