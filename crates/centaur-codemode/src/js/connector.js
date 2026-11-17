@@ -47,6 +47,22 @@
     return new Response(raw.status, JSON.parse(raw.headers), raw.body);
   };
 
+  // A WebSocket bound to this call. The host owns the socket; this is a handle
+  // it closes when the call ends.
+  const websocket = async (url, init = {}) => {
+    const protocols = JSON.stringify((init.protocols ?? []).map(String));
+    const { id, protocol } = await host.wsConnect(String(url), requestHeaders(init), protocols, requestTimeout(init));
+    const wait = (timeout_ms) => Math.max(0, Number(timeout_ms ?? 0) || 0);
+    return Object.freeze({
+      protocol: protocol ?? null,
+      send: (data) => host.wsSend(id, typeof data === "string" ? data : toBytes(data)),
+      recv: (timeout_ms) => host.wsRecv(id, wait(timeout_ms)),
+      close: (code, reason) => code === undefined
+        ? host.wsClose(id)
+        : host.wsClose(id, Number(code), String(reason ?? "")),
+    });
+  };
+
   // The files capability; `null` unless the runner was started with --files-dir.
   const files = typeof host.filesRead !== "function" ? null : Object.freeze({
     read: async (path) => (await host.filesRead(String(path))).data,
@@ -72,6 +88,7 @@
 
   return Object.freeze({
     fetch,
+    websocket,
     env,
     context,
     sleep,

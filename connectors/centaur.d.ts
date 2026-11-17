@@ -110,8 +110,40 @@ export interface CallingContext {
   [key: string]: unknown;
 }
 
+export interface WebSocketInit {
+  /** Extra handshake headers; the handshake's own (`Upgrade`, `Sec-WebSocket-*`, ...) are refused. */
+  headers?: Record<string, string | undefined>;
+  /** Subprotocols to offer (`Sec-WebSocket-Protocol`). */
+  protocols?: string[];
+  /** Handshake timeout, at most 30 s and the call's remaining time. */
+  timeout_ms?: number;
+}
+
+/**
+ * A WebSocket owned by the current connector call. It closes when the call ends, so connect,
+ * talk and finish within one call; keep longer-lived state upstream. Messages are at most 10 MiB.
+ */
+export interface WebSocketConn {
+  /** The subprotocol the server chose, or null. */
+  readonly protocol: string | null;
+  /** Send a text message (string) or a binary one (bytes). */
+  send(data: string | Uint8Array | ArrayBuffer): Promise<void>;
+  /**
+   * The next message: a string for text, bytes for binary, or `null` when none arrives within
+   * `timeout_ms` (default: the call's remaining time). Throws once the socket has closed.
+   */
+  recv(timeout_ms?: number): Promise<string | Uint8Array | null>;
+  /** Close the socket; `code` is 1000 (default) or 3000-4999. */
+  close(code?: number, reason?: string): Promise<void>;
+}
+
 export interface Ctx {
   fetch(url: string, init?: RequestInit): Promise<Response>;
+  /**
+   * Open a `ws://` or `wss://` WebSocket through the principal's iron-proxy, recorded against this
+   * call like `fetch`. A call may open at most 4.
+   */
+  websocket(url: string, init?: WebSocketInit): Promise<WebSocketConn>;
   /**
    * The runner's environment, read once at startup: configuration such as API
    * base URLs or database proxy endpoints. It never holds real credentials;

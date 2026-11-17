@@ -476,6 +476,7 @@ export async function wait(args: { ms: number }, ctx: Ctx): Promise<{ waited: nu
                     status: *status,
                     error: None,
                     ms: 1,
+                    websocket: None,
                 })
                 .collect(),
             files: Vec::new(),

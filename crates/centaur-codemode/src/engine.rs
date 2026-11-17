@@ -10,10 +10,11 @@
 //!    import only the catalog's shared `_lib` modules.
 //! 3. Cells and connectors never share a realm. Every tool call runs in a
 //!    fresh QuickJS runtime; arguments and results cross as JSON text.
-//! 4. A connector's `fetch` is bound to its call, so every upstream request
-//!    is recorded against the call that made it, at the point of I/O. So are
+//! 4. A connector's `fetch` and `websocket` are bound to its call, so every
+//!    upstream request and socket is recorded against the call that made it,
+//!    at the point of I/O, and every socket closes when its call ends. So are
 //!    its file operations, when the runner has the files capability; cells
-//!    never get file access.
+//!    never get file access or sockets.
 //! 5. `invoke` checks the tool against the cell's allowlist.
 //! 6. Time, memory, call count and call concurrency are bounded per cell,
 //!    including the work connectors do.
@@ -41,6 +42,7 @@ use tokio::sync::Semaphore;
 use crate::{
     catalog::{Catalog, Policy, lib_name},
     files::{FileInfo, Files, MAX_FILE_BYTES},
+    websocket::{self, Closed, Incoming, Outgoing, RecvError, Sockets, WebSocketStats},
 };
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
@@ -168,7 +170,12 @@ pub struct RequestRecord {
     pub status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// For a websocket (`method: "WS"`): how long it was open, so `ms`
+    /// covers the socket's life rather than its handshake.
     pub ms: u64,
+    /// For a websocket: what it carried and how it ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketStats>,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +196,8 @@ pub struct Engine {
     /// with, so its calls stay consistent while it runs.
     catalog: Arc<RwLock<Arc<Catalog>>>,
     http: reqwest::Client,
+    /// HTTP/1-only, for websocket upgrades; same proxy and trust roots.
+    ws_http: reqwest::Client,
     context_file: Option<PathBuf>,
     /// Console permissions, used only when the context file is absent (`serve`
     /// in a Code Mode sandbox).
@@ -210,16 +219,22 @@ impl Engine {
         let mut builder = reqwest::Client::builder()
             .timeout(TOOL_TIMEOUT)
             .connect_timeout(Duration::from_secs(10));
+        // No total timeout: an upgraded socket lives as long as its call.
+        let mut ws_builder = reqwest::Client::builder()
+            .http1_only()
+            .connect_timeout(Duration::from_secs(10));
         if let Some(path) = ca_file {
             let pem = std::fs::read(path)
                 .wrap_err_with(|| format!("reading CA bundle {}", path.display()))?;
             for certificate in reqwest::Certificate::from_pem_bundle(&pem)? {
-                builder = builder.add_root_certificate(certificate);
+                builder = builder.add_root_certificate(certificate.clone());
+                ws_builder = ws_builder.add_root_certificate(certificate);
             }
         }
         Ok(Self {
             catalog: Arc::new(RwLock::new(catalog)),
             http: builder.build()?,
+            ws_http: ws_builder.build()?,
             context_file,
             console: None,
             files: files_dir.map(Files::new).transpose()?,
@@ -275,6 +290,7 @@ impl Engine {
             allowed,
             context: self.calling_context().await,
             http: self.http.clone(),
+            ws_http: self.ws_http.clone(),
             files: self.files.clone(),
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
@@ -599,6 +615,7 @@ struct Cell {
     /// The sandbox context file as JSON text, or `null`.
     context: String,
     http: reqwest::Client,
+    ws_http: reqwest::Client,
     files: Option<Files>,
     logs: Mutex<Vec<String>>,
     calls: Mutex<Vec<Call>>,
@@ -653,16 +670,33 @@ impl Cell {
         url: &str,
         started: Instant,
         status: std::result::Result<u16, &String>,
-    ) {
+    ) -> usize {
         let request = RequestRecord {
             method: method.to_ascii_uppercase(),
             url: redact_url(url),
             status: status.ok(),
             error: status.err().cloned(),
             ms: started.elapsed().as_millis() as u64,
+            websocket: None,
         };
-        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
-            call.requests.push(request);
+        match self.calls.lock().expect("calls lock").get_mut(call) {
+            Some(call) => {
+                call.requests.push(request);
+                call.requests.len() - 1
+            }
+            None => usize::MAX,
+        }
+    }
+
+    /// Fill in a websocket's connect record once it has closed.
+    fn record_websocket(&self, call: usize, closed: Closed) {
+        let mut calls = self.calls.lock().expect("calls lock");
+        if let Some(request) = calls
+            .get_mut(call)
+            .and_then(|call| call.requests.get_mut(closed.record))
+        {
+            request.ms = closed.ms;
+            request.websocket = Some(closed.stats);
         }
     }
 
@@ -773,11 +807,13 @@ impl Cell {
             .map_err(|_| ExecError::new("cell is shutting down"))?;
         let started = Instant::now();
         let deadline = Deadline::new(self.deadline.get().min(started + TOOL_TIMEOUT));
+        let sockets = Arc::new(Sockets::default());
         let realm = Realm {
             host: HostKind::Connector {
                 call: id,
                 label: &tool,
                 deadline: deadline.clone(),
+                sockets: sockets.clone(),
             },
             prelude: connector_prelude(),
             globals: vec![("__env", environment().to_owned())],
@@ -789,13 +825,18 @@ impl Cell {
             deadline: deadline.clone(),
             libs: Some(self.catalog.libs.clone()),
         };
-        tokio::select! {
+        let result = tokio::select! {
             result = run_realm(&self, realm) => result,
             () = deadline.passed() => Err(ExecError::new(format!(
                 "{tool} timed out after {}s",
                 started.elapsed().as_secs()
             ))),
+        };
+        // However the call ended, its sockets end with it.
+        for closed in sockets.close_all().await {
+            self.record_websocket(id, closed);
         }
+        result
     }
 
     /// Give a request of up to `timeout_ms` (bounded by `MAX_REQUEST_TIMEOUT`)
@@ -871,6 +912,7 @@ enum HostKind<'a> {
         call: usize,
         label: &'a str,
         deadline: Deadline,
+        sockets: Arc<Sockets>,
     },
 }
 
@@ -912,7 +954,15 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
                     call,
                     label,
                     ref deadline,
-                } => connector_host(&ctx, cell.clone(), call, label, deadline.clone()),
+                    ref sockets,
+                } => connector_host(
+                    &ctx,
+                    cell.clone(),
+                    call,
+                    label,
+                    deadline.clone(),
+                    sockets.clone(),
+                ),
             };
             let setup = (|| -> rquickjs::Result<_> {
                 let globals = ctx.globals();
@@ -1233,8 +1283,10 @@ fn connector_host<'js>(
     call: usize,
     label: &str,
     deadline: Deadline,
+    sockets: Arc<Sockets>,
 ) -> rquickjs::Result<Object<'js>> {
     let host = common_host(ctx, cell.clone(), format!("[{label}] "))?;
+    websocket_host(ctx, &host, cell.clone(), call, deadline.clone(), sockets)?;
     let fetch_cell = cell.clone();
     let fetch_deadline = deadline.clone();
     host.set(
@@ -1409,6 +1461,168 @@ fn connector_host<'js>(
     Ok(host)
 }
 
+/// The websocket host functions of one connector call. Sockets are handles
+/// into this call's `Sockets`: an unknown or closed handle is an error, and
+/// the call closes whatever is left when it ends.
+fn websocket_host<'js>(
+    ctx: &Ctx<'js>,
+    host: &Object<'js>,
+    cell: Arc<Cell>,
+    call: usize,
+    deadline: Deadline,
+    sockets: Arc<Sockets>,
+) -> rquickjs::Result<()> {
+    // Time left in the call, optionally shortened by a connector's timeout.
+    let remaining = |deadline: &Deadline, timeout_ms: f64| {
+        let left = deadline.get().saturating_duration_since(Instant::now());
+        if timeout_ms.is_finite() && timeout_ms > 0.0 {
+            left.min(Duration::from_millis(timeout_ms as u64))
+        } else {
+            left
+        }
+    };
+
+    let (connect_cell, connect_sockets, connect_deadline) =
+        (cell.clone(), sockets.clone(), deadline.clone());
+    host.set(
+        "wsConnect",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>,
+                      url: String,
+                      headers: String,
+                      protocols: String,
+                      timeout_ms: f64| {
+                    let (cell, sockets) = (connect_cell.clone(), connect_sockets.clone());
+                    let timeout = remaining(&connect_deadline, timeout_ms);
+                    async move {
+                        let throw = |message: String| Exception::throw_message(&ctx, &message);
+                        let headers: BTreeMap<String, String> = serde_json::from_str(&headers)
+                            .map_err(|error| throw(format!("invalid headers: {error}")))?;
+                        let protocols: Vec<String> = serde_json::from_str(&protocols)
+                            .map_err(|error| throw(format!("invalid protocols: {error}")))?;
+                        sockets.reserve().map_err(throw)?;
+                        let started = Instant::now();
+                        let result = websocket::connect(
+                            &cell.ws_http,
+                            &url,
+                            &headers,
+                            &protocols,
+                            Some(timeout),
+                        )
+                        .await;
+                        let record = cell.record_request(
+                            call,
+                            "WS",
+                            &url,
+                            started,
+                            result.as_ref().map(|_| 101),
+                        );
+                        let connected = result.map_err(|message| {
+                            sockets.release();
+                            throw(message)
+                        })?;
+                        let id = sockets.insert(connected.stream, record);
+                        let object = Object::new(ctx.clone())?;
+                        object.set("id", id)?;
+                        object.set("protocol", connected.protocol)?;
+                        Ok::<_, rquickjs::Error>(object)
+                    }
+                },
+            ),
+        )?,
+    )?;
+
+    let send_sockets = sockets.clone();
+    host.set(
+        "wsSend",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, id: u32, data: Value<'js>| {
+                let sockets = send_sockets.clone();
+                let message = if let Some(text) = data.as_string() {
+                    text.to_string()
+                        .map(Outgoing::Text)
+                        .map_err(|e| e.to_string())
+                } else if let Ok(array) = TypedArray::<u8>::from_value(data.clone()) {
+                    Ok(Outgoing::Binary(copy_bytes(&array)))
+                } else {
+                    Err("websocket messages must be strings or bytes".to_owned())
+                };
+                async move {
+                    let message = message.map_err(|m| Exception::throw_type(&ctx, &m))?;
+                    sockets
+                        .send(id, message)
+                        .await
+                        .map_err(|m| Exception::throw_message(&ctx, &m))
+                }
+            }),
+        )?,
+    )?;
+
+    let (recv_cell, recv_sockets) = (cell.clone(), sockets.clone());
+    host.set(
+        "wsRecv",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, id: u32, timeout_ms: f64| {
+                let (cell, sockets) = (recv_cell.clone(), recv_sockets.clone());
+                let timeout = remaining(&deadline, timeout_ms);
+                async move {
+                    match sockets.recv(id, timeout).await {
+                        Ok(Incoming::Timeout) => Ok(Value::new_null(ctx.clone())),
+                        Ok(Incoming::Text(text)) => text.into_js(&ctx),
+                        Ok(Incoming::Binary(data)) => {
+                            Ok(TypedArray::<u8>::new(ctx.clone(), data)?.into_value())
+                        }
+                        Err(RecvError::Failed(message)) => {
+                            Err(Exception::throw_message(&ctx, &message))
+                        }
+                        Err(RecvError::Closed(closed)) => {
+                            let reason = closed.stats.close.clone().unwrap_or_default();
+                            cell.record_websocket(call, closed);
+                            Err(Exception::throw_message(
+                                &ctx,
+                                &format!("websocket {id} {reason}"),
+                            ))
+                        }
+                    }
+                }
+            }),
+        )?,
+    )?;
+
+    host.set(
+        "wsClose",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>, id: u32, code: Opt<f64>, reason: Opt<String>| {
+                    let (cell, sockets) = (cell.clone(), sockets.clone());
+                    let code = match code.0 {
+                        None => Ok(None),
+                        Some(code) if code == 1000.0 || (3000.0..=4999.0).contains(&code) => {
+                            Ok(Some(code as u16))
+                        }
+                        Some(_) => Err("close code must be 1000 or 3000-4999".to_owned()),
+                    };
+                    async move {
+                        let code = code.map_err(|m| Exception::throw_range(&ctx, &m))?;
+                        if let Some(closed) =
+                            sockets.close(id, code, reason.0.unwrap_or_default()).await
+                        {
+                            cell.record_websocket(call, closed);
+                        }
+                        Ok::<_, rquickjs::Error>(())
+                    }
+                },
+            ),
+        )?,
+    )?;
+    Ok(())
+}
+
 fn file_info<'js>(ctx: &Ctx<'js>, info: &FileInfo) -> rquickjs::Result<Object<'js>> {
     let object = Object::new(ctx.clone())?;
     object.set("path", info.path.display().to_string())?;
@@ -1493,7 +1707,7 @@ async fn send(
 
 /// Transport errors without the URL: query-string keys would otherwise land
 /// in error text.
-fn transport(error: reqwest::Error) -> String {
+pub(crate) fn transport(error: reqwest::Error) -> String {
     let error = error.without_url();
     let mut message = format!("request failed: {error}");
     let mut source = std::error::Error::source(&error);
@@ -1670,6 +1884,42 @@ export async function files(args: { base: string }, ctx: Ctx): Promise<unknown> 
     echoed: await echoed.text(),
     escape: escape.includes("files.write"),
   };
+}
+
+/** Talk to a websocket echo server. */
+export async function ws(args: { url: string; leave_open?: boolean }, ctx: Ctx): Promise<unknown> {
+  const socket = await ctx.websocket(args.url, { protocols: ["echo", "other"], headers: { "x-demo": "1" } });
+  await socket.send("hello");
+  const text = await socket.recv(2000);
+  await socket.send(new Uint8Array([1, 2, 3]));
+  const bytes = await socket.recv(2000);
+  const idle = await socket.recv(100);
+  let closed = "";
+  if (!args.leave_open) {
+    await socket.send("close");
+    try { await socket.recv(2000); } catch (e) { closed = String(e); }
+  }
+  return { protocol: socket.protocol, text, bytes: Array.from(bytes as Uint8Array), idle, closed };
+}
+
+/** Websocket misuse, each refused. */
+export async function ws_refusals(args: { url: string }, ctx: Ctx): Promise<unknown> {
+  const out: Record<string, string> = {};
+  const attempt = async (name: string, run: () => Promise<unknown>) => {
+    try { await run(); out[name] = "allowed"; } catch (e) { out[name] = String(e); }
+  };
+  await attempt("scheme", () => ctx.websocket(args.url.replace("ws://", "http://")));
+  await attempt("header", () => ctx.websocket(args.url, { headers: { "Sec-WebSocket-Key": "x" } }));
+  await attempt("refused", () => ctx.websocket(args.url.replace("/ws", "/nope")));
+  const socket = await ctx.websocket(args.url);
+  await socket.close();
+  await attempt("after_close", () => socket.send("x"));
+  await attempt("bad_code", () => socket.close(1006));
+  await ctx.websocket(args.url);
+  await ctx.websocket(args.url);
+  await ctx.websocket(args.url);
+  await attempt("too_many", () => ctx.websocket(args.url));
+  return out;
 }
 
 /** What the connector realm sees of globals a cell may have touched. */
@@ -2014,6 +2264,170 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         format!("http://{address}")
     }
 
+    /// A websocket echo server at `/ws`: echoes text and binary, closes on
+    /// "close", and records how each connection ended.
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
+    async fn websocket_upstream() -> (String, Arc<Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{
+            Message,
+            handshake::server::{ErrorResponse, Request, Response},
+            http::StatusCode,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let log = events.clone();
+        tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let callback = |request: &Request, mut response: Response| {
+                        if request.uri().path() != "/ws" {
+                            let mut refused = ErrorResponse::new(Some("no socket here".to_owned()));
+                            *refused.status_mut() = StatusCode::NOT_FOUND;
+                            return Err(refused);
+                        }
+                        let offered = request
+                            .headers()
+                            .get("sec-websocket-protocol")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("");
+                        if offered.split(',').any(|p| p.trim() == "echo") {
+                            response
+                                .headers_mut()
+                                .insert("sec-websocket-protocol", "echo".parse().unwrap());
+                        }
+                        Ok(response)
+                    };
+                    let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(tcp, callback).await
+                    else {
+                        return;
+                    };
+                    while let Some(message) = socket.next().await {
+                        match message {
+                            Ok(Message::Text(text)) if text.as_str() == "close" => {
+                                let _ = socket.close(None).await;
+                                log.lock().unwrap().push("server closed".to_owned());
+                                return;
+                            }
+                            Ok(message @ (Message::Text(_) | Message::Binary(_))) => {
+                                let _ = socket.send(message).await;
+                            }
+                            Ok(Message::Close(_)) => {
+                                log.lock().unwrap().push("client closed".to_owned());
+                                return;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                log.lock().unwrap().push("broken".to_owned());
+                                return;
+                            }
+                        }
+                    }
+                    log.lock().unwrap().push("ended".to_owned());
+                });
+            }
+        });
+        (format!("ws://{address}/ws"), events)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_talk_over_websockets_and_record_them() {
+        let (url, events) = websocket_upstream().await;
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.ws({{ url: {:?} }});",
+                format!("{url}?token=secret")
+            ),
+            None,
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        let result = response.result.unwrap();
+        assert_eq!(result["protocol"], "echo");
+        assert_eq!(result["text"], "hello");
+        assert_eq!(result["bytes"], serde_json::json!([1, 2, 3]));
+        assert_eq!(result["idle"], Json::Null);
+        assert!(
+            result["closed"]
+                .as_str()
+                .unwrap()
+                .contains("closed by peer"),
+            "{result}"
+        );
+        let requests = &response.calls[0].requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "WS");
+        assert_eq!(requests[0].status, Some(101));
+        assert_eq!(requests[0].url, url, "query string is dropped");
+        let stats = requests[0].websocket.as_ref().expect("websocket stats");
+        assert_eq!((stats.messages_sent, stats.messages_received), (3, 2));
+        assert_eq!((stats.bytes_sent, stats.bytes_received), (13, 8));
+        assert!(
+            stats
+                .close
+                .as_deref()
+                .unwrap()
+                .starts_with("closed by peer")
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*events.lock().unwrap(), vec!["server closed"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websockets_close_when_their_call_ends() {
+        let (url, events) = websocket_upstream().await;
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            &format!("return await tools.demo.ws({{ url: {url:?}, leave_open: true }});"),
+            None,
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        let stats = response.calls[0].requests[0].websocket.as_ref().unwrap();
+        assert_eq!(stats.close.as_deref(), Some("closed when the call ended"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*events.lock().unwrap(), vec!["client closed"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websocket_misuse_is_refused() {
+        let (url, _events) = websocket_upstream().await;
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            &format!("return await tools.demo.ws_refusals({{ url: {url:?} }});"),
+            None,
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        let result = response.result.unwrap();
+        let expect = |name: &str, needle: &str| {
+            let got = result[name].as_str().unwrap();
+            assert!(got.contains(needle), "{name}: {got}");
+        };
+        expect("scheme", "unsupported websocket URL scheme");
+        expect("header", "set by the websocket handshake");
+        expect("refused", "HTTP 404");
+        expect("after_close", "is not open");
+        expect("bad_code", "close code");
+        expect("too_many", "at most 4 websockets");
+        let requests = &response.calls[0].requests;
+        // Failed attempts are recorded but do not count against the limit:
+        // four sockets connected, and the fifth was refused before any I/O.
+        let statuses: Vec<Option<u16>> = requests.iter().map(|r| r.status).collect();
+        assert_eq!(
+            statuses,
+            vec![None, None, None, Some(101), Some(101), Some(101), Some(101)],
+            "{requests:?}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn connectors_get_base64_and_gzip() {
         let (_dir, engine) = engine();
@@ -2125,6 +2539,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             allowed: Vec::new(),
             context: "null".to_owned(),
             http: engine.http.clone(),
+            ws_http: engine.ws_http.clone(),
             files: None,
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
@@ -2265,6 +2680,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             allowed: vec!["other".to_owned()],
             context: "null".to_owned(),
             http: engine.http.clone(),
+            ws_http: engine.ws_http.clone(),
             files: None,
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),

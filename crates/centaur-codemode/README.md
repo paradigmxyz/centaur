@@ -101,10 +101,12 @@ through connectors.
    QuickJS runtime; arguments and results cross as JSON text. Cell realms
    have no module loader; connector realms can import only shared `_lib`
    modules.
-4. A connector's `fetch` is bound to its call, so each upstream request is
-   recorded against the call that made it, at the point of I/O (method, URL
-   without query string, status, duration). File operations are recorded the
-   same way (operation, path, bytes).
+4. A connector's `fetch` and `websocket` are bound to its call, so each
+   upstream request and socket is recorded against the call that made it, at
+   the point of I/O (method, URL without query string, status, duration; for
+   a socket also messages, bytes and how it closed), and every socket closes
+   when its call ends. File operations are recorded the same way (operation,
+   path, bytes).
 5. `invoke` checks every tool against the principal's allowlist; refusals are
    recorded.
 6. Time, memory, call count and call concurrency are bounded per cell,
@@ -137,6 +139,25 @@ Besides `fetch`, `env`, `context` and `sleep`, `ctx` offers `base64`
 (`encode`, `decode`, `decodeText`; both alphabets) and `gzip`/`gunzip` (gzip
 or zlib, output capped like a response body). `fetch` already decodes
 `Content-Encoding: gzip` and `deflate` responses.
+
+### WebSockets
+
+`ctx.websocket(url, { headers?, protocols?, timeout_ms? })` opens a `ws://` or
+`wss://` socket with an HTTP/1.1 upgrade through the same proxy and trust
+roots as `fetch`, so iron-proxy sees (and can inject into) the handshake. It
+returns `{ protocol, send, recv, close }`: `send` takes a string (text) or
+bytes (binary); `recv(timeout_ms?)` returns the next message, `null` when none
+arrives in time (default: the call's remaining time), and throws once the
+socket has closed. The handshake's own headers cannot be overridden.
+
+A socket belongs to its call: the host closes whatever the call left open when
+the call ends, so state that must outlive a call (a remote browser's tabs, for
+example) has to live upstream. A call may open 4 sockets; a message is at most
+10 MiB either way. Its record is a `requests` entry with `method: "WS"`,
+status 101, `ms` covering the socket's life, and `websocket: {messages_sent,
+messages_received, bytes_sent, bytes_received, close}`. `_lib/cdp.ts` speaks
+the Chrome DevTools Protocol over it; `connectors/browser_use` uses that to
+drive Browser Use cloud browsers.
 
 ### Files
 
