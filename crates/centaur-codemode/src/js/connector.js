@@ -47,6 +47,18 @@
     return new Response(raw.status, JSON.parse(raw.headers), raw.body);
   };
 
+  // A text WebSocket bound to this call. The host owns the socket; this is a
+  // handle it closes when the call ends.
+  const wait = (timeout_ms) => Math.max(0, Number(timeout_ms ?? 0) || 0);
+  const websocket = async (url, init = {}) => {
+    const id = await host.wsConnect(String(url), wait(init.timeout_ms));
+    return Object.freeze({
+      send: (text) => host.wsSend(id, String(text)),
+      recv: async (timeout_ms) => (await host.wsRecv(id, wait(timeout_ms))) ?? null,
+      close: () => host.wsClose(id),
+    });
+  };
+
   // The files capability; `null` unless the runner was started with --files-dir.
   const files = typeof host.filesRead !== "function" ? null : Object.freeze({
     read: async (path) => (await host.filesRead(String(path))).data,
@@ -72,6 +84,7 @@
 
   return Object.freeze({
     fetch,
+    websocket,
     env,
     context,
     sleep,

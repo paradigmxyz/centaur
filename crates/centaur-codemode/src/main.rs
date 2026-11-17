@@ -20,6 +20,7 @@ mod files;
 mod reload;
 mod search;
 mod server;
+mod websocket;
 
 use std::{io::Read, net::SocketAddr, path::PathBuf, sync::Arc};
 

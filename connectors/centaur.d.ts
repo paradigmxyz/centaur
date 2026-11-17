@@ -110,8 +110,27 @@ export interface CallingContext {
   [key: string]: unknown;
 }
 
+/**
+ * A text WebSocket owned by the current connector call. It closes when the call ends, so connect,
+ * talk and finish within one call; keep longer-lived state upstream. Messages are at most 10 MiB.
+ */
+export interface WebSocketConn {
+  send(text: string): Promise<void>;
+  /**
+   * The next message, or `null` when none arrives within `timeout_ms` (default: the call's
+   * remaining time). Throws once the socket has closed.
+   */
+  recv(timeout_ms?: number): Promise<string | null>;
+  close(): Promise<void>;
+}
+
 export interface Ctx {
   fetch(url: string, init?: RequestInit): Promise<Response>;
+  /**
+   * Open a `ws://` or `wss://` WebSocket through the principal's iron-proxy, recorded against this
+   * call like `fetch`. A call may make at most 4 attempts; `timeout_ms` bounds the handshake.
+   */
+  websocket(url: string, init?: { timeout_ms?: number }): Promise<WebSocketConn>;
   /**
    * The runner's environment, read once at startup: configuration such as API
    * base URLs or database proxy endpoints. It never holds real credentials;
