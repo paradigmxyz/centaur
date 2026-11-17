@@ -368,7 +368,7 @@ export async function get_html(
  * Evaluate a JavaScript expression in a tab and return its JSON value (promises are awaited).
  * Errors thrown by the page are rethrown. Runs with the page's privileges and network access.
  * Use it for anything the other functions do not cover: `document.body.innerText`, waiting for
- * a selector, scrolling, reading `localStorage`.
+ * a selector, reading `localStorage`. For scrolling a specific panel or grid, use `scroll_at`.
  */
 export async function evaluate_js(
   args: { browser_id: string; expression: string; target_id?: string; timeout_ms?: number },
@@ -398,11 +398,61 @@ export async function click(
         `const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height }; })()`,
     )) as { x: number; y: number; w: number; h: number };
     if (!(point.w > 0 && point.h > 0)) throw new Error(`the element matching ${args.selector} has no size`);
-    const mouse = (type: string): Promise<unknown> =>
-      cdp.send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 }, sessionId);
-    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y }, sessionId);
-    await mouse("mousePressed");
-    await mouse("mouseReleased");
+    await clickPoint(cdp, sessionId, point.x, point.y);
+    return pageState(cdp, sessionId, target);
+  });
+}
+
+function coordinate(name: string, value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
+  return value;
+}
+
+/** A left click with real mouse events at viewport point (`x`, `y`). */
+async function clickPoint(cdp: Cdp, sessionId: string, x: number, y: number): Promise<void> {
+  const mouse = (type: string): Promise<unknown> =>
+    cdp.send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 }, sessionId);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, sessionId);
+  await mouse("mousePressed");
+  await mouse("mouseReleased");
+}
+
+/**
+ * Click with real mouse events at viewport point (`x`, `y`) in CSS pixels, from the top-left of
+ * the visible viewport, as read off a (non-`full_page`) `screenshot`. Use it for targets with no
+ * usable selector, such as canvas or virtualized grids. If the screenshot is larger than the
+ * viewport (device pixel ratio above 1), divide its pixel coordinates by that ratio.
+ */
+export async function click_at(
+  args: { browser_id: string; x: number; y: number; target_id?: string },
+  ctx: Ctx,
+): Promise<PageState> {
+  const x = coordinate("x", args.x);
+  const y = coordinate("y", args.y);
+  return withPage(ctx, args, async (cdp, sessionId, target) => {
+    await clickPoint(cdp, sessionId, x, y);
+    return pageState(cdp, sessionId, target);
+  });
+}
+
+/**
+ * Scroll with a mouse-wheel event at viewport point (`x`, `y`) in CSS pixels, so the element
+ * under the pointer (a scrollable grid or panel, not only the page) scrolls. `delta_y` scrolls
+ * down when positive, `delta_x` right; both in CSS pixels, default 0. Returns once the event is
+ * dispatched; take a screenshot to see the result.
+ */
+export async function scroll_at(
+  args: { browser_id: string; x: number; y: number; delta_y?: number; delta_x?: number; target_id?: string },
+  ctx: Ctx,
+): Promise<PageState> {
+  const x = coordinate("x", args.x);
+  const y = coordinate("y", args.y);
+  const deltaY = coordinate("delta_y", args.delta_y ?? 0);
+  const deltaX = coordinate("delta_x", args.delta_x ?? 0);
+  if (deltaX === 0 && deltaY === 0) throw new Error("delta_y or delta_x is required");
+  return withPage(ctx, args, async (cdp, sessionId, target) => {
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, sessionId);
+    await cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX, deltaY }, sessionId);
     return pageState(cdp, sessionId, target);
   });
 }
