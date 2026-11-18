@@ -1,0 +1,5 @@
+description = "Elfa AI: event summaries of recent keyword mentions with source links"
+
+secrets = [
+  { type = "http", name = "ELFA_API_KEY", mode = "inject", inject_header = "x-elfa-api-key", hosts = ["api.elfa.ai"] },
+]

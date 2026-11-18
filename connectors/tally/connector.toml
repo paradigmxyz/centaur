@@ -1,0 +1,3 @@
+description = "Tally: on-chain governance organizations, governors, proposals, vote stats and delegates"
+
+secrets = [{type = "http", name = "TALLY_API_KEY", mode = "inject", inject_header = "Api-Key", hosts = ["api.tally.xyz"]}]

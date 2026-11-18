@@ -1,0 +1,3 @@
+description = "Token Terminal: projects, metric availability, metric series, financial statements and market sectors"
+
+secrets = [{type = "http", name = "TOKEN_TERMINAL_API_KEY", mode = "inject", inject_header = "authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.tokenterminal.com"]}]

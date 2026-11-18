@@ -1,0 +1,3 @@
+description = "Databento Historical: OHLCV price history for US equities (Nasdaq XNAS.ITCH)"
+
+secrets = [{type = "http", name = "DATABENTO_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = 'Basic {{ base64 .Value ":" }}', hosts = ["hist.databento.com"]}]

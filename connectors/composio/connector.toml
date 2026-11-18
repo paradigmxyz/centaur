@@ -1,0 +1,5 @@
+description = "Composio: search 1000+ integration tools and execute their actions (GitHub, Gmail, Slack, Notion, ...)"
+
+secrets = [
+    {type = "http", name = "COMPOSIO_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["backend.composio.dev"]},
+]

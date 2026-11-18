@@ -1,0 +1,3 @@
+description = "ethPandaOps lab: execution-layer `engine_newPayload` timings per client, aggregated and for slow payloads"
+
+secrets = []

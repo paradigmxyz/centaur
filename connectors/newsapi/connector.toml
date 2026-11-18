@@ -1,0 +1,3 @@
+description = "NewsAPI: top headlines by country/category/source, full article search, and news source listings"
+
+secrets = [{type = "http", name = "NEWSAPI_KEY", mode = "inject", inject_header = "X-Api-Key", hosts = ["newsapi.org"]}]

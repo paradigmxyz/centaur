@@ -1,0 +1,5 @@
+description = "SEC EDGAR: company lookup, filings, full-text search, filing documents, and XBRL financial data"
+
+# EDGAR needs no credential, but SEC rejects requests without a descriptive
+# User-Agent and asks clients to stay at or below 10 requests per second. The
+# contact string is configuration (EDGAR_USER_AGENT), not a secret.

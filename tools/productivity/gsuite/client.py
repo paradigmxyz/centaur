@@ -2686,6 +2686,408 @@ def sheets_write_table(
     }
 
 
+_A1_CELL_RE = re.compile(r"^\$?([A-Za-z]*)\$?(\d*)$")
+
+_HORIZONTAL_ALIGNMENTS = {"LEFT", "CENTER", "RIGHT"}
+_VERTICAL_ALIGNMENTS = {"TOP", "MIDDLE", "BOTTOM"}
+_WRAP_STRATEGIES = {"OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"}
+_NUMBER_FORMAT_TYPES = {
+    "TEXT",
+    "NUMBER",
+    "PERCENT",
+    "CURRENCY",
+    "DATE",
+    "TIME",
+    "DATE_TIME",
+    "SCIENTIFIC",
+}
+
+
+def _column_index(letters: str) -> int:
+    """Zero-based column index for A1 column letters (A -> 0, AA -> 26)."""
+    index = 0
+    for letter in letters.upper():
+        index = index * 26 + (ord(letter) - ord("A") + 1)
+    return index - 1
+
+
+def _split_sheet_range(range_notation: str) -> tuple[str | None, str | None]:
+    """Split ``'Tab'!A1:B2`` into its tab title and cell part."""
+    notation = range_notation.strip()
+    if notation.startswith("'"):
+        index = 1
+        title_chars: list[str] = []
+        while index < len(notation):
+            char = notation[index]
+            if char == "'":
+                if notation[index + 1 : index + 2] == "'":
+                    title_chars.append("'")
+                    index += 2
+                    continue
+                break
+            title_chars.append(char)
+            index += 1
+        else:
+            raise ValueError(f"Unterminated quoted sheet title in range: {range_notation}")
+        rest = notation[index + 1 :]
+        if not rest:
+            return "".join(title_chars), None
+        if not rest.startswith("!"):
+            raise ValueError(f"Invalid A1 range: {range_notation}")
+        return "".join(title_chars), rest[1:] or None
+    if "!" in notation:
+        title, cells = notation.rsplit("!", 1)
+        return title, cells or None
+    return None, notation or None
+
+
+def _parse_a1_cells(cells: str) -> dict | None:
+    """Parse ``A1``, ``A1:C3``, ``A:C``, ``2:5`` or ``A2:C`` into GridRange bounds.
+
+    Returns None when ``cells`` is not A1 notation.
+    """
+    parts = cells.split(":")
+    if len(parts) > 2:
+        return None
+    parsed = []
+    for part in parts:
+        match = _A1_CELL_RE.match(part.strip())
+        if not match or not (match.group(1) or match.group(2)):
+            return None
+        column = _column_index(match.group(1)) if match.group(1) else None
+        row = int(match.group(2)) - 1 if match.group(2) else None
+        if row is not None and row < 0:
+            return None
+        parsed.append((column, row))
+
+    grid: dict[str, int] = {}
+    start_column, start_row = parsed[0]
+    end_column, end_row = parsed[-1]
+    if len(parsed) == 1 and (start_column is None or start_row is None):
+        # A lone ``A`` or ``5`` is not a valid A1 range.
+        return None
+    columns = [c for c in (start_column, end_column) if c is not None]
+    rows = [r for r in (start_row, end_row) if r is not None]
+    if start_column is not None:
+        grid["startColumnIndex"] = min(columns)
+        if end_column is not None:
+            grid["endColumnIndex"] = max(columns) + 1
+    elif end_column is not None:
+        grid["endColumnIndex"] = end_column + 1
+    if start_row is not None:
+        grid["startRowIndex"] = min(rows)
+        if end_row is not None:
+            grid["endRowIndex"] = max(rows) + 1
+    elif end_row is not None:
+        grid["endRowIndex"] = end_row + 1
+    return grid
+
+
+def _sheet_properties_list(service, spreadsheet_id: str) -> list[dict]:
+    result = (
+        service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets.properties(sheetId,title,index)")
+        .execute()
+    )
+    properties = [sheet.get("properties", {}) for sheet in result.get("sheets", [])]
+    return sorted(properties, key=lambda p: p.get("index", 0))
+
+
+def _resolve_sheet_id(sheets: list[dict], title: str | None, spreadsheet_id: str) -> int:
+    if not sheets:
+        raise ValueError(f"Spreadsheet {spreadsheet_id} has no sheets")
+    if title is None:
+        return sheets[0].get("sheetId", 0)
+    for sheet in sheets:
+        if sheet.get("title") == title:
+            return sheet.get("sheetId", 0)
+    titles = ", ".join(repr(s.get("title", "")) for s in sheets)
+    raise ValueError(f"No sheet titled {title!r} in spreadsheet (tabs: {titles})")
+
+
+def _grid_range(sheets: list[dict], range_notation: str, spreadsheet_id: str) -> dict:
+    """Convert an A1 range into a Sheets API GridRange.
+
+    A range without a tab title addresses the first tab, unless the whole
+    string is a tab title, in which case it addresses that entire tab.
+    """
+    title, cells = _split_sheet_range(range_notation)
+    if title is None and cells is not None and any(sheet.get("title") == cells for sheet in sheets):
+        title, cells = cells, None
+    grid: dict = {"sheetId": _resolve_sheet_id(sheets, title, spreadsheet_id)}
+    if cells is None:
+        return grid
+    bounds = _parse_a1_cells(cells)
+    if bounds is None:
+        raise ValueError(f"Invalid A1 range: {range_notation}")
+    grid.update(bounds)
+    return grid
+
+
+def _parse_color(color: str) -> dict:
+    """Convert ``#RGB`` or ``#RRGGBB`` into a Sheets API Color."""
+    value = color.strip().lstrip("#")
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    if len(value) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in value):
+        raise ValueError(f"Color must be a hex string like '#1a73e8', got {color!r}")
+    return {
+        "red": int(value[0:2], 16) / 255,
+        "green": int(value[2:4], 16) / 255,
+        "blue": int(value[4:6], 16) / 255,
+    }
+
+
+def _choice(name: str, value: str, allowed: set[str]) -> str:
+    normalized = value.upper()
+    if normalized not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(sorted(allowed))}, got {value!r}")
+    return normalized
+
+
+def _cell_format(
+    *,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+    strikethrough: bool | None = None,
+    font_size: int | None = None,
+    font_family: str | None = None,
+    text_color: str | None = None,
+    background_color: str | None = None,
+    horizontal_alignment: str | None = None,
+    vertical_alignment: str | None = None,
+    wrap_strategy: str | None = None,
+    number_format_type: str | None = None,
+    number_format_pattern: str | None = None,
+) -> tuple[dict, list[str]]:
+    """Build a CellFormat and its ``userEnteredFormat`` field mask."""
+    cell_format: dict = {}
+    fields: list[str] = []
+    text_format: dict = {}
+    for key, value in (
+        ("bold", bold),
+        ("italic", italic),
+        ("underline", underline),
+        ("strikethrough", strikethrough),
+        ("fontFamily", font_family),
+    ):
+        if value is not None:
+            text_format[key] = value
+    if font_size is not None:
+        if font_size <= 0:
+            raise ValueError("font_size must be positive")
+        text_format["fontSize"] = font_size
+    if text_color is not None:
+        text_format["foregroundColorStyle"] = {"rgbColor": _parse_color(text_color)}
+    if text_format:
+        cell_format["textFormat"] = text_format
+        fields.extend(f"userEnteredFormat.textFormat.{key}" for key in text_format)
+    if background_color is not None:
+        cell_format["backgroundColorStyle"] = {"rgbColor": _parse_color(background_color)}
+        fields.append("userEnteredFormat.backgroundColorStyle")
+    if horizontal_alignment is not None:
+        cell_format["horizontalAlignment"] = _choice(
+            "horizontal_alignment", horizontal_alignment, _HORIZONTAL_ALIGNMENTS
+        )
+        fields.append("userEnteredFormat.horizontalAlignment")
+    if vertical_alignment is not None:
+        cell_format["verticalAlignment"] = _choice(
+            "vertical_alignment", vertical_alignment, _VERTICAL_ALIGNMENTS
+        )
+        fields.append("userEnteredFormat.verticalAlignment")
+    if wrap_strategy is not None:
+        cell_format["wrapStrategy"] = _choice("wrap_strategy", wrap_strategy, _WRAP_STRATEGIES)
+        fields.append("userEnteredFormat.wrapStrategy")
+    if number_format_type is not None or number_format_pattern is not None:
+        number_format = {
+            "type": _choice(
+                "number_format_type", number_format_type or "NUMBER", _NUMBER_FORMAT_TYPES
+            )
+        }
+        if number_format_pattern is not None:
+            number_format["pattern"] = number_format_pattern
+        cell_format["numberFormat"] = number_format
+        fields.append("userEnteredFormat.numberFormat")
+    return cell_format, fields
+
+
+def sheets_format(
+    spreadsheet_id: str,
+    range_notation: str,
+    *,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+    strikethrough: bool | None = None,
+    font_size: int | None = None,
+    font_family: str | None = None,
+    text_color: str | None = None,
+    background_color: str | None = None,
+    horizontal_alignment: str | None = None,
+    vertical_alignment: str | None = None,
+    wrap_strategy: str | None = None,
+    number_format_type: str | None = None,
+    number_format_pattern: str | None = None,
+) -> dict:
+    """Format the cells of an A1 range. Only the options given are changed.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        range_notation: A1 range ("Sheet1!A1:D1", "A:A", "2:2", or a tab title
+            for the whole tab); without a tab title, the first tab is used
+        bold, italic, underline, strikethrough: Text style on (True) or off (False)
+        font_size: Font size in points
+        font_family: Font family, such as "Roboto Mono"
+        text_color: Text color as hex, such as "#ffffff"
+        background_color: Cell fill color as hex, such as "#1a73e8"
+        horizontal_alignment: LEFT, CENTER, or RIGHT
+        vertical_alignment: TOP, MIDDLE, or BOTTOM
+        wrap_strategy: OVERFLOW_CELL, LEGACY_WRAP, CLIP, or WRAP
+        number_format_type: TEXT, NUMBER, PERCENT, CURRENCY, DATE, TIME,
+            DATE_TIME, or SCIENTIFIC (default NUMBER when only a pattern is given)
+        number_format_pattern: Sheets number format pattern, such as "#,##0.00"
+
+    Returns:
+        Dict with spreadsheet_id, range, grid_range, and the fields updated
+    """
+    cell_format, fields = _cell_format(
+        bold=bold,
+        italic=italic,
+        underline=underline,
+        strikethrough=strikethrough,
+        font_size=font_size,
+        font_family=font_family,
+        text_color=text_color,
+        background_color=background_color,
+        horizontal_alignment=horizontal_alignment,
+        vertical_alignment=vertical_alignment,
+        wrap_strategy=wrap_strategy,
+        number_format_type=number_format_type,
+        number_format_pattern=number_format_pattern,
+    )
+    if not fields:
+        raise ValueError("Provide at least one format option")
+
+    service = get_sheets_service()
+    sheets = _sheet_properties_list(service, spreadsheet_id)
+    grid_range = _grid_range(sheets, range_notation, spreadsheet_id)
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": grid_range,
+                        "cell": {"userEnteredFormat": cell_format},
+                        "fields": ",".join(fields),
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "range": range_notation,
+        "grid_range": grid_range,
+        "fields": fields,
+    }
+
+
+def sheets_freeze(
+    spreadsheet_id: str,
+    sheet_title: str | None = None,
+    rows: int | None = None,
+    columns: int | None = None,
+) -> dict:
+    """Freeze the top rows and/or left columns of a tab; 0 unfreezes.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        sheet_title: Tab title (default: the first tab)
+        rows: Number of rows to freeze
+        columns: Number of columns to freeze
+
+    Returns:
+        Dict with spreadsheet_id, sheet_id, and the frozen counts that were set
+    """
+    grid_properties: dict[str, int] = {}
+    if rows is not None:
+        if rows < 0:
+            raise ValueError("rows must not be negative")
+        grid_properties["frozenRowCount"] = rows
+    if columns is not None:
+        if columns < 0:
+            raise ValueError("columns must not be negative")
+        grid_properties["frozenColumnCount"] = columns
+    if not grid_properties:
+        raise ValueError("Provide rows and/or columns")
+
+    service = get_sheets_service()
+    sheets = _sheet_properties_list(service, spreadsheet_id)
+    sheet_id = _resolve_sheet_id(sheets, sheet_title, spreadsheet_id)
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": sheet_id, "gridProperties": grid_properties},
+                        "fields": ",".join(f"gridProperties.{key}" for key in grid_properties),
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": sheet_id,
+        "frozen_row_count": grid_properties.get("frozenRowCount"),
+        "frozen_column_count": grid_properties.get("frozenColumnCount"),
+    }
+
+
+def sheets_raw_batch_update(spreadsheet_id: str, requests: list[dict]) -> dict:
+    """Send Sheets API ``spreadsheets.batchUpdate`` requests as given.
+
+    Use for formatting the helpers do not cover: borders (updateBorders),
+    merges (mergeCells), column widths (updateDimensionProperties,
+    autoResizeDimensions), conditional formats (addConditionalFormatRule),
+    banding (addBanding), and so on. Requests address tabs by numeric
+    ``sheetId``, which ``sheets_tabs`` returns.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        requests: List of Sheets API Request objects
+
+    Returns:
+        The batchUpdate response, with ``replies`` in request order
+    """
+    if not requests:
+        raise ValueError("Provide at least one request")
+    service = get_sheets_service()
+    return (
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+        .execute()
+    )
+
+
+def sheets_tabs(spreadsheet_id: str) -> list[dict]:
+    """List a spreadsheet's tabs in order, with sheet_id, title, and index."""
+    service = get_sheets_service()
+    return [
+        {
+            "sheet_id": sheet.get("sheetId", 0),
+            "title": sheet.get("title", ""),
+            "index": sheet.get("index", 0),
+        }
+        for sheet in _sheet_properties_list(service, spreadsheet_id)
+    ]
+
+
 # Slides functions
 
 
@@ -4037,6 +4439,101 @@ class GSuiteClient:
             start_cell=start_cell,
             value_input_option=value_input_option,
         )
+
+    def sheets_format(
+        self,
+        spreadsheet_id: str,
+        range_notation: str,
+        bold: bool | None = None,
+        italic: bool | None = None,
+        underline: bool | None = None,
+        strikethrough: bool | None = None,
+        font_size: int | None = None,
+        font_family: str | None = None,
+        text_color: str | None = None,
+        background_color: str | None = None,
+        horizontal_alignment: str | None = None,
+        vertical_alignment: str | None = None,
+        wrap_strategy: str | None = None,
+        number_format_type: str | None = None,
+        number_format_pattern: str | None = None,
+    ) -> dict:
+        """Format the cells of an A1 range. Only the options given are changed.
+
+        Args:
+            spreadsheet_id: The spreadsheet ID (from URL)
+            range_notation: A1 range ("Sheet1!A1:D1", "A:A", "2:2", or a tab
+                title for the whole tab); without a tab title, the first tab
+            bold, italic, underline, strikethrough: Text style on or off
+            font_size: Font size in points
+            font_family: Font family, such as "Roboto Mono"
+            text_color: Text color as hex, such as "#ffffff"
+            background_color: Cell fill color as hex, such as "#1a73e8"
+            horizontal_alignment: LEFT, CENTER, or RIGHT
+            vertical_alignment: TOP, MIDDLE, or BOTTOM
+            wrap_strategy: OVERFLOW_CELL, LEGACY_WRAP, CLIP, or WRAP
+            number_format_type: TEXT, NUMBER, PERCENT, CURRENCY, DATE, TIME,
+                DATE_TIME, or SCIENTIFIC
+            number_format_pattern: Number format pattern, such as "#,##0.00"
+
+        Returns:
+            Dict with spreadsheet_id, range, grid_range, and the fields updated
+        """
+        return sheets_format(
+            spreadsheet_id,
+            range_notation,
+            bold=bold,
+            italic=italic,
+            underline=underline,
+            strikethrough=strikethrough,
+            font_size=font_size,
+            font_family=font_family,
+            text_color=text_color,
+            background_color=background_color,
+            horizontal_alignment=horizontal_alignment,
+            vertical_alignment=vertical_alignment,
+            wrap_strategy=wrap_strategy,
+            number_format_type=number_format_type,
+            number_format_pattern=number_format_pattern,
+        )
+
+    def sheets_freeze(
+        self,
+        spreadsheet_id: str,
+        sheet_title: str | None = None,
+        rows: int | None = None,
+        columns: int | None = None,
+    ) -> dict:
+        """Freeze the top rows and/or left columns of a tab; 0 unfreezes.
+
+        Args:
+            spreadsheet_id: The spreadsheet ID (from URL)
+            sheet_title: Tab title (default: the first tab)
+            rows: Number of rows to freeze
+            columns: Number of columns to freeze
+
+        Returns:
+            Dict with spreadsheet_id, sheet_id, and the frozen counts set
+        """
+        return sheets_freeze(spreadsheet_id, sheet_title=sheet_title, rows=rows, columns=columns)
+
+    def sheets_tabs(self, spreadsheet_id: str) -> list[dict]:
+        """List a spreadsheet's tabs in order, with sheet_id, title, and index."""
+        return sheets_tabs(spreadsheet_id)
+
+    def sheets_raw_batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+        """Send Sheets API spreadsheets.batchUpdate requests as given.
+
+        Use for borders (updateBorders), merges (mergeCells), column widths
+        (updateDimensionProperties, autoResizeDimensions), conditional formats
+        (addConditionalFormatRule), banding (addBanding), and other requests
+        the helpers do not cover. Requests address tabs by numeric sheetId,
+        which sheets_tabs returns.
+
+        Returns:
+            The batchUpdate response, with replies in request order
+        """
+        return sheets_raw_batch_update(spreadsheet_id, requests)
 
     # --- Slides ---
 

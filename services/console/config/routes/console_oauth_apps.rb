@@ -14,7 +14,9 @@ namespace :api do
         end
       end
       resources :oauth_providers, only: %i[index]
-      resources :integrations, only: %i[index]
+      resources :integrations, only: %i[index] do
+        collection { delete "connections/:id", action: :disconnect, as: :connection }
+      end
     end
   end
 end

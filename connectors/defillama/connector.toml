@@ -1,0 +1,3 @@
+description = "DefiLlama: TVL, stablecoins, DEX and perpetual volumes, open interest, fees, bridges"
+
+secrets = [{ type = "http", name = "DEFILLAMA_API_KEY", match_query = true, match_path = true, hosts = ["api.llama.fi", "stablecoins.llama.fi", "bridges.llama.fi", "pro-api.llama.fi"] }]

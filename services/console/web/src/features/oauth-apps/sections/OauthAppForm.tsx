@@ -1,5 +1,5 @@
 // The client secret is write-only: never prefilled, and a blank value on edit
-// is omitted so the stored secret is kept. `shared` is create-only.
+// is omitted so the stored secret is kept. `shared` and `owner_only` are create-only.
 import { zodResolver } from "@hookform/resolvers/zod";
 import { FormProvider, useForm, type FieldError } from "react-hook-form";
 import { Link } from "react-router";
@@ -19,6 +19,7 @@ const CONFIG_LABELS: Record<string, string> = {
   authorization_endpoint: "Authorization endpoint",
   token_endpoint: "Token endpoint",
   userinfo_endpoint: "Userinfo endpoint (optional)",
+  revocation_endpoint: "Revocation endpoint (optional)",
   resource: "Resource URL",
 };
 
@@ -35,6 +36,7 @@ const schema = z.object({
   allowed_scopes: z.string(),
   enabled: z.boolean(),
   shared: z.boolean(),
+  owner_only: z.boolean(),
   always_available: z.boolean(),
   labels: z.array(z.object({ key: z.string(), value: z.string() })),
 });
@@ -51,6 +53,7 @@ const FIELDS = [
   "allowed_scopes",
   "enabled",
   "shared",
+  "owner_only",
   "always_available",
   "labels",
 ] as const;
@@ -66,6 +69,7 @@ export function initialValues(app: OauthApp | undefined, defaultProvider: string
     allowed_scopes: (app?.allowed_scopes ?? []).join("\n"),
     enabled: app?.enabled ?? true,
     shared: app?.shared ?? false,
+    owner_only: app?.owner_only ?? false,
     always_available: app?.always_available ?? false,
     labels: recordToRows(app?.labels),
   };
@@ -82,7 +86,7 @@ export function lineList(raw: string): string[] {
 /**
  * Form values -> API payload. Only the custom provider takes a config (blank
  * fields dropped so the model reports them missing); a blank client secret is
- * omitted; `shared` is only sent on create.
+ * omitted; `shared` and `owner_only` are only sent on create.
  */
 export function toPayload(values: OauthAppFormValues, isNew: boolean, configKeys: string[]): OauthAppInput {
   const providerConfig: Record<string, string> = {};
@@ -104,7 +108,10 @@ export function toPayload(values: OauthAppFormValues, isNew: boolean, configKeys
     labels: rowsToRecord(values.labels),
   };
   if (values.client_secret.trim() !== "") payload.client_secret = values.client_secret;
-  if (isNew) payload.shared = values.shared;
+  if (isNew) {
+    payload.shared = values.shared;
+    payload.owner_only = values.owner_only;
+  }
   return payload;
 }
 
@@ -208,8 +215,9 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
           {configError && <p className="mt-2 text-xs text-destructive">{configError}</p>}
           <p className="mt-2 text-xs text-muted-foreground">
             The token endpoint must accept <code>client_secret_post</code>. Identity comes from the userinfo{" "}
-            <code>sub</code>, or from the access token's claims when no userinfo endpoint is set. The minted token is
-            sent only to the resource URL's host and path.
+            <code>sub</code>, or from the access token's claims when no userinfo endpoint is set; owner-only apps use
+            the connecting Console user instead. The revocation endpoint, when set, lets users disconnect and revoke
+            their tokens. The minted token is sent only to the resource URL's host and path.
           </p>
         </FormSection>
 
@@ -239,6 +247,18 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
               />
               {form.formState.errors.shared?.message && (
                 <p className="mt-1 text-xs text-destructive">{form.formState.errors.shared.message}</p>
+              )}
+            </div>
+            <div>
+              <CheckboxField
+                control={form.control}
+                name="owner_only"
+                label="Owner only: each user's connection serves only that user."
+                hint="Connections belong to the Console user who made them, so the provider needs no identity endpoint. The token reaches only that user's own principals, never roles or other people. Cannot be changed after the app is created."
+                disabled={!isNew}
+              />
+              {form.formState.errors.owner_only?.message && (
+                <p className="mt-1 text-xs text-destructive">{form.formState.errors.owner_only.message}</p>
               )}
             </div>
             <CheckboxField

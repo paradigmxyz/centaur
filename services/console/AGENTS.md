@@ -190,7 +190,7 @@ pnpm -C web build   # assets into public/spa, shell into spa-shell/ (served by S
 
 SPA tests cover logic and secret handling only (API client, formatting, local
 time, pagination clamping, the Slack channel picker label, the secret form
-model and field, the shell and navigation).
+model and field, the OAuth app form payload, the shell and navigation).
 `web/src/features/secret-handling.test.tsx` checks that secret plaintext
 leaves the inputs and TanStack caches after every secret-bearing submit and
 that an issued API client secret is shown once. Endpoint behaviour belongs in

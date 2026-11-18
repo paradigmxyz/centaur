@@ -134,6 +134,12 @@ impl SandboxManager {
         self.backend.read_output_since(id, since).await
     }
 
+    /// Address a running sandbox's workload accepts TCP connections on.
+    /// Backends without workload networking return `SandboxError::Unsupported`.
+    pub async fn workload_address(&self, id: &SandboxId) -> SandboxResult<String> {
+        self.backend.workload_address(id).await
+    }
+
     pub async fn observe(&self, id: &SandboxId) -> SandboxResult<ObservedSandbox> {
         self.backend.observe(id).await
     }

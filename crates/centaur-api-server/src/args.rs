@@ -94,6 +94,18 @@ impl Args {
         self.sandbox.runtime().await
     }
 
+    /// The image Code Mode sandboxes run. Missing or blank fails startup when
+    /// Code Mode is enabled, because the session sandbox image cannot serve it.
+    pub(crate) fn codemode_image(&self) -> Result<String, ServerError> {
+        clean_optional_value(self.sandbox.codemode_image.as_deref()).ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "CENTAUR_CODEMODE_IMAGE (--codemode-image) is required when \
+                 CENTAUR_MCP_V2_ENABLED=true"
+                    .to_owned(),
+            )
+        })
+    }
+
     pub(crate) async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
         self.sandbox.iron_control_runtime().await
     }
@@ -799,6 +811,10 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_IMAGE"
     )]
     agent_image: Option<String>,
+    /// Full image reference for MCP Code Mode sandboxes. Required when Code
+    /// Mode is enabled (`CENTAUR_MCP_V2_ENABLED=true`).
+    #[arg(long = "codemode-image", env = "CENTAUR_CODEMODE_IMAGE")]
+    codemode_image: Option<String>,
     #[arg(
         long = "session-sandbox-image-pull-policy",
         alias = "kubernetes-agent-image-pull-policy",
@@ -1131,14 +1147,10 @@ impl SandboxArgs {
                 "drained sandboxes with stale pod identity or agent security contexts before enabling reuse"
             );
         }
-        let artifact_backend = backend.clone();
-        Ok(
-            SandboxRuntime::backend_with_workload(backend, self.container_workload_mode()?)
-                .with_artifact_reader(move |id, path, max_bytes| {
-                    let backend = artifact_backend.clone();
-                    async move { backend.read_artifact(&id, &path, max_bytes).await }
-                }),
-        )
+        Ok(SandboxRuntime::backend_with_workload(
+            backend,
+            self.container_workload_mode()?,
+        ))
     }
 
     async fn workflow_host_sandbox_runtime(
@@ -2955,6 +2967,36 @@ mod tests {
 
         let config = args.activity_summary_config().unwrap();
         assert_eq!(config.api_key, "sk-mounted");
+    }
+
+    #[test]
+    fn codemode_image_is_required_and_non_blank() {
+        let base = [
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ];
+        for (flags, expected) in [
+            (vec![], None),
+            (vec!["--codemode-image", "   "], None),
+            (
+                vec!["--codemode-image", "registry.local/centaur-codemode:tag"],
+                Some("registry.local/centaur-codemode:tag"),
+            ),
+        ] {
+            let args = Args::try_parse_from(base.into_iter().chain(flags)).unwrap();
+            match expected {
+                Some(image) => assert_eq!(args.codemode_image().unwrap(), image),
+                None => assert!(
+                    matches!(
+                        args.codemode_image(),
+                        Err(ServerError::UnsupportedConfig(message))
+                            if message.contains("CENTAUR_CODEMODE_IMAGE")
+                    ),
+                    "missing or blank images must fail startup"
+                ),
+            }
+        }
     }
 
     #[tokio::test]

@@ -10,8 +10,11 @@
 //!    import only the catalog's shared `_lib` modules.
 //! 3. Cells and connectors never share a realm. Every tool call runs in a
 //!    fresh QuickJS runtime; arguments and results cross as JSON text.
-//! 4. A connector's `fetch` is bound to its call, so every upstream request
-//!    is recorded against the call that made it, at the point of I/O.
+//! 4. A connector's `fetch` and `websocket` are bound to its call, so every
+//!    upstream request and socket is recorded against the call that made it,
+//!    at the point of I/O, and every socket closes when its call ends. So are
+//!    its file operations, when the runner has the files capability; cells
+//!    never get file access or sockets.
 //! 5. `invoke` checks the tool against the cell's allowlist.
 //! 6. Time, memory, call count and call concurrency are bounded per cell,
 //!    including the work connectors do.
@@ -19,8 +22,11 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
+    sync::{
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use eyre::{Result, WrapErr};
@@ -33,7 +39,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tokio::sync::Semaphore;
 
-use crate::catalog::{Catalog, lib_name};
+use crate::{
+    catalog::{Catalog, Policy, lib_name},
+    files::{FileInfo, Files, MAX_FILE_BYTES},
+    websocket::{self, Sockets},
+};
 
 const COMMON_PRELUDE: &str = include_str!("js/common.js");
 const CELL_PRELUDE: &str = include_str!("js/cell.js");
@@ -42,6 +52,12 @@ const CONNECTOR_PRELUDE: &str = include_str!("js/connector.js");
 /// Hard-coded limits for the spike.
 pub const CELL_TIMEOUT: Duration = Duration::from_secs(120);
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a connector may let one request run (`timeout_ms`), for large
+/// downloads and uploads. A request that needs longer than its call or cell
+/// has left pushes both deadlines back.
+pub const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Time after a long request for the connector to finish its call.
+const REQUEST_GRACE: Duration = Duration::from_secs(10);
 /// Heap per realm: the cell, and each connector call while it runs.
 pub const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 pub const STACK_LIMIT: usize = 1024 * 1024;
@@ -51,14 +67,49 @@ pub const MAX_RESULT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_FETCH_BYTES: usize = 10 * 1024 * 1024;
 const MAX_LOG_LINES: usize = 1000;
 const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
+/// All log lines of one cell together.
+const MAX_LOG_BYTES: usize = 1024 * 1024;
+/// A cell's error message or stack. Thrown values bypass the result limit, so
+/// without this a cell could return an arbitrarily large error.
+const MAX_ERROR_BYTES: usize = 64 * 1024;
+/// One call record's error.
+const MAX_CALL_ERROR_BYTES: usize = 4 * 1024;
+
+/// Set in Code Mode sandboxes: Console's base URL, behind the principal's
+/// iron-proxy, which injects the sandbox token Console authenticates.
+const CONSOLE_URL_ENV: &str = "CENTAUR_CONSOLE_URL";
+const PERMISSIONS_PATH: &str = "/api/v1/sandbox/permissions";
+const CONTEXT_VERSION: u64 = 1;
+/// Refresh a successful Console context this long after the last success.
+const CONTEXT_TTL: Duration = Duration::from_secs(60);
+/// After a failed refresh, keep the last good context and try again later.
+const CONTEXT_RETRY: Duration = Duration::from_secs(5);
+/// One attempt. The background loop schedules retries.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTEXT_LOADING: &str = "Console permissions are still loading";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecRequest {
     pub code: String,
     /// Connectors the cell may use; `None` means every loaded connector.
     /// Credentials are not this runtime's concern: iron-proxy injects them.
+    /// The CLI uses this; api-rs sends `policy` instead.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+    /// The principal's tool filter, which wins over `tools` when present.
+    #[serde(default)]
+    pub policy: Option<Policy>,
+}
+
+impl ExecRequest {
+    /// The filter the cell runs under.
+    fn filter(&self) -> Option<Policy> {
+        match (&self.policy, &self.tools) {
+            (Some(policy), _) => Some(policy.clone()),
+            (None, Some(tools)) => Some(Policy::from_allowlist(tools.clone())),
+            (None, None) => None,
+        }
+    }
 }
 
 /// A failed cell or tool call.
@@ -91,6 +142,22 @@ pub struct CallRecord {
     pub error: Option<String>,
     pub ms: u64,
     pub requests: Vec<RequestRecord>,
+    /// Files the call read or wrote through the files capability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileRecord>,
+}
+
+/// One file operation made by a connector call.
+#[derive(Clone, Debug, Serialize)]
+pub struct FileRecord {
+    /// `read`, `write`, `download` or `upload` (sent as a request body).
+    pub op: &'static str,
+    /// The path as the connector gave it.
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One upstream HTTP request made by a connector call. The query string is
@@ -120,85 +187,155 @@ pub struct ExecResponse {
 
 #[derive(Clone)]
 pub struct Engine {
-    catalog: Arc<Catalog>,
+    /// A hot reload swaps the inner catalog; a cell keeps the `Arc` it started
+    /// with, so its calls stay consistent while it runs.
+    catalog: Arc<RwLock<Arc<Catalog>>>,
     http: reqwest::Client,
+    /// HTTP/1-only, for websocket upgrades; same proxy and trust roots.
+    ws_http: reqwest::Client,
     context_file: Option<PathBuf>,
+    /// Console permissions, used only when the context file is absent (`serve`
+    /// in a Code Mode sandbox).
+    console: Option<Arc<ConsoleContext>>,
+    files: Option<Files>,
 }
 
 impl Engine {
     /// `context_file` is the sandbox context file (`~/.centaur/sandbox.json`),
     /// read once per cell and given to cells as `context` and to connectors
-    /// as `ctx.context`.
+    /// as `ctx.context`. `files_dir` turns on the files capability: connectors
+    /// get `ctx.files`, rooted there.
     pub fn new(
         catalog: Arc<Catalog>,
         ca_file: Option<&Path>,
         context_file: Option<PathBuf>,
+        files_dir: Option<&Path>,
     ) -> Result<Self> {
         let mut builder = reqwest::Client::builder()
             .timeout(TOOL_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10));
+        // No total timeout: an upgraded socket lives as long as its call.
+        let mut ws_builder = reqwest::Client::builder()
+            .http1_only()
             .connect_timeout(Duration::from_secs(10));
         if let Some(path) = ca_file {
             let pem = std::fs::read(path)
                 .wrap_err_with(|| format!("reading CA bundle {}", path.display()))?;
             for certificate in reqwest::Certificate::from_pem_bundle(&pem)? {
-                builder = builder.add_root_certificate(certificate);
+                builder = builder.add_root_certificate(certificate.clone());
+                ws_builder = ws_builder.add_root_certificate(certificate);
             }
         }
         Ok(Self {
-            catalog,
+            catalog: Arc::new(RwLock::new(catalog)),
             http: builder.build()?,
+            ws_http: ws_builder.build()?,
             context_file,
+            console: None,
+            files: files_dir.map(Files::new).transpose()?,
         })
     }
 
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
+    /// In `serve`, use Console's sandbox permissions as the calling context
+    /// when there is no context file. A Code Mode sandbox has no file: Console
+    /// knows the principal this runner serves, and iron-proxy injects its
+    /// token on the request. A context file, when present, still wins.
+    pub fn enable_console_context(&mut self) {
+        if self.console.is_some() {
+            return;
+        }
+        let Some(url) = console_url() else {
+            return;
+        };
+        self.console = Some(Arc::new(ConsoleContext::new(url, self.http.clone())));
     }
 
-    /// The calling context for one cell. Informational: written by the
-    /// platform but readable and writable by agents in a sandbox, so it may
-    /// choose a route, never authorize anything. `null` when absent.
-    async fn calling_context(&self) -> String {
-        let Some(path) = &self.context_file else {
-            return "null".to_owned();
+    /// Start the background Console refresh: fetch immediately, then keep the
+    /// snapshot fresh. Only `serve` calls this; `exec` and `brief` never do.
+    pub fn prefetch_context(&self) {
+        if self.context_file.as_deref().is_some_and(Path::exists) {
+            return;
+        }
+        let Some(console) = self.console.clone() else {
+            return;
         };
-        match tokio::fs::read(path).await {
-            Ok(bytes) => match serde_json::from_slice::<Json>(&bytes) {
-                Ok(context @ Json::Object(_)) => context.to_string(),
-                _ => {
-                    tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
-                    "null".to_owned()
+        console.start();
+    }
+
+    /// The active catalog. A cell takes one snapshot when it starts.
+    pub fn catalog(&self) -> Arc<Catalog> {
+        self.catalog.read().expect("catalog lock").clone()
+    }
+
+    /// Swap in a reloaded catalog; cells already running keep their own.
+    pub fn replace_catalog(&self, catalog: Arc<Catalog>) {
+        *self.catalog.write().expect("catalog lock") = catalog;
+    }
+
+    /// Per-cell state: the catalog snapshot, the connectors the policy makes
+    /// visible, and the bookkeeping the host records.
+    async fn cell(&self, policy: Option<&Policy>, started: Instant) -> Cell {
+        let catalog = self.catalog();
+        let allowed = catalog
+            .visible(policy)
+            .map(|connector| connector.name.clone())
+            .collect();
+        Cell {
+            catalog,
+            allowed,
+            context: self.calling_context().await,
+            http: self.http.clone(),
+            ws_http: self.ws_http.clone(),
+            files: self.files.clone(),
+            logs: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            deadline: Deadline::new(started + CELL_TIMEOUT),
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
+        }
+    }
+
+    /// The calling context for one cell: the sandbox context file when it
+    /// exists, otherwise (in `serve`) Console's permissions, otherwise `null`.
+    /// Informational: the agent can write the file, so it may choose a route,
+    /// never authorize anything.
+    async fn calling_context(&self) -> String {
+        if let Some(path) = &self.context_file {
+            match tokio::fs::read(path).await {
+                Ok(bytes) => {
+                    return match serde_json::from_slice::<Json>(&bytes) {
+                        Ok(context @ Json::Object(_)) => context.to_string(),
+                        _ => {
+                            tracing::warn!(path = %path.display(), "sandbox context file is not a JSON object");
+                            "null".to_owned()
+                        }
+                    };
                 }
-            },
-            Err(_) => "null".to_owned(),
+                // Any other read error keeps the old behavior: no context,
+                // rather than treating an unreadable file as absent.
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return "null".to_owned();
+                }
+                Err(_) => {}
+            }
+        }
+        match &self.console {
+            Some(console) => console.context().as_ref().to_owned(),
+            None => "null".to_owned(),
         }
     }
 
     pub async fn exec(&self, request: ExecRequest) -> ExecResponse {
         let started = Instant::now();
-        let allowed: Vec<String> = self
+        let filter = request.filter();
+        let cell = Arc::new(self.cell(filter.as_ref(), started).await);
+        let connectors: BTreeMap<&str, Vec<&str>> = cell
             .catalog
-            .visible(request.tools.as_deref())
-            .map(|connector| connector.name.clone())
-            .collect();
-        let connectors: BTreeMap<&str, Vec<&str>> = self
-            .catalog
-            .visible(request.tools.as_deref())
+            .visible(filter.as_ref())
             .map(|connector| {
                 let functions = connector.functions.iter().map(|f| f.name.as_str());
                 (connector.name.as_str(), functions.collect())
             })
             .collect();
-        let cell = Arc::new(Cell {
-            catalog: self.catalog.clone(),
-            allowed,
-            context: self.calling_context().await,
-            http: self.http.clone(),
-            logs: Mutex::new(Vec::new()),
-            calls: Mutex::new(Vec::new()),
-            deadline: started + CELL_TIMEOUT,
-            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
-        });
         // No newline after the opening brace, so error line numbers match the cell.
         let code = format!("(async () => {{{}\n}})()", request.code);
         let realm = Realm {
@@ -209,35 +346,259 @@ impl Engine {
                 serde_json::to_string(&connectors).expect("connector list serializes"),
             )],
             entry: Entry::Script(&code),
-            deadline: cell.deadline,
+            deadline: cell.deadline.clone(),
             libs: None,
         };
-        let outcome = tokio::time::timeout(
-            CELL_TIMEOUT + Duration::from_secs(1),
-            run_realm(&cell, realm),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(ExecError::new(format!(
+        let outcome = tokio::select! {
+            outcome = run_realm(&cell, realm) => outcome,
+            () = expired(&cell.deadline) => Err(ExecError::new(format!(
                 "cell timed out after {}s",
-                CELL_TIMEOUT.as_secs()
-            )))
-        })
-        .and_then(|text| {
-            serde_json::from_str(&text)
-                .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
+                started.elapsed().as_secs()
+            ))),
+        }
+        .and_then(parse_result);
+        response(&cell, started, outcome)
+    }
+}
+
+/// Console's sandbox permissions. A runner serves one principal for its whole
+/// life, so one snapshot is fetched at startup and refreshed in the background.
+/// Cells only read the snapshot; they never wait on Console.
+struct ConsoleContext {
+    url: String,
+    http: reqwest::Client,
+    snapshot: RwLock<ConsoleSnapshot>,
+    started: AtomicBool,
+}
+
+struct ConsoleSnapshot {
+    text: Arc<str>,
+    /// A success has landed; later failures keep this text instead of
+    /// replacing it with their error.
+    good: bool,
+}
+
+impl ConsoleContext {
+    fn new(url: String, http: reqwest::Client) -> Self {
+        let loading = build_console_context(Err(CONTEXT_LOADING.to_owned()), unix_now());
+        Self {
+            url,
+            http,
+            snapshot: RwLock::new(ConsoleSnapshot {
+                text: Arc::from(loading.to_string()),
+                good: false,
+            }),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    /// The calling context as JSON text, synchronously. No network and no lock
+    /// is held across I/O, so a cell never waits for a refresh.
+    fn context(&self) -> Arc<str> {
+        self.snapshot
+            .read()
+            .expect("console context lock")
+            .text
+            .clone()
+    }
+
+    /// Fetch immediately, then refresh every `CONTEXT_TTL` after a success or
+    /// retry every `CONTEXT_RETRY` after a failure. The task lives as long as
+    /// the process; nothing else needs to cancel it.
+    fn start(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let console = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut delay = Duration::ZERO;
+            loop {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                delay = if console.refresh().await {
+                    CONTEXT_TTL
+                } else {
+                    CONTEXT_RETRY
+                };
+            }
         });
-        let (result, error) = match outcome {
-            Ok(result) => (Some(result), None),
-            Err(error) => (None, Some(error)),
-        };
-        ExecResponse {
-            ok: error.is_none(),
-            result,
-            error,
-            logs: std::mem::take(&mut *cell.logs.lock().expect("log lock")),
-            calls: cell.finished_calls(),
-            ms: started.elapsed().as_millis() as u64,
+    }
+
+    /// One attempt. A failure keeps the last good context, or reports the
+    /// error while no success has landed yet.
+    async fn refresh(&self) -> bool {
+        let url = format!("{}{PERMISSIONS_PATH}", self.url);
+        match self.fetch_once(&url).await {
+            Ok(sandbox) => {
+                let context = build_console_context(Ok(sandbox), unix_now());
+                let mut snapshot = self.snapshot.write().expect("console context lock");
+                snapshot.text = Arc::from(context.to_string());
+                snapshot.good = true;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "reading Console sandbox permissions failed");
+                let mut snapshot = self.snapshot.write().expect("console context lock");
+                if !snapshot.good {
+                    snapshot.text =
+                        Arc::from(build_console_context(Err(error), unix_now()).to_string());
+                }
+                false
+            }
+        }
+    }
+
+    /// One attempt; the background loop schedules retries.
+    async fn fetch_once(&self, url: &str) -> Result<Json, String> {
+        let response = self
+            .http
+            .get(url)
+            .timeout(REQUEST_TIMEOUT)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| format!("GET {PERMISSIONS_PATH}: {}", transport(error)))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("GET {PERMISSIONS_PATH}: HTTP {status}"));
+        }
+        let body: Json = response
+            .json()
+            .await
+            .map_err(|error| format!("decoding {PERMISSIONS_PATH}: {}", transport(error)))?;
+        match body.get("data") {
+            Some(data) if data.is_object() => Ok(data.clone()),
+            _ => Err(format!(
+                "{PERMISSIONS_PATH} response did not include a data object"
+            )),
+        }
+    }
+}
+
+/// The same shape harness-server writes for session sandboxes. A Code Mode
+/// runner has no session thread or persona.
+fn build_console_context(console: Result<Json, String>, generated_at_unix: u64) -> Json {
+    let mut context = serde_json::Map::new();
+    context.insert("version".to_owned(), Json::from(CONTEXT_VERSION));
+    context.insert(
+        "generated_at_unix".to_owned(),
+        Json::from(generated_at_unix),
+    );
+    context.insert("harness".to_owned(), Json::from("codemode"));
+    context.insert("thread_key".to_owned(), Json::Null);
+    context.insert("persona".to_owned(), Json::Null);
+    match console {
+        Ok(sandbox) => {
+            context.insert("sandbox".to_owned(), sandbox);
+        }
+        Err(error) => {
+            context.insert("sandbox".to_owned(), Json::Null);
+            context.insert("sandbox_error".to_owned(), Json::from(error));
+        }
+    }
+    Json::Object(context)
+}
+
+fn console_url() -> Option<String> {
+    let url = std::env::var(CONSOLE_URL_ENV).ok()?;
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return None;
+    }
+    Some(
+        if url.starts_with("http://") || url.starts_with("https://") {
+            url.to_owned()
+        } else {
+            format!("http://{url}")
+        },
+    )
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// One response for a finished cell: its result or error, plus its logs and
+/// call records.
+fn response(cell: &Cell, started: Instant, outcome: Result<Json, ExecError>) -> ExecResponse {
+    let (result, error) = match outcome {
+        Ok(result) => (Some(result), None),
+        Err(mut error) => {
+            error.message = truncate(error.message, MAX_ERROR_BYTES);
+            error.stack = error.stack.map(|stack| truncate(stack, MAX_ERROR_BYTES));
+            (None, Some(error))
+        }
+    };
+    let mut calls = cell.finished_calls();
+    for call in &mut calls {
+        call.error = call
+            .error
+            .take()
+            .map(|error| truncate(error, MAX_CALL_ERROR_BYTES));
+    }
+    ExecResponse {
+        ok: error.is_none(),
+        result,
+        error,
+        logs: std::mem::take(&mut *cell.logs.lock().expect("log lock")),
+        calls,
+        ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+fn parse_result(text: String) -> Result<Json, ExecError> {
+    serde_json::from_str(&text)
+        .map_err(|error| ExecError::new(format!("result is not JSON: {error}")))
+}
+
+/// Resolves one second after the deadline: the backstop for a realm that is
+/// stuck in host code the timer cannot interrupt.
+async fn expired(deadline: &Deadline) {
+    deadline.passed().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+/// A deadline that long requests may push back, shared by the timers and the
+/// interrupt handler that enforce it.
+#[derive(Clone)]
+struct Deadline {
+    base: Instant,
+    /// Nanoseconds after `base`.
+    at: Arc<AtomicU64>,
+}
+
+impl Deadline {
+    fn new(at: Instant) -> Self {
+        let base = Instant::now();
+        Self {
+            base,
+            at: Arc::new(AtomicU64::new(
+                at.saturating_duration_since(base).as_nanos() as u64,
+            )),
+        }
+    }
+
+    fn get(&self) -> Instant {
+        self.base + Duration::from_nanos(self.at.load(Ordering::Relaxed))
+    }
+
+    /// Move the deadline to `at` if that is later.
+    fn extend(&self, at: Instant) {
+        let nanos = at.saturating_duration_since(self.base).as_nanos() as u64;
+        self.at.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Resolves once the deadline, as it stands then, has passed.
+    async fn passed(&self) {
+        loop {
+            let at = self.get();
+            if Instant::now() >= at {
+                return;
+            }
+            tokio::time::sleep_until(at.into()).await;
         }
     }
 }
@@ -249,9 +610,11 @@ struct Cell {
     /// The sandbox context file as JSON text, or `null`.
     context: String,
     http: reqwest::Client,
+    ws_http: reqwest::Client,
+    files: Option<Files>,
     logs: Mutex<Vec<String>>,
     calls: Mutex<Vec<Call>>,
-    deadline: Instant,
+    deadline: Deadline,
     permits: Arc<Semaphore>,
 }
 
@@ -260,13 +623,16 @@ struct Call {
     started: Instant,
     ended: Option<(Instant, Result<(), String>)>,
     requests: Vec<RequestRecord>,
+    files: Vec<FileRecord>,
 }
 
 impl Cell {
     fn log(&self, line: String) {
         let mut logs = self.logs.lock().expect("log lock");
-        if logs.len() < MAX_LOG_LINES {
-            logs.push(truncate(line, MAX_LOG_LINE_BYTES));
+        let used: usize = logs.iter().map(String::len).sum();
+        if logs.len() < MAX_LOG_LINES && used < MAX_LOG_BYTES {
+            let room = (MAX_LOG_BYTES - used).min(MAX_LOG_LINE_BYTES);
+            logs.push(truncate(line, room));
         }
     }
 
@@ -286,15 +652,81 @@ impl Cell {
                     error: result.err(),
                     ms: ended.duration_since(call.started).as_millis() as u64,
                     requests: call.requests.clone(),
+                    files: call.files.clone(),
                 }
             })
             .collect()
     }
 
-    fn record_request(&self, call: usize, request: RequestRecord) {
+    fn record_request(
+        &self,
+        call: usize,
+        method: &str,
+        url: &str,
+        started: Instant,
+        status: std::result::Result<u16, &String>,
+    ) {
+        let request = RequestRecord {
+            method: method.to_ascii_uppercase(),
+            url: redact_url(url),
+            status: status.ok(),
+            error: status.err().cloned(),
+            ms: started.elapsed().as_millis() as u64,
+        };
         if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
             call.requests.push(request);
         }
+    }
+
+    fn record_file(
+        &self,
+        call: usize,
+        op: &'static str,
+        path: &str,
+        result: std::result::Result<&FileInfo, &eyre::Report>,
+    ) {
+        let record = FileRecord {
+            op,
+            path: truncate(path.to_owned(), 1024),
+            bytes: result.as_ref().ok().map(|info| info.bytes),
+            error: result.err().map(|error| format!("{error:#}")),
+        };
+        if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
+            call.files.push(record);
+        }
+    }
+
+    /// Join body parts, reading file parts through the files capability.
+    async fn request_body(
+        &self,
+        call: usize,
+        parts: Option<Vec<BodyPart>>,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let Some(parts) = parts else {
+            return Ok(None);
+        };
+        let mut body = Vec::new();
+        for part in parts {
+            match part {
+                BodyPart::Bytes(bytes) => body.extend_from_slice(&bytes),
+                BodyPart::File(path) => {
+                    let files = self.files.as_ref().ok_or_else(|| {
+                        "a { file } body part needs the files capability (--files-dir)".to_owned()
+                    })?;
+                    let result = files.read(&path).await;
+                    self.record_file(call, "upload", &path, result.as_ref().map(|(info, _)| info));
+                    let (_, data) =
+                        result.map_err(|error| format!("files.read({path:?}): {error:#}"))?;
+                    body.extend_from_slice(&data);
+                }
+            }
+            if body.len() > MAX_FILE_BYTES {
+                return Err(format!(
+                    "request body is over the {MAX_FILE_BYTES}-byte limit"
+                ));
+            }
+        }
+        Ok(Some(body))
     }
 
     /// The `invoke` host function: record, check policy, run, record.
@@ -311,6 +743,7 @@ impl Cell {
                 started: Instant::now(),
                 ended: None,
                 requests: Vec::new(),
+                files: Vec::new(),
             });
             calls.len() - 1
         };
@@ -350,12 +783,15 @@ impl Cell {
             .acquire_owned()
             .await
             .map_err(|_| ExecError::new("cell is shutting down"))?;
-        let deadline = self.deadline.min(Instant::now() + TOOL_TIMEOUT);
-        let budget = deadline.saturating_duration_since(Instant::now());
+        let started = Instant::now();
+        let deadline = Deadline::new(self.deadline.get().min(started + TOOL_TIMEOUT));
+        let sockets = Arc::new(Sockets::default());
         let realm = Realm {
             host: HostKind::Connector {
                 call: id,
                 label: &tool,
+                deadline: deadline.clone(),
+                sockets: sockets.clone(),
             },
             prelude: connector_prelude(),
             globals: vec![("__env", environment().to_owned())],
@@ -364,17 +800,33 @@ impl Cell {
                 function,
                 args: &args,
             },
-            deadline,
+            deadline: deadline.clone(),
             libs: Some(self.catalog.libs.clone()),
         };
-        tokio::time::timeout(budget, run_realm(&self, realm))
-            .await
-            .unwrap_or_else(|_| {
-                Err(ExecError::new(format!(
-                    "{tool} timed out after {}s",
-                    budget.as_secs()
-                )))
-            })
+        let result = tokio::select! {
+            result = run_realm(&self, realm) => result,
+            () = deadline.passed() => Err(ExecError::new(format!(
+                "{tool} timed out after {}s",
+                started.elapsed().as_secs()
+            ))),
+        };
+        // However the call ended, its sockets end with it.
+        sockets.close_all().await;
+        result
+    }
+
+    /// Give a request of up to `timeout_ms` (bounded by `MAX_REQUEST_TIMEOUT`)
+    /// room to finish by pushing back the call's and the cell's deadlines.
+    /// Returns the timeout to set on the request, or `None` for the default.
+    fn request_timeout(&self, call_deadline: &Deadline, timeout_ms: f64) -> Option<Duration> {
+        if !timeout_ms.is_finite() || timeout_ms <= 0.0 {
+            return None;
+        }
+        let timeout = Duration::from_millis(timeout_ms as u64).min(MAX_REQUEST_TIMEOUT);
+        let until = Instant::now() + timeout + REQUEST_GRACE;
+        call_deadline.extend(until);
+        self.deadline.extend(until);
+        Some(timeout)
     }
 }
 
@@ -386,7 +838,7 @@ struct Realm<'a> {
     /// Extra JSON globals for the prelude to consume.
     globals: Vec<(&'static str, String)>,
     entry: Entry<'a>,
-    deadline: Instant,
+    deadline: Deadline,
     /// Shared modules the realm may import; `None` means no module loader.
     libs: Option<Libs>,
 }
@@ -432,7 +884,12 @@ impl rquickjs::loader::Loader for LibLoader {
 
 enum HostKind<'a> {
     Cell,
-    Connector { call: usize, label: &'a str },
+    Connector {
+        call: usize,
+        label: &'a str,
+        deadline: Deadline,
+        sockets: Arc<Sockets>,
+    },
 }
 
 enum Entry<'a> {
@@ -453,9 +910,9 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
     let runtime = AsyncRuntime::new().map_err(internal)?;
     runtime.set_memory_limit(MEMORY_LIMIT).await;
     runtime.set_max_stack_size(STACK_LIMIT).await;
-    let deadline = realm.deadline;
+    let deadline = realm.deadline.clone();
     runtime
-        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)))
+        .set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline.get())))
         .await;
     // Without a loader, code in the realm cannot import modules at all.
     if let Some(libs) = realm.libs.clone() {
@@ -469,9 +926,19 @@ async fn run_realm(cell: &Arc<Cell>, realm: Realm<'_>) -> Result<String, ExecErr
             let caught = |error| caught(&ctx, error);
             let host = match realm.host {
                 HostKind::Cell => cell_host(&ctx, cell.clone()),
-                HostKind::Connector { call, label } => {
-                    connector_host(&ctx, cell.clone(), call, label)
-                }
+                HostKind::Connector {
+                    call,
+                    label,
+                    ref deadline,
+                    ref sockets,
+                } => connector_host(
+                    &ctx,
+                    cell.clone(),
+                    call,
+                    label,
+                    deadline.clone(),
+                    sockets.clone(),
+                ),
             };
             let setup = (|| -> rquickjs::Result<_> {
                 let globals = ctx.globals();
@@ -669,7 +1136,92 @@ fn common_host<'js>(
             TypedArray::<u8>::new(ctx, text.into_bytes())
         })?,
     )?;
+    host.set(
+        "base64Encode",
+        Function::new(ctx.clone(), |data: TypedArray<'js, u8>, url: Opt<bool>| {
+            base64_encode(&copy_bytes(&data), url.0.unwrap_or(false))
+        })?,
+    )?;
+    host.set(
+        "base64Decode",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, text: String| {
+            let bytes =
+                base64_decode(&text).map_err(|message| Exception::throw_type(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
+    host.set(
+        "gzip",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, data: TypedArray<'js, u8>| {
+            let bytes = gzip(&copy_bytes(&data))
+                .map_err(|message| Exception::throw_message(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
+    host.set(
+        "gunzip",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, data: TypedArray<'js, u8>| {
+            let bytes = gunzip(&copy_bytes(&data))
+                .map_err(|message| Exception::throw_message(&ctx, &message))?;
+            TypedArray::<u8>::new(ctx, bytes)
+        })?,
+    )?;
     Ok(host)
+}
+
+fn base64_encode(data: &[u8], url: bool) -> String {
+    use base64::Engine as _;
+    if url {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
+    } else {
+        base64::engine::general_purpose::STANDARD.encode(data)
+    }
+}
+
+/// Standard or URL-safe alphabet, padding optional, whitespace ignored.
+fn base64_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let normalized: String = text
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '=')
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(normalized)
+        .map_err(|error| format!("invalid base64: {error}"))
+}
+
+fn gzip(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(data)
+        .and_then(|()| encoder.finish())
+        .map_err(|error| format!("gzip failed: {error}"))
+}
+
+/// Decompresses gzip (all members) or zlib data, bounded by `MAX_FETCH_BYTES`
+/// so a small bomb cannot exhaust host memory.
+fn gunzip(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let reader: Box<dyn std::io::Read + '_> = if data.starts_with(&[0x1f, 0x8b]) {
+        Box::new(flate2::read::MultiGzDecoder::new(data))
+    } else {
+        Box::new(flate2::read::ZlibDecoder::new(data))
+    };
+    let mut out = Vec::new();
+    reader
+        .take(MAX_FETCH_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|error| format!("gunzip failed: {error}"))?;
+    if out.len() > MAX_FETCH_BYTES {
+        return Err(format!("gunzip output exceeds {MAX_FETCH_BYTES} bytes"));
+    }
+    Ok(out)
 }
 
 /// The cell's host: the common functions plus `invoke`.
@@ -700,14 +1252,19 @@ fn cell_host<'js>(ctx: &Ctx<'js>, cell: Arc<Cell>) -> rquickjs::Result<Object<'j
 }
 
 /// A connector call's host: the common functions plus `fetch` bound to this
-/// call.
+/// call, and the files functions when the runner has the files capability.
 fn connector_host<'js>(
     ctx: &Ctx<'js>,
     cell: Arc<Cell>,
     call: usize,
     label: &str,
+    deadline: Deadline,
+    sockets: Arc<Sockets>,
 ) -> rquickjs::Result<Object<'js>> {
     let host = common_host(ctx, cell.clone(), format!("[{label}] "))?;
+    websocket_host(ctx, &host, cell.clone(), call, deadline.clone(), sockets)?;
+    let fetch_cell = cell.clone();
+    let fetch_deadline = deadline.clone();
     host.set(
         "fetch",
         Function::new(
@@ -717,21 +1274,30 @@ fn connector_host<'js>(
                       url: String,
                       method: String,
                       headers: String,
-                      body: Opt<TypedArray<'js, u8>>| {
-                    let cell = cell.clone();
-                    let body = body.0.as_ref().map(copy_bytes);
+                      timeout_ms: f64,
+                      body: Opt<Value<'js>>| {
+                    let cell = fetch_cell.clone();
+                    let timeout = cell.request_timeout(&fetch_deadline, timeout_ms);
+                    let parts = body_parts(body.0);
                     async move {
+                        let parts =
+                            parts.map_err(|message| Exception::throw_type(&ctx, &message))?;
+                        let body = cell
+                            .request_body(call, parts)
+                            .await
+                            .map_err(|message| Exception::throw_message(&ctx, &message))?;
                         let started = Instant::now();
-                        let result = fetch(&cell.http, &url, &method, &headers, body).await;
+                        let result =
+                            match send(&cell.http, &url, &method, &headers, timeout, body).await {
+                                Ok(response) => collect(response).await,
+                                Err(error) => Err(error),
+                            };
                         cell.record_request(
                             call,
-                            RequestRecord {
-                                method: method.to_ascii_uppercase(),
-                                url: redact_url(&url),
-                                status: result.as_ref().ok().map(|out| out.status),
-                                error: result.as_ref().err().cloned(),
-                                ms: started.elapsed().as_millis() as u64,
-                            },
+                            &method,
+                            &url,
+                            started,
+                            result.as_ref().map(|out| out.status),
                         );
                         result.map_err(|message| Exception::throw_message(&ctx, &message))
                     }
@@ -739,7 +1305,264 @@ fn connector_host<'js>(
             ),
         )?,
     )?;
+    let Some(files) = cell.files.clone() else {
+        return Ok(host);
+    };
+    let read_cell = cell.clone();
+    let read_files = files.clone();
+    host.set(
+        "filesRead",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, path: String| {
+                let (cell, files) = (read_cell.clone(), read_files.clone());
+                async move {
+                    let result = files.read(&path).await;
+                    cell.record_file(call, "read", &path, result.as_ref().map(|(info, _)| info));
+                    let (info, data) = result.map_err(|error| {
+                        Exception::throw_message(&ctx, &format!("files.read({path:?}): {error:#}"))
+                    })?;
+                    let object = Object::new(ctx.clone())?;
+                    object.set("path", info.path.display().to_string())?;
+                    object.set("data", TypedArray::<u8>::new(ctx.clone(), data)?)?;
+                    Ok::<_, rquickjs::Error>(object)
+                }
+            }),
+        )?,
+    )?;
+    let write_cell = cell.clone();
+    let write_files = files.clone();
+    host.set(
+        "filesWrite",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>, path: String, data: TypedArray<'js, u8>| {
+                    let (cell, files) = (write_cell.clone(), write_files.clone());
+                    let data = copy_bytes(&data);
+                    async move {
+                        let result = files.write(&path, &data).await;
+                        cell.record_file(call, "write", &path, result.as_ref());
+                        let info = result.map_err(|error| {
+                            Exception::throw_message(
+                                &ctx,
+                                &format!("files.write({path:?}): {error:#}"),
+                            )
+                        })?;
+                        file_info(&ctx, &info)
+                    }
+                },
+            ),
+        )?,
+    )?;
+    let stat_files = files.clone();
+    host.set(
+        "filesStat",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, path: String| {
+                let files = stat_files.clone();
+                async move {
+                    match files.stat(&path).await {
+                        Ok(Some(info)) => Ok(file_info(&ctx, &info)?.into_value()),
+                        Ok(None) => Ok(Value::new_null(ctx.clone())),
+                        Err(error) => Err(Exception::throw_message(
+                            &ctx,
+                            &format!("files.stat({path:?}): {error:#}"),
+                        )),
+                    }
+                }
+            }),
+        )?,
+    )?;
+    let download_cell = cell.clone();
+    host.set(
+        "filesDownload",
+        Function::new(
+            ctx.clone(),
+            Async(
+                move |ctx: Ctx<'js>,
+                      url: String,
+                      path: String,
+                      method: String,
+                      headers: String,
+                      timeout_ms: f64,
+                      body: Opt<Value<'js>>| {
+                    let (cell, files) = (download_cell.clone(), files.clone());
+                    let timeout = cell.request_timeout(&deadline, timeout_ms);
+                    let parts = body_parts(body.0);
+                    async move {
+                        let parts =
+                            parts.map_err(|message| Exception::throw_type(&ctx, &message))?;
+                        let body = cell
+                            .request_body(call, parts)
+                            .await
+                            .map_err(|message| Exception::throw_message(&ctx, &message))?;
+                        let started = Instant::now();
+                        let result =
+                            match send(&cell.http, &url, &method, &headers, timeout, body).await {
+                                Ok(response) => download(&files, &path, response).await,
+                                Err(error) => Err(error),
+                            };
+                        cell.record_request(
+                            call,
+                            &method,
+                            &url,
+                            started,
+                            result.as_ref().map(|out| out.status),
+                        );
+                        if let Ok(out) = &result
+                            && let Some(info) = &out.file
+                        {
+                            cell.record_file(call, "download", &path, Ok(info));
+                        }
+                        let out =
+                            result.map_err(|message| Exception::throw_message(&ctx, &message))?;
+                        let object = Object::new(ctx.clone())?;
+                        object.set("status", out.status)?;
+                        object.set("headers", out.headers)?;
+                        if let Some(info) = &out.file {
+                            object.set("path", info.path.display().to_string())?;
+                            object.set("bytes", info.bytes as f64)?;
+                        }
+                        if let Some(text) = out.error_body {
+                            object.set("body", text)?;
+                        }
+                        Ok::<_, rquickjs::Error>(object)
+                    }
+                },
+            ),
+        )?,
+    )?;
     Ok(host)
+}
+
+/// The websocket host functions of one connector call. Sockets are handles
+/// into this call's `Sockets`: an unknown or closed handle is an error, and
+/// the call closes whatever is left when it ends.
+fn websocket_host<'js>(
+    ctx: &Ctx<'js>,
+    host: &Object<'js>,
+    cell: Arc<Cell>,
+    call: usize,
+    deadline: Deadline,
+    sockets: Arc<Sockets>,
+) -> rquickjs::Result<()> {
+    // Time left in the call, optionally shortened by a connector's timeout.
+    let remaining = |deadline: &Deadline, timeout_ms: f64| {
+        let left = deadline.get().saturating_duration_since(Instant::now());
+        if timeout_ms.is_finite() && timeout_ms > 0.0 {
+            left.min(Duration::from_millis(timeout_ms as u64))
+        } else {
+            left
+        }
+    };
+
+    let (connect_sockets, connect_deadline) = (sockets.clone(), deadline.clone());
+    host.set(
+        "wsConnect",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, url: String, timeout_ms: f64| {
+                let (cell, sockets) = (cell.clone(), connect_sockets.clone());
+                let timeout = remaining(&connect_deadline, timeout_ms);
+                async move {
+                    let throw = |message: String| Exception::throw_message(&ctx, &message);
+                    sockets.attempt().map_err(throw)?;
+                    let started = Instant::now();
+                    let result = websocket::connect(&cell.ws_http, &url, timeout).await;
+                    cell.record_request(call, "WS", &url, started, result.as_ref().map(|_| 101));
+                    Ok::<_, rquickjs::Error>(sockets.insert(result.map_err(throw)?))
+                }
+            }),
+        )?,
+    )?;
+
+    let send_sockets = sockets.clone();
+    host.set(
+        "wsSend",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, id: u32, text: String| {
+                let sockets = send_sockets.clone();
+                async move {
+                    sockets
+                        .send(id, text)
+                        .await
+                        .map_err(|message| Exception::throw_message(&ctx, &message))
+                }
+            }),
+        )?,
+    )?;
+
+    let recv_sockets = sockets.clone();
+    host.set(
+        "wsRecv",
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, id: u32, timeout_ms: f64| {
+                let sockets = recv_sockets.clone();
+                let timeout = remaining(&deadline, timeout_ms);
+                async move {
+                    sockets
+                        .recv(id, timeout)
+                        .await
+                        .map_err(|message| Exception::throw_message(&ctx, &message))
+                }
+            }),
+        )?,
+    )?;
+
+    host.set(
+        "wsClose",
+        Function::new(
+            ctx.clone(),
+            Async(move |id: u32| {
+                let sockets = sockets.clone();
+                async move { sockets.close(id).await }
+            }),
+        )?,
+    )?;
+    Ok(())
+}
+
+fn file_info<'js>(ctx: &Ctx<'js>, info: &FileInfo) -> rquickjs::Result<Object<'js>> {
+    let object = Object::new(ctx.clone())?;
+    object.set("path", info.path.display().to_string())?;
+    object.set("bytes", info.bytes as f64)?;
+    Ok(object)
+}
+
+/// One piece of a request body: bytes, or a file under the files root.
+enum BodyPart {
+    Bytes(Vec<u8>),
+    File(String),
+}
+
+/// A request body from the connector prelude: absent, one `Uint8Array`, or
+/// an array of `Uint8Array` and `{ file }` parts, sent in order.
+fn body_parts<'js>(body: Option<Value<'js>>) -> std::result::Result<Option<Vec<BodyPart>>, String> {
+    let Some(body) = body.filter(|body| !body.is_undefined() && !body.is_null()) else {
+        return Ok(None);
+    };
+    let part = |value: Value<'js>| -> std::result::Result<BodyPart, String> {
+        if let Ok(array) = TypedArray::<u8>::from_value(value.clone()) {
+            return Ok(BodyPart::Bytes(copy_bytes(&array)));
+        }
+        let path = value
+            .as_object()
+            .and_then(|object| object.get::<_, Option<String>>("file").ok().flatten());
+        path.map(BodyPart::File)
+            .ok_or_else(|| "body parts must be strings, bytes or { file: path }".to_owned())
+    };
+    if let Some(array) = body.as_array() {
+        let mut parts = Vec::with_capacity(array.len());
+        for value in array.iter::<Value>() {
+            parts.push(part(value.map_err(|error| error.to_string())?)?);
+        }
+        return Ok(Some(parts));
+    }
+    Ok(Some(vec![part(body)?]))
 }
 
 fn redact_url(url: &str) -> String {
@@ -755,13 +1578,15 @@ fn redact_url(url: &str) -> String {
     }
 }
 
-async fn fetch(
+/// Build and send one request; the caller reads the body.
+async fn send(
     http: &reqwest::Client,
     url: &str,
     method: &str,
     headers: &str,
+    timeout: Option<Duration>,
     body: Option<Vec<u8>>,
-) -> std::result::Result<FetchOut, String> {
+) -> std::result::Result<reqwest::Response, String> {
     let parsed = reqwest::Url::parse(url).map_err(|error| format!("invalid URL: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("unsupported URL scheme {:?}", parsed.scheme()));
@@ -777,49 +1602,112 @@ async fn fetch(
     if let Some(body) = body {
         request = request.body(body);
     }
-    // Drop the URL: query-string keys would otherwise land in error text.
-    let transport = |error: reqwest::Error| {
-        let error = error.without_url();
-        let mut message = format!("request failed: {error}");
-        let mut source = std::error::Error::source(&error);
-        while let Some(cause) = source {
-            message.push_str(&format!(": {cause}"));
-            source = cause.source();
-        }
-        message
-    };
-    let mut response = request.send().await.map_err(transport)?;
-    let status = response.status().as_u16();
-    let mut out_headers: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
+    request.send().await.map_err(transport)
+}
+
+/// Transport errors without the URL: query-string keys would otherwise land
+/// in error text.
+pub(crate) fn transport(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut message = format!("request failed: {error}");
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
+}
+
+fn response_headers(response: &reqwest::Response) -> String {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in response.headers() {
         let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        out_headers
-            .entry(name.as_str().to_owned())
+        out.entry(name.as_str().to_owned())
             .and_modify(|existing| {
                 existing.push_str(", ");
                 existing.push_str(&value);
             })
             .or_insert(value);
     }
+    serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_owned())
+}
+
+async fn collect(mut response: reqwest::Response) -> std::result::Result<FetchOut, String> {
+    let status = response.status().as_u16();
+    let headers = response_headers(&response);
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport)? {
         if body.len() + chunk.len() > MAX_FETCH_BYTES {
             return Err(format!(
-                "response body is over the {MAX_FETCH_BYTES}-byte limit"
+                "response body is over the {MAX_FETCH_BYTES}-byte limit; use ctx.files.download for large files"
             ));
         }
         body.extend_from_slice(&chunk);
     }
     Ok(FetchOut {
         status,
-        headers: serde_json::to_string(&out_headers).unwrap_or_else(|_| "{}".to_owned()),
+        headers,
         body,
+    })
+}
+
+struct DownloadOut {
+    status: u16,
+    headers: String,
+    /// The saved file, for a 2xx response.
+    file: Option<FileInfo>,
+    /// The start of the body of a non-2xx response, which is not saved.
+    error_body: Option<String>,
+}
+
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Stream a 2xx response body to `path`; keep the start of any other body
+/// for the connector's error message.
+async fn download(
+    files: &Files,
+    path: &str,
+    mut response: reqwest::Response,
+) -> std::result::Result<DownloadOut, String> {
+    let status = response.status().as_u16();
+    let headers = response_headers(&response);
+    if !response.status().is_success() {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
+            body.extend_from_slice(&chunk);
+            if body.len() >= MAX_ERROR_BODY_BYTES {
+                body.truncate(MAX_ERROR_BODY_BYTES);
+                break;
+            }
+        }
+        return Ok(DownloadOut {
+            status,
+            headers,
+            file: None,
+            error_body: Some(String::from_utf8_lossy(&body).into_owned()),
+        });
+    }
+    let failed = |error: eyre::Report| format!("files.download({path:?}): {error:#}");
+    let mut writer = files.create(path).await.map_err(failed)?;
+    while let Some(chunk) = response.chunk().await.map_err(transport)? {
+        writer.write(&chunk).await.map_err(failed)?;
+    }
+    let info = writer.finish().await.map_err(failed)?;
+    Ok(DownloadOut {
+        status,
+        headers,
+        file: Some(info),
+        error_body: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     const CONNECTOR: &str = r#"
 import type { Ctx } from "../centaur";
@@ -828,6 +1716,15 @@ import { loud } from "../_lib/text";
 /** Echo the args with the calling context's thread key. */
 export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string; thread_key: string | null }> {
   return { text: args.text, thread_key: ctx.context?.thread_key ?? null };
+}
+
+/** Report the calling principal and harness from the context. */
+export async function principal(args: {}, ctx: Ctx): Promise<{ principal: string | null; harness: string | null; error: string | null }> {
+  return {
+    principal: ctx.context?.sandbox?.principal.id ?? null,
+    harness: ctx.context?.harness ?? null,
+    error: ctx.context?.sandbox_error ?? null,
+  };
 }
 
 /** Uses a shared module. */
@@ -851,6 +1748,77 @@ export async function env(args: { name: string }, ctx: Ctx): Promise<{ value: st
   return { value: ctx.env[args.name] ?? null, frozen: Object.isFrozen(ctx.env) };
 }
 
+/** Round-trips text through base64 and gzip. */
+export async function codec(args: { text: string }, ctx: Ctx): Promise<{ b64: string; url: string; back: string; btoa: string; zipped: string }> {
+  const zipped = ctx.gzip(args.text);
+  return {
+    b64: ctx.base64.encode(args.text),
+    url: ctx.base64.encode(new Uint8Array([251, 255]), { url: true }),
+    back: ctx.base64.decodeText(ctx.base64.encode(args.text, { url: true })),
+    btoa: atob(btoa("latin")),
+    zipped: new TextDecoder().decode(ctx.gunzip(ctx.base64.decode(ctx.base64.encode(zipped)))),
+  };
+}
+
+/** GET with a request timeout. */
+export async function slow(args: { url: string; timeout_ms: number }, ctx: Ctx): Promise<{ status: number }> {
+  const res = await ctx.fetch(args.url, { timeout_ms: args.timeout_ms });
+  return { status: res.status };
+}
+
+/** Exercise the files capability. */
+export async function files(args: { base: string }, ctx: Ctx): Promise<unknown> {
+  if (!ctx.files) return { capability: false };
+  const written = await ctx.files.write("out/a.txt", "héllo");
+  const text = await ctx.files.readText("out/a.txt");
+  const missing = await ctx.files.stat("out/none");
+  const saved = await ctx.files.download(args.base + "/blob", "dl/blob.bin");
+  const failed = await ctx.files.download(args.base + "/missing", "dl/missing.bin");
+  const echoed = await ctx.fetch(args.base + "/echo", { method: "POST", body: ["<", { file: "out/a.txt" }, ">"] });
+  let escape = "";
+  try { await ctx.files.write("../x", "no"); } catch (e) { escape = String(e); }
+  return {
+    capability: true,
+    written: written.path.endsWith("/out/a.txt") && written.bytes === 6,
+    text,
+    missing,
+    saved: { ok: saved.ok, bytes: saved.bytes, type: saved.headers["content-type"], found: (await ctx.files.stat("dl/blob.bin"))?.bytes },
+    failed: { ok: failed.ok, status: failed.status, body: failed.body, path: failed.path ?? null, found: await ctx.files.stat("dl/missing.bin") },
+    echoed: await echoed.text(),
+    escape: escape.includes("files.write"),
+  };
+}
+
+/** Talk to a websocket echo server. */
+export async function ws(args: { url: string; leave_open?: boolean }, ctx: Ctx): Promise<unknown> {
+  const socket = await ctx.websocket(args.url);
+  await socket.send("hello");
+  const text = await socket.recv(2000);
+  const idle = await socket.recv(100);
+  let closed = "";
+  if (!args.leave_open) {
+    await socket.send("close");
+    try { await socket.recv(2000); } catch (e) { closed = String(e); }
+  }
+  return { text, idle, closed };
+}
+
+/** Websocket misuse, each refused. */
+export async function ws_refusals(args: { url: string }, ctx: Ctx): Promise<unknown> {
+  const out: Record<string, string> = {};
+  const attempt = async (name: string, run: () => Promise<unknown>) => {
+    try { await run(); out[name] = "allowed"; } catch (e) { out[name] = String(e); }
+  };
+  await attempt("scheme", () => ctx.websocket(args.url.replace("ws://", "http://")));
+  await attempt("refused", () => ctx.websocket(args.url.replace("/ws", "/nope")));
+  const socket = await ctx.websocket(args.url);
+  await socket.close();
+  await attempt("after_close", () => socket.send("x"));
+  await ctx.websocket(args.url);
+  await attempt("too_many", () => ctx.websocket(args.url));
+  return out;
+}
+
 /** What the connector realm sees of globals a cell may have touched. */
 export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json: string }> {
   return { marker: typeof (globalThis as any).marker, json: JSON.stringify({ a: 1 }) };
@@ -858,6 +1826,18 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 "#;
 
     fn engine() -> (tempfile::TempDir, Engine) {
+        engine_with(false, true)
+    }
+
+    fn engine_with_files(files: bool) -> (tempfile::TempDir, Engine) {
+        engine_with(files, true)
+    }
+
+    fn engine_without_context_file() -> (tempfile::TempDir, Engine) {
+        engine_with(false, false)
+    }
+
+    fn engine_with(files: bool, write_context: bool) -> (tempfile::TempDir, Engine) {
         let dir = tempfile::tempdir().unwrap();
         let connector = dir.path().join("connectors").join("demo");
         std::fs::create_dir_all(&connector).unwrap();
@@ -872,12 +1852,20 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         .unwrap();
         let catalog = Catalog::load(&[dir.path().join("connectors")]).unwrap();
         let context_file = dir.path().join("sandbox.json");
-        std::fs::write(
-            &context_file,
-            r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
+        if write_context {
+            std::fs::write(
+                &context_file,
+                r#"{"thread_key":"slack:T1:C1:1.2","sandbox":null}"#,
+            )
+            .unwrap();
+        }
+        let engine = Engine::new(
+            Arc::new(catalog),
+            None,
+            Some(context_file),
+            files.then(|| dir.path().join("files")).as_deref(),
         )
         .unwrap();
-        let engine = Engine::new(Arc::new(catalog), None, Some(context_file)).unwrap();
         (dir, engine)
     }
 
@@ -886,17 +1874,542 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             .exec(ExecRequest {
                 code: code.to_owned(),
                 tools,
+                policy: None,
             })
             .await
     }
 
+    /// A Console that serves one response and counts requests. A gate, when
+    /// set, holds the response until the test releases it.
+    #[derive(Clone)]
+    struct MockConsole {
+        response: Arc<Mutex<MockResponse>>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    struct MockResponse {
+        status: axum::http::StatusCode,
+        body: Json,
+        gate: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    async fn console_permissions(
+        axum::extract::State(state): axum::extract::State<MockConsole>,
+    ) -> (axum::http::StatusCode, axum::Json<Json>) {
+        state.requests.fetch_add(1, Ordering::SeqCst);
+        let (status, body, gate) = {
+            let response = state.response.lock().expect("mock console lock");
+            (
+                response.status,
+                response.body.clone(),
+                response.gate.clone(),
+            )
+        };
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        (status, axum::Json(body))
+    }
+
+    async fn mock_console(status: u16, body: Json) -> (String, MockConsole) {
+        mock_console_with_gate(status, body, None).await
+    }
+
+    async fn mock_console_with_gate(
+        status: u16,
+        body: Json,
+        gate: Option<Arc<tokio::sync::Notify>>,
+    ) -> (String, MockConsole) {
+        let console = MockConsole {
+            response: Arc::new(Mutex::new(MockResponse {
+                status: axum::http::StatusCode::from_u16(status).unwrap(),
+                body,
+                gate,
+            })),
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = axum::Router::new()
+            .route(PERMISSIONS_PATH, axum::routing::get(console_permissions))
+            .with_state(console.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), console)
+    }
+
+    impl MockConsole {
+        fn respond(&self, status: u16, body: Json) {
+            let mut response = self.response.lock().expect("mock console lock");
+            response.status = axum::http::StatusCode::from_u16(status).unwrap();
+            response.body = body;
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    fn console_engine(url: String) -> (tempfile::TempDir, Engine) {
+        let (dir, mut engine) = engine_without_context_file();
+        engine.console = Some(Arc::new(ConsoleContext::new(url, engine.http.clone())));
+        (dir, engine)
+    }
+
+    fn permissions(principal: &str) -> Json {
+        serde_json::json!({
+            "data": {
+                "principal_id": principal,
+                "principal": {"id": principal, "foreign_id": "C1", "name": "channel", "kind": "slack_channel"},
+                "capabilities": {},
+                "oauth_credentials": [],
+            }
+        })
+    }
+
+    async fn wait_for_requests(console: &MockConsole, count: usize) {
+        for _ in 0..200 {
+            if console.requests() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "Console got {} requests, wanted at least {count}",
+            console.requests()
+        );
+    }
+
+    async fn wait_for_context(engine: &Engine, check: impl Fn(&Json) -> bool) -> Json {
+        for _ in 0..200 {
+            let text = engine.console.as_ref().expect("console context").context();
+            let context: Json = serde_json::from_str(text.as_ref()).expect("console context JSON");
+            if check(&context) {
+                return context;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("Console context did not update");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cell_never_waits_for_the_first_console_fetch() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (url, console) =
+            mock_console_with_gate(200, permissions("prn_a"), Some(gate.clone())).await;
+        let (_dir, engine) = console_engine(url);
+        engine.prefetch_context();
+        wait_for_requests(&console, 1).await;
+
+        let code = r#"return {
+            harness: context.harness,
+            sandbox: context.sandbox,
+            error: context.sandbox_error,
+            connector: await tools.demo.principal({}),
+        };"#;
+        let first = exec(&engine, code, None).await;
+        assert!(first.ok, "{first:?}");
+        let result = first.result.as_ref().unwrap();
+        assert_eq!(result["harness"], "codemode");
+        assert_eq!(result["sandbox"], Json::Null);
+        assert!(
+            result["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("still loading")),
+            "{result}"
+        );
+        assert_eq!(result["connector"]["error"], result["error"]);
+        assert_eq!(
+            first.calls.len(),
+            1,
+            "the Console fetch is not a connector call"
+        );
+        assert!(first.calls[0].requests.is_empty());
+        assert_eq!(console.requests(), 1, "the fetch is still in flight");
+
+        gate.notify_one();
+        let context = wait_for_context(&engine, |context| context["sandbox"].is_object()).await;
+        assert_eq!(context["sandbox"]["principal"]["id"], "prn_a");
+
+        let second = exec(&engine, code, None).await;
+        assert!(second.ok, "{second:?}");
+        let result = second.result.as_ref().unwrap();
+        assert_eq!(result["sandbox"]["principal"]["id"], "prn_a");
+        assert_eq!(result["connector"]["principal"], "prn_a");
+        assert_eq!(result["connector"]["error"], Json::Null);
+        assert_eq!(console.requests(), 1, "the refresh sleeps after success");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failures_report_an_error_until_a_success_then_serve_it_stale() {
+        let (url, console) = mock_console(403, serde_json::json!({ "error": "forbidden" })).await;
+        let (_dir, engine) = console_engine(url);
+        let console_context = engine.console.clone().expect("console context");
+        let code = r#"return { sandbox: context.sandbox, error: context.sandbox_error };"#;
+        let context = |response: ExecResponse| {
+            assert!(response.ok, "{response:?}");
+            response.result.unwrap()
+        };
+
+        console_context.refresh().await;
+        let first = context(exec(&engine, code, None).await);
+        assert_eq!(first["sandbox"], Json::Null);
+        assert!(
+            first["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("HTTP 403")),
+            "{first}"
+        );
+
+        console.respond(200, permissions("prn_a"));
+        console_context.refresh().await;
+        assert_eq!(
+            context(exec(&engine, code, None).await)["sandbox"]["principal"]["id"],
+            "prn_a"
+        );
+
+        console.respond(500, serde_json::json!({ "error": "boom" }));
+        console_context.refresh().await;
+        let stale = context(exec(&engine, code, None).await);
+        assert_eq!(stale["sandbox"]["principal"]["id"], "prn_a");
+        assert_eq!(stale["error"], Json::Null);
+        assert_eq!(console.requests(), 3, "one attempt per refresh");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_context_file_wins_over_console() {
+        let (url, console) = mock_console(
+            200,
+            serde_json::json!({ "data": { "principal_id": "prn_console" } }),
+        )
+        .await;
+        let (_dir, mut engine) = engine();
+        engine.console = Some(Arc::new(ConsoleContext::new(url, engine.http.clone())));
+        engine.prefetch_context();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let response = exec(
+            &engine,
+            r#"return { thread_key: context.thread_key, sandbox: context.sandbox };"#,
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "thread_key": "slack:T1:C1:1.2", "sandbox": null })
+        );
+        assert_eq!(
+            console.requests(),
+            0,
+            "the file is read before Console, so no fetch starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn thrown_errors_and_logs_are_bounded() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"for (let i = 0; i < 200; i++) console.log("x".repeat(16000));
+               throw new Error("y".repeat(1 << 20));"#,
+            None,
+        )
+        .await;
+        assert!(!response.ok);
+        let error = response.error.expect("error");
+        assert!(
+            error.message.len() <= MAX_ERROR_BYTES + 32,
+            "{}",
+            error.message.len()
+        );
+        let logged: usize = response.logs.iter().map(String::len).sum();
+        assert!(logged <= MAX_LOG_BYTES + 64, "{logged}");
+    }
+
     /// A one-route HTTP server for fetch tests.
     async fn upstream() -> String {
-        let app = axum::Router::new().route("/hello", axum::routing::get(|| async { "hi there" }));
+        let app = axum::Router::new()
+            .route("/hello", axum::routing::get(|| async { "hi there" }))
+            .route(
+                "/blob",
+                axum::routing::get(|| async {
+                    (
+                        [("content-type", "application/octet-stream")],
+                        vec![7u8; 20 * 1024 * 1024],
+                    )
+                }),
+            )
+            .route(
+                "/missing",
+                axum::routing::get(|| async {
+                    (axum::http::StatusCode::NOT_FOUND, "no such blob")
+                }),
+            )
+            .route(
+                "/echo",
+                axum::routing::post(|body: String| async move { body }),
+            )
+            .route(
+                "/slow",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    "finally"
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{address}")
+    }
+
+    /// A websocket echo server at `/ws`: echoes text and binary, closes on
+    /// "close", and records how each connection ended.
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
+    async fn websocket_upstream() -> (String, Arc<Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{
+            Message,
+            handshake::server::{ErrorResponse, Request, Response},
+            http::StatusCode,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let log = events.clone();
+        tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let callback = |request: &Request, response: Response| {
+                        if request.uri().path() != "/ws" {
+                            let mut refused = ErrorResponse::new(Some("no socket here".to_owned()));
+                            *refused.status_mut() = StatusCode::NOT_FOUND;
+                            return Err(refused);
+                        }
+                        Ok(response)
+                    };
+                    let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(tcp, callback).await
+                    else {
+                        return;
+                    };
+                    while let Some(message) = socket.next().await {
+                        match message {
+                            Ok(Message::Text(text)) if text.as_str() == "close" => {
+                                let _ = socket.close(None).await;
+                                log.lock().unwrap().push("server closed".to_owned());
+                                return;
+                            }
+                            Ok(message @ (Message::Text(_) | Message::Binary(_))) => {
+                                let _ = socket.send(message).await;
+                            }
+                            Ok(Message::Close(_)) => {
+                                log.lock().unwrap().push("client closed".to_owned());
+                                return;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                log.lock().unwrap().push("broken".to_owned());
+                                return;
+                            }
+                        }
+                    }
+                    log.lock().unwrap().push("ended".to_owned());
+                });
+            }
+        });
+        (format!("ws://{address}/ws"), events)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_talk_over_websockets_and_record_them() {
+        let (url, events) = websocket_upstream().await;
+        let (_dir, engine) = engine();
+        let code = format!(
+            "return await tools.demo.ws({{ url: {:?} }});",
+            format!("{url}?token=secret")
+        );
+        let response = exec(&engine, &code, None).await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "text": "hello", "idle": null, "closed": "Error: websocket 1 closed" })
+        );
+        let requests = &response.calls[0].requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "WS");
+        assert_eq!(requests[0].status, Some(101));
+        assert_eq!(requests[0].url, url, "query string is dropped");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*events.lock().unwrap(), vec!["server closed"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websockets_close_when_their_call_ends() {
+        let (url, events) = websocket_upstream().await;
+        let (_dir, engine) = engine();
+        let code = format!("return await tools.demo.ws({{ url: {url:?}, leave_open: true }});");
+        let response = exec(&engine, &code, None).await;
+        assert!(response.ok, "{response:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*events.lock().unwrap(), vec!["client closed"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websocket_misuse_is_refused() {
+        let (url, _events) = websocket_upstream().await;
+        let (_dir, engine) = engine();
+        let code = format!("return await tools.demo.ws_refusals({{ url: {url:?} }});");
+        let response = exec(&engine, &code, None).await;
+        assert!(response.ok, "{response:?}");
+        let result = response.result.unwrap();
+        let expect = |name: &str, needle: &str| {
+            let got = result[name].as_str().unwrap();
+            assert!(got.contains(needle), "{name}: {got}");
+        };
+        expect("scheme", "unsupported websocket URL scheme");
+        expect("refused", "HTTP 404");
+        expect("after_close", "is not open");
+        expect("too_many", "at most 4 websockets");
+        // Every attempt is recorded and counts against the limit; the fifth
+        // was refused before any I/O.
+        let statuses: Vec<Option<u16>> = response.calls[0]
+            .requests
+            .iter()
+            .map(|request| request.status)
+            .collect();
+        assert_eq!(statuses, vec![None, None, Some(101), Some(101)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_get_base64_and_gzip() {
+        let (_dir, engine) = engine();
+        let response = exec(
+            &engine,
+            r#"return await tools.demo.codec({ text: "héllo?" });"#,
+            None,
+        )
+        .await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "b64": "aMOpbGxvPw==", "url": "-_8", "back": "héllo?", "btoa": "latin", "zipped": "héllo?" })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connectors_use_the_files_capability() {
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let code = format!("return await tools.demo.files({{ base: {base:?} }});");
+        let response = exec(&engine, &code, None).await;
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({ "capability": false })
+        );
+
+        let (dir, engine) = engine_with_files(true);
+        let response = exec(&engine, &code, None).await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({
+                "capability": true,
+                "written": true,
+                "text": "héllo",
+                "missing": null,
+                "saved": { "ok": true, "bytes": 20971520, "type": "application/octet-stream", "found": 20971520 },
+                "failed": { "ok": false, "status": 404, "body": "no such blob", "path": null, "found": null },
+                "echoed": "<héllo>",
+                "escape": true,
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("files/out/a.txt")).unwrap(),
+            "héllo"
+        );
+        let ops: Vec<(&str, String, Option<u64>)> = response.calls[0]
+            .files
+            .iter()
+            .map(|file| (file.op, file.path.clone(), file.bytes))
+            .collect();
+        assert_eq!(
+            ops,
+            vec![
+                ("write", "out/a.txt".to_owned(), Some(6)),
+                ("read", "out/a.txt".to_owned(), Some(6)),
+                ("download", "dl/blob.bin".to_owned(), Some(20971520)),
+                ("upload", "out/a.txt".to_owned(), Some(6)),
+                ("write", "../x".to_owned(), None),
+            ]
+        );
+        assert_eq!(response.calls[0].requests.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_take_a_timeout() {
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let short = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.slow({{ url: {:?}, timeout_ms: 200 }});",
+                format!("{base}/slow")
+            ),
+            None,
+        )
+        .await;
+        assert!(!short.ok, "{short:?}");
+        let message = short.error.unwrap().message;
+        assert!(message.contains("timed out"), "{message}");
+        let long = exec(
+            &engine,
+            &format!(
+                "return await tools.demo.slow({{ url: {:?}, timeout_ms: 5000 }});",
+                format!("{base}/slow")
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(long.result.unwrap(), serde_json::json!({ "status": 200 }));
+    }
+
+    #[tokio::test]
+    async fn deadlines_only_move_later() {
+        let start = Instant::now();
+        let deadline = Deadline::new(start + Duration::from_millis(50));
+        deadline.extend(start + Duration::from_millis(10));
+        assert!(deadline.get() >= start + Duration::from_millis(50));
+        deadline.extend(start + Duration::from_millis(150));
+        deadline.passed().await;
+        assert!(start.elapsed() >= Duration::from_millis(150));
+
+        // A long request pushes back both the call's and the cell's deadlines,
+        // bounded by MAX_REQUEST_TIMEOUT.
+        let (_dir, engine) = engine();
+        let cell = Cell {
+            catalog: engine.catalog(),
+            allowed: Vec::new(),
+            context: "null".to_owned(),
+            http: engine.http.clone(),
+            ws_http: engine.ws_http.clone(),
+            files: None,
+            logs: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            deadline: Deadline::new(Instant::now() + CELL_TIMEOUT),
+            permits: Arc::new(Semaphore::new(1)),
+        };
+        let call = Deadline::new(Instant::now() + TOOL_TIMEOUT);
+        assert_eq!(cell.request_timeout(&call, 0.0), None);
+        assert_eq!(cell.request_timeout(&call, f64::NAN), None);
+        assert_eq!(cell.request_timeout(&call, 1e12), Some(MAX_REQUEST_TIMEOUT));
+        let floor = Instant::now() + MAX_REQUEST_TIMEOUT;
+        assert!(call.get() >= floor && cell.deadline.get() >= floor);
+    }
+
+    #[test]
+    fn gunzip_is_bounded() {
+        let bomb = gzip(&vec![0u8; MAX_FETCH_BYTES + 1]).unwrap();
+        assert!(gunzip(&bomb).unwrap_err().contains("exceeds"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1015,13 +2528,15 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
 
         // `invoke` itself refuses, whatever JS calls it with.
         let cell = Arc::new(Cell {
-            catalog: engine.catalog.clone(),
+            catalog: engine.catalog(),
             allowed: vec!["other".to_owned()],
             context: "null".to_owned(),
             http: engine.http.clone(),
+            ws_http: engine.ws_http.clone(),
+            files: None,
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
-            deadline: Instant::now() + CELL_TIMEOUT,
+            deadline: Deadline::new(Instant::now() + CELL_TIMEOUT),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
         });
         for tool in ["demo.echo", "demo.nope", "nope", "other.echo"] {
@@ -1097,5 +2612,33 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
         assert!(!exec(&engine, "return {", None).await.ok);
         let response = exec(&engine, "return undefined;", None).await;
         assert_eq!(response.result.unwrap(), serde_json::Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn policy_wins_over_the_cli_tools_allowlist() {
+        let (_dir, engine) = engine();
+        let request = |tools: Option<Vec<String>>, policy: Option<Policy>| ExecRequest {
+            code: "return Object.keys(tools);".to_owned(),
+            tools,
+            policy,
+        };
+        let response = engine
+            .exec(request(
+                Some(vec!["other".to_owned()]),
+                Some(Policy::from_allowlist(vec!["demo".to_owned()])),
+            ))
+            .await;
+        assert_eq!(response.result.unwrap(), serde_json::json!(["demo"]));
+
+        let response = engine
+            .exec(request(
+                Some(vec!["demo".to_owned()]),
+                Some(Policy {
+                    allowlist: None,
+                    blocklist: Some(vec!["demo".to_owned()]),
+                }),
+            ))
+            .await;
+        assert_eq!(response.result.unwrap(), serde_json::json!([]));
     }
 }

@@ -50,7 +50,7 @@ impl SyncCache {
     ) -> Option<String> {
         // Requester unions depend on OAuth-app eligibility that is intentionally
         // assembled live and is not covered by the principal cache version.
-        if proxy.requester_principal_id.is_some() {
+        if proxy.requester_principal_id.is_some() || proxy.has_owner_only_grant {
             return None;
         }
         let generation = generation_fingerprint(proxy, token_windows)?;
@@ -68,7 +68,7 @@ impl SyncCache {
         token_windows: TokenWindows,
         config_hash: String,
     ) {
-        if proxy.requester_principal_id.is_some() {
+        if proxy.requester_principal_id.is_some() || proxy.has_owner_only_grant {
             return;
         }
         let Some(generation) = generation_fingerprint(proxy, token_windows) else {
@@ -112,6 +112,7 @@ mod tests {
             console_user_email: Some("user@example.com".to_owned()),
             console_user_id: Some(13),
             slack_history_channel_ids: json!(["C12345678"]),
+            has_owner_only_grant: false,
         }
     }
 
@@ -178,6 +179,19 @@ mod tests {
         let cache = SyncCache::default();
         let mut proxy = proxy();
         proxy.requester_principal_id = Some(12);
+        cache.store(&proxy, windows(), "sha256:current".to_owned());
+
+        assert_eq!(
+            cache.matching_hash(&proxy, windows(), "sha256:current"),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_only_grants_bypass_the_cache() {
+        let cache = SyncCache::default();
+        let mut proxy = proxy();
+        proxy.has_owner_only_grant = true;
         cache.store(&proxy, windows(), "sha256:current".to_owned());
 
         assert_eq!(

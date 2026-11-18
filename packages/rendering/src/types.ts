@@ -58,6 +58,8 @@ export type RendererEvent =
       type: 'renderer.done'
       answerMarkdown?: string
       error?: string
+      /** The execution was stopped before it finished. */
+      interrupted?: boolean
       streamFinalUpdates?: boolean
       threadId?: string
     }

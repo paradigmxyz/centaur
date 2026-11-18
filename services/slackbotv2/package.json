@@ -17,7 +17,7 @@
     "@json-render/chat": "0.22.0",
     "@json-render/core": "0.22.0",
     "chat": "4.44.0",
-    "hono": "^4.13.16",
+    "hono": "^4.13.17",
     "pg": "^8.23.1",
     "zod": "^4.6.7"
   },
@@ -28,7 +28,7 @@
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
-    "emulate": "^0.13.0",
+    "emulate": "^0.13.1",
     "typescript": "^7.0.2"
   }
 }

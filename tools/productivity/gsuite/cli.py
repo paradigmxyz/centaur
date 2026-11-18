@@ -1831,6 +1831,152 @@ def sheets_update_cmd(
         raise typer.Exit(1)
 
 
+@sheets_app.command("format")
+def sheets_format_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+    range_notation: str = typer.Argument(
+        ..., help="A1 range, such as 'Sheet1!A1:D1', 'A:A', '2:2', or a tab title"
+    ),
+    bold: bool | None = typer.Option(None, "--bold/--no-bold", help="Bold text"),
+    italic: bool | None = typer.Option(None, "--italic/--no-italic", help="Italic text"),
+    underline: bool | None = typer.Option(
+        None, "--underline/--no-underline", help="Underlined text"
+    ),
+    strikethrough: bool | None = typer.Option(
+        None, "--strikethrough/--no-strikethrough", help="Struck-through text"
+    ),
+    font_size: int | None = typer.Option(None, "--font-size", help="Font size in points"),
+    font_family: str | None = typer.Option(None, "--font", help="Font family"),
+    text_color: str | None = typer.Option(None, "--color", help="Text color hex, e.g. #ffffff"),
+    background_color: str | None = typer.Option(
+        None, "--bg", help="Background color hex, e.g. #1a73e8"
+    ),
+    horizontal_alignment: str | None = typer.Option(None, "--align", help="LEFT, CENTER, or RIGHT"),
+    vertical_alignment: str | None = typer.Option(None, "--valign", help="TOP, MIDDLE, or BOTTOM"),
+    wrap_strategy: str | None = typer.Option(
+        None, "--wrap", help="OVERFLOW_CELL, LEGACY_WRAP, CLIP, or WRAP"
+    ),
+    number_format_type: str | None = typer.Option(
+        None,
+        "--number-type",
+        help="TEXT, NUMBER, PERCENT, CURRENCY, DATE, TIME, DATE_TIME, or SCIENTIFIC",
+    ),
+    number_format_pattern: str | None = typer.Option(
+        None, "--number-pattern", help="Number format pattern, e.g. '#,##0.00'"
+    ),
+):
+    """Format cells in a Google Sheet. Only the options given are changed.
+
+    Examples:
+        gsuite sheets format "1Abc..." "Sheet1!A1:D1" --bold --bg "#1a73e8" --color "#ffffff"
+        gsuite sheets format "1Abc..." "C:C" --number-type CURRENCY --number-pattern '"$"#,##0.00'
+        gsuite sheets format "1Abc..." "A2:A" --italic --underline --align CENTER
+    """
+    from .client import sheets_format
+
+    try:
+        result = sheets_format(
+            spreadsheet_id,
+            range_notation,
+            bold=bold,
+            italic=italic,
+            underline=underline,
+            strikethrough=strikethrough,
+            font_size=font_size,
+            font_family=font_family,
+            text_color=text_color,
+            background_color=background_color,
+            horizontal_alignment=horizontal_alignment,
+            vertical_alignment=vertical_alignment,
+            wrap_strategy=wrap_strategy,
+            number_format_type=number_format_type,
+            number_format_pattern=number_format_pattern,
+        )
+        console.print(f"[green]✓ Formatted {result['range']}[/]")
+        console.print(f"[dim]Fields: {', '.join(result['fields'])}[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@sheets_app.command("freeze")
+def sheets_freeze_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+    tab: str | None = typer.Option(None, "--tab", "-t", help="Tab title (default: first tab)"),
+    rows: int | None = typer.Option(None, "--rows", help="Rows to freeze (0 unfreezes)"),
+    columns: int | None = typer.Option(None, "--columns", help="Columns to freeze (0 unfreezes)"),
+):
+    """Freeze the top rows and/or left columns of a tab.
+
+    Examples:
+        gsuite sheets freeze "1Abc..." --rows 1
+        gsuite sheets freeze "1Abc..." --tab "Data" --rows 1 --columns 2
+    """
+    from .client import sheets_freeze
+
+    try:
+        result = sheets_freeze(spreadsheet_id, sheet_title=tab, rows=rows, columns=columns)
+        parts = []
+        if result["frozen_row_count"] is not None:
+            parts.append(f"{result['frozen_row_count']} rows")
+        if result["frozen_column_count"] is not None:
+            parts.append(f"{result['frozen_column_count']} columns")
+        console.print(f"[green]✓ Frozen {' and '.join(parts)} on sheet {result['sheet_id']}[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@sheets_app.command("tabs")
+def sheets_tabs_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+):
+    """List a spreadsheet's tabs with their numeric sheet IDs as JSON.
+
+    Example:
+        gsuite sheets tabs "1Abc..."
+    """
+    from .client import sheets_tabs
+
+    try:
+        print(json.dumps(sheets_tabs(spreadsheet_id), indent=2, ensure_ascii=False))
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
+@sheets_app.command("raw-batch-update")
+def sheets_raw_batch_update_cmd(
+    spreadsheet_id: str = typer.Argument(..., help="Spreadsheet ID (from URL)"),
+    requests: str = typer.Argument(..., help="JSON array of Sheets API Request objects"),
+):
+    """Send raw Sheets API batchUpdate requests and print the response as JSON.
+
+    Use for borders, merges, column widths, conditional formatting, banding,
+    and anything else `format` and `freeze` do not cover. Requests address
+    tabs by numeric sheetId; `gsuite sheets tabs` lists them.
+
+    Example:
+        gsuite sheets raw-batch-update "1Abc..." '[{"autoResizeDimensions":
+          {"dimensions": {"sheetId": 0, "dimension": "COLUMNS"}}}]'
+    """
+    from .client import sheets_raw_batch_update
+
+    try:
+        parsed = json.loads(requests)
+    except json.JSONDecodeError as e:
+        console.print("[red]Error: requests must be a valid JSON array[/]")
+        raise typer.Exit(1) from e
+    if not isinstance(parsed, list):
+        console.print("[red]Error: requests must be a JSON array[/]")
+        raise typer.Exit(1)
+    try:
+        print(json.dumps(sheets_raw_batch_update(spreadsheet_id, parsed), indent=2))
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        raise typer.Exit(1) from e
+
+
 @sheets_app.command("create")
 def sheets_create_cmd(
     title: str = typer.Argument(..., help="Spreadsheet title"),

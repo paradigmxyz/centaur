@@ -58,7 +58,7 @@ case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
+IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"

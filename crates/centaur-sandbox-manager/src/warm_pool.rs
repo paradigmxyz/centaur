@@ -294,6 +294,10 @@ impl WarmPoolManager {
             .list_observed()
             .await?
             .into_iter()
+            // Code Mode sandboxes are long-lived per-principal workloads that
+            // session admission does not count either; counting them here
+            // would starve the pool without any session load.
+            .filter(|observed| !centaur_sandbox_core::is_codemode_workload(&observed.labels))
             .filter(|observed| status_consumes_running_slot(&observed.status))
             .count();
         Ok(max_running.saturating_sub(running))

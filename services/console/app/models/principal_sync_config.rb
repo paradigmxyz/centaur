@@ -42,6 +42,16 @@ module PrincipalSyncConfig
   # serve.
   def self.served_credentials_for(principal)
     static = principal.granted_static_secrets.select { |ss| ss.source&.deliverable? }
+    # An owner-only token serves only its owner, matching proxy-sync.
+    reconciliation = PrincipalCredentialReconciliation.new
+    direct_secret_ids = nil
+    static.select! do |secret|
+      credential = secret.broker_credential
+      next true unless credential&.oauth_app&.owner_only?
+
+      direct_secret_ids ||= principal.grants.where(role_id: nil).where.not(static_secret_id: nil).pluck(:static_secret_id).to_set
+      !credential.oauth_app.shared? && direct_secret_ids.include?(secret.id) && reconciliation.connection_owner?(principal, credential)
+    end
     gcp_auth = principal.granted_gcp_auth_secrets.to_a
     gcp_id_token = principal.granted_gcp_id_token_secrets.to_a
     aws_auth = principal.granted_aws_auth_secrets.to_a

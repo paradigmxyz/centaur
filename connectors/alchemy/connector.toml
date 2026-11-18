@@ -1,0 +1,3 @@
+description = "Alchemy: EVM RPC reads (balances, token balances, transfers, transactions, logs, gas) and token prices"
+
+secrets = [{type = "http", name = "ALCHEMY_API_KEY", match_headers = ["Authorization"], match_path = true, hosts = ["*.g.alchemy.com"]}]

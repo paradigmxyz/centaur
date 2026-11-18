@@ -1,0 +1,5 @@
+description = "Airtable: bases, schemas, tables, views, records (list, search, create, update, upsert, delete)"
+
+secrets = [
+  {type = "http", name = "AIRTABLE_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["api.airtable.com"]},
+]

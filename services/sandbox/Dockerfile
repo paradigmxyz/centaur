@@ -94,11 +94,11 @@ RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.318
+ARG CLAUDE_CODE_VERSION=2.1.325
 # Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
 # from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
 ARG CODEX_VERSION=0.166.0
-ARG PI_CODING_AGENT_VERSION=1.5.0
+ARG PI_CODING_AGENT_VERSION=1.5.2
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG NUSHELL_VERSION=0.116.1
@@ -214,7 +214,7 @@ ARG FOUNDRY_VERSION=v1.9.0
 ARG AMP_CLI_VERSION=0.0.1793829508-g91ac5b
 ARG MANIM_VERSION=0.22.1
 ARG BUN_VERSION=bun-v1.4.4
-ARG OMP_VERSION=18.16.0
+ARG OMP_VERSION=18.21.0
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -276,11 +276,11 @@ RUN set -eux; \
     amp --version >/dev/null
 
 # ── agent-browser: download Chrome binary (runs as agent, deps already installed) ─
-# Pinned to Chrome for Testing Stable 157.0.8103.78, which fixes the Skia RCE
-# CVE-2026-126846 (and the earlier 157.0.8103.50 fix for CVE-2026-125350 and
-# 157.0.8103.38 fixes for CVE-2026-121030, -121035, -121071 and -121189).
+# Pinned to Chrome for Testing Stable 158.0.8127.36, which fixes CVE-2026-130963
+# and the 38 other CVEs in the same Chrome release (earlier pins covered
+# CVE-2026-126846, CVE-2026-125350, and CVE-2026-121030, -121035, -121071, -121189).
 # agent-browser discovers the browser at ~/.agent-browser/browsers/chrome-<version>.
-ARG CHROME_FOR_TESTING_VERSION=157.0.8103.78
+ARG CHROME_FOR_TESTING_VERSION=158.0.8127.36
 RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       set -eux; \
       dest="$HOME/.agent-browser/browsers/chrome-${CHROME_FOR_TESTING_VERSION}"; \
@@ -326,7 +326,8 @@ RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,shar
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
     CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
-    cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server
+    cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server \
+    && cargo +stable install --locked --path crates/centaur-codemode --root /home/agent/harness-server
 
 # ==============================================================================
 # Final thin stage: only frequently-changing local files below.
@@ -349,6 +350,8 @@ COPY --link centaur_sdk/ /opt/centaur/centaur_sdk/
 RUN python3 -m compileall -q /opt/centaur/centaur_sdk
 COPY --link --chmod=0755 services/sandbox/git-hooks/ /opt/centaur/git-hooks/
 COPY --link --chown=1001:1001 tools/ /opt/centaur/tools/
+# Code Mode connectors; the chart's CENTAUR_CODEMODE_CONNECTORS lists this root first.
+COPY --link --chown=1001:1001 connectors/ /opt/centaur/connectors/
 COPY --link --chmod=644 services/sandbox/codex-auth.json /etc/centaur/codex-auth.default.json
 COPY --link --chmod=644 services/sandbox/claude-credentials.json /etc/centaur/claude-credentials.default.json
 COPY --link --chmod=755 services/sandbox/md2docx.py /usr/local/bin/md2docx
@@ -357,7 +360,6 @@ COPY --link services/workflow-python/api/ /usr/local/bin/api/
 COPY --link --chmod=755 services/sandbox/git-branch.sh /usr/local/bin/git-branch
 COPY --link --chmod=755 services/sandbox/install_tool_shims.py /usr/local/bin/install-tool-shims
 COPY --link --chmod=755 services/sandbox/seed_hermes_codex_auth.py /usr/local/bin/seed-hermes-codex-auth
-COPY --link --chmod=755 services/sandbox/centaur_artifact_get.py /usr/local/bin/centaur-artifact-get
 COPY --link --chmod=755 services/sandbox/centaur_tool_host.py /usr/local/bin/centaur-tool-host
 COPY --link --chmod=755 services/sandbox/compose_system_prompt.py /usr/local/bin/compose-system-prompt
 COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-cache-sync
@@ -368,6 +370,7 @@ COPY --link --chmod=755 services/sandbox/configure_codex_models.py /usr/local/bi
 COPY --link --chmod=644 services/sandbox/codex-base-instructions.md /etc/centaur/codex-base-instructions.md
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
+COPY --link --chmod=755 --from=harness-server-build /home/agent/harness-server/bin/centaur-codemode /usr/local/bin/centaur-codemode
 
 USER agent
 WORKDIR /home/agent

@@ -1,0 +1,3 @@
+description = "EODHD: real-time and delayed equity quotes, historical end-of-day OHLCV prices"
+
+secrets = [{ type = "http", name = "EODHD_API_KEY", mode = "inject", inject_query_param = "api_token", hosts = ["eodhd.com"] }]
