@@ -203,3 +203,14 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
 See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync), plus the session-only [Console API](docs/API.md#console-api).
+
+## Owner-only OAuth apps
+
+An OAuth app with `owner_only` gives each Console user their own connection.
+The credential is keyed by the connecting user, so the provider needs no
+identity endpoint, and its token reaches only that user's own principals, in
+DMs and, with `always_available`, in channels. It never reaches roles, other
+principals, or email matches. Users can disconnect from Integrations; a
+`custom` app's optional `revocation_endpoint` revokes the tokens at the
+provider. The Runlayer preset sets one up for a tenant's MCP URL; see
+[Runlayer setup](../../tools/infra/runlayer/README.md).

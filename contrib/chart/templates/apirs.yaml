@@ -17,6 +17,7 @@
 {{- $skillDirs := list -}}
 {{- $publicSkillDirs := list -}}
 {{- $overlayRepoDirs := list -}}
+{{- $codemodeSandboxConnectorDirs := list -}}
 {{- range $source := $overlaySources -}}
 {{- $repo := get $source "repo" | default "" -}}
 {{- $visibility := get $source "visibility" | default "private" -}}
@@ -40,6 +41,11 @@
 {{- if eq $visibility "public" -}}
 {{- $publicSkillDirs = append $publicSkillDirs $skillDir -}}
 {{- end -}}
+{{- end -}}
+{{- /* Code Mode connector roots: overlay copies shadow the image's baked
+connectors, so later sources come later in the list. */ -}}
+{{- with (get $source "connectorsSubdir") -}}
+{{- $codemodeSandboxConnectorDirs = append $codemodeSandboxConnectorDirs (printf "/home/agent/github/%s/%s" $repo .) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -396,6 +402,10 @@ spec:
               value: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
             - name: SESSION_SANDBOX_IMAGE_PULL_POLICY
               value: {{ .Values.sandbox.image.pullPolicy | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_CODEMODE_IMAGE") }}
+            - name: CENTAUR_CODEMODE_IMAGE
+              value: {{ printf "%s:%s" .Values.codemode.image.repository .Values.codemode.image.tag | quote }}
+{{- end }}
 {{- if .Values.sandbox.stateVolume.enabled }}
             - name: SESSION_SANDBOX_STATE_VOLUME_ENABLED
               value: "true"
@@ -573,6 +583,15 @@ spec:
 {{- if and .Values.repoCache.enabled (gt (len $overlayRepoDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_OVERLAY_REPO_DIRS" "value" (join ":" $overlayRepoDirs)) }}
 {{- end }}
+{{- if not (hasKey .Values.sandbox.extraEnv "CENTAUR_CODEMODE_CONNECTORS") }}
+{{- /* Code Mode connector roots: the image's baked connectors, then overlay
+copies in source order (later roots shadow earlier ones). */}}
+{{- $codemodeSandboxConnectorRoots := list "/opt/centaur/connectors" -}}
+{{- if and .Values.repoCache.enabled (gt (len $codemodeSandboxConnectorDirs) 0) -}}
+{{- $codemodeSandboxConnectorRoots = concat $codemodeSandboxConnectorRoots $codemodeSandboxConnectorDirs -}}
+{{- end }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_CODEMODE_CONNECTORS" "value" (join ":" $codemodeSandboxConnectorRoots)) }}
+{{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_ENABLED") }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" ($companyContextEmbeddingsEnabled | toString)) }}
 {{- end }}
@@ -682,7 +701,11 @@ spec:
 {{- range $name, $value := .Values.apiRs.extraEnv }}
 {{- if ne $name "SESSION_SANDBOX_PASSTHROUGH_ENV" }}
             - name: {{ $name }}
+{{- if kindIs "map" $value }}
+{{ toYaml $value | nindent 14 }}
+{{- else }}
               value: {{ $value | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
           envFrom:

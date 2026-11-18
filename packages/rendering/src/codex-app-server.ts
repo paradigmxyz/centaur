@@ -65,6 +65,7 @@ type CodexMapperState = {
   emittedActivityRunByTaskId: Map<string, string>
   emittedActivityOutputByTaskId: Map<string, string>
   emittedActivitySignatureByTaskId: Map<string, string>
+  interrupted: boolean
   done: boolean
 }
 
@@ -79,6 +80,10 @@ export type CodexAppServerRendererEventMapperOptions = {
   // consumers that stream text into their own surface (discordbot) pass 0 to
   // emit deltas immediately. Default 500ms (Slack card-first rendering).
   preStreamGraceMs?: number
+  // When a stop interrupts the execution, end without adding the
+  // "Execution interrupted." notice (or the empty-answer placeholder) when no
+  // answer text was produced. Partial answer text is still kept.
+  silentInterrupt?: boolean
 }
 
 export type CodexAppServerToChatStreamOptions = CodexAppServerRendererEventMapperOptions & {
@@ -96,6 +101,7 @@ export class CodexAppServerRendererEventMapper
   private readonly deferUnphasedAgentMessages: boolean
   private readonly includeTaskOutput: boolean
   private readonly preStreamGraceMs: number
+  private readonly silentInterrupt: boolean
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
@@ -104,6 +110,7 @@ export class CodexAppServerRendererEventMapper
     this.deferUnphasedAgentMessages = options.unknownAgentMessagePhase === undefined
     this.includeTaskOutput = options.taskOutput === 'full'
     this.preStreamGraceMs = options.preStreamGraceMs ?? PRE_STREAM_GRACE_MS
+    this.silentInterrupt = options.silentInterrupt === true
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -112,6 +119,12 @@ export class CodexAppServerRendererEventMapper
     const rustMapped = rustSessionEventToServerNotification(source)
     if (rustMapped?.kind === 'failed') return this.fail(rustMapped.error)
     if (rustMapped?.kind === 'completed') return this.complete(rustMapped.resultText)
+    if (rustMapped?.kind === 'cancelled') {
+      this.state.interrupted = true
+      return this.complete(
+        rustMapped.resultText || (this.silentInterrupt ? undefined : rustMapped.notice)
+      )
+    }
     if (rustMapped?.kind === 'status')
       return [{ type: 'renderer.status', status: rustMapped.status }]
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
@@ -133,6 +146,7 @@ export class CodexAppServerRendererEventMapper
     out.push({
       type: 'renderer.done',
       answerMarkdown: this.state.answerText,
+      ...(this.state.interrupted ? { interrupted: true } : {}),
       streamFinalUpdates: true,
       threadId: this.state.threadId || undefined
     })
@@ -327,7 +341,9 @@ export class CodexAppServerRendererEventMapper
         resultText,
         willClose
       })
-      const finalText = resultText || (isInterruptedTurn(event) ? INTERRUPTED_TEXT : '')
+      if (isInterruptedTurn(event)) this.state.interrupted = true
+      const finalText =
+        resultText || (this.state.interrupted && !this.silentInterrupt ? INTERRUPTED_TEXT : '')
       if (finalText && !this.state.answerText.trim()) {
         this.state.harnessAnswerText += finalText
         recomposeBuffers(this.state)
@@ -378,6 +394,7 @@ export class CodexAppServerRendererEventMapper
 
   private ensureFinalAnswerText(): void {
     if (this.state.answerText.trim()) return
+    if (this.state.interrupted && this.silentInterrupt) return
     this.state.harnessAnswerText += EMPTY_FINAL_ANSWER_TEXT
     recomposeBuffers(this.state)
   }
@@ -631,12 +648,14 @@ async function* renderChatSdkChunks(
   }
 }
 
-const INTERRUPTED_TEXT = 'Execution interrupted.'
+export const INTERRUPTED_TEXT = 'Execution interrupted.'
 
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
   | { kind: 'completed'; resultText?: string }
+  // `notice` is the interruption wording shown when no answer text exists.
+  | { kind: 'cancelled'; resultText?: string; notice: string }
   | { kind: 'status'; status: string }
   | null
 
@@ -682,11 +701,11 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
 
   if (eventKind === 'session.execution_cancelled') {
     const data = isRecord(source.data) ? source.data : source
-    const resultText =
-      terminalResultText(data).trim() || String(data.error ?? INTERRUPTED_TEXT).trim()
+    const resultText = terminalResultText(data).trim()
     return {
-      kind: 'completed',
-      ...(resultText ? { resultText } : {})
+      kind: 'cancelled',
+      ...(resultText ? { resultText } : {}),
+      notice: String(data.error ?? INTERRUPTED_TEXT).trim() || INTERRUPTED_TEXT
     }
   }
 
@@ -735,6 +754,7 @@ function newState(): CodexMapperState {
     emittedActivityRunByTaskId: new Map(),
     emittedActivityOutputByTaskId: new Map(),
     emittedActivitySignatureByTaskId: new Map(),
+    interrupted: false,
     done: false
   }
 }

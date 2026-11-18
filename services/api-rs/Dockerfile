@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# Build context is the repo root (see Justfile `_build-api-rs`) so the runtime
-# stage can bake the shared `tools/` tree used for iron-proxy fragment discovery.
+# Context is the repo root (see Justfile `_build-api-rs`) so the runtime stage can
+# bake the shared `tools/` tree used for iron-proxy fragment and secret discovery.
 
 FROM rust:1-bookworm AS builder
 # aws-lc-rs (the rustls crypto provider) builds native code, so the builder

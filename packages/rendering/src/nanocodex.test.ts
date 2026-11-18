@@ -169,6 +169,19 @@ describe('NanocodexRendererEventMapper', () => {
     ])
   })
 
+  test('ends a cancelled run without a notice when silentInterrupt is set', () => {
+    const mapper = new NanocodexRendererEventMapper({ silentInterrupt: true })
+    expect(mapper.process(native('run.failed', { status: 'cancelled' }, 2))).toEqual([
+      {
+        type: 'renderer.done',
+        answerMarkdown: '',
+        interrupted: true,
+        streamFinalUpdates: true,
+        threadId: 'nano-session'
+      }
+    ])
+  })
+
   test('renders a cancelled run through the stock interruption path', () => {
     const mapper = new NanocodexRendererEventMapper()
     expect(mapper.process(native('run.error', { message: 'turn cancelled' }))).toEqual([])
@@ -176,6 +189,7 @@ describe('NanocodexRendererEventMapper', () => {
       {
         type: 'renderer.done',
         answerMarkdown: 'Execution interrupted.',
+        interrupted: true,
         streamFinalUpdates: true,
         threadId: 'nano-session'
       }

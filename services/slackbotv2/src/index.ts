@@ -61,6 +61,8 @@ import {
   interruptSessionExecution,
   isRetryableSessionApiError,
   isSessionPrincipalAdmissionDenied,
+  isSlackFileUrl,
+  NON_SLACK_FILE_URL_ERROR,
   openSessionEventStream,
   serializeAttachment,
   serializeMessageLinks,
@@ -2769,7 +2771,7 @@ async function renderFallbackFinalAnswer(
       slackSafeChatSdkStream(
         harnessToChatSdkStream(
           fallback.collectSource(stream),
-          fallbackRendererOptions(options)
+          fallback.withRendererOptions(fallbackRendererOptions(options))
         )
       )
     )
@@ -2786,6 +2788,15 @@ async function renderFallbackFinalAnswer(
       return null
     }
     const text = fallback.textOrDefault()
+    if (!text) {
+      // A stop ended the turn before any answer: there is nothing to post.
+      outcome = 'interrupted'
+      traceLog(options, 'slackbotv2_render_fallback_interrupted', trace, {
+        last_event_id: lastEventId,
+        phase_ms: elapsedMs(startedAtMs)
+      })
+      return { lastEventId }
+    }
     // With generative UI on, a valid json-render block leaves the markdown and
     // becomes a card posted after it; a rejected block stays in the markdown
     // as code so nothing is lost.
@@ -3811,7 +3822,9 @@ async function renderPlainTextExecutionStream(
           fallback.collectSource(
             restoreAssistantStatusAfterSteering(thread, stream, statusTracker, options, trace)
           ),
-          rendererOptions(thread, options, undefined, trace, statusTracker)
+          fallback.withRendererOptions(
+            rendererOptions(thread, options, undefined, trace, statusTracker)
+          )
         )
       )
     )
@@ -3826,7 +3839,8 @@ async function renderPlainTextExecutionStream(
     traceLog(options, 'slackbotv2_render_plain_text_final', trace, {
       chars: text.length
     })
-    await thread.post(text)
+    // A stop that ended the turn before any answer posts nothing.
+    if (text) await thread.post(text)
   } finally {
     await closeAssistantStatus(thread, statusTracker, options, trace)
   }
@@ -3862,17 +3876,29 @@ class SlackRenderFallback {
     return terminalText || markdownText
   }
 
+  /** The text to post; empty when a stop ended the turn before any answer. */
   textOrDefault(): string {
-    return (
-      this.text() ||
-      (this.interrupted
-        ? 'Execution interrupted.'
-        : EMPTY_FINAL_ANSWER_TEXT)
-    )
+    return this.text() || (this.interrupted ? '' : EMPTY_FINAL_ANSWER_TEXT)
   }
 
   isInterrupted(): boolean {
     return this.interrupted
+  }
+
+  /**
+   * Observes the renderer's terminal event as well. The renderer can finish on
+   * a native interrupted turn before the cancellation envelope is consumed.
+   */
+  withRendererOptions(
+    rendererOptions: CodexAppServerToChatStreamOptions
+  ): CodexAppServerToChatStreamOptions {
+    return {
+      ...rendererOptions,
+      onRendererEvent: async (event: RendererEvent) => {
+        if (event.type === 'renderer.done' && event.interrupted) this.interrupted = true
+        await rendererOptions.onRendererEvent?.(event)
+      }
+    }
   }
 
   private captureTerminalText(event: SlackbotV2RendererSource): void {
@@ -4607,6 +4633,7 @@ function slackFileAttachment(
 }
 
 async function fetchSlackFile(options: SlackbotV2Options, url: string): Promise<Buffer> {
+  if (!isSlackFileUrl(url)) throw new Error(NON_SLACK_FILE_URL_ERROR)
   const fetchFn = options.fetch ?? fetch
   const controller = new AbortController()
   try {
@@ -4906,6 +4933,8 @@ function rendererOptions(
   return {
     ...mapper,
     logInfo: rendererLogInfo(options, capture),
+    // A Slack stop ends the reply without an interruption notice.
+    silentInterrupt: true,
     async onRendererEvent(event: RendererEvent) {
       await mapper?.onRendererEvent?.(event)
       if (event.type === 'renderer.title.update') {
@@ -4933,6 +4962,7 @@ function fallbackRendererOptions(options: SlackbotV2Options): CodexAppServerToCh
   return {
     ...mapper,
     logInfo: rendererLogInfo(options),
+    silentInterrupt: true,
     async onRendererEvent(event: RendererEvent) {
       try {
         await mapper?.onRendererEvent?.(event)

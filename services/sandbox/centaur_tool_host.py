@@ -28,27 +28,12 @@ def _v1_call_command(request: dict[str, Any]) -> list[str]:
     ]
 
 
-def _v2_run_command(request: dict[str, Any]) -> list[str]:
-    """V2 invokes the tool CLI with literal argv tokens."""
-    argv = request["argv"]
-    if not isinstance(argv, list):
-        raise TypeError("tool argv must be an array of strings")
-    for arg in argv:
-        if not isinstance(arg, str):
-            raise TypeError("each tool argv token must be a string")
-        if "\0" in arg:
-            raise ValueError("tool argv tokens must not contain NUL characters")
-    return ["centaur-tools", "run", str(request["tool"]), *argv]
-
-
 def _command_for_request(request: dict[str, Any]) -> list[str]:
     # V1 requests predate the mode field and invoke Python client methods.
     mode = request.get("mode", "v1")
     match mode:
         case "v1":
             return _v1_call_command(request)
-        case "v2":
-            return _v2_run_command(request)
         case _:
             raise ValueError(f"unsupported tool host mode: {mode}")
 

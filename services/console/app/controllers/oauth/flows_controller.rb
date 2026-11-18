@@ -55,7 +55,8 @@ module Oauth
       code_verifier = SecureRandom.urlsafe_base64(64)
 
       state = Rails.application.message_verifier(STATE_PURPOSE).generate(
-        { "app" => @app.oid, "scopes" => consent_scopes, "nonce" => nonce },
+        { "app" => @app.oid, "scopes" => consent_scopes, "nonce" => nonce,
+          "user_id" => current_user.id, "config" => provider_config_digest },
         purpose: STATE_PURPOSE, expires_in: FLOW_TTL
       )
 
@@ -76,7 +77,10 @@ module Oauth
 
       # The signed state must belong to this slug's app and the app must still be
       # active.
-      if state["app"] != @app.oid || !@app.enabled?
+      # It must also be finished by the user who started it, against the same
+      # endpoints and resource.
+      if state["app"] != @app.oid || !@app.enabled? || state["user_id"] != current_user.id ||
+          state["config"] != provider_config_digest
         return render_result(:error, status: :bad_request, message: "This integration is no longer available.")
       end
 
@@ -92,11 +96,11 @@ module Oauth
 
       result = exchange_code(params[:code], flow["code_verifier"])
       validate_provider_result!(result)
-      identity = @provider.identity_from(
-        result,
-        client_id: @app.client_id,
-        http_client: identity_http_client_factory.call
-      )
+      identity = if @app.owner_only?
+        owner_identity
+      else
+        @provider.identity_from(result, client_id: @app.client_id, http_client: identity_http_client_factory.call)
+      end
       @credential = upsert_credential(state, result, identity)
       enqueue_post_connect_enrichment(@credential)
 
@@ -158,6 +162,18 @@ module Oauth
       Array(@provider.required_scopes)
     end
 
+    def provider_config_digest
+      Digest::SHA256.hexdigest(JSON.generate(@app.provider_config.to_h.sort.to_h))
+    end
+
+    # Owner-only credentials belong to the connecting Console user rather than
+    # a provider account, so servers without OIDC or userinfo need no identity.
+    # Reconnecting replaces that user's grant. No provider email is recorded,
+    # so nothing can match the credential by email.
+    def owner_identity
+      { subject: "owner-#{current_user.oid}", name: current_user.email }
+    end
+
     def exchange_code(code, code_verifier)
       exchange_client_factory.call.exchange(
         token_endpoint: @provider.token_endpoint,
@@ -199,11 +215,18 @@ module Oauth
           end
         end
         credential = BrokerCredential.find_or_initialize_by(oauth_app: @app, provider_subject: identity[:subject])
+        # Reload under the same row lock used by disconnect/refresh before dirty
+        # tracking compares the new tokens and live state with the stored values.
+        credential.lock! if credential.persisted?
         # Remember which user connected this account. The Integrations page
         # matches on it, so the card flips to "Connected" even when the provider
         # account's email differs from the console login email. Never
         # overwritten: the first linked user keeps the credential.
+        if @app.owner_only? && credential.persisted? && credential.created_by_id != current_user.id
+          raise Broker::ExchangeError.new("Connection belongs to another user", stage: "oauth", code: "account_mismatch")
+        end
         credential.created_by ||= current_user
+        credential.token_endpoint = @provider.token_endpoint if @app.owner_only?
         if credential.new_record?
           credential.foreign_id = "#{@app.provider}-#{@app.slug}-#{foreign_id_subject(identity[:subject])}"
           credential.name = "#{@provider.display_name} – #{identity_display_name(identity)}"
@@ -299,9 +322,14 @@ module Oauth
     # would risk colliding with an operator-created secret.
     def ensure_wrapping_secret(credential)
       secret = StaticSecret.find_or_initialize_by(broker_credential: credential)
-      return secret unless secret.new_record?
+      # Owner-only wrappers are rebuilt on reconnect, restoring their source and
+      # rules if they were edited.
+      return secret unless secret.new_record? || @app.owner_only?
 
       secret.name = "#{credential.name} token"
+      # An app's centaur-tool label makes its tool visible wherever the token is.
+      tool_label = (@app.labels || {}).slice("centaur-tool")
+      secret.labels = (secret.labels || {}).merge(tool_label) if tool_label.present?
       secret.kind = wrapping_secret_kind
       secret.assign_attributes(wrapping_secret_config) if secret.kind == CredentialProfiles::Registry::CUSTOM_KIND
       secret.source = SecretSource.new(source_type: "token_broker", config: { "credential_id" => credential.oid })

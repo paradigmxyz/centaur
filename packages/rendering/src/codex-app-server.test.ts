@@ -5,6 +5,7 @@ import {
   codexAppServerToRendererEvents,
   isRetryableCodexErrorNotification
 } from './codex-app-server'
+import type { RendererEvent } from './types'
 
 describe('CodexAppServerRendererEventMapper', () => {
   it.each([
@@ -937,6 +938,71 @@ describe('CodexAppServerRendererEventMapper', () => {
         text: 'Execution interrupted.'
       }
     ])
+  })
+
+  it('ends cancelled Rust sessions silently with silentInterrupt', async () => {
+    const events: RendererEvent[] = []
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            type: 'item.started',
+            item: { id: 'cmd-1', type: 'commandExecution', command: 'sleep 60' }
+          },
+          {
+            eventKind: 'session.execution_cancelled',
+            data: { reason: 'turn_interrupted' }
+          }
+        ]),
+        { silentInterrupt: true, onRendererEvent: event => void events.push(event) }
+      )
+    )
+
+    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([])
+    expect(events.at(-1)).toMatchObject({ type: 'renderer.done', interrupted: true })
+  })
+
+  it('ends silently on an interrupted turn with silentInterrupt', async () => {
+    const events: RendererEvent[] = []
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            type: 'item.started',
+            item: { id: 'cmd-1', type: 'commandExecution', command: 'sleep 60' }
+          },
+          { type: 'turn.completed', turn: { id: 'turn-1', status: 'interrupted' } }
+        ]),
+        { silentInterrupt: true, onRendererEvent: event => void events.push(event) }
+      )
+    )
+
+    expect(chunks.filter(chunk => chunk.type === 'markdown_text')).toEqual([])
+    expect(events.at(-1)).toMatchObject({ type: 'renderer.done', interrupted: true })
+  })
+
+  it('keeps partial answer text when a silent interrupt stops the turn', async () => {
+    const chunks = await collect(
+      codexAppServerToChatSdkStream(
+        toAsyncIterable([
+          {
+            type: 'item.completed',
+            item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer', text: 'Partial answer' }
+          },
+          {
+            eventKind: 'session.execution_cancelled',
+            data: { reason: 'turn_interrupted' }
+          }
+        ]),
+        { silentInterrupt: true }
+      )
+    )
+
+    const text = chunks
+      .filter(chunk => chunk.type === 'markdown_text')
+      .map(chunk => chunk.text)
+      .join('')
+    expect(text).toBe('Partial answer')
   })
 })
 

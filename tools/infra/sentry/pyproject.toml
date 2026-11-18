@@ -27,5 +27,5 @@ packages = ["."]
 module = "client.py"
 hosts = ["sentry.io", "*.sentry.io"]
 secrets = [
-    {type = "http", name = "SENTRY_AUTH_TOKEN", match_headers = ["Authorization"], hosts = ["sentry.io", "*.sentry.io"]},
+    {type = "http", name = "SENTRY_AUTH_TOKEN", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["sentry.io", "*.sentry.io"]},
 ]

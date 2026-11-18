@@ -18,7 +18,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use centaur_sandbox_core::{ObservedSandbox, SandboxResult, SandboxStatus};
+use centaur_sandbox_core::{ObservedSandbox, SandboxResult, SandboxStatus, is_codemode_workload};
 use centaur_session_sqlx::{PgSessionStore, SandboxReapState};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
@@ -88,6 +88,32 @@ impl SandboxReaper {
         let now = SystemTime::now();
         let mut reaped = 0;
         for observed in self.manager.list_observed().await? {
+            // Code Mode sandboxes belong to no session and have no durable
+            // lifecycle row, so they never expire by max lifetime: the process
+            // exits on its own idle timer. A stopped one is pure garbage and is
+            // released immediately, without store lookups or warm-pool eviction.
+            if is_codemode_workload(&observed.labels) {
+                if codemode_reap_reason(&observed).is_some() {
+                    match self.manager.stop(&observed.id).await {
+                        Ok(()) => {
+                            reaped += 1;
+                            info!(
+                                sandbox_id = %observed.id.as_str(),
+                                reason = "codemode_stopped",
+                                "reaped stopped Code Mode sandbox"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                sandbox_id = %observed.id.as_str(),
+                                %error,
+                                "failed to reap stopped Code Mode sandbox"
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
             // Durable state can only defer a reap, so skip the lookup for
             // sandboxes that are not expired by backend age alone.
             if reap_reason(&observed, &SandboxReapState::default(), now, &self.config).is_none() {
@@ -165,12 +191,24 @@ impl SandboxReaper {
     }
 }
 
+/// Reason a Code Mode sandbox is reaped immediately. Such a sandbox has no
+/// session row to consult and no warm-pool claim to release, so the reaper acts
+/// on backend state alone and only once the process has exited.
+fn codemode_reap_reason(observed: &ObservedSandbox) -> Option<&'static str> {
+    (is_codemode_workload(&observed.labels) && observed.status == SandboxStatus::Stopped)
+        .then_some("codemode_stopped")
+}
+
 fn reap_reason(
     observed: &ObservedSandbox,
     state: &SandboxReapState,
     now: SystemTime,
     config: &SandboxReaperConfig,
 ) -> Option<&'static str> {
+    // Code Mode sandboxes are exempt from the max-lifetime sweep; see [`reap_once`].
+    if is_codemode_workload(&observed.labels) {
+        return None;
+    }
     let max_lifetime = config.max_lifetime?;
     let expired = |since: Option<SystemTime>| {
         since.is_some_and(|since| {
@@ -193,6 +231,10 @@ fn reap_reason(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use centaur_sandbox_core::{SandboxError, SandboxId};
+
     use super::*;
 
     fn config(max_lifetime: Option<Duration>) -> SandboxReaperConfig {
@@ -366,5 +408,100 @@ mod tests {
     fn orphan_sweep_keeps_the_reaper_enabled_without_max_lifetime() {
         let config = config(None);
         assert!(config.is_enabled());
+    }
+
+    fn codemode_observed(
+        id: &str,
+        status: SandboxStatus,
+        created_at: SystemTime,
+    ) -> ObservedSandbox {
+        ObservedSandbox::new(id, "reaper-test", status)
+            .with_labels(std::collections::BTreeMap::from([(
+                centaur_sandbox_core::WORKLOAD_LABEL.to_owned(),
+                centaur_sandbox_core::CODEMODE_WORKLOAD.to_owned(),
+            )]))
+            .with_created_at(Some(created_at))
+    }
+
+    struct ReaperBackend {
+        observed: Mutex<Vec<ObservedSandbox>>,
+        stopped: Mutex<Vec<String>>,
+    }
+
+    type R<T> = SandboxResult<T>;
+
+    fn unused<T>() -> R<T> {
+        Err(SandboxError::backend("unused by the reaper"))
+    }
+
+    #[async_trait::async_trait]
+    impl centaur_sandbox_core::SandboxBackend for ReaperBackend {
+        fn name(&self) -> &'static str {
+            "reaper-test"
+        }
+
+        async fn create(
+            &self,
+            _: centaur_sandbox_core::SandboxSpec,
+        ) -> R<centaur_sandbox_core::SandboxHandle> {
+            unused()
+        }
+
+        async fn open_io(&self, _: &SandboxId) -> R<centaur_sandbox_core::SandboxIo> {
+            unused()
+        }
+
+        async fn status(&self, _: &SandboxId) -> R<SandboxStatus> {
+            unused()
+        }
+
+        async fn observe(&self, _: &SandboxId) -> R<ObservedSandbox> {
+            unused()
+        }
+
+        async fn list_observed(&self) -> R<Vec<ObservedSandbox>> {
+            Ok(self.observed.lock().unwrap().clone())
+        }
+
+        async fn stop(&self, id: &SandboxId) -> R<()> {
+            self.stopped.lock().unwrap().push(id.as_str().to_owned());
+            Ok(())
+        }
+
+        async fn pause(&self, _: &SandboxId) -> R<()> {
+            unused()
+        }
+
+        async fn resume(&self, _: &SandboxId) -> R<()> {
+            unused()
+        }
+    }
+
+    /// A sweep ignores Code Mode age but releases an exited process. This pool
+    /// never connects, so a session-store lookup would fail the sweep.
+    #[tokio::test]
+    async fn sweep_reaps_only_stopped_codemode_sandboxes_without_store_lookups() {
+        let old = SystemTime::now() - Duration::from_secs(100_000);
+        let backend = Arc::new(ReaperBackend {
+            observed: Mutex::new(vec![
+                codemode_observed("cm-running", SandboxStatus::Running, old),
+                codemode_observed("cm-stopped", SandboxStatus::Stopped, old),
+            ]),
+            stopped: Mutex::new(Vec::new()),
+        });
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test")
+                .expect("create lazy pool");
+        let reaper = SandboxReaper::new(
+            Arc::new(SandboxManager::new(backend.clone())),
+            PgSessionStore::new(pool),
+            config(Some(Duration::from_secs(60))),
+        );
+
+        assert_eq!(reaper.reap_once().await.expect("sweep succeeds"), 1);
+        assert_eq!(
+            *backend.stopped.lock().unwrap(),
+            vec!["cm-stopped".to_owned()]
+        );
     }
 }

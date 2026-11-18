@@ -93,9 +93,11 @@ export interface SandboxPermissions {
 }
 
 /**
- * The sandbox context file (`~/.centaur/sandbox.json`) that the platform writes for the
- * session. Informational: route on it, never authorize anything with it; iron-proxy and
- * Console enforce access.
+ * The calling context, read once per cell. In a session sandbox it is the sandbox context file
+ * (`~/.centaur/sandbox.json`) the platform writes. In a Code Mode sandbox, which has no such file,
+ * it comes from Console's sandbox permissions, with `harness: "codemode"` and a null `thread_key`.
+ * Informational: route on it, never authorize anything with it; iron-proxy and Console enforce
+ * access.
  */
 export interface CallingContext {
   version?: number;
@@ -108,8 +110,27 @@ export interface CallingContext {
   [key: string]: unknown;
 }
 
+/**
+ * A text WebSocket owned by the current connector call. It closes when the call ends, so connect,
+ * talk and finish within one call; keep longer-lived state upstream. Messages are at most 10 MiB.
+ */
+export interface WebSocketConn {
+  send(text: string): Promise<void>;
+  /**
+   * The next message, or `null` when none arrives within `timeout_ms` (default: the call's
+   * remaining time). Throws once the socket has closed.
+   */
+  recv(timeout_ms?: number): Promise<string | null>;
+  close(): Promise<void>;
+}
+
 export interface Ctx {
   fetch(url: string, init?: RequestInit): Promise<Response>;
+  /**
+   * Open a `ws://` or `wss://` WebSocket through the principal's iron-proxy, recorded against this
+   * call like `fetch`. A call may make at most 4 attempts; `timeout_ms` bounds the handshake.
+   */
+  websocket(url: string, init?: { timeout_ms?: number }): Promise<WebSocketConn>;
   /**
    * The runner's environment, read once at startup: configuration such as API
    * base URLs or database proxy endpoints. It never holds real credentials;
@@ -117,7 +138,10 @@ export interface Ctx {
    * the wire, and inject-mode credentials need no variable at all.
    */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** The calling context, read once per cell; `null` outside a Centaur session. */
+  /**
+   * The calling context, read once per cell; `null` when there is no context file and Code Mode
+   * has no Console permissions.
+   */
   readonly context: Readonly<CallingContext> | null;
   sleep(ms: number): Promise<void>;
   /**

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{
+    Matcher, PrometheusBuilder, PrometheusHandle, PrometheusRecorder,
+};
 
 const HTTP_REQUESTS_TOTAL: &str = "http_server_requests_total";
 const HTTP_REQUEST_DURATION_SECONDS: &str = "http_server_request_duration_seconds";
@@ -11,13 +13,23 @@ const HTTP_REQUEST_DURATION_BUCKETS: &[f64] = &[
 ];
 
 pub(crate) fn init_metrics() -> Result<PrometheusHandle, metrics_exporter_prometheus::BuildError> {
-    let handle = PrometheusBuilder::new()
+    let recorder = build_recorder()?;
+    let handle = recorder.handle();
+    metrics::set_global_recorder(recorder)?;
+    describe_metrics();
+    Ok(handle)
+}
+
+fn build_recorder() -> Result<PrometheusRecorder, metrics_exporter_prometheus::BuildError> {
+    Ok(PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Full(HTTP_REQUEST_DURATION_SECONDS.to_owned()),
             HTTP_REQUEST_DURATION_BUCKETS,
         )?
-        .install_recorder()?;
+        .build_recorder())
+}
 
+fn describe_metrics() {
     metrics::describe_counter!(
         HTTP_REQUESTS_TOTAL,
         "Total HTTP requests served by proxy-sync."
@@ -35,8 +47,6 @@ pub(crate) fn init_metrics() -> Result<PrometheusHandle, metrics_exporter_promet
         SYNC_CACHE_LOOKUPS_TOTAL,
         "Proxy sync configuration cache lookups by result."
     );
-
-    Ok(handle)
 }
 
 pub(crate) fn record_http_request_started() {
@@ -86,17 +96,23 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        init_metrics, record_cache_lookup, record_http_request_finished,
+        build_recorder, describe_metrics, record_cache_lookup, record_http_request_finished,
         record_http_request_started,
     };
 
     #[test]
     fn renders_http_and_cache_metrics() {
-        let handle = init_metrics().expect("metrics recorder should initialize");
+        // Use a thread-local recorder: the global one would also observe
+        // requests from concurrently running integration tests.
+        let recorder = build_recorder().expect("metrics recorder should build");
+        let handle = recorder.handle();
 
-        record_http_request_started();
-        record_http_request_finished("GET", "/healthz", 200, Duration::from_millis(10));
-        record_cache_lookup("hit");
+        metrics::with_local_recorder(&recorder, || {
+            describe_metrics();
+            record_http_request_started();
+            record_http_request_finished("GET", "/healthz", 200, Duration::from_millis(10));
+            record_cache_lookup("hit");
+        });
 
         let output = handle.render();
         assert!(output.contains("http_server_requests_total"));

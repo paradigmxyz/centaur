@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lint": "oxlint --deny-warnings",
     "typecheck": "tsc -p ."
   },
   "devDependencies": {
+    "oxlint": "1.94.0",
     "typescript": "7.0.2"
   }
 }

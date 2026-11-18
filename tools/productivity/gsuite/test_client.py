@@ -2039,3 +2039,195 @@ def test_directory_list_does_not_return_partial_results_on_page_failure(monkeypa
 
     with pytest.raises(RuntimeError, match="Page request failed"):
         client.directory_list()
+
+
+def _formatting_service(sheets: list[dict]) -> Mock:
+    service = Mock()
+    spreadsheets = service.spreadsheets.return_value
+    spreadsheets.get.return_value.execute.return_value = {
+        "sheets": [{"properties": properties} for properties in sheets]
+    }
+    spreadsheets.batchUpdate.return_value.execute.return_value = {"replies": [{}]}
+    return service
+
+
+_TWO_TABS = [
+    {"title": "Summary"},  # sheetId 0 and index 0 are omitted by the API
+    {"sheetId": 42, "title": "Bob's Data", "index": 1},
+]
+
+
+@pytest.mark.parametrize(
+    ("range_notation", "expected"),
+    [
+        (
+            "A1",
+            {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 1,
+                "startColumnIndex": 0,
+                "endColumnIndex": 1,
+            },
+        ),
+        (
+            "B2:D5",
+            {
+                "sheetId": 0,
+                "startRowIndex": 1,
+                "endRowIndex": 5,
+                "startColumnIndex": 1,
+                "endColumnIndex": 4,
+            },
+        ),
+        ("'Bob''s Data'!A:C", {"sheetId": 42, "startColumnIndex": 0, "endColumnIndex": 3}),
+        ("Summary!1:1", {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1}),
+        ("A2:AA", {"sheetId": 0, "startRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 27}),
+        (
+            "$C$3:$A$1",
+            {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 3,
+                "startColumnIndex": 0,
+                "endColumnIndex": 3,
+            },
+        ),
+        ("'Bob''s Data'", {"sheetId": 42}),
+        ("Summary", {"sheetId": 0}),
+    ],
+)
+def test_grid_range_parses_a1_notation(range_notation, expected):
+    assert client._grid_range(_TWO_TABS, range_notation, "s") == expected
+
+
+@pytest.mark.parametrize("range_notation", ["Nope!A1", "A1:B2:C3", "hello world", "A0"])
+def test_grid_range_rejects_unknown_tabs_and_bad_ranges(range_notation):
+    with pytest.raises(ValueError):
+        client._grid_range(_TWO_TABS, range_notation, "s")
+
+
+def test_sheets_format_sends_repeat_cell_with_field_mask(monkeypatch):
+    service = _formatting_service(_TWO_TABS)
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+
+    result = client.GSuiteClient().sheets_format(
+        "spreadsheet-123",
+        "'Bob''s Data'!A1:C1",
+        bold=True,
+        italic=False,
+        underline=True,
+        font_size=12,
+        text_color="#fff",
+        background_color="#1A73E8",
+        horizontal_alignment="center",
+        number_format_pattern="#,##0.00",
+    )
+
+    service.spreadsheets.return_value.get.assert_called_once_with(
+        spreadsheetId="spreadsheet-123", fields="sheets.properties(sheetId,title,index)"
+    )
+    body = service.spreadsheets.return_value.batchUpdate.call_args.kwargs["body"]
+    repeat = body["requests"][0]["repeatCell"]
+    assert repeat["range"] == {
+        "sheetId": 42,
+        "startRowIndex": 0,
+        "endRowIndex": 1,
+        "startColumnIndex": 0,
+        "endColumnIndex": 3,
+    }
+    assert repeat["cell"]["userEnteredFormat"] == {
+        "textFormat": {
+            "bold": True,
+            "italic": False,
+            "underline": True,
+            "fontSize": 12,
+            "foregroundColorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        },
+        "backgroundColorStyle": {
+            "rgbColor": {"red": 0x1A / 255, "green": 0x73 / 255, "blue": 0xE8 / 255}
+        },
+        "horizontalAlignment": "CENTER",
+        "numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"},
+    }
+    assert repeat["fields"] == (
+        "userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.italic,"
+        "userEnteredFormat.textFormat.underline,userEnteredFormat.textFormat.fontSize,"
+        "userEnteredFormat.textFormat.foregroundColorStyle,"
+        "userEnteredFormat.backgroundColorStyle,userEnteredFormat.horizontalAlignment,"
+        "userEnteredFormat.numberFormat"
+    )
+    assert result["grid_range"]["sheetId"] == 42
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"background_color": "blue"}, {"horizontal_alignment": "JUSTIFY"}, {"font_size": 0}],
+)
+def test_sheets_format_validates_before_connecting(monkeypatch, kwargs):
+    get_service = Mock()
+    monkeypatch.setattr(client, "get_sheets_service", get_service)
+
+    with pytest.raises(ValueError):
+        client.sheets_format("spreadsheet-123", "A1", **kwargs)
+    get_service.assert_not_called()
+
+
+def test_sheets_freeze_updates_grid_properties_of_named_tab(monkeypatch):
+    service = _formatting_service(_TWO_TABS)
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+
+    result = client.sheets_freeze("spreadsheet-123", sheet_title="Bob's Data", rows=1, columns=0)
+
+    body = service.spreadsheets.return_value.batchUpdate.call_args.kwargs["body"]
+    assert body == {
+        "requests": [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": 42,
+                        "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 0},
+                    },
+                    "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+                }
+            }
+        ]
+    }
+    assert result == {
+        "spreadsheet_id": "spreadsheet-123",
+        "sheet_id": 42,
+        "frozen_row_count": 1,
+        "frozen_column_count": 0,
+    }
+
+
+def test_sheets_freeze_defaults_to_first_tab_and_requires_counts(monkeypatch):
+    service = _formatting_service(list(reversed(_TWO_TABS)))
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+
+    assert client.sheets_freeze("spreadsheet-123", rows=2)["sheet_id"] == 0
+    with pytest.raises(ValueError):
+        client.sheets_freeze("spreadsheet-123")
+
+
+def test_sheets_raw_batch_update_passes_requests_through(monkeypatch):
+    service = _formatting_service(_TWO_TABS)
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+    requests = [{"mergeCells": {"range": {"sheetId": 0}, "mergeType": "MERGE_ALL"}}]
+
+    assert client.sheets_raw_batch_update("spreadsheet-123", requests) == {"replies": [{}]}
+    service.spreadsheets.return_value.batchUpdate.assert_called_once_with(
+        spreadsheetId="spreadsheet-123", body={"requests": requests}
+    )
+    with pytest.raises(ValueError):
+        client.sheets_raw_batch_update("spreadsheet-123", [])
+
+
+def test_sheets_tabs_lists_tabs_in_order(monkeypatch):
+    service = _formatting_service(list(reversed(_TWO_TABS)))
+    monkeypatch.setattr(client, "get_sheets_service", lambda: service)
+
+    assert client.sheets_tabs("spreadsheet-123") == [
+        {"sheet_id": 0, "title": "Summary", "index": 0},
+        {"sheet_id": 42, "title": "Bob's Data", "index": 1},
+    ]

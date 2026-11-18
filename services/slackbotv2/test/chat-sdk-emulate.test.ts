@@ -25,7 +25,7 @@ import {
   type SlackbotV2ExecuteSessionRequest,
   type SlackbotV2SessionMessage
 } from '../src/index'
-import { clearRequesterIdentityCacheForTests } from '../src/session-api'
+import { clearRequesterIdentityCacheForTests, NON_SLACK_FILE_URL_ERROR } from '../src/session-api'
 import { resetSlackbotMetricsForTests, slackbotMetrics } from '../src/metrics'
 import type { ProactivityRules } from '../src/proactivity-rules'
 import { createOpenAiMessageOverridesStrategy } from '../src/message-overrides-strategy'
@@ -1452,7 +1452,7 @@ describe('slackbotv2', () => {
     expect(mention.response.status).toBe(200)
     await mention.finished()
 
-    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileUrl = 'https://files.slack.com/files/captured.png'
     const fileTs = incrementSlackTs(mention.ts, 2)
     const fileDelivery = await deliverEvent({
       type: 'message',
@@ -1507,7 +1507,7 @@ describe('slackbotv2', () => {
     const mention = await sendMessage(`<@${BOT_USER_ID}> inspect the delayed file`)
     await mention.finished()
 
-    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileUrl = 'https://files.slack.com/files/captured.png'
     slackApi.setFileInfo('F-check-file-info', {
       id: 'F-check-file-info',
       mimetype: 'image/png',
@@ -1611,7 +1611,7 @@ describe('slackbotv2', () => {
             id: 'F-dedupe-late',
             mimetype: 'image/png',
             name: 'dedupe.png',
-            url_private: `${slackApi.url}/files/captured.png`
+            url_private: 'https://files.slack.com/files/captured.png'
           }
         ]
       }
@@ -1630,7 +1630,7 @@ describe('slackbotv2', () => {
   it('fetches attachments from preceding Slack thread messages for a mid-thread mention', async () => {
     const parent = await postUserMessage('Root context before an attachment.')
     const priorReply = await postUserMessage('Screenshot is attached here.', parent.ts)
-    const fileUrl = `${slackApi.url}/files/captured.png`
+    const fileUrl = 'https://files.slack.com/files/captured.png'
     slackApi.addFileToMessage(CHANNEL_ID, priorReply.ts, {
       id: 'F-thread-context-image',
       mimetype: 'image/png',
@@ -1668,6 +1668,42 @@ describe('slackbotv2', () => {
     expect(executeInput).toContain('"type":"attachment"')
     expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
     expect(executeInput).not.toContain('data:image/png;base64')
+  })
+
+  it('does not fetch a thread attachment hosted outside Slack', async () => {
+    let elsewhereRequests = 0
+    const elsewhere = createServer((_req, res) => {
+      elsewhereRequests += 1
+      res.end('elsewhere-bytes')
+    })
+    await new Promise<void>(resolve => elsewhere.listen(0, '127.0.0.1', resolve))
+    try {
+      // Another origin than the Slack API emulator, and reachable, so a fetch
+      // would be counted rather than fail to connect.
+      const fileUrl = `http://127.0.0.1:${(elsewhere.address() as { port: number }).port}/files/elsewhere.png`
+      const parent = await postUserMessage('Root context before an attachment.')
+      const priorReply = await postUserMessage('A file from elsewhere is attached here.', parent.ts)
+      slackApi.addFileToMessage(CHANNEL_ID, priorReply.ts, {
+        id: 'F-thread-context-elsewhere',
+        mimetype: 'image/png',
+        name: 'elsewhere.png',
+        size: 15,
+        url_private: fileUrl
+      })
+      const mention = await sendMessage(`<@${BOT_USER_ID}> inspect the earlier file`, {
+        threadTs: parent.ts
+      })
+
+      expect(mention.response.status).toBe(200)
+      await mention.finished()
+
+      expect(elsewhereRequests).toBe(0)
+      const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines.at(-1)!))
+      expect(executeInput).toContain(`fetch_error=${NON_SLACK_FILE_URL_ERROR}`)
+      expect(executeInput).not.toContain(Buffer.from('elsewhere-bytes').toString('base64'))
+    } finally {
+      await new Promise<void>(resolve => elsewhere.close(() => resolve()))
+    }
   })
 
   it('caches Slack requester identity across mentions from the same user', async () => {
@@ -1938,7 +1974,7 @@ describe('slackbotv2', () => {
     )
   })
 
-  it('renders interrupted executions with no final answer as interrupted', async () => {
+  it('ends interrupted executions with no final answer without an interruption notice', async () => {
     codexApi.autoRespond = false
 
     const parent = await postUserMessage('Context before an interrupt.')
@@ -1987,16 +2023,41 @@ describe('slackbotv2', () => {
     const transcripts = slackStreamTranscripts(slackApi.calls)
     expect(transcripts).toHaveLength(1)
     const markdownChunks = transcripts[0]!.chunks.filter(chunk => chunk.type === 'markdown_text')
-    expect(markdownChunks).toEqual([
-      {
-        type: 'markdown_text',
-        text: 'Execution interrupted.'
-      }
-    ])
+    expect(markdownChunks).toEqual([])
     const renderedText = transcripts[0]!.chunks.map(chunkText).filter(Boolean).join('\n')
     expect(renderedText).toContain('Command execution')
-    expect(renderedText.trim().endsWith('Execution interrupted.')).toBe(true)
+    expect(renderedText).not.toContain('Execution interrupted.')
     expect(renderedText).not.toContain('Execution completed, but no final text was captured.')
+  })
+
+  it('posts nothing for a plain-text request stopped by a native interrupted turn', async () => {
+    codexApi.autoRespond = false
+
+    const parent = await postUserMessage('Context before a plain text interrupt.')
+    const mention = await sendMessage(
+      `<@${BOT_USER_ID}> Plain text only, no interactive blocks. Run until stopped.`,
+      { threadTs: parent.ts }
+    )
+
+    expect(mention.response.status).toBe(200)
+    await waitFor(() => codexApi.executes.length === 1)
+    await waitFor(() => codexApi.streamCount === 1)
+
+    codexApi.emitOutputLine(
+      threadKey(parent.ts),
+      JSON.stringify({ type: 'turn.completed', turn: { id: 'turn-1', status: 'interrupted' } })
+    )
+    codexApi.emitSessionEvent(threadKey(parent.ts), 'session.execution_cancelled', {
+      execution_id: 'exe-interrupted',
+      status: 'cancelled',
+      reason: 'turn_interrupted'
+    })
+
+    await mention.finished()
+    const text = await threadText(parent.ts)
+    expect(text).not.toContain('Execution interrupted.')
+    expect(text).not.toContain('Execution completed, but no final text was captured.')
+    expect(slackApi.calls.filter(call => call.method === 'chat.postMessage')).toHaveLength(0)
   })
 
   it('renders api-rs completion result text when no final answer delta streamed', async () => {
@@ -6045,6 +6106,13 @@ function createProductionDefaultTestBot(
     signingSecret: SIGNING_SECRET,
     slackApiUrl,
     state: createMemoryState(),
+    // slackbotv2 downloads files with the bot token only from Slack's file
+    // origins, so serve files.slack.com from the emulator, as the adapter's
+    // file transport below does.
+    fetch: (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      return fetch(url.hostname === 'files.slack.com' ? new URL(url.pathname, slackApi.url) : input, init)
+    },
     ...overrides
   })
   Object.assign(instance.chat.getAdapter('slack'), {

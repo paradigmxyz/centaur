@@ -24,12 +24,17 @@ use oxc::{
     transformer::{TransformOptions, Transformer},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::search::{self, Document, Hit, Index};
 
 const MANIFEST: &str = "connector.toml";
 const ENTRY: &str = "index.ts";
 const LIB_DIR: &str = "_lib";
 /// Types only; there is no runtime module behind it.
 const TYPES_MODULE: &str = "../centaur";
+/// Hex characters of the catalog revision that are kept.
+const REVISION_CHARS: usize = 16;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,18 +78,35 @@ pub struct Catalog {
     pub connectors: BTreeMap<String, Connector>,
     /// Shared helper modules by name (`_lib/<name>.ts`), as bytecode.
     pub libs: Arc<BTreeMap<String, Arc<[u8]>>>,
+    /// Content hash of the connector roots this catalog was loaded from.
+    /// `/healthz` and `/search` report it; a hot reload compares it.
+    pub revision: String,
+    /// One BM25 document per connector function, built with the catalog.
+    search: Index,
 }
 
 impl Catalog {
     /// Load every connector under `roots`. Later roots shadow earlier ones by
     /// connector name, matching overlay order.
     pub fn load(roots: &[PathBuf]) -> Result<Self> {
+        // Hash before reading anything. A file that changes during the load
+        // then leaves the recorded revision behind the tree, so the next
+        // reload check sees a difference and loads again; hashing afterwards
+        // could label stale bytecode with the newest revision and never
+        // reload it.
+        let revision = revision(roots)?;
         // Phase 1: strip types and collect imports. Later roots shadow
         // earlier ones, for connectors and shared modules alike.
         let mut connectors: BTreeMap<String, (Connector, String)> = BTreeMap::new();
         let mut libs: BTreeMap<String, String> = BTreeMap::new();
         let mut imports: Vec<(String, Vec<Import>)> = Vec::new();
         for root in roots {
+            // Overlay roots a principal cannot see are not mounted, and an
+            // overlay without connectors has no root: expected, not a problem.
+            if !root.is_dir() {
+                tracing::info!(root = %root.display(), "connector root is missing; skipping");
+                continue;
+            }
             let lib_dir = root.join(LIB_DIR);
             if lib_dir.is_dir() {
                 let mut files: Vec<PathBuf> = std::fs::read_dir(&lib_dir)?
@@ -146,36 +168,140 @@ impl Catalog {
                 Ok((connector.name.clone(), connector))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let search = search::Index::new(
+            connectors
+                .values()
+                .flat_map(|connector| {
+                    connector.functions.iter().map(|function| Document {
+                        connector: connector.name.clone(),
+                        description: connector.description.clone(),
+                        function: function.name.clone(),
+                        signature: function.signature.clone(),
+                        doc: function.doc.clone(),
+                    })
+                })
+                .collect(),
+        );
         Ok(Self {
             connectors,
             libs: Arc::new(lib_bytecode),
+            revision,
+            search,
         })
     }
 
-    /// Connectors visible for an allowlist; `None` means all.
+    /// Connectors visible under a policy; no policy means all of them.
     pub fn visible<'a>(
         &'a self,
-        allowed: Option<&'a [String]>,
+        policy: Option<&'a Policy>,
     ) -> impl Iterator<Item = &'a Connector> + 'a {
-        self.connectors.values().filter(move |connector| {
-            allowed.is_none_or(|allowed| allowed.contains(&connector.name))
-        })
+        self.connectors
+            .values()
+            .filter(move |connector| policy.is_none_or(|policy| policy.allows(&connector.name)))
+    }
+
+    /// The connector a request names exactly, when the policy makes it
+    /// visible.
+    pub fn find<'a>(
+        &'a self,
+        requested: &str,
+        policy: Option<&'a Policy>,
+    ) -> Option<&'a Connector> {
+        self.visible(policy)
+            .find(|connector| connector.name == requested)
     }
 
     /// The brief an agent reads before writing a cell.
-    pub fn brief(&self, allowed: Option<&[String]>) -> String {
+    pub fn brief(&self, policy: Option<&Policy>) -> String {
         let mut out = String::new();
-        for connector in self.visible(allowed) {
-            out.push_str(&format!(
-                "// ── tools.{} ── {}\n{}\n",
-                connector.name,
-                connector.description,
-                connector.declarations.trim_end()
-            ));
+        for connector in self.visible(policy) {
+            out.push_str(&connector_brief(connector));
             out.push('\n');
         }
         out
     }
+
+    /// BM25 search over the catalog, keeping only connectors the policy makes
+    /// visible, then truncating to `limit`.
+    pub fn search(&self, query: &str, limit: usize, policy: Option<&Policy>) -> Vec<Hit> {
+        self.search
+            .ranked(query)
+            .into_iter()
+            .filter_map(|(index, _)| self.search.documents().get(index))
+            .filter(|document| policy.is_none_or(|policy| policy.allows(&document.connector)))
+            .take(limit)
+            .map(Document::hit)
+            .collect()
+    }
+}
+
+/// One connector's TypeScript declarations, with the header the brief uses.
+pub fn connector_brief(connector: &Connector) -> String {
+    format!(
+        "// ── tools.{} ── {}\n{}\n",
+        connector.name,
+        connector.description,
+        connector.declarations.trim_end()
+    )
+}
+
+/// Content revision of the connector roots: a hash over every file a load
+/// reads (manifests, TypeScript and the shared declarations), in a
+/// deterministic order. Missing roots contribute nothing, so a root that is
+/// not mounted does not change what a load would do.
+pub fn revision(roots: &[PathBuf]) -> Result<String> {
+    let mut hash = Sha256::new();
+    for (ordinal, root) in roots.iter().enumerate() {
+        if !root.is_dir() {
+            continue;
+        }
+        // Overlay order decides shadowing, so it is part of the content.
+        hash.update(ordinal.to_be_bytes());
+        for file in root_files(root)? {
+            let relative = file.strip_prefix(root).unwrap_or(&file);
+            hash.update(relative.to_string_lossy().as_bytes());
+            hash.update([0]);
+            hash.update(
+                std::fs::read(&file).wrap_err_with(|| format!("reading {}", file.display()))?,
+            );
+            hash.update([0]);
+        }
+    }
+    Ok(hex::encode(hash.finalize())[..REVISION_CHARS].to_owned())
+}
+
+/// The files under one root that a load depends on, sorted by path.
+fn root_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(root)
+        .wrap_err_with(|| format!("reading connector root {}", root.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    entries.sort();
+    let mut files = Vec::new();
+    for entry in entries {
+        if entry.is_dir() {
+            // A connector directory, or the shared `_lib` modules.
+            let named = entry.file_name().and_then(|name| name.to_str());
+            if named != Some(LIB_DIR) && !entry.join(MANIFEST).is_file() {
+                continue;
+            }
+            let mut nested: Vec<PathBuf> = std::fs::read_dir(&entry)
+                .wrap_err_with(|| format!("reading {}", entry.display()))?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_file() && (path.ends_with(MANIFEST) || is_typescript(path)))
+                .collect();
+            nested.sort();
+            files.extend(nested);
+        } else if is_typescript(&entry) {
+            // `centaur.d.ts` and any other root-level declarations.
+            files.push(entry);
+        }
+    }
+    Ok(files)
+}
+
+fn is_typescript(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "ts")
 }
 
 /// The shared module an import names, if it names one: `../_lib/<name>` from
@@ -504,6 +630,39 @@ fn render(
         .join("\n")
 }
 
+/// Which connectors a request may see: the deployment-wide tool filter api-rs
+/// sends with each request. An entry matches a connector only when it equals
+/// the connector's name exactly, so `google-docs` does not match `google_docs`.
+/// No policy, or neither list set, means every connector. Nothing here
+/// authorizes a credential: iron-proxy only injects what a principal holds.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Policy {
+    #[serde(default)]
+    pub allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub blocklist: Option<Vec<String>>,
+}
+
+impl Policy {
+    /// An allowlist only, from the CLI's `--tools` or the request's `tools`.
+    pub fn from_allowlist(names: Vec<String>) -> Self {
+        Self {
+            allowlist: Some(names),
+            blocklist: None,
+        }
+    }
+
+    /// Not blocklisted, and allowlisted when there is an allowlist.
+    pub fn allows(&self, name: &str) -> bool {
+        let listed = |entries: &Option<Vec<String>>| {
+            entries
+                .as_deref()
+                .is_some_and(|entries| entries.iter().any(|entry| entry == name))
+        };
+        !listed(&self.blocklist) && (self.allowlist.is_none() || listed(&self.allowlist))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,28 +790,101 @@ export async function f(args: { n: number }, ctx: Ctx): Promise<{ n: number }> {
         );
     }
 
+    const ECHO: &str = r#"
+import type { Ctx } from "../centaur";
+
+/** Echo the args back. */
+export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: string }> { return { text: args.text }; }
+"#;
+
+    fn write_connector(dir: &Path, description: &str) {
+        let connector = dir.join("demo");
+        std::fs::create_dir_all(&connector).unwrap();
+        std::fs::write(
+            connector.join(MANIFEST),
+            format!("description = \"{description}\"\n"),
+        )
+        .unwrap();
+        std::fs::write(connector.join(ENTRY), ECHO).unwrap();
+    }
+
     #[test]
-    fn rejects_unannotated_exports() {
-        let error = compile(
+    fn a_missing_root_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("connectors");
+        write_connector(&root, "Demo");
+        let missing = dir.path().join("not-mounted");
+
+        let catalog = Catalog::load(&[missing.clone(), root.clone()]).unwrap();
+        assert_eq!(catalog.connectors.len(), 1);
+        assert_eq!(
+            revision(std::slice::from_ref(&missing)).unwrap(),
+            revision(&[]).unwrap(),
+            "an unmounted root contributes no content"
+        );
+        assert!(
+            Catalog::load(&[missing]).unwrap().connectors.is_empty(),
+            "startup emptiness is the caller's error to raise"
+        );
+    }
+
+    #[test]
+    fn the_revision_tracks_the_files_a_load_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("connectors");
+        write_connector(&root, "Demo");
+        let roots = std::slice::from_ref(&root);
+        let before = revision(roots).unwrap();
+        assert_eq!(before.len(), REVISION_CHARS);
+        assert_eq!(before, revision(roots).unwrap(), "deterministic");
+
+        // A file a load does not read does not matter.
+        std::fs::write(root.join("demo/notes.md"), "not compiled").unwrap();
+        assert_eq!(before, revision(roots).unwrap());
+
+        write_connector(&root, "Changed");
+        assert_ne!(before, revision(roots).unwrap());
+    }
+
+    #[test]
+    fn rejects_invalid_exports() {
+        let unannotated = compile(
             "export async function f(args: { a: string }) { return 1; }",
             Path::new("index.ts"),
         )
         .err()
         .unwrap();
         assert!(
-            error.to_string().contains("explicit annotations"),
-            "{error}"
+            unannotated.to_string().contains("explicit annotations"),
+            "{unannotated}"
         );
-    }
 
-    #[test]
-    fn rejects_sync_exports() {
-        let error = compile(
+        let synchronous = compile(
             "export function f(args: { a: string }): number { return 1; }",
             Path::new("index.ts"),
         )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("must be async"), "{error}");
+        assert!(
+            synchronous.to_string().contains("must be async"),
+            "{synchronous}"
+        );
+    }
+
+    #[test]
+    fn the_policy_matches_names_exactly() {
+        let policy = |allowlist: Option<&[&str]>, blocklist: &[&str]| Policy {
+            allowlist: allowlist.map(|names| names.iter().map(|name| (*name).to_owned()).collect()),
+            blocklist: Some(blocklist.iter().map(|name| (*name).to_owned()).collect()),
+        };
+        assert!(Policy::default().allows("slack"));
+        let filter = policy(Some(&["slack"]), &["dune"]);
+        assert!(filter.allows("slack") && !filter.allows("dune") && !filter.allows("linear"));
+        assert!(
+            !policy(Some(&["dune"]), &["dune"]).allows("dune"),
+            "blocklist wins"
+        );
+        assert!(!policy(Some(&["google-docs"]), &[]).allows("google_docs"));
+        assert!(!policy(Some(&["Slack"]), &[]).allows("slack"));
     }
 }
