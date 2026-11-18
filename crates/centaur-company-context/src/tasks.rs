@@ -7,6 +7,7 @@ use std::{
 
 use absurd::{Client as AbsurdClient, Error as AbsurdError, SpawnOptions, TaskContext};
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -20,7 +21,7 @@ use crate::{
         Config, DOCUMENT_DELETE_TASK, DOCUMENT_EMBED_TASK, DOCUMENT_EXTRACT_TASK,
         DRIVE_CREDENTIALS_RECONCILE_TASK, DRIVE_SCAN_TASK, GOOGLE_DOC_MIME_TYPE,
         GOOGLE_DRIVE_DOCUMENT_ID_PREFIX, PDF_MIME_TYPE, SHARED_DRIVE_SCAN_TASK,
-        SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK,
+        SHARED_DRIVES_DISCOVER_TASK, SHARED_FOLDERS_BATCH_TASK, TASK_RETRY_INTERVAL,
     },
     credentials::{ConsoleCredentials, GoogleCredential, GoogleProduct},
     custom_documents,
@@ -315,16 +316,139 @@ async fn reconcile_credentials(
             )
             .await?;
     }
+    let embeddings_enqueued = spawn_due_embeddings(state).await?;
     info!(
         event = "company_context_credentials_reconciled",
         task_id = ctx.task_id(),
         observations_deactivated = stale_observations,
-        files_enqueued = deletions.len()
+        files_enqueued = deletions.len(),
+        embeddings_enqueued
     );
     Ok(TaskSummary {
         status: "completed",
-        files: deletions.len(),
+        files: deletions.len() + embeddings_enqueued,
     })
+}
+
+/// Files enqueued again for embedding per reconciliation; the rest wait for
+/// the next one.
+const DUE_EMBEDDINGS_PER_RUN: i64 = 1000;
+
+/// An extracted file whose publication has not finished and was not requested
+/// within the retry interval, with a credential that still observes it.
+#[derive(Debug, PartialEq)]
+struct DueEmbedding {
+    file_id: String,
+    content_hash: String,
+    observation_key: String,
+    credential_id: i64,
+}
+
+async fn due_embeddings(pool: &PgPool) -> Result<Vec<DueEmbedding>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT files.file_id, files.content_hash, files.observation_key,
+               observers.broker_credential_id
+        FROM company_context_system.google_drive_files files
+        CROSS JOIN LATERAL (
+            SELECT observations.broker_credential_id
+            FROM company_context_data.google_drive_broker_observations observations
+            WHERE observations.file_id = files.file_id
+              AND observations.active
+            ORDER BY observations.last_seen_at DESC, observations.broker_credential_id
+            LIMIT 1
+        ) observers
+        WHERE files.extraction_status = 'completed'
+          AND files.embedding_status IN ('pending', 'failed')
+          AND (
+              files.task_requested_at IS NULL
+              OR files.task_requested_at < NOW() - INTERVAL '{TASK_RETRY_INTERVAL}'
+          )
+        ORDER BY files.task_requested_at NULLS FIRST, files.file_id
+        LIMIT $1
+        "#
+    ))
+    .bind(DUE_EMBEDDINGS_PER_RUN)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(DueEmbedding {
+                file_id: row.try_get("file_id")?,
+                content_hash: row.try_get("content_hash")?,
+                observation_key: row.try_get("observation_key")?,
+                credential_id: row.try_get("broker_credential_id")?,
+            })
+        })
+        .collect()
+}
+
+/// Records that a due file's embedding is being enqueued. Returns the time of
+/// the request, which distinguishes the task from earlier ones, or `None` if
+/// the file changed or another reconciliation requested it first.
+async fn claim_embedding(pool: &PgPool, file: &DueEmbedding) -> Result<Option<DateTime<Utc>>> {
+    Ok(sqlx::query_scalar(&format!(
+        r#"
+        UPDATE company_context_system.google_drive_files
+        SET task_requested_at = NOW()
+        WHERE file_id = $1
+          AND observation_key = $2
+          AND content_hash = $3
+          AND extraction_status = 'completed'
+          AND embedding_status IN ('pending', 'failed')
+          AND (
+              task_requested_at IS NULL
+              OR task_requested_at < NOW() - INTERVAL '{TASK_RETRY_INTERVAL}'
+          )
+        RETURNING task_requested_at
+        "#
+    ))
+    .bind(&file.file_id)
+    .bind(&file.observation_key)
+    .bind(&file.content_hash)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Enqueues the embedding of extracted files whose publication has not
+/// finished within the retry interval, such as those whose task exhausted its
+/// attempts while the embeddings API refused requests. Each is embedded from
+/// the chunks extraction staged, so nothing is downloaded again.
+async fn spawn_due_embeddings(state: &TaskState) -> Result<usize> {
+    let mut spawned = 0;
+    for file in due_embeddings(&state.pool).await? {
+        let Some(requested_at) = claim_embedding(&state.pool, &file).await? else {
+            continue;
+        };
+        let attempt = requested_at.timestamp_micros();
+        state
+            .absurd
+            .spawn(
+                DOCUMENT_EMBED_TASK,
+                EmbedParams {
+                    credential_id: file.credential_id,
+                    // Embedding reads only the staged chunks; the revision
+                    // identifies the extraction, which a retry does not repeat.
+                    credential_revision: String::new(),
+                    file_id: file.file_id.clone(),
+                    content_hash: file.content_hash.clone(),
+                    observation_key: file.observation_key.clone(),
+                },
+                SpawnOptions {
+                    idempotency_key: Some(format!(
+                        "drive.document.embed:retry:{}:{}:{}:{}:{attempt}",
+                        file.file_id,
+                        file.content_hash,
+                        state.embeddings.model(),
+                        file.observation_key
+                    )),
+                    ..SpawnOptions::default()
+                },
+            )
+            .await?;
+        spawned += 1;
+    }
+    Ok(spawned)
 }
 
 async fn scan_drive(
@@ -1094,6 +1218,8 @@ async fn extract_document(
                 extraction_status = 'completed',
                 embedding_status = 'pending',
                 last_error = '',
+                -- The embed task enqueued next gets a full retry interval.
+                task_requested_at = NOW(),
                 updated_at = NOW()
             WHERE file_id = $1
               AND observation_key = $2
@@ -1901,5 +2027,95 @@ mod tests {
     fn errors_are_bounded() {
         let error = anyhow!("{}", "x".repeat(2_000));
         assert_eq!(bounded_error(&error).len(), 1_000);
+    }
+
+    #[tokio::test]
+    async fn unpublished_files_are_enqueued_again_once_overdue() {
+        use sqlx::Executor;
+
+        use crate::test_support::TestDatabase;
+
+        let Ok(database_url) = std::env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "drive_embed_retries").await;
+        let pool = &database.pool;
+
+        // F1's embedding failed and was never requested again; F2 was just
+        // extracted and its embedding requested; the rest are not due.
+        pool.execute(
+            r#"
+            INSERT INTO company_context_system.google_drive_files
+                (file_id, observation_key, content_hash, extraction_status, embedding_status, task_requested_at)
+            VALUES
+                ('F1', 'file:F1:v1', 'hash-1', 'completed', 'failed', NULL),
+                ('F2', 'file:F2:v1', 'hash-2', 'completed', 'pending', NOW()),
+                ('F3', 'file:F3:v1', 'hash-3', 'completed', 'completed', NULL),
+                ('F4', 'file:F4:v1', 'hash-4', 'completed', 'rejected', NULL),
+                ('F5', 'file:F5:v1', '', 'pending', 'pending', NULL),
+                ('F6', 'file:F6:v1', 'hash-6', 'completed', 'failed', NULL);
+            INSERT INTO company_context_data.google_drive_broker_observations
+                (broker_credential_id, file_id, observation_key, active, last_seen_at)
+            VALUES
+                (1, 'F1', 'file:F1:v1', TRUE, NOW() - INTERVAL '1 day'),
+                (2, 'F1', 'file:F1:v1', TRUE, NOW()),
+                (3, 'F1', 'file:F1:v1', FALSE, NOW() + INTERVAL '1 day'),
+                (1, 'F2', 'file:F2:v1', TRUE, NOW()),
+                (1, 'F3', 'file:F3:v1', TRUE, NOW()),
+                (1, 'F4', 'file:F4:v1', TRUE, NOW()),
+                (1, 'F5', 'file:F5:v1', TRUE, NOW()),
+                (1, 'F6', 'file:F6:v1', FALSE, NOW());
+            "#,
+        )
+        .await
+        .unwrap();
+        let f1 = DueEmbedding {
+            file_id: "F1".to_owned(),
+            content_hash: "hash-1".to_owned(),
+            observation_key: "file:F1:v1".to_owned(),
+            credential_id: 2,
+        };
+        // Only F1 is due, through the credential that saw it most recently;
+        // F6 waits for reconciliation to remove it.
+        assert_eq!(due_embeddings(pool).await.unwrap(), [f1]);
+
+        // Requesting F1 holds it for the retry interval.
+        let [file] = due_embeddings(pool).await.unwrap().try_into().unwrap();
+        let first = claim_embedding(pool, &file).await.unwrap().unwrap();
+        assert!(claim_embedding(pool, &file).await.unwrap().is_none());
+        assert!(due_embeddings(pool).await.unwrap().is_empty());
+
+        // An overdue request is due again and gets a new attempt, as does
+        // the freshly extracted F2 once its first task is overdue.
+        pool.execute(
+            "UPDATE company_context_system.google_drive_files SET task_requested_at = NOW() - INTERVAL '2 hours'",
+        )
+        .await
+        .unwrap();
+        let due: Vec<String> = due_embeddings(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|file| file.file_id)
+            .collect();
+        assert_eq!(due, ["F1", "F2"]);
+        let second = claim_embedding(pool, &file).await.unwrap().unwrap();
+        assert!(second > first);
+
+        // A file extracted again since it was listed is not claimed with the
+        // old content.
+        pool.execute(
+            r#"
+            UPDATE company_context_system.google_drive_files
+            SET content_hash = 'hash-1b', task_requested_at = NULL
+            WHERE file_id = 'F1'
+            "#,
+        )
+        .await
+        .unwrap();
+        assert!(claim_embedding(pool, &file).await.unwrap().is_none());
+
+        database.drop().await;
     }
 }
