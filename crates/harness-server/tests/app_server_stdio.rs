@@ -1,6 +1,7 @@
+mod support;
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+use support::write_executable;
 
 const LONG_PROMPT: &str = "Write exactly 24 lines. Each line must be 'LONG_STREAM_DELTA_LINE_N: abcdefghijklmnopqrstuvwxyz 0123456789' where N is 01 through 24. Do not use markdown, bullets, tools, or extra text.";
 
@@ -324,12 +327,7 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_when_model_is_configured() {
     let fake_codex = temp_path("fake-openrouter-codex.sh");
     let fake_codex_log = temp_path("fake-openrouter-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
         Harness::Codex,
@@ -386,12 +384,7 @@ fn fake_codex_blocks_mode_uses_openrouter_provider_for_explicit_model_slug() {
     let fake_codex = temp_path("fake-openrouter-flag-codex.sh");
     let fake_codex_log = temp_path("fake-openrouter-flag-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
@@ -451,12 +444,7 @@ fn fake_codex_blocks_mode_resumes_thread_on_the_configured_model() {
     let fake_codex = temp_path("fake-resume-model-codex.sh");
     let fake_codex_log = temp_path("fake-resume-model-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
         Harness::Codex,
@@ -510,12 +498,7 @@ fn fake_codex_blocks_mode_uses_bedrock_provider_when_selected() {
     let fake_codex = temp_path("fake-bedrock-codex.sh");
     let fake_codex_log = temp_path("fake-bedrock-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
@@ -636,7 +619,7 @@ fn blocks_mode_runs_session_prompt_hooks_once_before_the_harness_starts() {
     let prompt = temp_path("session-prompt.md");
     let runs = temp_path("session-prompt-runs.log");
     let composer = temp_path("fake-compose-system-prompt.sh");
-    std::fs::write(
+    write_executable(
         &composer,
         format!(
             concat!(
@@ -648,13 +631,7 @@ fn blocks_mode_runs_session_prompt_hooks_once_before_the_harness_starts() {
             runs = shell_quote(&runs),
             prompt = shell_quote(&prompt),
         ),
-    )
-    .expect("write fake composer");
-    let mut permissions = std::fs::metadata(&composer)
-        .expect("composer metadata")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    );
     let fake_claude = format!(
         concat!(
             "text=$(cat {prompt}); ",
@@ -704,7 +681,7 @@ fn blocks_mode_recomposes_the_prompt_without_hook_output() {
     std::fs::write(&prompt, "boot").expect("write boot prompt");
     let runs = temp_path("session-prompt-no-hook-runs.log");
     let composer = temp_path("fake-compose-system-prompt-no-hook.sh");
-    std::fs::write(
+    write_executable(
         &composer,
         format!(
             concat!(
@@ -715,13 +692,7 @@ fn blocks_mode_recomposes_the_prompt_without_hook_output() {
             runs = shell_quote(&runs),
             prompt = shell_quote(&prompt),
         ),
-    )
-    .expect("write fake composer");
-    let mut permissions = std::fs::metadata(&composer)
-        .expect("composer metadata")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    std::fs::set_permissions(&composer, permissions).expect("chmod fake composer");
+    );
     let fake_claude = format!(
         concat!(
             "text=$(cat {prompt}); ",
@@ -889,12 +860,7 @@ fn fake_codex_blocks_mode_spawns_app_server_and_translates_user_blocks() {
     let fake_codex = temp_path("fake-codex.sh");
     let fake_codex_log = temp_path("fake-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
@@ -954,12 +920,7 @@ fn fake_codex_blocks_mode_queues_active_turns_in_order() {
     let fake_codex = temp_path("fake-queued-codex.sh");
     let fake_codex_log = temp_path("fake-queued-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
         Harness::Codex,
@@ -1022,12 +983,7 @@ fn fake_codex_blocks_mode_interrupts_active_turn() {
     let fake_codex = temp_path("fake-interruptible-codex.sh");
     let fake_codex_log = temp_path("fake-interruptible-codex-requests.jsonl");
     let script = fake_codex_interruptible_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
@@ -1089,12 +1045,7 @@ fn fake_codex_blocks_mode_steers_active_turn() {
     let fake_codex = temp_path("fake-steerable-codex.sh");
     let fake_codex_log = temp_path("fake-steerable-codex-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
         Harness::Codex,
@@ -1421,12 +1372,7 @@ fn fake_codex_blocks_mode_forwards_traceparent_to_app_server_requests() {
     let fake_codex = temp_path("fake-codex-trace.sh");
     let fake_codex_log = temp_path("fake-codex-trace-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01";
     let mut bridge = BridgeProcess::spawn_harness_blocks(
@@ -1480,12 +1426,7 @@ fn fake_codex_blocks_mode_forwards_reasoning_as_turn_start_effort() {
     let fake_codex = temp_path("fake-codex-effort.sh");
     let fake_codex_log = temp_path("fake-codex-effort-requests.jsonl");
     let script = fake_codex_app_server_script(&fake_codex_log);
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex)
-        .expect("fake codex metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+    write_executable(&fake_codex, script);
 
     let mut bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
@@ -3119,10 +3060,7 @@ fn fake_codex_handles_resolved_and_unresolved_citations_in_both_modes() {
                 &format!("\"items\":[{sources},{{\"type\":\"agentMessage\""),
             );
         }
-        std::fs::write(&fake_codex, script).expect("write fake codex script");
-        let mut permissions = std::fs::metadata(&fake_codex).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_codex, permissions).unwrap();
+        write_executable(&fake_codex, script);
         let extra_env = Some(("CODEX_BIN", fake_codex.to_str().unwrap()));
         let mut bridge = if blocks {
             BridgeProcess::spawn_harness_blocks(Harness::Codex, None, extra_env)
@@ -3186,8 +3124,7 @@ fn spawn_fake_codex_recovery(name: &str) -> (BridgeProcess, PathBuf, PathBuf) {
             "      fi\n      ;;",
             "      fi\n      case \"$line\" in *'exit after turn'*) exit 0;; esac\n      ;;",
         );
-    std::fs::write(&fake_codex, script).unwrap();
-    std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&fake_codex, script);
     let bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
         None,
@@ -3227,7 +3164,7 @@ fn track_fake_codex_thread_providers(fake_codex: &Path) {
         script.contains("tid=\"$tid.$provider\""),
         "fake app-server fork patch did not apply"
     );
-    std::fs::write(fake_codex, script).unwrap();
+    write_executable(fake_codex, script);
 }
 
 fn read_requests(log: &Path) -> Vec<Value> {
@@ -3655,10 +3592,7 @@ fn fake_codex_blocks_mode_filters_child_and_stale_notifications_across_queued_tu
             "      fi\n      ;;",
             &format!("      fi\n{replay}\n      ;;"),
         );
-    std::fs::write(&fake_codex, script).expect("write fake codex script");
-    let mut permissions = std::fs::metadata(&fake_codex).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_codex, permissions).unwrap();
+    write_executable(&fake_codex, script);
     let mut bridge = BridgeProcess::spawn_harness_blocks(
         Harness::Codex,
         None,

@@ -614,6 +614,8 @@ export async function resolve_url(args: { url: string }, ctx: Ctx): Promise<{ do
  * `mime_type`. Hand that `path` to the analysis functions instead of the URL
  * to avoid downloading it again. Accepted hosts: share.firefox.dev, profiler.firefox.com and
  * storage.googleapis.com.
+ *
+ * @requires files
  */
 export async function fetch_profile(
   args: { url: string; path?: string },

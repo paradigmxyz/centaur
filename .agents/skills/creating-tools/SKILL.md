@@ -1,248 +1,185 @@
 ---
 name: creating-tools
-description: "Scaffold and build new tool integrations in tools/. Use when asked to create a new tool, add an API integration, or build a new client for an external service."
+description: "Scaffold and build new Code Mode connectors in connectors/. Use when asked to create a new tool or connector, add an API integration, or build a new client for an external service."
 ---
 
-# Creating Tools
+# Creating Connectors
 
-A tool is an independently packaged Python CLI under `tools/<category>/<name>/`
-(categories: `business`, `comms`, `crypto`, `infra`, `media`, `productivity`,
-`research`). api-rs reads its `pyproject.toml` for secret grants, and sandboxes
-install its `[project.scripts]` entry as a CLI shim. Agents use it through
-`centaur-tools list`, `<tool> --help`, and the CLI itself; there is no HTTP
-tool-method API.
+New integrations are Code Mode connectors, not Python CLIs under `tools/`. A
+connector is a directory `connectors/<name>/` holding a `connector.toml` and an
+`index.ts`; every exported async function in `index.ts` is a tool. Agents find
+and call them through `centaur-codemode search`, `load` and `exec` (the MCP
+tools `centaur_catalog_search`, `centaur_catalog_load` and `centaur_execute`),
+writing one JavaScript cell that calls `tools.<name>.<fn>(args)`.
 
-Read `docs/pages/extend/tools.mdx` for the full `[tool.centaur]` secret
-reference. Copy the shape of a recent tool such as `tools/productivity/luma`
-or `tools/research/pangram` rather than inventing a new layout.
+Read `crates/centaur-codemode/README.md` first: it is the contract for the
+runtime, `ctx`, files, websockets, limits and security invariants. Read
+`connectors/centaur.d.ts` for the `Ctx`, `Response`, `RequestInit` and `Files`
+types. Copy the shape of a recent connector such as `connectors/pangram`
+(small) or `connectors/luma` (pagination plus a generic `request` escape hatch)
+rather than inventing a new layout.
 
 ## Layout
 
 ```
-tools/<category>/<name>/
-├── pyproject.toml   # metadata, [project.scripts], wheel mapping, [tool.centaur]
-├── __init__.py      # one-line docstring
-├── client.py        # API client class + _client() factory
-├── cli.py           # thin Typer CLI over the client, with a `health` command
-├── test_client.py   # client tests against httpx.MockTransport
-└── test_cli.py      # CLI tests with typer.testing.CliRunner
+connectors/<name>/
+├── connector.toml   # description and secrets
+└── index.ts         # exported async functions are the tools
+connectors/_lib/     # helpers shared by connectors (http.ts, files.ts, ...)
 ```
 
-## pyproject.toml
+- `<name>` is snake_case (`google_docs`, `token_terminal`). It is the name a
+  principal's tool allowlist/blocklist matches exactly.
+- Discovery is automatic: the Code Mode image copies `connectors/`, and the
+  runtime reloads connector roots on change. There is no registry to edit.
+- Put organization-specific connectors in an overlay repo
+  (`overlays.sources[*].connectorsSubdir`, default `connectors`; see
+  `docs/pages/extend/overlay.mdx`). A later root shadows an earlier one.
+
+## connector.toml
+
+Same schema as a tool's `[tool.centaur]` block (`docs/pages/extend/tools.mdx`
+is the full secret reference): `description`, `secrets`, `optional_secrets`.
 
 ```toml
-[project]
-name = "<name>"
-description = "<One-line description>"
-version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = [
-    "httpx>=0.27.0",
-    "typer>=0.12.0",
-]
+description = "<Name>: <what it reads and writes, in one line>"
 
-[project.scripts]
-<name> = "centaur_tool_<module>.cli:app"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["."]
-
-[tool.hatch.build.targets.wheel.sources]
-"." = "centaur_tool_<module>"
-
-[tool.centaur]
-module = "client.py"
 secrets = [
-    {type = "http", name = "<NAME>_API_KEY", match_headers = ["Authorization"], hosts = ["api.example.com"]},
+    {type = "http", name = "<NAME>_API_KEY", mode = "inject", inject_header = "x-api-key", hosts = ["api.example.com"]},
 ]
 ```
 
-- `[project.scripts]` is required for the tool to be visible to agents. Name
-  the package `centaur_tool_<module>`, where `<module>` is the tool name in
-  snake_case, so it cannot shadow an installed dependency. The wheel
-  `packages`/`sources` mapping must match the script's package;
-  `scripts/validate_cli_packaging.py` checks this in CI.
-- Declare every credential in `secrets` (or `optional_secrets`) with the
-  narrowest `hosts` list. Omit `secrets` for public APIs.
-- Add dependencies only when needed. Use `httpx`, never `requests`: httpx
-  honors the proxy that iron-proxy relies on.
+- The description feeds catalog search, so name the nouns and verbs an agent
+  would search for.
+- Prefer `mode = "inject"`: iron-proxy adds the header on the wire and the
+  connector needs no placeholder. Use `inject_formatter = "Bearer {{ .Value }}"`
+  for bearer tokens. Give each secret the narrowest `hosts` list.
+- Omit `secrets` for public APIs.
 
-## client.py
+## index.ts
 
-- Get credentials with `from centaur_sdk import secret` and `secret("KEY")`. In
-  a sandbox this returns a placeholder that iron-proxy swaps for the real value
-  on the allowed hosts. Never use `os.getenv`/`os.environ` or `load_dotenv`;
-  `tools/ruff.toml` bans them.
-- One client class. Public methods are the tool's operations; prefix helpers
-  with `_`. Add type hints and a docstring to each public method.
-- Raise on HTTP errors (`response.raise_for_status()`) and validate response
-  shape at the boundary.
-- Support `close()` and the context-manager protocol, and end the module with a
-  `_client()` factory.
+```ts
+import type { Ctx } from "../centaur";
+import { query, readJson } from "../_lib/http";
 
-```python
-"""Client for the <Name> API."""
+// <Name> API (api.example.com). Responses are passed through unchanged.
 
-from __future__ import annotations
+const BASE = "https://api.example.com";
 
-from typing import Any
+/** An item. Lists the fields worth knowing; the API may send more. */
+export interface Item {
+  id: string;
+  name?: string;
+  [field: string]: unknown;
+}
 
-import httpx
+/** A page of items; pass `next_cursor` back as `cursor` for the next page. */
+export interface ItemList {
+  items: Item[];
+  next_cursor?: string | null;
+  [field: string]: unknown;
+}
 
-from centaur_sdk import secret
+async function request(ctx: Ctx, path: string, init?: { method?: string; body?: unknown }): Promise<any> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  // Behind iron-proxy the key is injected on the wire; locally it may come from the env.
+  if (ctx.env.EXAMPLE_API_KEY) headers["x-api-key"] = ctx.env.EXAMPLE_API_KEY;
+  if (init?.body !== undefined) headers["content-type"] = "application/json";
+  const res = await ctx.fetch(`${BASE}${path}`, {
+    method: init?.method ?? "GET",
+    headers,
+    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+  return readJson(res, "<Name>");
+}
 
-BASE_URL = "https://api.example.com"
-
-
-class <Name>Client:
-    def __init__(self, api_key: str | None = None, timeout: float = 30.0) -> None:
-        self._api_key = api_key
-        self.timeout = timeout
-        self._client: httpx.Client | None = None
-
-    @property
-    def client(self) -> httpx.Client:
-        if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
-        return self._client
-
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self._api_key or secret('<NAME>_API_KEY')}"}
-        response = self.client.request(method, f"{BASE_URL}{path}", headers=headers, **kwargs)
-        response.raise_for_status()
-        result = response.json()
-        if not isinstance(result, dict):
-            raise RuntimeError("<Name> returned an unexpected response.")
-        return result
-
-    def search(self, query: str, limit: int = 10) -> dict[str, Any]:
-        """Search for items."""
-        return self._request("GET", "/search", params={"q": query, "limit": limit})
-
-    def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
-
-    def __enter__(self) -> <Name>Client:
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.close()
-
-
-def _client() -> <Name>Client:
-    return <Name>Client()
+/**
+ * Search items by `query`. Returns up to `limit` (default 10) items and a `next_cursor`
+ * for the next page.
+ */
+export async function search_items(
+  args: { query: string; limit?: number; cursor?: string },
+  ctx: Ctx,
+): Promise<ItemList> {
+  return request(ctx, `/items${query({ q: args.query, limit: args.limit ?? 10, cursor: args.cursor })}`);
+}
 ```
 
-## cli.py
+Rules the loader and type checker enforce:
 
-- Keep it thin: parse arguments, call one client method, and print JSON to
-  stdout with `typer.echo(json.dumps(...))`.
-- Catch expected errors, print a short message to stderr, and exit 1. Never
-  echo response bodies or headers from failed requests; they can contain
-  credentials.
-- Provide `health`: make one cheap authenticated read and print
-  `{"ok": bool, "tool": "<name>", "error": str | null, "details": {...}}`,
-  exiting 1 when `ok` is false. The `tool-health-smoke` skill runs it on every
-  tool.
+- Each export has the signature `(args, ctx: Ctx)` with explicit parameter and
+  return types (`isolatedDeclarations`) and a JSDoc comment, which becomes the
+  description in the brief. Tools with no arguments take
+  `_args: Record<string, never>`.
+- Imports are limited to `import type ... from "../centaur"` and
+  `../_lib/<name>`. Anything else fails at load. There is no npm, no Node API
+  and no global `fetch`; use `ctx.fetch`, `ctx.websocket`, `ctx.sleep`,
+  `ctx.base64`, `ctx.gzip`/`gunzip` and `ctx.files`.
+- Declare exported types in the connector itself; the brief shows each
+  connector's declarations alone.
+- Return objects, not bare arrays.
 
-```python
-"""Command-line interface for the <Name> API."""
+Conventions:
 
-from __future__ import annotations
+- Return upstream data as the API sends it. Unwrap envelopes and turn API
+  errors into thrown errors (`readJson` does both), but don't rename or coerce
+  fields. Interfaces use the vendor's field names and end with
+  `[field: string]: unknown`.
+- Credentials never live in code or `ctx.env` in a deployment; `ctx.env` holds
+  configuration (base URLs) and, for replace-mode secrets, placeholders. Let a
+  base URL be overridden from `ctx.env` when the API has regional or
+  self-hosted endpoints.
+- Functions that produce or consume files take workspace paths and use
+  `requireFiles`, `downloadTo`, `saveBytes` and `multipart` from
+  `_lib/files.ts`. Never pass file contents as base64.
+- Keep error messages short. `readJson` includes up to 1000 characters of the
+  body; don't add response headers.
+- Write JSDoc for an agent: say what each argument means, defaults, units,
+  pagination and terminal states for polling (see `pangram.get_task`). Prefer
+  a few well-documented functions plus a generic `request` escape hatch over
+  wrapping every endpoint.
+- Put a helper in `_lib/` only when a second connector needs it.
 
-import json
-
-import httpx
-import typer
-
-from .client import _client
-
-app = typer.Typer(name="<name>", help="<Description>")
-
-
-def _echo(payload: dict) -> None:
-    typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-
-
-def _error_message(exc: Exception) -> str:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return f"<Name> API error: HTTP {exc.response.status_code}"
-    if isinstance(exc, httpx.HTTPError):
-        return f"<Name> request failed ({type(exc).__name__})."
-    return str(exc)
-
-
-@app.command()
-def health() -> None:
-    """Check authentication and connectivity."""
-    try:
-        with _client() as client:
-            details = client.search("health", limit=1)
-    except (httpx.HTTPError, KeyError, RuntimeError) as exc:
-        _echo({"ok": False, "tool": "<name>", "error": _error_message(exc), "details": {}})
-        raise typer.Exit(1) from None
-    _echo({"ok": True, "tool": "<name>", "error": None, "details": details})
-
-
-@app.command()
-def search(
-    query: str = typer.Argument(..., help="Search query."),
-    limit: int = typer.Option(10, "--limit", "-n", help="Maximum results."),
-) -> None:
-    """Search for items."""
-    try:
-        with _client() as client:
-            _echo(client.search(query, limit=limit))
-    except (httpx.HTTPError, KeyError, RuntimeError) as exc:
-        typer.echo(_error_message(exc), err=True)
-        raise typer.Exit(1) from None
-
-
-if __name__ == "__main__":
-    app()
-```
-
-## Tests
-
-Import the tool as `centaur_tool_<module>`; `.github/scripts/run-tool-tests.sh`
-links the tool directory under that name before running pytest.
-
-- Client: inject `httpx.Client(transport=httpx.MockTransport(handler))` and
-  assert the method, URL, query or body, and auth header the real API expects,
-  plus how responses are parsed. See `tools/research/pangram/test_client.py`.
-- CLI: patch `cli._client`, invoke with `CliRunner`, and check exit codes,
-  JSON output, and that a failed request does not print the response body.
-- Test real behavior such as pagination, polling, and error mapping. Don't add
-  tests that only restate the code.
-
-Checks:
+## Checks
 
 ```bash
-uvx ruff check tools/<category>/<name>
-uvx ruff format --check tools/<category>/<name>
-python scripts/validate_cli_packaging.py
-.github/scripts/run-tool-tests.sh   # runs every tool's tests the way CI does
+pnpm install --frozen-lockfile
+pnpm --filter @centaur/connectors lint
+pnpm --filter @centaur/connectors typecheck
+cargo test -p centaur-codemode      # includes compiling every repository connector
 ```
+
+Then confirm the catalog sees it and a real call works:
+
+```bash
+cargo build -p centaur-codemode
+B=target/debug/centaur-codemode
+$B list | grep <name>
+$B search "<words an agent would use>"
+$B load <name>                      # check the brief reads well
+$B exec --tools <name> <<'EOF'
+return await tools.<name>.search_items({ query: "test", limit: 1 });
+EOF
+```
+
+For a local `exec` against the real API, put the key in the environment from
+the configured secret source (never on the command line or in a file in the
+repo). Inspect `calls[].requests` in the result to confirm the method, URL and
+status of each upstream request.
 
 ## Credentials and verification
 
 1. Store the secret in the deployment's configured secret source under the
-   exact `name` from `pyproject.toml` (see `docs/pages/secrets/`).
-2. Grant it: `centaur-perms ... principals grant <principal> --tool <name>`
-   registers the declared secrets, creates the `tool-<slug>` role, and assigns
-   it. See "Register and Grant a Tool" in
-   `docs/pages/secrets/advanced-permissioning.mdx`.
-3. From a fresh local sandbox, run `centaur-tools list`, `<name> --help`,
-   `<name> health`, and one real command. Configuration alone does not prove
-   access works.
+   exact `name` from `connector.toml` (see `docs/pages/secrets/`).
+2. Create the matching secret in the Console (same name, type, inject header
+   or formatter, and hosts) and grant it to the principal or a
+   `tool-<name>` role. Use the `centaur-console-permissions` skill for the
+   `centaur_console` connector calls, or the Console UI.
+3. From a real sandbox for that principal, run `centaur-codemode load <name>`
+   and one real `exec` call. Configuration alone does not prove access works;
+   a 401 or 403 usually means the secret's name, hosts or inject settings
+   don't match `connector.toml` (see the `auth-failure-log-triage` skill).
 
-If the tool is missing, check the `[project.scripts]` entry, the wheel mapping,
-`[tool.centaur] module = "client.py"`, and the configured `TOOL_DIRS` or
-overlay `toolsSubdir`. Add organization-specific tools to an overlay repo
-instead of this one (`docs/pages/extend/overlay.mdx`).
+If the connector is missing from `list`, check that the directory name matches
+the tool filter, the connector root is in `CENTAUR_CODEMODE_CONNECTORS`, and
+`centaur-codemode list` with `RUST_LOG=info` reports no load error.

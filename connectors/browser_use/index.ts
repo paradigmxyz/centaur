@@ -528,6 +528,8 @@ export async function type_text(
  * Save a screenshot of a tab to the workspace (`path`, default `downloads/browser_use/...`) as
  * `png` (default) or `jpeg`; `full_page` captures beyond the viewport. Tabs only: an iframe
  * target cannot be captured, but it shows in its tab's screenshot. Needs a Centaur sandbox.
+ *
+ * @requires files
  */
 export async function screenshot(
   args: { browser_id: string; path?: string; full_page?: boolean; format?: "png" | "jpeg"; quality?: number; target_id?: string },

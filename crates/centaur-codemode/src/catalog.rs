@@ -5,6 +5,10 @@
 //! live in `_lib/*.ts` next to them and are imported as `../_lib/<name>`. Loading strips TypeScript to
 //! JavaScript for QuickJS and emits declarations (without `tsc`) so the brief
 //! can show typed signatures.
+//!
+//! A function whose JSDoc carries `@requires files` only works with the files
+//! capability. A catalog loaded without it leaves such functions out of
+//! search, the brief and `invoke`, and drops a connector left with none.
 
 use std::{
     collections::BTreeMap,
@@ -35,6 +39,10 @@ const LIB_DIR: &str = "_lib";
 const TYPES_MODULE: &str = "../centaur";
 /// Hex characters of the catalog revision that are kept.
 const REVISION_CHARS: usize = 16;
+/// The JSDoc tag that marks a function as needing the files capability.
+const REQUIRES_FILES_TAG: &str = "@requires files";
+/// `_lib/files.ts` helpers that throw without the files capability.
+const FILES_HELPERS: [&str; 3] = ["requireFiles", "downloadTo", "saveBytes"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +64,9 @@ pub struct Function {
     pub doc: String,
     /// `name(args: {...}): Promise<...>` as cells call it (no `ctx`).
     pub signature: String,
+    /// Tagged `@requires files`: callable only with the files capability.
+    #[serde(skip)]
+    pub requires_files: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -81,14 +92,18 @@ pub struct Catalog {
     /// Content hash of the connector roots this catalog was loaded from.
     /// `/healthz` and `/search` report it; a hot reload compares it.
     pub revision: String,
+    /// Whether this catalog keeps `@requires files` functions.
+    pub files: bool,
     /// One BM25 document per connector function, built with the catalog.
     search: Index,
 }
 
 impl Catalog {
     /// Load every connector under `roots`. Later roots shadow earlier ones by
-    /// connector name, matching overlay order.
-    pub fn load(roots: &[PathBuf]) -> Result<Self> {
+    /// connector name, matching overlay order. `files` is whether the runner
+    /// has the files capability; without it, `@requires files` functions are
+    /// left out.
+    pub fn load(roots: &[PathBuf], files: bool) -> Result<Self> {
         // Hash before reading anything. A file that changes during the load
         // then leaves the recorded revision behind the tree, so the next
         // reload check sees a difference and loads again; hashing afterwards
@@ -134,7 +149,7 @@ impl Catalog {
                 .collect();
             dirs.sort();
             for dir in dirs {
-                let (connector, connector_imports, js) = load_connector(&dir)
+                let (connector, connector_imports, js) = load_connector(&dir, files)
                     .wrap_err_with(|| format!("loading connector {}", dir.display()))?;
                 imports.push((dir.display().to_string(), connector_imports));
                 if let Some((previous, _)) =
@@ -148,6 +163,15 @@ impl Catalog {
                 }
             }
         }
+        // After shadowing, so an overlay that only offers file functions
+        // still hides the connector it shadows.
+        connectors.retain(|name, (connector, _)| {
+            let keep = !connector.functions.is_empty();
+            if !keep {
+                tracing::info!(connector = %name, "every function needs files; leaving the connector out");
+            }
+            keep
+        });
         for (module, imports) in &imports {
             for import in imports {
                 check_import(import, &libs).wrap_err_with(|| format!("in {module}"))?;
@@ -186,6 +210,7 @@ impl Catalog {
             connectors,
             libs: Arc::new(lib_bytecode),
             revision,
+            files,
             search,
         })
     }
@@ -357,7 +382,7 @@ fn imports(program: &oxc::ast::ast::Program<'_>) -> Vec<Import> {
         .collect()
 }
 
-fn load_connector(dir: &Path) -> Result<(Connector, Vec<Import>, String)> {
+fn load_connector(dir: &Path, files: bool) -> Result<(Connector, Vec<Import>, String)> {
     let name = dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -374,9 +399,16 @@ fn load_connector(dir: &Path) -> Result<(Connector, Vec<Import>, String)> {
     )
     .wrap_err("parsing connector.toml")?;
     let source = std::fs::read_to_string(dir.join(ENTRY)).wrap_err("reading index.ts")?;
-    let compiled = compile(&source, &dir.join(ENTRY))?;
-    if compiled.functions.is_empty() {
+    let compiled = compile(&source, &dir.join(ENTRY), files)?;
+    if compiled.exported == 0 {
         bail!("index.ts exports no functions");
+    }
+    // A missing tag only leaves a function visible where it cannot work, so
+    // warn instead of refusing a connector an overlay may ship.
+    for function in &compiled.untagged_files {
+        tracing::warn!(
+            "{name}.{function} always needs the files capability; tag its JSDoc `{REQUIRES_FILES_TAG}`"
+        );
     }
     let connector = Connector {
         name,
@@ -454,7 +486,13 @@ fn describe_js_error(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String 
 
 struct Compiled {
     js: String,
+    /// The functions this catalog offers: all exports, less `@requires
+    /// files` ones when there is no files capability.
     functions: Vec<Function>,
+    /// How many functions the module exports, offered or not.
+    exported: usize,
+    /// Exports that always call a files helper but lack the tag.
+    untagged_files: Vec<String>,
     declarations: String,
     imports: Vec<Import>,
 }
@@ -502,7 +540,7 @@ fn strip_types<'a>(
         .code)
 }
 
-fn compile(source: &str, path: &Path) -> Result<Compiled> {
+fn compile(source: &str, path: &Path, files: bool) -> Result<Compiled> {
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
     let parsed = Parser::new(&allocator, source, source_type).parse();
@@ -511,8 +549,20 @@ fn compile(source: &str, path: &Path) -> Result<Compiled> {
     }
     let mut program = parsed.program;
 
-    let functions = exported_functions(&program, source)?;
+    let mut functions = exported_functions(&program, source)?;
+    let exported = functions.len();
+    let untagged_files = untagged_files_functions(&program, &functions);
     let imports = imports(&program);
+    let hidden: Vec<String> = if files {
+        Vec::new()
+    } else {
+        functions
+            .iter()
+            .filter(|function| function.requires_files)
+            .map(|function| function.name.clone())
+            .collect()
+    };
+    functions.retain(|function| !hidden.contains(&function.name));
 
     let mut dts = IsolatedDeclarations::new(
         &allocator,
@@ -531,6 +581,11 @@ fn compile(source: &str, path: &Path) -> Result<Compiled> {
     dts.program
         .body
         .retain(|statement| !matches!(statement, Statement::ImportDeclaration(_)));
+    dts.program.body.retain(|statement| {
+        !matches!(statement, Statement::ExportDeclaration(export)
+            if matches!(&export.declaration, Declaration::FunctionDeclaration(function)
+                if function.id.as_ref().is_some_and(|id| hidden.iter().any(|name| id.name == name.as_str()))))
+    });
     for statement in dts.program.body.iter_mut() {
         if let Statement::ExportDeclaration(export) = statement
             && let Declaration::FunctionDeclaration(function) = &mut export.declaration
@@ -554,6 +609,8 @@ fn compile(source: &str, path: &Path) -> Result<Compiled> {
     Ok(Compiled {
         js,
         functions,
+        exported,
+        untagged_files,
         declarations,
         imports,
     })
@@ -589,16 +646,17 @@ fn exported_functions(program: &oxc::ast::ast::Program<'_>, source: &str) -> Res
                     .as_ref()
                     .map(|annotation| annotation.span.source_text(source))
                     .unwrap_or(": Promise<unknown>");
-                let doc = program
+                let raw_doc = program
                     .comments
                     .iter()
                     .rfind(|comment| comment.is_jsdoc() && comment.attached_to == export.span.start)
-                    .map(|comment| clean_jsdoc(comment.content_span().source_text(source)))
+                    .map(|comment| comment.content_span().source_text(source))
                     .unwrap_or_default();
                 functions.push(Function {
                     signature: format!("{name}({args}){returns}"),
                     name,
-                    doc,
+                    doc: clean_jsdoc(raw_doc),
+                    requires_files: requires_files(raw_doc),
                 });
             }
             Statement::ExportDefaultDeclaration(_) => {
@@ -610,13 +668,100 @@ fn exported_functions(program: &oxc::ast::ast::Program<'_>, source: &str) -> Res
     Ok(functions)
 }
 
-fn clean_jsdoc(raw: &str) -> String {
+fn jsdoc_lines(raw: &str) -> impl Iterator<Item = &str> {
     raw.trim_start_matches('*')
         .lines()
         .map(|line| line.trim().trim_start_matches('*').trim())
-        .filter(|line| !line.is_empty())
+}
+
+/// The description: the JSDoc without blank lines or the files tag.
+fn clean_jsdoc(raw: &str) -> String {
+    jsdoc_lines(raw)
+        .filter(|line| !line.is_empty() && !is_requires_files(line))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn is_requires_files(line: &str) -> bool {
+    line.strip_prefix(REQUIRES_FILES_TAG)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn requires_files(raw_doc: &str) -> bool {
+    jsdoc_lines(raw_doc).any(is_requires_files)
+}
+
+/// Exported functions whose body always calls a `_lib/files.ts` helper that
+/// throws without the files capability, yet lack the tag. Only top-level
+/// statements count, and not inside a branch or nested function, so a
+/// function that touches files only for some arguments is not flagged. A
+/// helper reached through a local function is not seen either: the tag is
+/// the source of truth, this only catches the common omission.
+fn untagged_files_functions(
+    program: &oxc::ast::ast::Program<'_>,
+    functions: &[Function],
+) -> Vec<String> {
+    use oxc::ast_visit::Visit;
+
+    #[derive(Default)]
+    struct FindsHelper(bool);
+
+    impl<'a> Visit<'a> for FindsHelper {
+        fn visit_call_expression(&mut self, call: &oxc::ast::ast::CallExpression<'a>) {
+            if let oxc::ast::ast::Expression::Identifier(callee) = &call.callee
+                && FILES_HELPERS.contains(&callee.name.as_str())
+            {
+                self.0 = true;
+            }
+            oxc::ast_visit::walk::walk_call_expression(self, call);
+        }
+        // Branches and nested functions run only sometimes.
+        fn visit_conditional_expression(&mut self, _: &oxc::ast::ast::ConditionalExpression<'a>) {}
+        fn visit_logical_expression(&mut self, _: &oxc::ast::ast::LogicalExpression<'a>) {}
+        fn visit_function(
+            &mut self,
+            _: &oxc::ast::ast::Function<'a>,
+            _: oxc::syntax::scope::ScopeFlags,
+        ) {
+        }
+        fn visit_arrow_function_expression(
+            &mut self,
+            _: &oxc::ast::ast::ArrowFunctionExpression<'a>,
+        ) {
+        }
+    }
+
+    let mut untagged = Vec::new();
+    for statement in &program.body {
+        let Statement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let Declaration::FunctionDeclaration(function) = &export.declaration else {
+            continue;
+        };
+        let (Some(id), Some(body)) = (&function.id, &function.body) else {
+            continue;
+        };
+        let tagged = functions
+            .iter()
+            .any(|f| f.name == id.name.as_str() && f.requires_files);
+        if tagged {
+            continue;
+        }
+        let mut finds = FindsHelper::default();
+        for statement in &body.statements {
+            match statement {
+                Statement::ExpressionStatement(_)
+                | Statement::VariableDeclaration(_)
+                | Statement::ReturnStatement(_) => finds.visit_statement(statement),
+                _ => {}
+            }
+        }
+        if finds.0 {
+            untagged.push(id.name.to_string());
+        }
+    }
+    untagged
 }
 
 fn render(
@@ -684,7 +829,7 @@ function helper(x: number): number { return x + 1; }
 
     #[test]
     fn compiles_exports_docs_and_declarations() {
-        let compiled = compile(SOURCE, Path::new("index.ts")).unwrap();
+        let compiled = compile(SOURCE, Path::new("index.ts"), true).unwrap();
         assert_eq!(compiled.functions.len(), 1);
         let function = &compiled.functions[0];
         assert_eq!(function.name, "find_things");
@@ -715,7 +860,7 @@ function helper(x: number): number { return x + 1; }
     #[test]
     fn repository_connectors_compile() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
-        let catalog = Catalog::load(&[root]).unwrap();
+        let catalog = Catalog::load(&[root], true).unwrap();
         for name in ["crunchbase", "slack"] {
             let connector = &catalog.connectors[name];
             assert!(!connector.functions.is_empty(), "{name} exports tools");
@@ -729,6 +874,133 @@ function helper(x: number): number { return x + 1; }
         }
     }
 
+    #[test]
+    fn repository_file_functions_are_tagged() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
+        let mut untagged = Vec::new();
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let dir = entry.unwrap().path();
+            let Ok(source) = std::fs::read_to_string(dir.join(ENTRY)) else {
+                continue;
+            };
+            let compiled = compile(&source, &dir.join(ENTRY), true).unwrap();
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            untagged.extend(
+                compiled
+                    .untagged_files
+                    .iter()
+                    .map(|f| format!("{name}.{f}")),
+            );
+        }
+        assert!(
+            untagged.is_empty(),
+            "tag these `{REQUIRES_FILES_TAG}`: {untagged:?}"
+        );
+
+        let without = Catalog::load(std::slice::from_ref(&root), false).unwrap();
+        let with = Catalog::load(&[root], true).unwrap();
+        assert!(
+            with.connectors["slack"]
+                .functions
+                .iter()
+                .any(|f| f.name == "download_file")
+        );
+        assert!(
+            !without.connectors["slack"]
+                .functions
+                .iter()
+                .any(|f| f.name == "download_file")
+        );
+        assert!(
+            without.connectors["slack"]
+                .functions
+                .iter()
+                .any(|f| f.name == "channels")
+        );
+    }
+
+    const FILES: &str = r#"
+import type { Ctx } from "../centaur";
+import { requireFiles } from "../_lib/files";
+
+/**
+ * Save something.
+ *
+ * @requires files
+ */
+export async function save(args: { path: string }, ctx: Ctx): Promise<{ path: string }> {
+  requireFiles(ctx, "demo.save");
+  return { path: args.path };
+}
+
+/** List things. */
+export async function list(args: {}, ctx: Ctx): Promise<{ n: number }> { return { n: 1 }; }
+
+/** Optionally save; only some arguments need files. */
+export async function maybe(args: { path?: string }, ctx: Ctx): Promise<{}> {
+  if (args.path) requireFiles(ctx, "demo.maybe");
+  return {};
+}
+
+/** Forgot the tag. */
+export async function untagged(args: {}, ctx: Ctx): Promise<{}> {
+  const files = requireFiles(ctx, "demo.untagged");
+  return {};
+}
+"#;
+
+    const FILES_LIB: (&str, &str) = (
+        "files",
+        "export function requireFiles(ctx: any, what: string): any { return ctx.files; }",
+    );
+
+    #[test]
+    fn file_functions_are_hidden_without_the_files_capability() {
+        let compiled = compile(FILES, Path::new("index.ts"), true).unwrap();
+        assert_eq!(compiled.untagged_files, ["untagged"]);
+        let save = &compiled.functions[0];
+        assert!(save.requires_files);
+        assert_eq!(save.doc, "Save something.");
+        assert!(compiled.declarations.contains("function save"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let connector = dir.path().join("demo");
+        std::fs::create_dir_all(&connector).unwrap();
+        std::fs::write(connector.join(MANIFEST), "description = \"Demo\"\n").unwrap();
+        std::fs::write(connector.join(ENTRY), FILES).unwrap();
+        std::fs::create_dir_all(dir.path().join(LIB_DIR)).unwrap();
+        std::fs::write(dir.path().join(LIB_DIR).join("files.ts"), FILES_LIB.1).unwrap();
+        let roots = [dir.path().to_owned()];
+
+        let with = Catalog::load(&roots, true).unwrap();
+        assert_eq!(with.connectors["demo"].functions.len(), 4);
+        assert_eq!(with.search("save something", 8, None)[0].function, "save");
+
+        let without = Catalog::load(&roots, false).unwrap();
+        let demo = &without.connectors["demo"];
+        let names: Vec<&str> = demo.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["list", "maybe", "untagged"]);
+        assert!(
+            !demo.declarations.contains("function save"),
+            "{}",
+            demo.declarations
+        );
+        assert!(demo.declarations.contains("function list"));
+        assert!(
+            without
+                .search("save something", 8, None)
+                .iter()
+                .all(|hit| hit.function != "save")
+        );
+
+        // A connector with only file functions disappears.
+        let only = "import type { Ctx } from \"../centaur\";\n/**\n * Save.\n * @requires files\n */\n\
+                    export async function save(args: {}, ctx: Ctx): Promise<{}> { return {}; }\n";
+        std::fs::write(connector.join(ENTRY), only).unwrap();
+        assert!(Catalog::load(&roots, false).unwrap().connectors.is_empty());
+        assert_eq!(Catalog::load(&roots, true).unwrap().connectors.len(), 1);
+    }
+
     fn load_one(index: &str, libs: &[(&str, &str)]) -> Result<Catalog> {
         let dir = tempfile::tempdir().unwrap();
         let connector = dir.path().join("demo");
@@ -739,7 +1011,7 @@ function helper(x: number): number { return x + 1; }
         for (name, source) in libs {
             std::fs::write(dir.path().join(LIB_DIR).join(format!("{name}.ts")), source).unwrap();
         }
-        Catalog::load(&[dir.path().to_owned()])
+        Catalog::load(&[dir.path().to_owned()], true)
     }
 
     const USES_LIB: &str = r#"
@@ -815,7 +1087,7 @@ export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: st
         write_connector(&root, "Demo");
         let missing = dir.path().join("not-mounted");
 
-        let catalog = Catalog::load(&[missing.clone(), root.clone()]).unwrap();
+        let catalog = Catalog::load(&[missing.clone(), root.clone()], true).unwrap();
         assert_eq!(catalog.connectors.len(), 1);
         assert_eq!(
             revision(std::slice::from_ref(&missing)).unwrap(),
@@ -823,7 +1095,10 @@ export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: st
             "an unmounted root contributes no content"
         );
         assert!(
-            Catalog::load(&[missing]).unwrap().connectors.is_empty(),
+            Catalog::load(&[missing], true)
+                .unwrap()
+                .connectors
+                .is_empty(),
             "startup emptiness is the caller's error to raise"
         );
     }
@@ -851,6 +1126,7 @@ export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: st
         let unannotated = compile(
             "export async function f(args: { a: string }) { return 1; }",
             Path::new("index.ts"),
+            true,
         )
         .err()
         .unwrap();
@@ -862,6 +1138,7 @@ export async function echo(args: { text: string }, ctx: Ctx): Promise<{ text: st
         let synchronous = compile(
             "export function f(args: { a: string }): number { return 1; }",
             Path::new("index.ts"),
+            true,
         )
         .err()
         .unwrap();

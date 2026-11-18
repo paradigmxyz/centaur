@@ -269,6 +269,8 @@ export async function start_video_generation(
  * request, so keep it small — the Gemini API may refuse large inputs or refuse video input for
  * some models, and its error is surfaced as thrown. `prompt` describes the continuation. Returns
  * the long-running operation to poll with `operation_status`.
+ *
+ * @requires files
  */
 export async function start_video_extension(
   args: {
@@ -344,6 +346,8 @@ function videoFilename(uri: string): string {
  * `downloads/veo3/<file id>.mp4`). The runtime streams the body, so the video never passes
  * through the realm and may be up to 100 MiB. Returns the download `uri`, the saved `path`, its
  * `bytes` and `mime_type`.
+ *
+ * @requires files
  */
 export async function download_video(
   args: { uri: string; path?: string },

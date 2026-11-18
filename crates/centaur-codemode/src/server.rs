@@ -348,7 +348,8 @@ export async function wait(args: { ms: number }, ctx: Ctx): Promise<{ waited: nu
         )
         .unwrap();
         std::fs::write(connector.join("index.ts"), CONNECTOR).unwrap();
-        let catalog = crate::catalog::Catalog::load(&[dir.path().join("connectors")]).unwrap();
+        let catalog =
+            crate::catalog::Catalog::load(&[dir.path().join("connectors")], false).unwrap();
         let engine = Engine::new(Arc::new(catalog), None, None, None).unwrap();
         (dir, engine)
     }

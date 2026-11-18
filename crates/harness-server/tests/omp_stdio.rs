@@ -1,6 +1,7 @@
+mod support;
+
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -8,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+use support::write_executable;
 
 const KEY: &str = "slack:C123:123.456";
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/omp");
@@ -75,8 +78,7 @@ while IFS= read -r line; do
 done
 "##.replace("@DIR@", &dir.to_string_lossy()).replace("@FIXTURES@", FIXTURES);
     let path = dir.join("omp");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, script);
     path
 }
 

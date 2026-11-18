@@ -456,7 +456,7 @@ describe('Slack display text fallback', () => {
     expect(context?.text).toContain('session_context.slack.channel_id: C1')
     expect(context?.text).toContain('session_context.slack.thread_ts: 1700000000.000100')
     expect(context?.text).toContain('thread_key: slack:C1:1700000000.000100')
-    expect(context?.text).toContain('slack upload C1 /path/to/file --thread 1700000000.000100')
+    expect(context?.text).toContain('tools.slack.upload_file({ channel: "C1", thread_ts: "1700000000.000100"')
     expect(context?.text).toContain('Do not recover this destination with Slack search.')
   })
 

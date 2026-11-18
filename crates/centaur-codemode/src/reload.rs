@@ -37,7 +37,7 @@ impl Reloader {
         if revision == engine.catalog().revision {
             return false;
         }
-        match catalog::Catalog::load(&self.roots) {
+        match catalog::Catalog::load(&self.roots, engine.catalog().files) {
             Ok(catalog) if catalog.connectors.is_empty() => {
                 tracing::warn!("catalog reload found no connectors; keeping the loaded catalog");
                 false
@@ -94,7 +94,7 @@ mod tests {
     }
 
     fn engine(root: &Path) -> Engine {
-        let catalog = catalog::Catalog::load(&[root.to_owned()]).unwrap();
+        let catalog = catalog::Catalog::load(&[root.to_owned()], false).unwrap();
         Engine::new(Arc::new(catalog), None, None, None).unwrap()
     }
 
