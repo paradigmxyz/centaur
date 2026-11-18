@@ -1880,7 +1880,12 @@ fn task_error(error: anyhow::Error) -> AbsurdError {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
+    use sqlx::Executor;
+
     use super::*;
+    use crate::test_support::TestDatabase;
 
     #[test]
     fn blank_page_tokens_are_omitted() {
@@ -2031,11 +2036,7 @@ mod tests {
 
     #[tokio::test]
     async fn unpublished_files_are_enqueued_again_once_overdue() {
-        use sqlx::Executor;
-
-        use crate::test_support::TestDatabase;
-
-        let Ok(database_url) = std::env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
             eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
             return;
         };
