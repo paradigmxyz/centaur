@@ -190,7 +190,11 @@ fn main() -> Result<()> {
 
 async fn run(cli: Cli) -> Result<()> {
     let Cli { common, command } = cli;
-    let catalog = Arc::new(Catalog::load(&common.roots, common.files_dir.is_some())?);
+    // Only `serve` hides `@requires files` functions when it has no files
+    // capability: it backs MCP clients that cannot use them. The CLI shows
+    // the whole catalog, and such a call fails with a clear error instead.
+    let files = !matches!(command, Command::Serve { .. }) || common.files_dir.is_some();
+    let catalog = Arc::new(Catalog::load(&common.roots, files)?);
     match command {
         Command::List => {
             let policy = common.policy();

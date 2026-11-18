@@ -179,9 +179,10 @@ capability (`requireFiles`, `downloadTo`, `saveBytes` and `multipart` in
 `_lib/files.ts`). They do not return or accept file contents as base64.
 
 A function that always needs files carries `@requires files` in its JSDoc.
-Without `--files-dir` (as in a Code Mode sandbox behind MCP), the catalog
-leaves such functions out of search, `load`, the brief and `invoke`, and drops
-a connector left with none. Functions that touch files only for some arguments
+When `serve` runs without `--files-dir` (as in a Code Mode sandbox behind MCP),
+its catalog leaves such functions out of search, `load`, the brief and
+`invoke`, and drops a connector left with none. The CLI commands always show
+the whole catalog; without `--files-dir` a tagged function fails when called. Functions that touch files only for some arguments
 (an optional `path`, optional attachments) stay untagged. Loading warns about an
 export whose body always calls `requireFiles`, `downloadTo` or `saveBytes` but
 lacks the tag. Helpers reached through a local function are not seen, so the
