@@ -29,6 +29,10 @@ pub enum AnthropicStreamEvent {
         tool_use_result: Option<Value>,
         #[serde(default)]
         parent_tool_use_id: Option<String>,
+        /// Claude Code's echo of a stdin user message it consumed
+        /// (`--replay-user-messages`).
+        #[serde(default, rename = "isReplay")]
+        is_replay: bool,
     },
     StreamEvent {
         event: AnthropicRawStreamEvent,
@@ -95,6 +99,16 @@ impl AnthropicStreamEvent {
 
     pub fn is_sidechain(&self) -> bool {
         self.parent_tool_use_id().is_some()
+    }
+
+    pub fn is_user_replay(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                is_replay: true,
+                ..
+            }
+        )
     }
 
     pub fn token_usage(&self) -> Option<NormalizedTokenUsage> {

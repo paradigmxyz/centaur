@@ -40,6 +40,13 @@ const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"]
 /// surfaced as a tool item that starts on `task_started` and completes with
 /// the agent's summary on `task_notification`; a resumed agent starts again
 /// and gets a new item.
+///
+/// A message steered in on stdin is folded into the running turn if Claude
+/// Code reads it before its last model call; otherwise Claude Code emits this
+/// turn's `result` and then runs a turn of its own for it. With
+/// `--replay-user-messages`, Claude Code echoes each stdin user message when
+/// it consumes it, in order, so the turn stays open past a `result` until
+/// every steered message has been echoed.
 #[derive(Debug, Default)]
 pub struct ClaudeEventNormalizer {
     inner: AnthropicEventNormalizer,
@@ -50,6 +57,11 @@ pub struct ClaudeEventNormalizer {
     /// Claude Code's own turn ended (its `result` was swallowed) and no
     /// follow-up message has started since.
     result_held: bool,
+    /// Messages steered into this turn on stdin.
+    steers_sent: usize,
+    /// Stdin user messages Claude Code has echoed as consumed in this turn,
+    /// the turn's own input included.
+    user_messages_replayed: usize,
 }
 
 #[derive(Debug)]
@@ -81,6 +93,10 @@ impl PendingAgentMessage {
 
 impl ClaudeEventNormalizer {
     pub fn normalize(&mut self, event: AnthropicStreamEvent) -> Vec<NormalizedEvent> {
+        if event.is_user_replay() {
+            self.user_messages_replayed += 1;
+            return Vec::new();
+        }
         let token_usage = event.token_usage();
         let message_stop_reason = event.message_stop_reason().map(str::to_string);
         let mut out = Vec::new();
@@ -109,6 +125,13 @@ impl ClaudeEventNormalizer {
             }
             NormalizedEvent::Result { error: None } if self.holding_turn() => {
                 self.flush_pending(Some("tool_use".to_string()), &mut out);
+                self.result_held = true;
+            }
+            // Claude Code has not read a steered message yet: it runs a turn
+            // of its own for it after this `result`. This turn's answer
+            // stands; the steered message's answer follows in the same turn.
+            NormalizedEvent::Result { error: None } if self.steer_unconsumed() => {
+                self.flush_pending(Some("end_turn".to_string()), &mut out);
                 self.result_held = true;
             }
             event @ NormalizedEvent::Result { .. } => {
@@ -212,8 +235,20 @@ impl ClaudeEventNormalizer {
         self.awaiting_follow_up || !self.background_agents.is_empty()
     }
 
+    /// Records a steer written to Claude Code's stdin during this turn.
+    pub fn steer_sent(&mut self) {
+        self.steers_sent += 1;
+    }
+
+    /// A steered message Claude Code has not echoed yet. The turn's own input
+    /// is echoed first, so every steer is consumed once the echoes outnumber
+    /// the steers.
+    fn steer_unconsumed(&self) -> bool {
+        self.steers_sent > 0 && self.user_messages_replayed <= self.steers_sent
+    }
+
     pub fn turn_hold(&self) -> TurnHold {
-        if !self.holding_turn() {
+        if !self.holding_turn() && !self.steer_unconsumed() {
             TurnHold::Released
         } else if self.result_held && !self.background_agents.values().any(|agent| agent.live) {
             TurnHold::Idle(FOLLOW_UP_IDLE_TIMEOUT)
@@ -372,6 +407,9 @@ impl HarnessServer for ClaudeCodeHarness {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            // Echoes each stdin user message once consumed, which tells
+            // whether a steer joined the running turn or queued its own.
+            "--replay-user-messages",
             "--dangerously-skip-permissions",
             "--permission-mode",
             "bypassPermissions",
@@ -463,6 +501,10 @@ impl HarnessServer for ClaudeCodeHarness {
 
     fn turn_hold(&self, normalizer: &Self::EventNormalizer) -> TurnHold {
         normalizer.turn_hold()
+    }
+
+    fn steer_sent(&self, normalizer: &mut Self::EventNormalizer) {
+        normalizer.steer_sent();
     }
 }
 
@@ -962,6 +1004,134 @@ mod tests {
         assert!(events.iter().any(NormalizedEvent::is_terminal));
         // The agent still owes output, so the server stops it with the process.
         assert_ne!(normalizer.turn_hold(), TurnHold::Released);
+    }
+
+    fn replay(text: &str) -> Value {
+        json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+    }
+
+    fn final_message(id: &str, text: &str) -> [Value; 3] {
+        [
+            json!({"type": "stream_event", "event": {"type": "message_start", "message": {"id": id, "content": []}}}),
+            json!({"type": "assistant", "message": {"id": id, "content": [{"type": "text", "text": text}]}}),
+            json!({"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}}),
+        ]
+    }
+
+    #[test]
+    fn replayed_user_messages_are_silent_and_turns_without_steers_end_on_result() {
+        let mut normalizer = ClaudeEventNormalizer::default();
+        normalize(
+            &mut normalizer,
+            json!({"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_1", "content": []}}}),
+        );
+        normalize(
+            &mut normalizer,
+            json!({"type": "assistant", "message": {"id": "msg_1", "content": [{"type": "text", "text": "Hello."}]}}),
+        );
+        // The echo of a consumed stdin message neither renders nor settles
+        // pending text as commentary.
+        assert!(normalize(&mut normalizer, replay("hi")).is_empty());
+
+        let events = normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "Hello."}),
+        );
+        assert_eq!(
+            agent_texts(&events),
+            vec![(Some("end_turn".to_string()), "Hello.".to_string())]
+        );
+        assert!(events.iter().any(NormalizedEvent::is_terminal));
+        assert_eq!(normalizer.turn_hold(), TurnHold::Released);
+    }
+
+    #[test]
+    fn steer_folded_into_the_running_turn_ends_on_its_result() {
+        let mut normalizer = ClaudeEventNormalizer::default();
+        normalize(&mut normalizer, replay("run three commands"));
+        normalize(
+            &mut normalizer,
+            json!({"type": "assistant", "message": {"id": "msg_1", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]}}),
+        );
+        normalizer.steer_sent();
+        assert_eq!(normalizer.turn_hold(), TurnHold::Waiting);
+        normalize(
+            &mut normalizer,
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a"}]}}),
+        );
+        // Claude Code reads the steer at the tool boundary.
+        normalize(&mut normalizer, replay("also answer this"));
+        assert_eq!(normalizer.turn_hold(), TurnHold::Released);
+
+        let mut events = Vec::new();
+        for event in final_message("msg_2", "Both answers.") {
+            events.extend(normalize(&mut normalizer, event));
+        }
+        events.extend(normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "Both answers."}),
+        ));
+        assert_eq!(
+            agent_texts(&events),
+            vec![(Some("end_turn".to_string()), "Both answers.".to_string())]
+        );
+        assert!(events.iter().any(NormalizedEvent::is_terminal));
+    }
+
+    #[test]
+    fn steer_queued_after_the_final_answer_holds_the_turn_for_its_own_result() {
+        let mut normalizer = ClaudeEventNormalizer::default();
+        normalize(&mut normalizer, replay("write an essay"));
+        normalizer.steer_sent();
+
+        // The steer arrives while the final answer streams: that answer still
+        // renders as an answer, but its `result` does not end the turn.
+        let mut events = Vec::new();
+        for event in final_message("msg_1", "The essay.") {
+            events.extend(normalize(&mut normalizer, event));
+        }
+        events.extend(normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "The essay."}),
+        ));
+        assert_eq!(
+            agent_texts(&events),
+            vec![(Some("end_turn".to_string()), "The essay.".to_string())]
+        );
+        assert!(!events.iter().any(NormalizedEvent::is_terminal));
+        assert!(matches!(normalizer.turn_hold(), TurnHold::Idle(_)));
+
+        // Claude Code runs a turn of its own for the steer.
+        normalize(
+            &mut normalizer,
+            json!({"type": "system", "subtype": "init", "session_id": "s1"}),
+        );
+        normalize(&mut normalizer, replay("also answer this"));
+        assert_eq!(normalizer.turn_hold(), TurnHold::Released);
+        let mut events = Vec::new();
+        for event in final_message("msg_2", "Paris.") {
+            events.extend(normalize(&mut normalizer, event));
+        }
+        events.extend(normalize(
+            &mut normalizer,
+            json!({"type": "result", "subtype": "success", "result": "Paris."}),
+        ));
+        assert_eq!(
+            agent_texts(&events),
+            vec![(Some("end_turn".to_string()), "Paris.".to_string())]
+        );
+        assert!(events.iter().any(NormalizedEvent::is_terminal));
+    }
+
+    #[test]
+    fn launch_command_replays_user_messages() {
+        let state = ClaudeCodeHarness.thread_state(&Default::default(), std::env::temp_dir());
+        let command = ClaudeCodeHarness.command_for_turn(&state);
+        assert!(
+            command
+                .get_args()
+                .any(|arg| arg == "--replay-user-messages")
+        );
     }
 
     #[test]
