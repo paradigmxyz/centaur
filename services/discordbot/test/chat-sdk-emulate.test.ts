@@ -49,6 +49,7 @@ const USER_ID = "100000000000000001";
 const TRIGGER_BOT_ID = "400000000000000001";
 const GUILD_ID = "200000000000000001";
 const CHANNEL_ID = "300000000000000001";
+const OTHER_CHANNEL_ID = "300000000000000002";
 const PUBLIC_KEY = "a".repeat(64);
 
 let discordApi: FakeDiscordApi;
@@ -1342,6 +1343,34 @@ describe("discordbot", () => {
       thread: { id: allowedThreadId, parentId: CHANNEL_ID },
     });
     await waitForSettle(allowedThreadId, allowedBotMentionId);
+    expect(codexApi.executes).toHaveLength(1);
+  });
+
+  it("answers only in allowlisted channels and the threads under them", async () => {
+    bot = createTestBot({ channelAllowlist: [CHANNEL_ID] });
+
+    // A mention in a channel off the allowlist is dropped before any mutation.
+    await dispatchMessage({
+      channelId: OTHER_CHANNEL_ID,
+      content: `<@${APP_ID}> from another channel`,
+      mention: true,
+    });
+    await sleep(50);
+    expect(
+      discordApi.calls.some((call) => call.path.endsWith("/threads")),
+    ).toBe(false);
+    expect(codexApi.creates).toHaveLength(0);
+
+    // A mention inside a thread is checked against the thread's parent.
+    const threadId = discordApi.nextId();
+    discordApi.seedThreadChannel(threadId, CHANNEL_ID);
+    const mentionId = await dispatchMessage({
+      channelId: threadId,
+      content: `<@${APP_ID}> from a thread under the allowlisted channel`,
+      mention: true,
+      thread: { id: threadId, parentId: CHANNEL_ID },
+    });
+    await waitForSettle(threadId, mentionId);
     expect(codexApi.executes).toHaveLength(1);
   });
 });

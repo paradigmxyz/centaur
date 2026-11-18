@@ -68,6 +68,10 @@ spec:
               value: {{ .Values.discordbot.userName | quote }}
             - name: DISCORDBOT_GUILD_ALLOWLIST
               value: {{ .Values.discordbot.guildAllowlist | quote }}
+{{- if .Values.discordbot.channelAllowlist }}
+            - name: DISCORDBOT_CHANNEL_ALLOWLIST
+              value: {{ .Values.discordbot.channelAllowlist | quote }}
+{{- end }}
 {{- if .Values.discordbot.mentionRoleIds }}
             - name: DISCORD_MENTION_ROLE_IDS
               value: {{ .Values.discordbot.mentionRoleIds | quote }}

@@ -1076,6 +1076,9 @@ discordbot:
   userName: centaur
   # Comma/space-separated Discord guild IDs. The bot is INERT (ignores all messages) until set.
   guildAllowlist: ""
+  # Comma/space-separated Discord channel IDs the bot answers in; threads count as their
+  # parent channel. Empty means every channel in an allowlisted guild.
+  channelAllowlist: ""
   # Comma/space-separated role IDs whose mentions also trigger the bot.
   mentionRoleIds: ""
   # Rename auto-created threads to the triggering message; set false to keep generic names.

@@ -50,7 +50,7 @@ export function isAllowedDiscordMessage(
     }
   }
 
-  const { guildId } = parseDiscordThreadKey(message.threadId);
+  const { guildId, channelId } = parseDiscordThreadKey(message.threadId);
   if (!guildId || guildId === "@me") {
     logger.warn("discordbot_message_ignored_dm", {
       message_id: message.id,
@@ -73,6 +73,15 @@ export function isAllowedDiscordMessage(
     logger.warn("discordbot_message_ignored_guild_not_allowlisted", {
       message_id: message.id,
       guild_id: guildId,
+    });
+    return false;
+  }
+
+  if (!isAllowedDiscordChannel(channelId, options)) {
+    logger.warn("discordbot_message_ignored_channel_not_allowlisted", {
+      message_id: message.id,
+      guild_id: guildId,
+      channel_id: channelId,
     });
     return false;
   }
@@ -123,6 +132,25 @@ export function isAllowedDiscordGuild(
     options.guildAllowlist ??
     splitEnvList(process.env.DISCORDBOT_GUILD_ALLOWLIST);
   return allowlist.length > 0 && new Set(allowlist).has(guildId);
+}
+
+/**
+ * Discord delta (mirrors teamsbot's allowed channel ids): channel slice of the
+ * allowlist check. Callers pass the parent channel for a message inside a
+ * thread (the thread key carries it), so threads count as their parent. An
+ * empty channel allowlist admits every channel of an allowlisted guild.
+ */
+export function isAllowedDiscordChannel(
+  channelId: string | undefined,
+  options: DiscordbotOptions,
+): boolean {
+  const allowlist =
+    options.channelAllowlist ??
+    splitEnvList(process.env.DISCORDBOT_CHANNEL_ALLOWLIST);
+  return (
+    allowlist.length === 0 ||
+    (channelId !== undefined && allowlist.includes(channelId))
+  );
 }
 
 /** Resolved trigger-bot allowlist (options first, env fallback). */

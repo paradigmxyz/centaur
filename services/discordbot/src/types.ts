@@ -95,6 +95,12 @@ export type DiscordbotOptions = {
   apiUrl: string;
   applicationId: string;
   botToken: string;
+  /**
+   * Discord delta (mirrors teamsbot's allowed channel ids): channel ids the
+   * bot answers in; threads count as their parent channel. Empty means every
+   * channel in an allowlisted guild.
+   */
+  channelAllowlist?: readonly string[];
   discordApiUrl?: string;
   fetch?: DiscordbotFetch;
   guildAllowlist?: readonly string[];

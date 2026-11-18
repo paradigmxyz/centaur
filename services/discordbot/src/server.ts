@@ -40,6 +40,7 @@ const options: DiscordbotOptions = {
   publicKey,
   discordApiUrl: optionalEnv("DISCORD_API_URL"),
   guildAllowlist: optionalList("DISCORDBOT_GUILD_ALLOWLIST"),
+  channelAllowlist: optionalList("DISCORDBOT_CHANNEL_ALLOWLIST"),
   idleTimeoutMs: optionalNumberEnv("SESSION_IDLE_TIMEOUT_MS"),
   isGatewayActive: () => gateway.isActive(),
   maxConcurrentExecutionsPerGuild: optionalNumberEnv(
