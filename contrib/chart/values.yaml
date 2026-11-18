@@ -858,6 +858,10 @@ apiRs:
 # Chat SDK Slackbot v2. Forwards Slack events to the api-rs control plane
 # (:8080) and streams responses back. Listens on :3001.
 slackbotv2:
+  # Optional public PEM CA bundle trusted in addition to the runtime's default
+  # roots (for example, a database CA). Stored in a ConfigMap, never private keys.
+  # A change updates the pod checksum so the runtime reloads its trust at startup.
+  extraCaCertificates: ""
   enabled: true
   replicaCount: 1
   image:
