@@ -38,6 +38,9 @@ spec:
   template:
     metadata:
       annotations:
+{{- if .Values.githubbot.extraCaCertificates }}
+        checksum/extra-ca-certificates: {{ .Values.githubbot.extraCaCertificates | sha256sum }}
+{{- end }}
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
 {{- if or .Values.githubbot.reviewPrompt .Values.githubbot.issuePrompt .Values.githubbot.managementPrompt }}
         checksum/prompts: {{ dict "review" .Values.githubbot.reviewPrompt "issue" .Values.githubbot.issuePrompt "management" .Values.githubbot.managementPrompt | toJson | sha256sum }}
@@ -59,6 +62,10 @@ spec:
           image: {{ printf "%s:%s" .Values.githubbot.image.repository .Values.githubbot.image.tag | quote }}
           imagePullPolicy: {{ .Values.githubbot.image.pullPolicy }}
           env:
+{{- if .Values.githubbot.extraCaCertificates }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/centaur/ca/extra-ca-certificates.pem
+{{- end }}
             - name: PORT
               value: "3001"
             - name: CENTAUR_API_URL
@@ -151,15 +158,42 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.githubbot.resources | nindent 12 }}
-{{- if or .Values.githubbot.reviewPrompt .Values.githubbot.issuePrompt .Values.githubbot.managementPrompt }}
+{{- $prompts := or .Values.githubbot.reviewPrompt .Values.githubbot.issuePrompt .Values.githubbot.managementPrompt }}
+{{- if or $prompts .Values.githubbot.extraCaCertificates }}
           volumeMounts:
+{{- if .Values.githubbot.extraCaCertificates }}
+            - name: extra-ca-certificates
+              mountPath: /etc/centaur/ca
+              readOnly: true
+{{- end }}
+{{- if $prompts }}
             - name: prompts
               mountPath: /etc/githubbot/prompts
               readOnly: true
+{{- end }}
       volumes:
+{{- if .Values.githubbot.extraCaCertificates }}
+        - name: extra-ca-certificates
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot-ca") }}
+{{- end }}
+{{- if $prompts }}
         - name: prompts
           configMap:
             name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot") }}-prompts
+{{- end }}
+{{- end }}
+{{- if .Values.githubbot.extraCaCertificates }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "githubbot-ca") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "githubbot") | nindent 4 }}
+data:
+  extra-ca-certificates.pem: |
+{{ .Values.githubbot.extraCaCertificates | indent 4 }}
 {{- end }}
 ---
 apiVersion: v1

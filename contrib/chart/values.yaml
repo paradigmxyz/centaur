@@ -1036,6 +1036,10 @@ linearbot:
 # (see contrib/scripts/bootstrap-k8s-secrets.sh). userName must be the bot
 # account's GitHub login so @-mention and review-request matching work.
 githubbot:
+  # Optional public PEM CA bundle trusted in addition to the runtime's default
+  # roots (for example, a database CA). Stored in a ConfigMap, never private keys.
+  # A change updates the pod checksum so the runtime reloads its trust at startup.
+  extraCaCertificates: ""
   enabled: false
   replicaCount: 1
   image:
