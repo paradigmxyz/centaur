@@ -241,6 +241,8 @@ export async function list_downloads(
  * `downloads/docsend/<download_id>`, because Browserbase names the file in the
  * response header rather than in the record. Returns the saved file's absolute
  * `path`, `bytes` and `mime_type`; `list_downloads` has the record's own filename.
+ *
+ * @requires files
  */
 export async function download_content(
   args: { download_id: string; path?: string },

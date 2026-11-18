@@ -435,6 +435,8 @@ export async function get_message_body(
  * its `path`, `bytes` and `attachment_id`. Gmail sends attachment bytes base64url-encoded in JSON,
  * so the runtime decodes and writes them without the bytes reaching the caller. Pass `path` with
  * the MIME type's extension (`attachment` in `get_message_body` has `filename` and `mimeType`).
+ *
+ * @requires files
  */
 export async function get_attachment(
   args: { message_id: string; attachment_id: string; path?: string },

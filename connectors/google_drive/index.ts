@@ -310,6 +310,8 @@ export async function get_file(args: { file_id: string }, ctx: Ctx): Promise<{ f
  * Download a binary file to `path` in the sandbox (default `downloads/google_drive/<Drive name>`)
  * and return the saved file: `path`, `bytes`, `mime_type`, plus Drive's `name` and `web_view_link`.
  * Google Docs, Sheets and Slides have no binary form: use `export_file` for those.
+ *
+ * @requires files
  */
 export async function download_file(
   args: { file_id: string; path?: string },
@@ -334,6 +336,8 @@ export async function download_file(
  * runtime streams its bytes to Drive without reading them into the cell. `name` defaults to the
  * path's last segment; `mime_type` defaults to `application/octet-stream`, so pass the real type
  * for Drive to preview and convert it. Returns the new file's id, name and web link.
+ *
+ * @requires files
  */
 export async function upload_file(
   args: {
@@ -443,6 +447,8 @@ export async function get_revision(
  * `mime_type`, `name` and Drive's `web_view_link`. `export_format` is one of `txt`, `pdf`, `docx`,
  * `html`, `csv`, `xlsx`, `pptx`, `md`; the format must suit the file type (csv/xlsx for Sheets,
  * pptx for Slides, docx/pdf for Docs).
+ *
+ * @requires files
  */
 export async function export_file(
   args: { file_id: string; export_format?: string; path?: string },
@@ -469,6 +475,8 @@ export async function export_file(
  * `exportLinks` (`export_format`: txt, pdf, docx, html, csv, xlsx, pptx, md). Throws when that
  * revision cannot be exported in the requested format; see `get_revision` for the formats it
  * offers.
+ *
+ * @requires files
  */
 export async function export_revision(
   args: { file_id: string; revision_id: string; export_format?: string; path?: string },
@@ -512,6 +520,8 @@ export async function export_revision(
  * Download an earlier revision of a binary (non-Google-native) file to `path` (default
  * `downloads/google_drive/<name>-revision-<revision_id><ext>`). Native Docs, Sheets and Slides
  * have no binary revision: use `export_revision` for those.
+ *
+ * @requires files
  */
 export async function download_revision(
   args: { file_id: string; revision_id: string; path?: string },

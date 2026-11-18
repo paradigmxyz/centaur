@@ -1850,7 +1850,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             "export const loud = (text: string): string => text.toUpperCase() + \"!\";",
         )
         .unwrap();
-        let catalog = Catalog::load(&[dir.path().join("connectors")]).unwrap();
+        let catalog = Catalog::load(&[dir.path().join("connectors")], files).unwrap();
         let context_file = dir.path().join("sandbox.json");
         if write_context {
             std::fs::write(

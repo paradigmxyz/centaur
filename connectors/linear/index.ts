@@ -838,6 +838,8 @@ export interface SavedAsset {
  * `downloads/linear/<URL filename>`). Only that host is accepted. Returns the saved file's
  * absolute `path`, `bytes` and `mime_type`; there is no result-size limit because the bytes never
  * enter the realm.
+ *
+ * @requires files
  */
 export async function fetch_asset(
   args: { url: string; path?: string },

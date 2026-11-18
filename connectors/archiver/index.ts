@@ -259,6 +259,8 @@ export async function submit_extract(
  * never enters the realm); `filename` drives Reducto's type detection (default:
  * the path's last segment), `content_type` defaults to application/octet-stream.
  * Returns the `file_id` for `submit_parse`/`submit_extract`.
+ *
+ * @requires files
  */
 export async function upload(
   args: { path: string; filename?: string; content_type?: string },
@@ -387,6 +389,8 @@ export async function extract_metadata(
  * (reported as an error), Drive folders cannot be listed without OAuth, and
  * Google-native files only export this way; authenticated `gog` downloads are
  * not available here.
+ *
+ * @requires files
  */
 export async function google_export(
   args: { url: string; title?: string; export_format?: string; path?: string },

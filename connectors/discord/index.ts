@@ -412,6 +412,8 @@ export async function post_message(
  * path's last segment), `content_type` defaults to `application/octet-stream`, `content` is
  * optional message text, and `reply_to_message_id` replies to a message. Returns the created
  * message.
+ *
+ * @requires files
  */
 export async function upload_file(
   args: {
@@ -457,6 +459,8 @@ export async function upload_file(
  * `path` says where to save it (relative to the files root or absolute inside it; default
  * `downloads/discord/<attachment filename>`) and the result is the saved file's absolute `path`,
  * `bytes`, `mime_type` and `filename`.
+ *
+ * @requires files
  */
 export async function download_url(
   args: { url: string; path?: string },
@@ -493,6 +497,8 @@ async function saveAttachment(
  * message has one attachment, a directory when it has several (default `downloads/discord` with
  * each attachment's own filename). Returns each saved file's absolute `path`, `bytes`, `mime_type`,
  * `filename` and source `url`.
+ *
+ * @requires files
  */
 export async function download_message_attachments(
   args: { channel: string; message_id: string; path?: string },
