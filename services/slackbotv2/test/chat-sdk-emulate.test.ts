@@ -4871,7 +4871,9 @@ describe('slackbotv2', () => {
     const threadEventRequests = () =>
       codexApi.eventRequests.filter(request => request.threadKey === key)
     const threadExecutes = () => codexApi.executes.filter(request => request.threadKey === key)
-    await waitFor(() => threadEventRequests().length === 1, 3000)
+    // The queued turn opens its own stream right after recovery renders, so
+    // the count may pass 1 between polls.
+    await waitFor(() => threadEventRequests().length >= 1, 3000)
     await waitFor(async () => (await threadText(parent.ts)).includes('Undelivered answer.'), 5000)
     // The obligation was recovered under its own execution, not replaced by
     // the queued turn's.
