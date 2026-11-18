@@ -9,7 +9,9 @@
 // on the shared kind node, and pauses the sandbox when it is done.
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { api, eventually, ironControl, model, slack, sshGateway, turnTimeoutMs, type Thread } from '../lib'
+import { api, eventually, ironControl, model, releaseSandboxesAfterAll, slack, sshGateway, turnTimeoutMs, type Thread } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const consoleApi = ironControl.api
 // Marks the keys this file creates, so they can be found and removed.

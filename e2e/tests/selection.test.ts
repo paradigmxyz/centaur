@@ -12,6 +12,7 @@ import codexConfig from '../../harness/codex/config.toml'
 import {
   DEFAULTS_CHANNEL,
   model,
+  releaseSandboxesAfterAll,
   slack,
   turnTimeoutMs,
   type Channel,
@@ -19,6 +20,8 @@ import {
   type Thread,
   type Turn
 } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const CODEX_MODEL = (codexConfig as { model: string }).model
 const CODEX_EFFORT = (codexConfig as { model_reasoning_effort: string }).model_reasoning_effort

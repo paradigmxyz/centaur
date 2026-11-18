@@ -6,7 +6,9 @@
 // without a mention neither steer nor stop it. A mentioned stop ends the turn
 // silently: it posts no reply, not even an interruption notice.
 import { expect, test } from 'bun:test'
-import { USER_B, eventually, model, slack, turnTimeoutMs, type Channel } from '../lib'
+import { USER_B, eventually, model, releaseSandboxesAfterAll, slack, turnTimeoutMs, type Channel } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const STEERING_REACTION = 'hourglass_flowing_sand'
 

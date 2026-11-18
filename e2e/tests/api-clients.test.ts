@@ -5,7 +5,9 @@
 // disabling it revokes all access.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
-import { apiClients, ironControl, model, turnTimeoutMs } from '../lib'
+import { apiClients, ironControl, model, releaseSandboxesAfterAll, turnTimeoutMs } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const sessionPath = (key: string) => `/api/session/${encodeURIComponent(key)}`
 

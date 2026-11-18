@@ -10,11 +10,14 @@ import {
   eventually,
   ironControl,
   model,
+  releaseSandboxesAfterAll,
   slack,
   turnTimeoutMs,
   type Script,
   type Thread
 } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const consoleApi = ironControl.api
 // The model server serves the echo path on the provider hosts.

@@ -3,7 +3,9 @@
 // exchange in its own session, and the thread must stay on one sandbox running
 // the requested harness.
 import { expect, test } from 'bun:test'
-import { model, slack, turnTimeoutMs } from '../lib'
+import { model, releaseSandboxesAfterAll, slack, turnTimeoutMs } from '../lib'
+
+releaseSandboxesAfterAll()
 
 for (const harness of ['codex', 'claudecode']) {
   test.concurrent(`${harness} answers and remembers a Slack thread`, async () => {

@@ -11,9 +11,12 @@ import {
   USER_B,
   ironControl,
   model,
+  releaseSandboxesAfterAll,
   slack,
   turnTimeoutMs
 } from '../lib'
+
+releaseSandboxesAfterAll()
 
 test.concurrent('a first mention mid-thread brings the thread so far', async () => {
   const root = await slack.post('Root context for the thread.')
