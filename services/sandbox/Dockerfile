@@ -322,10 +322,16 @@ FROM toolchain AS harness-server-build
 WORKDIR /home/agent/centaur-src
 COPY --chown=1001:1001 Cargo.toml Cargo.lock ./
 COPY --chown=1001:1001 crates/ crates/
+# The target dir cache is shared by every build, on every branch, and cargo
+# decides freshness by mtime: a checkout older than another branch's cached
+# artifacts would ship that branch's binary. Touching the workspace sources
+# under the cache lock makes them newer than anything cached, so workspace
+# crates always rebuild while third-party crates stay cached.
 RUN --mount=type=cache,target=/home/agent/.cargo/registry,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cargo/git,uid=1001,gid=1001,sharing=locked \
     --mount=type=cache,target=/home/agent/.cache/harness-server-target,uid=1001,gid=1001,sharing=locked \
-    CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
+    find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+    && CARGO_TARGET_DIR=/home/agent/.cache/harness-server-target \
     cargo +stable install --locked --path crates/harness-server --root /home/agent/harness-server \
     && cargo +stable install --locked --path crates/centaur-codemode --root /home/agent/harness-server
 
