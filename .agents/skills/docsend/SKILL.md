@@ -50,19 +50,19 @@ If the link is invalid, retry `resume` with the correct link and the same sessio
 
 ### Find The Link In Gmail
 
-When `gsuite` is available, search the Gmail account connected to the current Centaur user. Gmail operations use `userId=me`; never search another mailbox or ask for Gmail credentials.
+When the `gmail` connector is available, search the Gmail account connected to the current Centaur user in Code Mode (`centaur-codemode exec --result-only`). Gmail operations use `userId=me`; never search another mailbox or ask for Gmail credentials.
 
 1. Search for recent DocSend mail and inspect results newest first:
 
-```bash
-centaur-tools call gsuite gmail_search \
-  '{"query":"newer_than:1d from:docsend.com","max_results":5}'
+```js
+return await tools.gmail.search_messages({ query: "newer_than:1d from:docsend.com", max_results: 5 });
 ```
 
 2. Read the newest candidate received after the current verification request:
 
-```bash
-centaur-tools call gsuite gmail_get '{"message_id":"<message-id>"}'
+```js
+const { text, html } = await tools.gmail.get_message_body({ message_id: "<message-id>" });
+return { text, html };
 ```
 
 3. Extract the full HTTPS DocSend verification URL from the message body or HTML. Confirm the hostname is `docsend.com` or a subdomain. Do not click it, request it, preview it, or pass it to any browser or HTTP tool.
