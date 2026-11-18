@@ -364,8 +364,7 @@ done
 "#
         .replace("DIR", &dir.display().to_string());
     let pi = dir.join("pi");
-    std::fs::write(&pi, script).unwrap();
-    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&pi, script);
     let mut child = Command::new(env!("CARGO_BIN_EXE_harness-server"))
         .arg("pi")
         .env("CENTAUR_PI_BIN", pi)
