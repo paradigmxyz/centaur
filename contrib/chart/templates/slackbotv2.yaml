@@ -51,6 +51,9 @@ spec:
   template:
     metadata:
       annotations:
+{{- if .Values.slackbotv2.extraCaCertificates }}
+        checksum/extra-ca-certificates: {{ .Values.slackbotv2.extraCaCertificates | sha256sum }}
+{{- end }}
         checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
 {{- if $proactivityRules }}
         checksum/proactivity-rules: {{ dict "default" $proactivity.defaultRules "channels" $proactivity.channelRules | toJson | sha256sum }}
@@ -72,6 +75,10 @@ spec:
           image: {{ printf "%s:%s" .Values.slackbotv2.image.repository .Values.slackbotv2.image.tag | quote }}
           imagePullPolicy: {{ .Values.slackbotv2.image.pullPolicy }}
           env:
+{{- if .Values.slackbotv2.extraCaCertificates }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/centaur/ca/extra-ca-certificates.pem
+{{- end }}
             - name: PORT
               value: "3001"
             - name: CENTAUR_API_URL
@@ -223,15 +230,41 @@ spec:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
 {{ toYaml .Values.slackbotv2.resources | nindent 12 }}
-{{- if $proactivityRules }}
+{{- if or $proactivityRules .Values.slackbotv2.extraCaCertificates }}
           volumeMounts:
+{{- if .Values.slackbotv2.extraCaCertificates }}
+            - name: extra-ca-certificates
+              mountPath: /etc/centaur/ca
+              readOnly: true
+{{- end }}
+{{- if $proactivityRules }}
             - name: proactivity-rules
               mountPath: /etc/slackbotv2/proactivity-rules
               readOnly: true
+{{- end }}
       volumes:
+{{- if .Values.slackbotv2.extraCaCertificates }}
+        - name: extra-ca-certificates
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2-ca") }}
+{{- end }}
+{{- if $proactivityRules }}
         - name: proactivity-rules
           configMap:
             name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2") }}-proactivity-rules
+{{- end }}
+{{- end }}
+{{- if .Values.slackbotv2.extraCaCertificates }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "slackbotv2-ca") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "slackbotv2") | nindent 4 }}
+data:
+  extra-ca-certificates.pem: |
+{{ .Values.slackbotv2.extraCaCertificates | indent 4 }}
 {{- end }}
 ---
 apiVersion: v1
