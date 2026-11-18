@@ -1967,7 +1967,7 @@ function slackUploadSessionContext(threadId: string): string | undefined {
     `- thread_key: ${threadId}`,
     '',
     'Use these exact IDs for Slack file uploads in this thread.',
-    `Example: slack upload ${destination.channelId} /path/to/file --thread ${destination.threadTs}`,
+    `Example (Code Mode): tools.slack.upload_file({ channel: "${destination.channelId}", thread_ts: "${destination.threadTs}", path: "<file under the home directory>" })`,
     'Do not recover this destination with Slack search.',
     '---'
   ]
