@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ironsh/iron-proxy:0.56.0@sha256:727da0cc35a6d73ed2913a38d56c4b9b4476c075149492e4fbf75552e83361ff
+FROM ironsh/iron-proxy:0.57.0@sha256:3b7ace7bc766ef02376453fa60aefc40ab2f75c4e3fd73c16d64b274893d854e
 
 USER root
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
