@@ -1,116 +1,100 @@
 ---
 name: company-context
-description: "Use Centaur's indexed company context and scoped read-only SQL together with direct Slack, Linear, Google Docs, Drive, Calendar, or Granola searches when answering internal company-history, prior-decision, project-context, meeting-context, roadmap/status, or cross-source memory questions. Indexed context includes Slack channels, user-visible Slack DMs, Google Docs, Google Calendar, Linear, and user-visible Granola notes. Use for questions like what was discussed, decided, planned, mentioned, or documented internally, especially when the user did not name one exact source."
+description: "Use Centaur's indexed company context together with live Slack, Linear, Google Drive, Calendar, or Granola lookups, all through Code Mode connectors, when answering internal company-history, prior-decision, project-context, meeting-context, roadmap/status, or cross-source memory questions. Indexed context includes Slack channel history and files, Google Docs and PDFs, Google Calendar events, Granola notes, and custom documents visible to the requester. Use for questions like what was discussed, decided, planned, mentioned, or documented internally, especially when the user did not name one exact source."
 ---
 
 # Company Context
 
-Use `company_context` as the first retrieval step for internal historical context. Its `search` command queries indexed company memory across enabled sources such as Slack channels, Google Docs (`--source docs`), Google Calendar, Linear, and user-visible Granola notes (`--source granola`). It also has dedicated commands for user-visible Slack DMs and DM conversations. Always pair indexed results with the relevant direct source tools, then reconcile and collate both evidence sets before answering.
+Search indexed company memory first with the `company_context` connector, then check the live source connectors, and reconcile both before answering. Run everything in Code Mode (`centaur-codemode exec --result-only`); `centaur-codemode load company_context` prints the full contract.
 
-For aggregation, grouping, joins, or fields that the search surface does not expose, use the scoped read-only SQL command. Database grants and row-level security still apply, and output is capped:
-
-```bash
-company_context query "SELECT source, count(*) FROM company_context_documents GROUP BY source" --limit 100 --json
-```
-
-Use one row-returning query. The command runs it inside a read-only transaction with a bounded timeout, so writes and multiple statements are rejected. For exact or not-yet-projected Slack results, query `company_context_slack_messages` and `company_context_slack_users`. These security-invoker views expose normalized fields while preserving channel RLS; users are limited to authors visible through that scope, and raw payloads remain inaccessible. Bound message queries by channel and/or time when possible:
-
-```bash
-company_context query "SELECT m.occurred_at, u.display_name, m.text, m.permalink FROM company_context_slack_messages m LEFT JOIN company_context_slack_users u ON u.user_id = m.user_id WHERE m.channel_id = 'CHANNEL_ID' AND m.occurred_at >= now() - interval '7 days' ORDER BY m.occurred_at DESC" --limit 100 --json
-```
-
-When the company-context service is deployed, the preview `company_context v2 search` and `company_context v2 read DOCUMENT_ID` commands query its API, which returns only documents visible to the requester: Slack channel days and files, Google Docs and PDFs, Google Calendar events, Granola notes, and custom documents granted to the requester in named sources (such as archives of retired internal tools, notes, and memory). Narrow searches with repeatable `--type` (`slack_message`, `slack_file`, `drive_doc`, `calendar_event`, `granola_note`, `custom_doc`), `--channel-id`, `--file-id`, and `--source`, with RFC 3339 `--after`/`--before`, and, for custom documents, with `--metadata '{"KEY": "VALUE"}'`, which keeps documents whose returned `metadata` contains that JSON object (exact, case-sensitive values; `external_id` included); `--limit` is at most 50. Results are ranked by relevance and not paged, unless `--keyword` is set: then every document containing all query terms is returned newest first, unranked and without semantic matching, and a response with more results has a `next_cursor` to pass as `--cursor`. Use `--keyword` with `--channel-id` and `--after`/`--before` to enumerate a channel's history of a topic. The commands report an error when `COMPANY_CONTEXT_API_URL` is unset, meaning the service is not deployed.
+`tools.company_context.search` returns only documents the requester can see: Slack channel-day transcripts and files, Google Docs and PDFs, Calendar events, Granola notes, and custom documents (archives, notes, memory). Each result has a `document_id`, `type`, `title`, `url`, `text`, `occurred_at`, and type-specific `metadata`.
 
 ## Default Workflow
 
-1. Search company context first, before source-specific tools. Use `company_context v2 search`, then `company_context v2 read DOCUMENT_ID` to read a result in full. It combines keyword and semantic matching; narrow it with `--type`, `--after`/`--before`, or `--channel-id` when the question names a source, period, or channel. To enumerate every match, such as all mentions of a term in a channel, add `--keyword` and follow `next_cursor` with `--cursor`:
+1. Search company context first, before source-specific connectors. Default (hybrid) mode ranks by keyword and semantic similarity and is not paged; narrow it with filters when the question names a source, period, or channel:
 
-```bash
-company_context v2 search "QUERY" --limit 10
-company_context v2 read "DOCUMENT_ID"
+```js
+const cc = tools.company_context;
+return await cc.search({
+  query: "QUERY",
+  limit: 10,                       // at most 50
+  // types: ["slack_message", "slack_file", "drive_doc", "calendar_event", "granola_note", "custom_doc"],
+  // occurred_after: "2025-01-01", occurred_before: "2025-02-01",
+  // channel_ids: ["C123"],
+});
 ```
 
-Fall back to the legacy search only when v2 is disabled: `COMPANY_CONTEXT_API_URL` is unset or v2 reports the API is not deployed. Report other v2 errors, and do not switch to legacy search for weak results. With legacy search, use `--no-hybrid` for exact identifiers, quoted phrases, filenames, or keyword comparisons:
+To enumerate every match, such as all mentions of a term in a channel, set `keyword: true`: it returns every document containing all query terms, newest first and unranked, and a `next_cursor` to pass back as `cursor` with the same query and filters. Use keyword mode for exact identifiers, quoted phrases, and filenames.
 
-```bash
-company_context search "QUERY" --limit 10 --json
+```js
+const all = [];
+let cursor;
+do {
+  const page = await tools.company_context.search({
+    query: "QUERY", keyword: true, channel_ids: ["C123"], occurred_after: "2025-01-01", limit: 50, cursor,
+  });
+  all.push(...page.results.map(({ document_id, title, url, occurred_at }) => ({ document_id, title, url, occurred_at })));
+  cursor = page.next_cursor ?? undefined;
+} while (cursor && all.length < 500);
+return all;
 ```
+
+For custom documents, filter with `sources` and `metadata` (an exact, case-sensitive subset match).
 
 Query strategy:
 
-- Keep the user's wording first and add at most one or two semantic variants.
+- Keep the user's wording first and add at most one or two semantic variants; run them together with `Promise.all`.
 - Add concrete domain anchors to ambiguous concepts and reject results matching only a broad neighbor.
-- If fewer than two of the top five results directly answer the question, run one narrower semantic variant.
+- If fewer than two of the top five results directly answer the question, run one narrower variant.
 
-For DM-specific questions, use the dedicated DM search surface:
+2. Read the highest-value results in full before answering; do not infer conclusions from titles or snippets. Deduplicate repeated discussions:
 
-```bash
-company_context search-dms "QUERY" --limit 10 --json
-company_context search-dm-conversations "PERSON OR QUERY" --limit 10 --json
+```js
+const ids = ["DOCUMENT_ID_1", "DOCUMENT_ID_2"];
+return await Promise.all(ids.map((document_id) => tools.company_context.read_document({ document_id })));
 ```
 
-2. Read the highest-value sources before answering; do not infer conclusions from titles alone. Deduplicate repeated discussions:
+3. Check live sources for the same query, even when indexed results look strong. One cell can query them all; use `Promise.allSettled` so one unavailable source does not hide the rest:
 
-```bash
-company_context read "DOCUMENT_ID" --max-chars 8000 --related --json
+```js
+const q = "QUERY";
+const [linear, drive, calendar, granola] = await Promise.allSettled([
+  tools.linear.search_issues({ query: q, limit: 10 }),
+  tools.google_drive.list_files({ query: q, max_results: 10 }),
+  tools.google_calendar.list_events({ query: q, max_results: 10 }),
+  tools.granola.search_notes({ query: q, limit: 10 }),
+]);
+return { linear, drive, calendar, granola };
 ```
 
-3. Check live/source tools for the same query and relevant source filters. Do this even when indexed results look strong:
+For Slack, check `tools.slack.get_access()` first. When its `search` is `company_context`, `slack.search_messages` queries the same index as step 1, so read live Slack with `slack.channel_history` or `slack.thread_replies` for the channels and threads the indexed results point to. When it is `slack`, `slack.search_messages` is Slack's native search and takes Slack search syntax.
 
-```bash
-slack search "QUERY"
-linear search "QUERY"
-gsuite drive list --query "QUERY"
-gsuite calendar events --query "QUERY"
-```
+Use the sources that match the question. For broad cross-source questions, check all likely sources.
 
-Use the source-specific tools that match the question. For broad cross-source questions, check all likely sources.
+4. For time-sensitive or "latest" asks, a keyword search returns newest first, so its first `occurred_at` shows the newest indexed match. Confirm current state with the live connectors, since the index can lag.
 
-4. For time-sensitive or "latest" asks, check index freshness:
+5. Collate indexed and live results before answering:
 
-```bash
-company_context latest-date
-company_context latest-date --source slack
-company_context latest-date --source docs --source-type google_doc
-company_context latest-date --source linear
-```
-
-`latest-date` always outputs JSON, so it does not accept a `--json` flag.
-
-5. If results are weak, broaden or target source filters:
-
-```bash
-company_context search "QUERY" --source slack --limit 10 --json
-company_context search "QUERY" --source docs --source-type google_doc --limit 10 --json
-company_context search "QUERY" --source google_calendar --limit 10 --json
-company_context search "QUERY" --source linear --limit 10 --json
-company_context search "QUERY" --source granola --limit 10 --json
-company_context search-dms "QUERY" --limit 10 --json
-```
-
-6. Collate indexed and live results before answering:
-
-- Prefer direct live-tool evidence for current state, exact source objects, and canonical fields.
+- Prefer live evidence for current state, exact source objects, and canonical fields.
 - Prefer indexed context for historical recall, older discussions, and cross-source semantic matches.
 - Treat disagreement as a signal to explain the mismatch, including dates and source links when available.
-- Avoid claiming completeness unless the direct source tool or owning API supports that claim.
+- Avoid claiming completeness unless the owning source supports that claim.
 
-## When To Fall Back
+## When To Go Deeper
 
-Use extra direct-tool depth after the default indexed-plus-live pass when:
+Use extra live-connector depth after the default pass when:
 
-- The user asks for the current Slack thread, a specific Slack channel/message/file, or a direct source object that `company_context` did not return.
-- The user asks to create, update, comment on, or inspect an exact Linear issue/project.
-- The user gives an exact Google Doc, Drive, Calendar, or Linear URL/id.
-- `company_context` returns an auth, permission, connection, or malformed-response error.
-- The question requires a canonical exhaustive answer. Company context is indexed retrieval; use the owning API/database for definitive inventories or yes/no internal-history claims when the user asks for completeness.
+- The user asks for the current Slack thread, a specific Slack channel, message, or file, or a source object that company context did not return.
+- The user asks to create, update, comment on, or inspect an exact Linear issue or project.
+- The user gives an exact Google Doc, Drive, Calendar, or Linear URL or ID (`google_docs.get_text`, `google_drive.get_file`, `linear.issue`).
+- `company_context.search` returns an auth, permission, connection, or malformed-response error. Report it; do not treat it as an empty result.
+- The question requires a canonical exhaustive answer. Company context is indexed retrieval; use the owning API for definitive inventories or yes/no internal-history claims when the user asks for completeness.
 
 ## Answering Rules
 
 - Distinguish direct internal views from AI-generated research or summaries; prefer human-authored discussion and primary notes.
 - If retrieval remains weak, say so rather than synthesizing a confident company position.
-- Lead with the answer and cite the underlying thread or document when it matters: source, source type, date, title, and URL/permalink if present.
-- Say how indexed context and live source-tool results agree, differ, or complement each other.
-- If freshness matters, use `latest-date` to inspect the indexed cutoff and direct source tools for live corroboration.
+- Lead with the answer and cite the underlying thread or document when it matters: source, type, date, title, and URL or permalink if present.
+- Say how indexed context and live results agree, differ, or complement each other.
 - Do not copy long private documents or message dumps into the reply. Summarize narrowly and quote only short snippets when useful.
-- If no indexed context is found after reasonable query variants, say that plainly and name the live tools checked.
+- If no indexed context is found after reasonable query variants, say that plainly and name the live sources checked.

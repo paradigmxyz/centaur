@@ -1,6 +1,6 @@
 ---
 name: qa
-description: "Smoke test a running Centaur deployment from a new Slack thread. Use when asked to QA the stack, run a smoke test, verify a deployment, check deploy readiness, or prove Slack tools, file upload/download, company context, logs, metrics, and tool loading work end to end."
+description: "Smoke test a running Centaur deployment from a new Slack thread. Use when asked to QA the stack, run a smoke test, verify a deployment, check deploy readiness, or prove Slack connectors, file upload/download, company context, logs, metrics, and connector loading work end to end."
 ---
 
 # Centaur QA
@@ -15,14 +15,14 @@ If the user asks for deploy readiness, promotion gating, concurrency checks, or 
 
 The smoke test passes only when all core workflows work from the running agent session:
 
-- A list of tools loads and includes expected tools.
+- The connector list loads and includes expected connectors.
 - Slack file upload to the current thread works.
 - Slack file download from the current thread works.
 - Slack file download from the current channel, then re-upload to the current thread, works.
 - Slack token search works after bounded retries.
 - Slack overall message search works.
 - Current thread history works.
-- Company context connects to its database and returns indexed documents or a valid empty result.
+- Company context search reaches its API and returns indexed documents or a valid empty result.
 - VictoriaLogs and VictoriaMetrics are reachable, and VictoriaMetrics proves metric existence without asserting exact metric values.
 
 Treat auth, permission, DNS, schema, and timeout errors as failures. Treat empty search results as warnings only when the tool successfully queried the backing service.
@@ -31,9 +31,11 @@ For promotion or deploy-readiness requests, the final status is `PASS` only if t
 
 ## In-Thread Smoke Test
 
-Use direct tool CLIs when available. Use `centaur-tools call <tool> <method> '<json>'` when a tool has no standalone CLI command for the method you need.
+Run every check through Code Mode connectors (`centaur-codemode exec --result-only`), the same path the agent uses for real work. `centaur-codemode load <connector>` prints each connector's functions and arguments.
 
-Slack file transfers must use the proxied commands, which route through the Centaur API server Slack proxy: `slack upload` and `slack download <file_id> <channel_id>`. Do not use `upload-direct`, `download-direct`, `slack files --download`, `centaur-tools call slack upload_file`, or raw `url_private` fetches; those bypass the proxy and do not prove the user-facing path.
+Slack file transfers must go through the Centaur API server Slack proxy. In a Slack channel session, `tools.slack.get_access()` returns `access: "centaur"`, and `slack.upload_file` and `slack.download_file` then route through `/api/slack/files/...`. If `access` is anything else, record a FAIL for the file checks: the session is not on the user-facing path. Do not use raw `url_private` fetches.
+
+Connectors read and write files only under the home directory, so keep QA files there, not in `/tmp`.
 
 First capture session context:
 
@@ -44,143 +46,184 @@ echo "SLACK_THREAD_TS=${SLACK_THREAD_TS:-}"
 echo "SLACK_CHANNEL_NAME=${SLACK_CHANNEL_NAME:-}"
 ```
 
-If `SLACK_CHANNEL_ID` or `SLACK_THREAD_TS` is missing, infer it from `CENTAUR_THREAD_KEY` when possible. Slack thread keys are usually `slack:<channel_id>:<thread_ts>`.
+If `SLACK_CHANNEL_ID` or `SLACK_THREAD_TS` is missing, infer it from `CENTAUR_THREAD_KEY` when possible. Slack thread keys are usually `slack:<channel_id>:<thread_ts>`. Substitute the values into the cells below.
 
-### 1. Tool Loading
+### 1. Connector Loading
 
 ```bash
-centaur-tools list
+centaur-codemode list
 ```
 
-Verify that the list is non-empty and includes at least `slack`, `company_context`, `vlogs`, and `vmetrics`. If a tool is absent, record the failure before continuing.
+Verify that the list is non-empty and includes at least `slack`, `company_context`, `vlogs`, and `vmetrics`. If a connector is absent, record the failure before continuing.
 
 ### 2. Upload File To Current Thread
 
-Upload a tiny deterministic file to the current Slack thread through the proxy:
+Write a tiny deterministic file under the home directory:
 
 ```bash
 QA_TOKEN="centaur-qa-$(date +%s)"
-QA_UPLOAD_DIR="/tmp/centaur-qa-upload-${QA_TOKEN}"
-mkdir -p "$QA_UPLOAD_DIR"
-printf '%s\n' "$QA_TOKEN" > "$QA_UPLOAD_DIR/centaur-qa-upload.txt"
-slack upload "${SLACK_CHANNEL_ID}" "$QA_UPLOAD_DIR/centaur-qa-upload.txt" \
-  --thread "${SLACK_THREAD_TS}" \
-  --comment "QA upload smoke test: ${QA_TOKEN}"
+QA_DIR="$HOME/centaur-qa/${QA_TOKEN}"
+mkdir -p "$QA_DIR"
+printf '%s\n' "$QA_TOKEN" > "$QA_DIR/centaur-qa-upload.txt"
+echo "$QA_TOKEN $QA_DIR"
 ```
 
-Verify the command prints `Uploaded centaur-qa-upload.txt` and a Slack file ID (`F...`). Save the file ID for the next step. If no file ID is printed, use thread history in step 3 to find the uploaded file's `id`.
+Upload it to the current thread through the proxy:
+
+```js
+const access = await tools.slack.get_access({});
+const upload = await tools.slack.upload_file({
+  channel: "SLACK_CHANNEL_ID",
+  thread_ts: "SLACK_THREAD_TS",
+  path: "QA_DIR/centaur-qa-upload.txt",
+  initial_comment: "QA upload smoke test: QA_TOKEN",
+});
+return { access, upload };
+```
+
+Verify `access.access` is `centaur` and `upload.file_ids` has a Slack file ID (`F...`). Save it for the next step. If none is returned, use thread history in step 3 to find the uploaded file's `id`.
 
 ### 3. Download File From Current Thread
 
-If step 2 did not print a file ID, fetch the current thread history and take the uploaded file's `id`:
+If step 2 returned no file ID, take it from the current thread's messages (`files[].id`):
 
-```bash
-slack thread "${SLACK_CHANNEL_ID}:${SLACK_THREAD_TS}" --json --limit 20
+```js
+return await tools.slack.thread_replies({ channel: "SLACK_CHANNEL_ID", ts: "SLACK_THREAD_TS", limit: 20 });
 ```
 
-Download it through the proxy to a sandbox-local temp directory:
+Download it through the proxy:
 
-```bash
-QA_DOWNLOAD_DIR="/tmp/centaur-qa-files-${QA_TOKEN}"
-slack download "${FILE_ID_FROM_CURRENT_THREAD}" "${SLACK_CHANNEL_ID}" --output "$QA_DOWNLOAD_DIR"
+```js
+return await tools.slack.download_file({
+  file: "FILE_ID_FROM_CURRENT_THREAD",
+  channel: "SLACK_CHANNEL_ID",
+  path: "QA_DIR/download/centaur-qa-upload.txt",
+});
 ```
 
-Verify the JSON output includes `output_path` and a non-zero `size_bytes`, and that the downloaded file contains `$QA_TOKEN`.
+Verify the result has a `path` and non-zero `bytes`, and that the file contains the token:
+
+```bash
+grep -q "$QA_TOKEN" "$QA_DIR/download/centaur-qa-upload.txt" && echo token-matched
+```
 
 ### 4. Current Thread History
 
-```bash
-slack thread "${SLACK_CHANNEL_ID}:${SLACK_THREAD_TS}" --json --limit 20
+```js
+const { messages } = await tools.slack.thread_replies({ channel: "SLACK_CHANNEL_ID", ts: "SLACK_THREAD_TS", limit: 20 });
+return { count: messages.length, messages: messages.map(({ ts, text, files }) => ({ ts, text: text.slice(0, 200), files })) };
 ```
 
 Verify the returned messages include the QA request and the file upload message. Record the number of messages returned.
 
 ### 5. Search Uploaded Token
 
-Search for the unique token uploaded in step 2:
+Search for the unique token uploaded in step 2, retrying for indexing lag:
 
-```bash
-for attempt in 1 2 3; do
-  slack search "$QA_TOKEN" --limit 5 --full && break
-  sleep 10
-done
+```js
+const access = await tools.slack.get_access({});
+const attempts = [];
+for (let attempt = 1; attempt <= 3; attempt++) {
+  const result = await tools.slack.search_messages({ query: "QA_TOKEN", count: 5 });
+  attempts.push(result);
+  if (JSON.stringify(result).includes("SLACK_CHANNEL_ID")) break;
+  if (attempt < 3) await sleep(10000);
+}
+return { search_backend: access.search, attempts };
 ```
 
-Verify at least one result points to the current channel or current thread. Retry up to three total attempts with 10 seconds between attempts to handle Slack indexing lag. If all three attempts complete successfully but return no matching result, record `WARN: token not indexed yet` and continue.
+Verify at least one result points to the current channel or current thread. If all three attempts succeed but return no matching result, record `WARN: token not indexed yet` and continue. Record `search_backend`: with `company_context`, search reads the company-context index, which lags Slack more than native search.
 
 ### 6. Search Overall Messages
 
 Run a separate broader message search for a stable term from the current channel:
 
-```bash
-slack search "${SLACK_CHANNEL_NAME:-centaur}" --limit 5 --full
+```js
+return await tools.slack.search_messages({ query: "SLACK_CHANNEL_NAME", count: 5 });
 ```
 
-Pass when the command succeeds and returns valid search output. Empty results are a warning only when the query reached Slack successfully.
+Use `centaur` as the query when `SLACK_CHANNEL_NAME` is unset.
+
+Pass when the call succeeds and returns valid search output. Empty results are a warning only when the query reached the backing service successfully.
 
 ### 7. Download File From Current Channel And Re-Upload
 
-Find another accessible Slack file from the current channel. Prefer a result outside the current thread, but do not use files from other channels. `search_files` filters by filename or title, so start broad with an empty query:
+Find another accessible Slack file from the current channel's recent messages. Prefer a file outside the current thread, and avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file:
 
-```bash
-slack search-files "${SLACK_CHANNEL_ID}" "" --limit 5
+```js
+const { messages } = await tools.slack.channel_history({ channel: "SLACK_CHANNEL_ID", limit: 200 });
+return messages
+  .filter((m) => m.files?.length && m.ts !== "SLACK_THREAD_TS")
+  .flatMap((m) => m.files.map((f) => ({ ts: m.ts, id: f.id, name: f.name, size: f.size })))
+  .filter((f) => f.name !== "centaur-qa-upload.txt")
+  .slice(0, 5);
 ```
 
-Pick a result whose `channels` includes `${SLACK_CHANNEL_ID}`. If possible, avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file. Download it through the proxy by file ID:
+Download it through the proxy and re-upload it to the current thread in one cell:
 
-```bash
-QA_REUPLOAD_DIR="/tmp/centaur-qa-reupload-${QA_TOKEN}"
-slack download "${FILE_ID_FROM_CURRENT_CHANNEL}" "${SLACK_CHANNEL_ID}" --output "$QA_REUPLOAD_DIR"
+```js
+const downloaded = await tools.slack.download_file({
+  file: "FILE_ID_FROM_CURRENT_CHANNEL",
+  channel: "SLACK_CHANNEL_ID",
+  path: "QA_DIR/reupload/FILE_NAME",
+});
+const uploaded = await tools.slack.upload_file({
+  channel: "SLACK_CHANNEL_ID",
+  thread_ts: "SLACK_THREAD_TS",
+  path: downloaded.path,
+  initial_comment: "QA re-upload from current channel",
+});
+return { downloaded: { path: downloaded.path, bytes: downloaded.bytes }, uploaded };
 ```
 
-Save the `output_path` from the JSON output, then re-upload it to the current thread through the proxy:
-
-```bash
-slack upload "${SLACK_CHANNEL_ID}" "${DOWNLOADED_FILE_FROM_CURRENT_CHANNEL}" \
-  --thread "${SLACK_THREAD_TS}" \
-  --comment "QA re-upload from current channel"
-```
-
-Verify the current thread now shows the re-uploaded file. If no accessible current-channel file exists, record `SKIP: no readable file in current channel` and include the `search-files` result.
+Verify the current thread now shows the re-uploaded file. If no accessible current-channel file exists, record `SKIP: no readable file in current channel` and include the `channel_history` result.
 
 ### 8. Company Context
 
-This verifies the database-backed context path and row-level permissions:
+This verifies the company-context API path and per-requester visibility:
 
-```bash
-company_context list --limit 3 --json
-company_context search "centaur" --limit 3 --json
+```js
+return await tools.company_context.search({ query: "centaur", limit: 3 });
 ```
 
-Pass when the tool returns a valid JSON payload with `status: ok`, even if no documents match. Fail on database connection errors, permission errors, missing `COMPANY_CONTEXT_DSN`, or malformed results.
+Pass when the call returns a valid `results` array, even if empty. Fail on connection, auth, or permission errors, a missing service URL, or malformed results.
 
-If company context returns `upstream connection failed`, use runtime evidence before suggesting a code fix:
+If company context fails, use runtime evidence before suggesting a code fix:
 
-```bash
-centaur-tools call vlogs thread_logs '{"thread_key":"'"${CENTAUR_THREAD_KEY}"'","start":"2h"}'
-vlogs query '_time:2h ("upstream connection failed" OR "postgres upstream connect failed" OR "failed to fetch secret")' --limit 20 --json
+```js
+const [thread, upstream] = await Promise.allSettled([
+  tools.vlogs.thread_logs({ thread_key: "THREAD_KEY", start: "2h" }),
+  tools.vlogs.query({ query: '_time:2h ("upstream connection failed" OR "failed to fetch secret" OR company_context)', limit: 20 }),
+]);
+return { thread, upstream };
 ```
 
-Classify whether the failure is a database proxy upstream issue, missing database selection, secret-resolution failure, or tool schema/client error. Include the failing tool command and thread key in the report.
+Classify whether the failure is a service or proxy upstream issue, secret-resolution failure, or connector schema/client error. Include the failing call and thread key in the report.
 
 ### 9. Logs Via VictoriaLogs
 
-```bash
-vlogs health
-vlogs query '*' --limit 3 --json
-vlogs query "centaur.thread_key:\"${CENTAUR_THREAD_KEY}\"" --limit 10 --json
+```js
+const [ready, sample, thread] = await Promise.allSettled([
+  tools.vlogs.ready({}),
+  tools.vlogs.query({ query: "*", limit: 3 }),
+  tools.vlogs.query({ query: 'centaur.thread_key:"THREAD_KEY"', limit: 10 }),
+]);
+return { ready, sample, thread };
 ```
 
-Pass when VictoriaLogs is reachable and returns JSON log entries or a valid empty list for the current-thread query. Fail on DNS, HTTP, or LogsQL errors. Keep this check scoped to the current deployment state visible from the current thread.
+Pass when VictoriaLogs is reachable and returns log entries or a valid empty list for the current-thread query. Fail on DNS, HTTP, or LogsQL errors. Keep this check scoped to the current deployment state visible from the current thread.
 
-Do not run broad error searches such as `level:error`, `vlogs errors`, or `error OR ERROR` as part of the default QA pass/fail decision. The goal of this step is to prove the vlogs connection works, not to audit whether unrelated services currently have errors. Only query error logs when a preceding check failed and you need runtime evidence to classify that specific failure.
+Do not run broad error searches such as `level:error`, `vlogs.errors`, or `error OR ERROR` as part of the default QA pass/fail decision. The goal of this step is to prove the vlogs connection works, not to audit whether unrelated services currently have errors. Only query error logs when a preceding check failed and you need runtime evidence to classify that specific failure.
 
 ### 10. Metrics Via VictoriaMetrics
 
-```bash
-vmetrics health
-vmetrics query 'count(up)' --json
-vmetrics series 'up' --limit 5 --json
+```js
+const [health, count, series] = await Promise.allSettled([
+  tools.vmetrics.health({}),
+  tools.vmetrics.query({ expr: "count(up)" }),
+  tools.vmetrics.series({ match: "up", limit: 5 }),
+]);
+return { health, count, series };
 ```
 
 Pass when VictoriaMetrics is reachable and the responses prove that at least one `up` series exists. Do not use catch-all selectors such as `{__name__=~".+"}`; they scan every series and are too expensive on shared environments. Do not assert exact sample values, counter values, gauge values, label values, or a specific `up` value; those are environment-dependent. Fail on DNS, HTTP, malformed response errors, or a valid response that proves no metric names or series exist.
@@ -235,7 +278,7 @@ responses; Slack does not render them reliably. Use this exact shape:
 ```text
 *Setup*
 - *Thread context:* PASS - C123:1712345678.000000, key slack:C123:...
-- *Tool loading:* PASS - 72 tools; expected slack/company_context/vlogs/vmetrics present
+- *Connector loading:* PASS - 72 connectors; expected slack/company_context/vlogs/vmetrics present
 
 *Slack*
 - *Upload current-thread file:* PASS - F123, centaur-qa-upload.txt
@@ -246,8 +289,8 @@ responses; Slack does not render them reliably. Use this exact shape:
 - *Current thread history:* PASS - 4 messages; QA request and upload present
 
 *Data + Observability*
-- *Company context:* PASS - list 0, search 0, status ok
-- *VictoriaLogs:* PASS - health ok, sample 3, thread query 0
+- *Company context:* PASS - search 0 results, valid response
+- *VictoriaLogs:* PASS - ready, sample 3, thread query 0
 - *VictoriaMetrics:* PASS - reachable, `up` series found
 
 *Extended*
@@ -287,25 +330,27 @@ one Slack message.
 | Symptom | Likely Cause | Action |
 |---------|--------------|--------|
 | Missing Slack env vars | Invocation did not come through Slack, or runtime metadata was not injected | Derive from `CENTAUR_THREAD_KEY`; otherwise fail early |
-| `slack download` rejects arguments | Passed a URL or permalink instead of a file ID, or the channel is not where the file is shared | Read thread history or `search-files` JSON and pass the file `id` (`F...`) plus the channel ID it is shared in |
+| `slack.download_file` rejects arguments | Passed a URL or permalink instead of a file ID, or the channel is not where the file is shared | Read `files[].id` (`F...`) from thread or channel history and pass the channel ID it is shared in |
+| `slack.upload_file` or `download_file` says no such file or path outside the files root | QA file written outside the home directory | Write QA files under `$HOME` |
+| `slack.get_access()` is not `centaur` | Session lacks Centaur API Slack context | Fail the file checks and report the thread key and access value |
 | Search cannot find just-uploaded token | Slack search indexing lag | Retry up to three total attempts, then warn and run the separate overall message search |
-| `company_context` permission denied | Principal lacks DB-backed reader grant | Report principal/channel and ask owner to grant company context access |
-| `company_context` upstream connection failed | Database proxy upstream, database selection, or secret-resolution failure | Check thread logs and vlogs for upstream connect and secret fetch errors before proposing a code change |
+| `company_context.search` permission denied | Principal lacks company context access | Report principal/channel and ask owner to grant company context access |
+| `company_context.search` connection failed | Service, proxy upstream, or secret-resolution failure | Check thread logs and vlogs for upstream connect and secret fetch errors before proposing a code change |
 | Tool CLI import error | Package entrypoint or relative import packaging regression | Run `<tool> health`, `<tool> --help`, package build checks, and report the broken console script |
 | Tool crashes when an API key env var is absent | Client assumes local env auth despite brokered credentials | Re-run `<tool> health` with the env var unset and verify client construction does not raise |
 | Tool returns 401/403 | Missing grant, wrong secret, or header not injected by iron-proxy | Check the principal's grants and the tool's `[tool.centaur]` hosts/match rules, then follow the `auth-failure-log-triage` skill |
 | `vlogs` or `vmetrics` DNS failure | Observability service unavailable from sandbox | Check local stack or cluster service deployment |
-| Expected tools missing | Tool catalog did not load or overlay masked base tools | Report the missing tool names and include `centaur-tools list` output |
+| Expected connectors missing | Connector catalog did not load, policy hides it, or an overlay shadowed a base connector | Report the missing connector names and include `centaur-codemode list` output |
 | Concurrent runs hang | Runtime assignment, execution queue, or final delivery issue | Check `session_executions`, `session_events`, and the vlogs thread trace |
 
 ## Failure Triage
 
 When a flow fails, inspect runtime evidence before redesigning:
 
-- Stuck execution: check `session_executions`, `session_events`, and `centaur-tools call vlogs thread_trace '{"thread_key":"..."}'`.
+- Stuck execution: check `session_executions`, `session_events`, and `tools.vlogs.thread_trace({ thread_key })`.
 - Missing Slack response: check Slackbot logs, final delivery state, and the Slack thread surface.
-- File failure: check `slack file-info <file_id> <channel_id>`, downloaded byte size, and the proxied upload response.
-- Tool failure: classify credential, DNS, upstream, schema, timeout, or runtime errors separately.
+- File failure: check `slack.get_access()`, the downloaded byte size, the proxied upload response, and the `requests` the cell recorded (run without `--result-only`).
+- Connector failure: classify credential, DNS, upstream, schema, timeout, or runtime errors separately.
 - Brokered-auth failure: verify whether the tool should work without local env vars and whether the proxy injected the expected headers.
 - Context bug: inspect thread history, requester context, and message ordering.
 
