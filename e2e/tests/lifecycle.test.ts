@@ -3,7 +3,9 @@
 // restart mid-turn, and cleanup after a harness switch. These disrupt shared
 // components, so they run one at a time rather than alongside other scenarios.
 import { expect, test } from 'bun:test'
-import { api, cluster, eventually, model, slack, turnTimeoutMs } from '../lib'
+import { api, cluster, eventually, model, releaseSandboxesAfterAll, slack, turnTimeoutMs } from '../lib'
+
+releaseSandboxesAfterAll()
 
 test('a paused thread resumes in the same sandbox on its next turn', async () => {
   const first = model.says('First answer.')

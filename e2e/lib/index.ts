@@ -8,6 +8,7 @@
 //   const turn = await thread.nextTurn()
 //   expect(turn.reply).toBe('Hello.')
 import { randomUUID } from 'node:crypto'
+import { afterAll } from 'bun:test'
 import { SQL } from 'bun'
 import { BOT, CHANNEL, USER, type SlackUser } from '../fakes/slack-fixture'
 
@@ -208,6 +209,24 @@ export const api = {
     const result = await api.ok('POST', `/api/session/${encodeURIComponent(thread.key)}/pause`)
     return result.paused
   }
+}
+
+/**
+ * Stops the file's idle sandboxes once all its tests finish. Call it at the top
+ * level of every test file.
+ *
+ * A thread keeps its sandbox and iron-proxy pod until it idles out (hours),
+ * so without this a run holds two pods for every thread it opened, and the
+ * single kind node runs out of pods. Bun runs files one at a time, so when a
+ * file's tests are done, every idle sandbox is one of its own finished
+ * threads. api-rs leaves sandboxes with a running execution alone.
+ */
+export function releaseSandboxesAfterAll(): void {
+  afterAll(async () => {
+    const report = await api.ok('POST', '/api/sandboxes/drain')
+    if (report.failed.length > 0) throw new Error(`sandbox release failed: ${JSON.stringify(report.failed)}`)
+    console.log(`released ${report.stopped_count} idle sandboxes; ${report.busy_count} busy`)
+  }, 60_000)
 }
 
 export const cluster = {

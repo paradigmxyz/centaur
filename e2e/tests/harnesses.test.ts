@@ -3,7 +3,9 @@
 // subscription, the workspace). CI also runs this file alone against a stack
 // in access_token mode, the one check of the subscription path.
 import { expect, test } from 'bun:test'
-import { authMode, chatgptAccountId, model, providerCredentials, slack, turnTimeoutMs } from '../lib'
+import { authMode, chatgptAccountId, model, providerCredentials, releaseSandboxesAfterAll, slack, turnTimeoutMs } from '../lib'
+
+releaseSandboxesAfterAll()
 
 // Pi and OMP support API keys only (docs/pages/extend/pi-harness.mdx, omp-harness.mdx).
 const harnesses = authMode === 'access_token' ? ['codex', 'claudecode'] : ['codex', 'claudecode', 'pi', 'omp']

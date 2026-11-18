@@ -13,7 +13,9 @@
 // iron-proxy and reads the session's calling context.
 import { expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { api, CHANNEL, model, slack, turnTimeoutMs } from '../lib'
+import { api, CHANNEL, model, releaseSandboxesAfterAll, slack, turnTimeoutMs } from '../lib'
+
+releaseSandboxesAfterAll()
 
 /** `name=value` lines a command printed, keyed by name. */
 function fields(output: string): Record<string, string> {

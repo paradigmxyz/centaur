@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test'
-import { executionOutput, model, providerCredentials, slack, turnTimeoutMs } from '../lib'
+import { executionOutput, model, providerCredentials, releaseSandboxesAfterAll, slack, turnTimeoutMs } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const credential = 'Bearer e2e-custom-provider-test-key'
 

@@ -12,10 +12,13 @@ import {
   USER_B,
   ironControl,
   model,
+  releaseSandboxesAfterAll,
   slack,
   turnTimeoutMs,
   type SlackUser
 } from '../lib'
+
+releaseSandboxesAfterAll()
 
 /** The requester iron-control should bind for a home-workspace user. */
 function requester(user: SlackUser) {

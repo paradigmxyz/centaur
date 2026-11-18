@@ -35,6 +35,7 @@ The script uses a private kubeconfig, never the ambient context. Rerun `up` afte
 - Assert observable outcomes: `turn.reply`, `turn.execution.status`, `turn.sandbox`, and `turn.request` (what the harness actually sent the provider).
 - Use `test.concurrent` with a `turnTimeoutMs`-based timeout. Each test makes its own thread and script tokens, so tests must not share state.
 - Wait with `eventually(...)`, not fixed sleeps. Use `delayMs` plus `thread.inFlight()` to keep a turn running.
+- Call `releaseSandboxesAfterAll()` at the top level of every test file. A thread's sandbox and iron-proxy pod otherwise outlive the test by hours, and the single kind node runs out of pods.
 - Put a short comment at the top of each file stating the behavior it guarantees. Add a scenario to the existing file that covers that area before creating a new file.
 - Extend `e2e/lib` or a fake only when a scenario needs a new capability, and name helpers in user terms. When a test needs new stack configuration, add it to `e2e/infra/values.yaml`, and keep fixture values aligned with `stack.sh`.
 - E2E scenarios are slow. Cover cross-service behavior here and leave logic that a unit test can reach to unit tests.

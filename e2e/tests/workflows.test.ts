@@ -14,9 +14,12 @@ import {
   eventually,
   model,
   providerCredentials,
+  releaseSandboxesAfterAll,
   slack,
   workflows
 } from '../lib'
+
+releaseSandboxesAfterAll()
 
 const WORKFLOW_DIR = '/app/workflows'
 
