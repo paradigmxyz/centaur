@@ -68,7 +68,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
 # ── GitHub CLI + Node.js 24 (LTS) + Docker CLI + Google Cloud CLI (cached) ──
-ARG NODE_VERSION=24.22.2
+ARG NODE_VERSION=24.22.3
 RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=sandbox-apt-lib,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -97,11 +97,11 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 ARG CLAUDE_CODE_VERSION=2.1.325
 # Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
 # from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
-ARG CODEX_VERSION=0.166.0
+ARG CODEX_VERSION=0.167.1
 ARG PI_CODING_AGENT_VERSION=1.5.2
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
-ARG NUSHELL_VERSION=0.116.1
+ARG NUSHELL_VERSION=0.117.0
 ARG KUBECTL_VERSION=v1.37.2
 ARG KACHE_VERSION=v0.28.1
 # Bootstrap pnpm for agents working in JS monorepos. The exact baked version
@@ -109,7 +109,7 @@ ARG KACHE_VERSION=v0.28.1
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
 # default; `manage-package-manager-versions` in v10) over the same registry
 # egress a dependency install already needs.
-ARG PNPM_VERSION=11.28.10
+ARG PNPM_VERSION=11.28.11
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -160,7 +160,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@openai/codex@${CODEX_VERSION}" \
       "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-      agent-browser@0.41.2 \
+      agent-browser@0.42.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
@@ -211,7 +211,7 @@ WORKDIR /home/agent
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
 
 ARG FOUNDRY_VERSION=v1.9.0
-ARG AMP_CLI_VERSION=0.0.1793829508-g91ac5b
+ARG AMP_CLI_VERSION=0.0.1794326444-g2deeb3
 ARG MANIM_VERSION=0.22.1
 ARG BUN_VERSION=bun-v1.4.4
 ARG OMP_VERSION=18.21.0
@@ -296,7 +296,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 # Keep Playwright in uv's image-backed cache so isolated tool environments do
 # not download its large Python driver package on first use. Browser binaries
 # are intentionally omitted because DocSend connects to Browserbase over CDP.
-ARG PLAYWRIGHT_VERSION=1.64.1
+ARG PLAYWRIGHT_VERSION=1.65.0
 RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
     && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
 
@@ -366,7 +366,7 @@ COPY --link --chmod=755 services/sandbox/repo_cache_sync.py /usr/local/bin/repo-
 COPY --link --chmod=755 services/sandbox/repo_cache_watch.py /usr/local/bin/repo-cache-watch
 COPY --link --chmod=755 services/sandbox/configure_codex_models.py /usr/local/bin/configure-codex-models
 # Codex's generic base prompt (Apache-2.0, vendored from openai/codex
-# rust-v0.166.0 codex-rs/models-manager/prompt.md) for custom catalog models.
+# rust-v0.167.1 codex-rs/models-manager/prompt.md) for custom catalog models.
 COPY --link --chmod=644 services/sandbox/codex-base-instructions.md /etc/centaur/codex-base-instructions.md
 COPY --link --chmod=755 services/sandbox/entrypoint.sh /entrypoint.sh
 COPY --link --chown=1001:1001 --from=harness-server-build /home/agent/harness-server/bin/harness-server /home/agent/.local/bin/harness-server
