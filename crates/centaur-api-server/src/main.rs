@@ -158,15 +158,26 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;
-    let workflows = Some(
-        WorkflowRuntime::new(
-            store,
-            runtime.clone(),
-            workflow_host_sandbox,
-            iron_control.workflow_principal_registrar,
+    let workflow_runtime = WorkflowRuntime::new(
+        store,
+        runtime.clone(),
+        workflow_host_sandbox,
+        iron_control.workflow_principal_registrar,
+    )
+    .await?;
+    if let Some(settings) = args.scheduled_task_runner()? {
+        let runner = centaur_scheduled_tasks::ScheduledTaskRunner::new(
+            settings.config,
+            pool.clone(),
+            settings.console_db,
+            settings.console,
+            std::sync::Arc::new(workflow_runtime.clone()),
         )
-        .await?,
-    );
+        .await?;
+        let handle = runner.start("centaur-api-rs-scheduled-task-worker");
+        app_state.set_scheduled_task_runner(runner, handle);
+    }
+    let workflows = Some(workflow_runtime);
 
     // Adopt executions orphaned by another control plane process
     // (deploy/crash): recover finished turns from recorded sandbox output,
@@ -231,6 +242,10 @@ pub(crate) enum ServerError {
     Store(#[from] centaur_session_sqlx::SessionStoreError),
     #[error(transparent)]
     Workflows(#[from] centaur_workflows::WorkflowRuntimeError),
+    #[error(transparent)]
+    ScheduledTasks(#[from] centaur_scheduled_tasks::RunnerError),
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     KubeConfig(#[from] kube::config::KubeconfigError),
     #[error(transparent)]

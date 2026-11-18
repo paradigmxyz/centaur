@@ -1,8 +1,8 @@
 //! Refreshes against a Postgres database holding Console's schema and a local
 //! token endpoint.
 //!
-//! Set `TOKEN_BROKER_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:schema:load`. Each test refreshes only the rows it inserts,
+//! Set `TOKEN_BROKER_TEST_DATABASE_URL` to a database migrated by
+//! `centaur-console migrate`. Each test refreshes only the rows it inserts,
 //! so tests can share one database and run in parallel.
 
 use std::{

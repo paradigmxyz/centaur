@@ -319,6 +319,12 @@ pub struct TaskTerminalOutcome {
 
 pub type TaskTerminalHook = Arc<dyn Fn(TaskTerminalOutcome) + Send + Sync>;
 
+/// The time `sleep_for`/`sleep_until` compare wake times with. Defaults to
+/// the system clock. A test clock must agree with the database's
+/// `absurd.current_time()` (the `absurd.fake_now` setting), which decides
+/// when a sleeping run becomes claimable.
+pub type ClockFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ClientOptions {
     pub database_url: Option<String>,
@@ -326,6 +332,8 @@ pub struct ClientOptions {
     pub queue_name: String,
     pub default_max_attempts: i32,
     pub hooks: Hooks,
+    /// `None` is the system clock.
+    pub clock: Option<ClockFn>,
 }
 
 impl Default for ClientOptions {
@@ -336,6 +344,7 @@ impl Default for ClientOptions {
             queue_name: DEFAULT_QUEUE_NAME.to_string(),
             default_max_attempts: DEFAULT_MAX_ATTEMPTS,
             hooks: Hooks::default(),
+            clock: None,
         }
     }
 }
@@ -347,6 +356,7 @@ pub struct Client {
     queue_name: String,
     default_max_attempts: i32,
     hooks: Hooks,
+    clock: Option<ClockFn>,
     registry: Arc<RwLock<HashMap<String, RegisteredTask>>>,
 }
 
@@ -458,8 +468,17 @@ impl Client {
             queue_name,
             default_max_attempts,
             hooks: options.hooks,
+            clock: options.clock,
             registry: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// The client's clock (see [`ClockFn`]).
+    pub fn now(&self) -> DateTime<Utc> {
+        match &self.clock {
+            Some(clock) => clock(),
+            None => Utc::now(),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -1319,7 +1338,8 @@ impl TaskContext {
     pub async fn sleep_for(&self, step_name: &str, duration: Duration) -> Result<()> {
         let duration = chrono::Duration::from_std(duration)
             .map_err(|err| Error::InvalidOptions(err.to_string()))?;
-        self.sleep_until(step_name, Utc::now() + duration).await
+        self.sleep_until(step_name, self.inner.client.now() + duration)
+            .await
     }
 
     pub async fn sleep_until(&self, step_name: &str, wake_at: DateTime<Utc>) -> Result<()> {
@@ -1335,7 +1355,7 @@ impl TaskContext {
             wake_at
         };
 
-        if Utc::now() < actual_wake_at {
+        if self.inner.client.now() < actual_wake_at {
             self.schedule_run(actual_wake_at).await?;
             return Err(Error::Suspend);
         }

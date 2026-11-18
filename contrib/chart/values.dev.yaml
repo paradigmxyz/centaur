@@ -39,10 +39,6 @@ tokenBroker:
   image:
     pullPolicy: IfNotPresent
 
-console:
-  image:
-    pullPolicy: IfNotPresent
-
 ironProxy:
   image:
     pullPolicy: IfNotPresent

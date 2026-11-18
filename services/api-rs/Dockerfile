@@ -1,6 +1,27 @@
 # syntax=docker/dockerfile:1.7
 # Build context is the repo root (see Justfile `_build-api-rs`) so the runtime
 # stage can bake the shared `tools/` tree used for iron-proxy fragment discovery.
+#
+# The image also ships the console (RFC 0006): the `centaur-console` binary
+# and its static files, which the chart runs as the `console` and
+# `console-worker` Deployments.
+
+ARG NODE_VERSION=24
+
+# The console SPA: hashed assets into services/console/public/spa and the
+# shell into services/console/spa-shell (served only by centaur-console, with
+# the Content-Security-Policy). Only the workspace manifests and the SPA
+# sources are copied, so Rust-only changes reuse this stage from cache.
+FROM docker.io/library/node:${NODE_VERSION}-slim AS console-web
+WORKDIR /repo
+RUN npm install -g pnpm@10.34.9
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
+COPY services/console/web/package.json services/console/web/package.json
+RUN --mount=type=cache,id=console-web-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --filter @centaur/console-web --frozen-lockfile
+COPY services/console/web/ services/console/web/
+RUN pnpm -C services/console/web build
 
 FROM rust:1-bookworm AS builder
 # aws-lc-rs (the rustls crypto provider) builds native code, so the builder
@@ -41,10 +62,11 @@ RUN --mount=type=cache,id=api-rs-cargo-registry-${TARGETARCH},target=/usr/local/
     --mount=type=cache,id=api-rs-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=api-rs-sccache-${TARGETARCH},target=/var/cache/sccache,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-      release) cargo build --release --locked -p centaur-api-server && cp target/release/centaur-api-server /usr/local/bin/centaur-api-server ;; \
-      debug|dev) cargo build --locked -p centaur-api-server && cp target/debug/centaur-api-server /usr/local/bin/centaur-api-server ;; \
+      release) cargo build --release --locked -p centaur-api-server -p centaur-console && profile_dir=release ;; \
+      debug|dev) cargo build --locked -p centaur-api-server -p centaur-console && profile_dir=debug ;; \
       *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 2 ;; \
     esac && \
+    cp "target/${profile_dir}/centaur-api-server" "target/${profile_dir}/centaur-console" /usr/local/bin/ && \
     sccache --show-stats
 
 FROM debian:bookworm-slim
@@ -53,6 +75,15 @@ RUN --mount=type=cache,id=api-rs-apt-cache,target=/var/cache/apt,sharing=locked 
     printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
     && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
+COPY --from=builder /usr/local/bin/centaur-console /usr/local/bin/centaur-console
+# Console static files: public/ (oauth-page CSS and fonts, icons, PWA files,
+# offline.html, error pages) plus the built SPA assets, and the SPA shell
+# outside public/ so it is only ever served with the CSP.
+COPY services/console/public/ /usr/share/centaur-console/public/
+COPY --from=console-web /repo/services/console/public/spa/ /usr/share/centaur-console/public/spa/
+COPY --from=console-web /repo/services/console/spa-shell/index.html /usr/share/centaur-console/spa-shell/index.html
+ENV CENTAUR_CONSOLE_PUBLIC_DIR=/usr/share/centaur-console/public \
+    CENTAUR_CONSOLE_SPA_SHELL=/usr/share/centaur-console/spa-shell/index.html
 WORKDIR /app
 COPY centaur_sdk/ /app/centaur_sdk/
 COPY services/workflow-python/ /app/workflow-python/

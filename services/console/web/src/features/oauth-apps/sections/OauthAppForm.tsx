@@ -108,7 +108,7 @@ export function toPayload(values: OauthAppFormValues, isNew: boolean, configKeys
   return payload;
 }
 
-/** Rails `"github".capitalize` -> "Github". */
+/** `"github"` -> "Github". */
 function capitalize(key: string) {
   return key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
 }

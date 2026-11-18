@@ -1,0 +1,22 @@
+{% extends "pages/layout.html" %}
+{%- block title %}Awaiting Approval · Centaur Console{% endblock -%}
+{%- block content %}
+<div class="oauth-header">
+  <img src="{{ assets.path("centaur-lockup-white.svg") }}" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <p class="oauth-subtitle">Operator console.</p>
+</div>
+{% if let Some(notice) = notice %}<div class="oauth-notice" role="status">{{ notice }}</div>{% endif %}
+<section class="oauth-card oauth-center" aria-labelledby="pending-heading">
+  <h1 id="pending-heading" class="oauth-result-heading">Awaiting approval</h1>
+  <p class="oauth-result-message">
+    You're signed in as <strong class="oauth-strong">{{ email }}</strong>, but your account
+    is pending approval by an administrator. You'll have access once it's approved.
+  </p>
+  <div class="oauth-result-retry">
+    <form class="oauth-button-form" method="post" action="/logout">
+      <button class="oauth-button oauth-button-outline" type="submit">Sign out</button>
+      <input type="hidden" name="authenticity_token" value="{{ csrf }}" autocomplete="off">
+    </form>
+  </div>
+</section>
+{% endblock %}

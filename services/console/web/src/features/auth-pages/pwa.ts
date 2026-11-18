@@ -17,7 +17,7 @@ type BadgingNavigator = Navigator & {
   clearAppBadge?: () => Promise<void>;
 };
 
-export const SERVICE_WORKER_URL = "/service-worker.js";
+export const SERVICE_WORKER_URL = "/service-worker";
 
 export function registerPwa(win: Window = window) {
   const nav = win.navigator as BadgingNavigator;

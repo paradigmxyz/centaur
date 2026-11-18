@@ -72,7 +72,10 @@
 {{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
 {{- end -}}
 {{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
-{{- $companyContextV1Enabled := .Values.companyContextV1.enabled -}}
+{{- /* Deprecated (RFC 0006): companyContextV1 is no longer a chart value, but an
+explicit `companyContextV1.enabled=false` left in a values file still keeps
+the v1 Slack ETL and retention off. NOTES.txt warns when it is set. */ -}}
+{{- $companyContextV1Enabled := ne (index (.Values.companyContextV1 | default dict) "enabled" | toString) "false" -}}
 {{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
 {{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
 {{- $companyContextEmbeddingsDimensions := dig "companyContextEmbeddings" "dimensions" 1536 $apiRsEtl -}}
@@ -628,6 +631,15 @@ spec:
                   key: {{ printf "%sIRON_CONTROL_DATABASE_URL" .Values.secretManager.envPrefix }}
             - name: IRON_CONTROL_DATABASE_NAME
               value: {{ $console.database.name | quote }}
+            # Console scheduled tasks (RFC 0006a): api-rs decides when a task
+            # runs and claims each occurrence from the console (IRON_CONTROL_URL,
+            # signed with CENTAUR_JWT_SIGNING_SECRET).
+            - name: SCHEDULED_TASK_RUNNER_ENABLED
+              value: {{ .Values.apiRs.scheduledTaskRunner.enabled | quote }}
+            - name: SCHEDULED_TASK_RECONCILE_INTERVAL_SECS
+              value: {{ .Values.apiRs.scheduledTaskRunner.reconcileIntervalSeconds | quote }}
+            - name: SCHEDULED_TASK_WORKER_CONCURRENCY
+              value: {{ .Values.apiRs.scheduledTaskRunner.workerConcurrency | quote }}
 {{- if and .Values.toolServer.enabled (not .Values.toolServer.repo) (eq (len $toolSources) 0) }}
 {{- fail "toolServer.repo (owner/name) must be set when toolServer.enabled=true" }}
 {{- end }}

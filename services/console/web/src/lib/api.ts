@@ -73,7 +73,7 @@ export const navigation = {
   },
 };
 
-/** Rails honours return_to only for allowlisted same-origin paths (ConsoleReturnPath). */
+/** The console honours return_to only for same-origin paths it accepts (centaur_console_auth::return_path). */
 export function loginUrl(location: Pick<Location, "pathname" | "search"> = window.location): string {
   const here = location.pathname + location.search;
   return `/login?return_to=${encodeURIComponent(here)}`;

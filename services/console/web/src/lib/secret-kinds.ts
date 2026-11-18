@@ -1,4 +1,4 @@
-// Mirrors SecretKinds::SECRET_KINDS (app/controllers/concerns/secret_kinds.rb).
+// Mirrors SECRET_KINDS in crates/centaur-console-api/src/principals/mod.rs.
 
 export const SECRET_KINDS = {
   static: { label: "Static", form: true },

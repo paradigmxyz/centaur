@@ -86,11 +86,14 @@ toolServer:
     existingSecretName: ""
     secretKey: token
 
-# console — Rails control plane (formerly "iron-control") for authenticated API
-# access + encrypted secret storage. The console is a required chart component.
+# console — the credential-control API and operator UI (formerly
+# "iron-control"). The console is a required chart component. It runs the
+# `centaur-console` binary from the api-rs image (apiRs.image), as the `console`
+# (`serve`) and `console-worker` (`worker`) Deployments.
 # Uses a dedicated `iron_control_production` database on the bundled Postgres
-# (its own logical DB so its Rails schema_migrations table never collides with
-# the API's migration table); an init container creates the DB idempotently.
+# (its own logical DB so its schema never collides with the API's migration
+# table); an init container creates the DB idempotently and the console
+# migrates it on start.
 # DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
 # keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
 # elsewhere to use an external DB.
@@ -115,34 +118,30 @@ console:
   # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
   # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
   publicUrl: ""
-  # Additional exact Host headers accepted by Rails Host Authorization. Use for
+  # Additional exact Host headers accepted by the console's Host Authorization. Use for
   # service DNS names that differ from the chart's short in-cluster URL;
   # publicUrl and the short service host are already included.
   allowedHosts: []
-  # Optional Sentry DSN for Console web requests and background jobs. Empty by
-  # default, so the Sentry SDK remains disabled unless explicitly configured.
-  sentryDsn: ""
+  # Extra environment variables for the console web and worker containers.
+  # Use for settings that are not chart-rendered, such as SLACK_API_URL when
+  # the Slack Web API is reached through an internal endpoint.
+  extraEnv: {}
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
-  image:
-    repository: centaur-console
-    tag: latest
-    # Default Always: the image is published under the mutable `latest` tag, so
-    # IfNotPresent would pin pods to whatever digest a node already cached.
-    pullPolicy: Always
-  railsEnv: production
+  # There is no console image: the console runs from apiRs.image. The former
+  # console.image (the Rails image), console.railsEnv, and console.sentryDsn
+  # are ignored.
   database:
     # Logical DB created on the bundled Postgres by the create-db init
-    # container. Must match the primary connection's `database:` in the image's
-    # database.yml — the connection URL carries no database path, so Rails
-    # resolves the name from there.
+    # container. Must match the console's database name (iron_control_production)
+    # — the connection URL carries no database path, so the console uses its
+    # fixed name.
     name: iron_control_production
-  # Google as an OAuth identity provider for console sign-in (and the
-  # broker-credential refresh loop). Off by default — not every deployment uses
+  # Google as an OAuth identity provider for console sign-in. Off by default — not every deployment uses
   # Google to log in. When enabled, the IRON_CONTROL_GOOGLE_CLIENT_ID and
   # IRON_CONTROL_GOOGLE_CLIENT_SECRET env vars are sourced from the shared infra
   # Secret (keys <secretManager.envPrefix>IRON_CONTROL_GOOGLE_CLIENT_ID /
@@ -157,7 +156,7 @@ console:
   # must exist or the console pods CreateContainerConfigError. This is the
   # Sign-in-with-Slack OIDC app (scopes openid/email/profile, redirect URL
   # <publicUrl>/auth/slack/callback) — not the DB-managed Slack OAuth app the
-  # bot and DM sync use.
+  # bot uses.
   slackOauth:
     enabled: false
   # Okta as an OIDC identity provider for console sign-in. Set issuer to the
@@ -171,19 +170,12 @@ console:
     issuer: ""
     # Must match token_endpoint_auth_method on the Okta client application.
     tokenEndpointAuthMethod: client_secret_basic
-  # OAuth app slug whose user-level Slack credentials are used by the DM sync
-  # worker. Keep this aligned with the Console OAuth app users authorize.
+  # OAuth app slug whose user-level Slack credentials experimentalCompanyContext
+  # uses for Slack discovery. Keep this aligned with the Console OAuth app users
+  # authorize. (The console's own Slack DM sync was retired with company
+  # context v1; console.googleDocsSync is gone with it and is ignored.)
   slackDmSync:
     oauthAppSlug: slack
-  # Google Docs metadata and document-content ETL. Enable this to run the
-  # recurring poller and queued Google Docs sync jobs. Disabled jobs exit
-  # without work.
-  # This does not disable Google OAuth or remove previously indexed content.
-  googleDocsSync:
-    enabled: false
-    # Index credentials from this OAuth app. A dedicated app can limit ingestion
-    # to one shared account without syncing other connected users.
-    oauthAppSlug: google
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale
@@ -210,11 +202,10 @@ console:
     host: ""
     tls: []
   resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs the console's background jobs —
-  # most importantly the broker-credential OAuth refresh loop that mints and
-  # refreshes the access tokens delivered inline via `token_broker` sources
-  # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute.
+  # `centaur-console worker`: the Slack channel catalog and membership refresh
+  # loops. Replica-safe (each loop runs under a Postgres advisory lock).
+  # Broker-credential refresh is tokenBroker's; scheduled tasks run from
+  # api-rs (apiRs.scheduledTaskRunner).
   worker:
     replicaCount: 1
     # Node steering for Console background worker pods. Configure separately
@@ -489,7 +480,7 @@ proxySync:
 # update never refreshes a credential twice.
 tokenBroker:
   # Set false to run no broker, for example while another deployment refreshes
-  # the same credentials. The console's own refresh jobs are unaffected.
+  # the same credentials. Nothing else refreshes them.
   enabled: true
   replicaCount: 1
   nodeSelector: {}
@@ -515,13 +506,11 @@ tokenBroker:
     annotations: {}
   resources: {}
 
-# v1 company-context ingestion: the api-rs Slack workflows (slack_sync,
-# slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
-# Granola sync jobs. Set false to stop all of them, for example to roll out
-# experimentalCompanyContext in isolation. Already-synced data is kept, and
-# Slack retention does not run while this is false.
-companyContextV1:
-  enabled: true
+# companyContextV1 was removed with the Rails console (RFC 0006): the console's
+# Slack DM, Google Docs, and Granola sync jobs are retired in favour of
+# experimentalCompanyContext. The api-rs Slack workflows follow
+# apiRs.etl.slack. An explicit `companyContextV1.enabled: false` left in a
+# values file still keeps the api-rs Slack ETL and retention off (deprecated).
 
 # API clients: machine callers, such as eval runners, that exchange a client
 # secret for a session API token at api-rs /oauth/token. Off hides them in the
@@ -559,12 +548,12 @@ experimentalCompanyContext:
     # Projects rows written to company_context_system.custom_documents.
     custom:
       enabled: true
-  # Rails Console OAuth app whose live per-user Google broker credentials are
+  # Console OAuth app whose live per-user Google broker credentials are
   # synchronized: those with drive.readonly for Drive and those with
   # calendar.readonly for Calendar. The embeddings API key comes from
   # OPENAI_API_KEY in the shared Kubernetes Secret.
   googleOauthAppSlug: google
-  # Rails Console OAuth app whose live per-user Granola MCP credentials are
+  # Console OAuth app whose live per-user Granola MCP credentials are
   # synchronized.
   granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
@@ -576,7 +565,7 @@ experimentalCompanyContext:
   granolaSyncIntervalSeconds: 1800
   customProjectIntervalSeconds: 60
   # Slack conversations are discovered through the same per-user Slack
-  # credentials as the Console DM sync (console.slackDmSync.oauthAppSlug).
+  # credentials users connect through the Console (console.slackDmSync.oauthAppSlug).
   # Workspace users are listed with SLACK_BOT_TOKEN from the shared Secret, so
   # Slack documents show names instead of user IDs.
   slackDiscoveryIntervalSeconds: 1800
@@ -690,6 +679,17 @@ apiRs:
   # Set false when multiple Centaur instances share one console/1Password
   # Connect control plane and infra secrets are managed out of band.
   syncInfraSecrets: true
+  # Console scheduled tasks (RFC 0006a). api-rs owns when a task runs: it
+  # reconciles one durable tick per enabled task from the console database and
+  # claims each occurrence from the console before spawning its workflow run.
+  # Keep enabled: the console no longer schedules tasks itself.
+  scheduledTaskRunner:
+    enabled: true
+    # Seconds between reconcile passes; 0 reconciles only at startup (the
+    # console also asks api-rs to reconcile after every task change).
+    reconcileIntervalSeconds: 60
+    # Ticks processed at once.
+    workerConcurrency: 2
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.

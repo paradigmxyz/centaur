@@ -1,8 +1,8 @@
 //! Tests against a Postgres database holding Console's schema.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. Each test inserts uniquely named rows, so tests can
-//! share one database and run in parallel.
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to an empty database: the tests bring it to the
+//! current schema with `centaur_console_db::migrate::migrate`. Each test inserts uniquely named rows, so tests
+//! can share one database and run in parallel.
 
 use std::env;
 
@@ -31,13 +31,15 @@ async fn database() -> Option<PgPool> {
         eprintln!("skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema");
         return None;
     };
-    Some(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect to the test database"),
-    )
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect to the test database");
+    centaur_console_db::migrate::migrate(&pool)
+        .await
+        .expect("bring the test database to the console schema");
+    Some(pool)
 }
 
 struct Fixture {

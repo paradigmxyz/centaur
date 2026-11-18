@@ -682,7 +682,7 @@ Run one agent turn from inside the api-rs deployment:
 THREAD_KEY=cli:production-smoke-codex
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
 CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+  centaur-console service-token)
 
 SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
   -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \

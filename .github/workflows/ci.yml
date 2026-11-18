@@ -24,6 +24,7 @@ jobs:
       harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
       company_context_checks: ${{ steps.filter.outputs.company_context_checks }}
       rust_api: ${{ steps.filter.outputs.rust_api }}
+      console_checks: ${{ steps.filter.outputs.console_checks }}
       proxy_sync_checks: ${{ steps.filter.outputs.proxy_sync_checks }}
       token_broker_checks: ${{ steps.filter.outputs.token_broker_checks }}
       sandbox_tests: ${{ steps.filter.outputs.sandbox_tests }}
@@ -77,7 +78,7 @@ jobs:
           set_output migration_order \
             '^crates/centaur-session-sqlx/migrations/' \
             '^crates/centaur-session-sqlx/search-migrations/' \
-            '^services/console/db/migrate/' \
+            '^crates/centaur-console-db/migrations/' \
             '^\.github/scripts/check-migration-order\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_checks \
@@ -102,14 +103,15 @@ jobs:
             '^crates/active-record-encryption/' \
             '^crates/centaur-proxy-sync/' \
             '^crates/centaur-console-db/' \
-            '^services/console/' \
+            '^crates/centaur-console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output token_broker_checks \
             '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
             '^crates/centaur-token-broker/' \
-            '^services/console/' \
+            '^crates/centaur-console-db/' \
+            '^crates/centaur-console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
@@ -122,6 +124,15 @@ jobs:
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
             '^workflows/' \
+            '^\.github/workflows/ci\.yml$'
+          set_output console_checks \
+            '^Cargo\.(toml|lock)$' \
+            '^crates/active-record-encryption/' \
+            '^crates/centaur-console' \
+            '^crates/centaur-telemetry/' \
+            '^crates/centaur-token-broker/providers\.json$' \
+            '^services/console/public/' \
+            '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output sandbox_tests \
             '^services/sandbox/' \
@@ -305,27 +316,12 @@ jobs:
       - name: Start test database
         run: .github/scripts/start-test-postgres.sh proxy-sync-test-postgres 5432 proxy_sync_test pgvector
 
-      - name: Install Console packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
       # proxy-sync reads Console's tables directly, so its integration tests
       # run against the schema Console currently ships.
       - name: Load Console schema
-        working-directory: services/console
         env:
-          RAILS_ENV: test
           CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
-        run: bin/rails db:prepare
-
-      - name: Test Console database crate
-        env:
-          CONSOLE_DB_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
-        run: cargo test --locked -p centaur-console-db
+        run: cargo run --locked -p centaur-console -- migrate
 
       - name: Test
         env:
@@ -353,40 +349,55 @@ jobs:
       - name: Start test database
         run: .github/scripts/start-test-postgres.sh token-broker-test-postgres 5432 token_broker_test pgvector
 
-      - name: Install Console packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
       # token-broker reads and writes Console's tables directly, so its
       # integration tests run against the schema Console currently ships.
       - name: Load Console schema
-        working-directory: services/console
         env:
-          RAILS_ENV: test
           CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
-        run: bin/rails db:prepare
+        run: cargo run --locked -p centaur-console -- migrate
 
       - name: Test
         env:
           TOKEN_BROKER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
         run: cargo test --locked -p centaur-token-broker
 
-      # The tests store tokens encrypted by token-broker; Console must read them.
-      - name: Decrypt token-broker's writes with Console
-        working-directory: services/console
+
+  console-checks:
+    name: Console tests
+    runs-on: depot-ubuntu-24.04-16
+    needs: ci_changes
+    if: needs.ci_changes.outputs.console_checks == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Stock PostgreSQL, as on managed services: the console needs no
+      # extensions. Tests create their own databases on this server.
+      - name: Start test database
+        run: .github/scripts/start-test-postgres.sh console-test-postgres 5432 console_test pgvector
+
+      - name: Test
         env:
-          RAILS_ENV: test
-          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
-        run: |
-          bin/rails runner '
-            credentials = BrokerCredential.where.not(access_token: nil).to_a
-            abort "token-broker tests stored no tokens" if credentials.empty?
-            credentials.each { |credential| [credential.access_token, credential.refresh_token] }
-            puts "Console decrypted #{credentials.size} credentials token-broker wrote"'
+          CONSOLE_DB_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/console_test
+        run: >-
+          cargo test --locked
+          -p centaur-console-db
+          -p centaur-console-auth
+          -p centaur-console-api
+          -p centaur-console
+
+      - name: Cleanup Test Postgres
+        if: ${{ always() }}
+        run: docker rm -f console-test-postgres || true
 
   rust-api:
     name: Rust API tests
@@ -431,11 +442,16 @@ jobs:
             --exclude centaur-company-context \
             --exclude centaur-proxy-sync \
             --exclude centaur-token-broker \
-            --exclude centaur-console-db
+            --exclude centaur-console-db \
+            --exclude centaur-console-auth \
+            --exclude centaur-console-api \
+            --exclude centaur-console
 
           PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
           SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
             cargo test --locked -p centaur-session-runtime -- --test-threads=1
+          SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
+            cargo test --locked -p centaur-scheduled-tasks
 
       - name: Cleanup Test Postgres
         if: ${{ always() }}
@@ -730,6 +746,7 @@ jobs:
       - company-context-checks
       - proxy-sync-checks
       - token-broker-checks
+      - console-checks
       - rust-api
       - rust-api-postgres
       - sandbox-tests
@@ -744,5 +761,5 @@ jobs:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: migration-order, rust-checks, harness-server-checks, harness-server-conformance, company-context-checks, proxy-sync-checks, token-broker-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
+          allowed-skips: migration-order, rust-checks, harness-server-checks, harness-server-conformance, company-context-checks, proxy-sync-checks, token-broker-checks, console-checks, rust-api, rust-api-postgres, sandbox-tests, workflow-python-tests, tool-tests, slackbotv2-tests, discordbot-checks, githubbot-checks, teamsbot-checks
           jobs: ${{ toJSON(needs) }}

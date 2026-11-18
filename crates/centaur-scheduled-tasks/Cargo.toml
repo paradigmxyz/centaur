@@ -1,0 +1,31 @@
+[package]
+name = "centaur-scheduled-tasks"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "api-rs runner for Console scheduled tasks on Absurd (RFC 0006 Decision 3, contract in RFC 0006a)"
+
+[dependencies]
+absurd-sdk.workspace = true
+async-trait.workspace = true
+centaur-console-auth.workspace = true
+centaur-console-db.workspace = true
+centaur-workflows.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["chrono"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+centaur-session-sqlx.workspace = true
+tokio = { workspace = true, features = ["process"] }
+uuid.workspace = true
+
+[lints]
+workspace = true

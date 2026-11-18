@@ -4,16 +4,18 @@
 {{- $dbName := $console.database.name }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
-# console — Rails control plane for authenticated API access and encrypted
-# secret storage. The chart owns the Deployment shape (image, port, env,
-# security context) so operators tune it via `helm upgrade`. It runs against a
-# dedicated `iron_control_production` database on the bundled Postgres (a separate logical
-# DB so its Rails schema_migrations table never collides with the API's migration
-# table); the create-db init container provisions that DB idempotently. All
-# secret material — the primary DB URL, the bootstrap user/API-key, the three
-# ActiveRecord encryption keys, and SECRET_KEY_BASE — comes from the shared
-# infra Secret via explicit secretKeyRefs (NOT envFrom, which would leak the
-# API's ai_v2 DATABASE_URL into console's env).
+# console — the credential-control API and operator UI (RFC 0006). It runs the
+# `centaur-console` binary from the api-rs image (`centaur.consoleImage`). The
+# chart owns the Deployment shape (image, port, env, security context) so
+# operators tune it via `helm upgrade`. It runs against a dedicated
+# `iron_control_production` database on the bundled Postgres (a separate
+# logical DB so the console schema never collides with the API's migration
+# table); the create-db init container provisions that DB idempotently and
+# `centaur-console serve` migrates it on start. All secret material — the
+# primary DB URL, the bootstrap user/API-key, the three ActiveRecord encryption
+# keys, and SECRET_KEY_BASE — comes from the shared infra Secret via explicit
+# secretKeyRefs (NOT envFrom, which would leak the API's ai_v2 DATABASE_URL
+# into console's env).
 apiVersion: v1
 kind: Service
 metadata:
@@ -53,13 +55,13 @@ spec:
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" $console "indent" 6) }}
       initContainers:
-        # Create the console logical databases on the bundled Postgres: the
-        # primary plus the Solid Cache/Queue/Cable databases (see
-        # config/database.yml). The image entrypoint's `db:prepare` loads schema
-        # and migrates each one but does not create them, so they are provisioned
-        # here as the admin (ai_v2) DSN whose `tempo` superuser can create
-        # databases. Idempotent: each CREATE is guarded by a pg_database check and
-        # tolerates a lost race against a concurrent replica.
+        # Create the console database on the bundled Postgres as the admin
+        # (ai_v2) DSN, whose `tempo` superuser can create databases;
+        # `centaur-console serve` then migrates it. Idempotent: the CREATE is
+        # guarded by a pg_database check and tolerates a lost race against a
+        # concurrent replica. The Rails console's Solid Cache/Queue/Cable
+        # databases (<name>_cache/_queue/_cable) are no longer created, but
+        # are left in place so a rollback to the Rails release still starts.
         - name: create-db
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
@@ -89,58 +91,47 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Primary + Solid Cache/Queue/Cable, matching config/database.yml.
             - name: DB_NAMES
-              value: {{ printf "%s %s_cache %s_queue %s_cable" $dbName $dbName $dbName $dbName | quote }}
+              value: {{ $dbName | quote }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             seccompProfile:
               type: RuntimeDefault
       containers:
         - name: console
-          image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
-          imagePullPolicy: {{ $console.image.pullPolicy }}
+{{ include "centaur.consoleImage" . | indent 10 }}
+          # Create the database if missing, migrate (adopting a Rails-managed
+          # schema at the baseline), bootstrap the first operator, then serve
+          # HTTP on PORT.
+          command:
+            - /usr/local/bin/centaur-console
+            - serve
           env:
             # Explicit secretKeyRefs only — never envFrom the shared Secret, or
             # its DATABASE_URL (ai_v2) would leak into console's env. Env
             # var names match the IRON_CONTROL_* secret keys 1:1 (except
-            # SECRET_KEY_BASE, which Rails reads by its standard name). The DB
-            # URL carries connection info only (no database path) so each Rails
-            # connection's db name comes from the image's database.yml.
+            # SECRET_KEY_BASE, which is read by its standard name). The DB URL
+            # carries connection info only (no database path), so the database
+            # name is the console's fixed `iron_control_production`.
             - name: IRON_CONTROL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
-            # Thread browsing reads api-rs session rows from its logical DB.
-            # Keep this under a Console-specific name so Rails' primary
-            # DATABASE_URL remains pointed at the console database.
+            # Workflow views read api-rs rows from its logical DB. Keep this
+            # under a Console-specific name so the primary DATABASE_URL
+            # remains pointed at the console database.
             - name: CENTAUR_CONSOLE_CENTAUR_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            - name: CENTAUR_CONSOLE_SLACKBOTV2_USER_NAME
-              value: {{ .Values.slackbotv2.userName | quote }}
             - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sSLACK_BOT_TOKEN" $prefix }}
                   optional: true
-{{- if .Values.codex.customProviders }}
-            - name: CODEX_CUSTOM_PROVIDERS
-              value: {{ .Values.codex.customProviders | toJson | quote }}
-{{- end }}
-{{- range $name := tuple "CLAUDE_MODEL" "CODEX_MODEL" }}
-{{- if hasKey $.Values.sandbox.extraEnv $name }}
-            # Mirror the deployer's harness default-model override
-            # (sandbox.extraEnv) so the Threads view names the model threads
-            # without a recorded override actually ran on.
-            - name: {{ $name }}
-              value: {{ index $.Values.sandbox.extraEnv $name | toString | quote }}
-{{- end }}
-{{- end }}
             - name: IRON_CONTROL_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -194,10 +185,6 @@ spec:
 {{- with $console.allowedHosts }}
             - name: CENTAUR_CONSOLE_ALLOWED_HOSTS
               value: {{ join "," . | quote }}
-{{- end }}
-{{- with $console.sentryDsn }}
-            - name: SENTRY_DSN
-              value: {{ . | quote }}
 {{- end }}
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
@@ -260,33 +247,21 @@ spec:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_SECRET" $prefix }}
 {{- end }}
-            - name: RAILS_ENV
-              value: {{ $console.railsEnv | quote }}
-{{- with $console.slackDmSync.oauthAppSlug }}
-            - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
-              value: {{ . | quote }}
-{{- end }}
-            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
-              value: {{ $console.googleDocsSync.enabled | quote }}
-{{- with $console.googleDocsSync.oauthAppSlug }}
-            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_OAUTH_APP_SLUG
-              value: {{ . | quote }}
-{{- end }}
-            - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
-              value: {{ .Values.companyContextV1.enabled | quote }}
             - name: CENTAUR_CONSOLE_API_CLIENTS_ENABLED
               value: {{ .Values.apiClients.enabled | quote }}
             - name: PORT
               value: {{ $console.service.httpPort | quote }}
-            - name: RAILS_LOG_TO_STDOUT
-              value: "1"
-            - name: RAILS_SERVE_STATIC_FILES
-              value: "1"
+            - name: RUST_LOG
+              value: info
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
             - name: CENTAUR_CONSOLE_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- end }}
+{{- range $name, $value := $console.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
 {{- end }}
           ports:
             - containerPort: {{ $console.service.httpPort }}
@@ -313,10 +288,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
           securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-            # No readOnlyRootFilesystem — Rails writes to tmp/ at runtime.
-            seccompProfile:
-              type: RuntimeDefault
+{{ include "centaur.consoleSecurityContext" . | indent 12 }}
           resources:
 {{ toYaml $console.resources | nindent 12 }}
 {{- if .Values.networkPolicy.enabled }}

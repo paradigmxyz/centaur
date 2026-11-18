@@ -76,7 +76,7 @@ function ShellFrame() {
   );
 }
 
-/** Leaves the SPA for a Rails-rendered page (login, pending). */
+/** Leaves the SPA for a server-rendered page (login, pending). */
 function FullPageRedirect({ to }: { to: string }) {
   useEffect(() => navigation.assign(to), [to]);
   return <ShellLoading />;

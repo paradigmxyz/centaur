@@ -1,46 +1,104 @@
 # centaur-console dev tasks. Run `just` to list recipes.
+#
+# The console is the Rust `centaur-console` binary (crates/centaur-console*);
+# this directory holds the SPA (web/), the static files it serves (public/),
+# and the docs. Cargo runs from the repository root.
 
-set shell := ["bash", "-uc"]
+set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Hardcoded dev-only bootstrap secrets. centaur-console refuses API requests until
-# a user and API key exist; these are created on first boot from these vars.
-# The API key must be `iak_` + 64 lowercase hex chars. NOT for production use.
+root := source_directory() / ".." / ".."
+
+# Hardcoded dev-only settings. centaur-console refuses API requests until a
+# user and API key exist; these are created on first boot from these vars.
+# The API key must be `iak_` + 64 lowercase hex chars. The encryption keys are
+# the retired Rails console's development fallbacks, so an existing dev database stays
+# readable. NOT for production use.
 export CENTAUR_CONSOLE_INITIAL_USER_EMAIL := "dev@iron.local"
 export CENTAUR_CONSOLE_INITIAL_USER_PASSWORD := "dev-password-1234"
 export CENTAUR_CONSOLE_INITIAL_API_KEY := "iak_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-export CENTAUR_CONSOLE_DB_HOST := env_var_or_default("CENTAUR_CONSOLE_DB_HOST", "127.0.0.1")
-export CENTAUR_CONSOLE_DB_PORT := env_var_or_default("CENTAUR_CONSOLE_DB_PORT", "55432")
-export CENTAUR_CONSOLE_DB_USERNAME := env_var_or_default("CENTAUR_CONSOLE_DB_USERNAME", "postgres")
-export CENTAUR_CONSOLE_DB_PASSWORD := env_var_or_default("CENTAUR_CONSOLE_DB_PASSWORD", "postgres")
+export SECRET_KEY_BASE := "dev_secret_key_base_0000000000000000000000000000000000000000000000000000000000000000"
+export CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY := "dev_ar_encryption_primary_key_0000000000000000"
+export CENTAUR_CONSOLE_AR_ENCRYPTION_DETERMINISTIC_KEY := "dev_ar_encryption_deterministic_key_00000000000"
+export CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT := "dev_ar_encryption_key_derivation_salt_000000000"
+export CENTAUR_JWT_SIGNING_SECRET := env_var_or_default("CENTAUR_JWT_SIGNING_SECRET", "dev-jwt-signing-secret")
+export CENTAUR_CONSOLE_PUBLIC_DIR := source_directory() / "public"
+export CENTAUR_CONSOLE_SPA_SHELL := source_directory() / "spa-shell" / "index.html"
+
+db_host := env_var_or_default("CENTAUR_CONSOLE_DB_HOST", "127.0.0.1")
+db_port := env_var_or_default("CENTAUR_CONSOLE_DB_PORT", "55432")
+db_user := env_var_or_default("CENTAUR_CONSOLE_DB_USERNAME", "postgres")
+db_password := env_var_or_default("CENTAUR_CONSOLE_DB_PASSWORD", "postgres")
+db_name := env_var_or_default("CENTAUR_CONSOLE_DEV_DB_NAME", "iron_control_development")
+export CENTAUR_CONSOLE_DATABASE_URL := "postgresql://" + db_user + ":" + db_password + "@" + db_host + ":" + db_port + "/" + db_name
 
 # List available recipes.
 default:
     @just --list
 
-# Prepare the database, then run the Rails server and the Vite dev server for
-# the SPA under overmind (see Procfile.dev). Browse the SPA at
-# http://localhost:5173; it proxies API and auth paths to Rails.
+# `serve` creates and migrates the database. Browse the SPA at
+# http://localhost:5173; Vite proxies API and auth paths to the console on :3000.
+# Start Postgres, centaur-console, and the Vite dev server for the SPA.
 dev: deps postgres
-    @echo "== Preparing database =="
-    bin/rails db:prepare
-    @echo "== Starting overmind (rails + vite) =="
-    @echo "   console:  http://localhost:5173/console/principals (Vite)"
-    @echo "   rails:    http://localhost:3000"
-    @echo "   user:     $CENTAUR_CONSOLE_INITIAL_USER_EMAIL"
-    @echo "   password: $CENTAUR_CONSOLE_INITIAL_USER_PASSWORD"
-    @echo "   api key:  $CENTAUR_CONSOLE_INITIAL_API_KEY"
-    bin/dev
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== Starting centaur-console (:3000) and Vite (:5173) =="
+    echo "   console:  http://localhost:5173/principals (Vite)"
+    echo "   server:   http://localhost:3000"
+    echo "   user:     $CENTAUR_CONSOLE_INITIAL_USER_EMAIL"
+    echo "   password: $CENTAUR_CONSOLE_INITIAL_USER_PASSWORD"
+    echo "   api key:  $CENTAUR_CONSOLE_INITIAL_API_KEY"
+    trap 'kill 0' EXIT INT TERM
+    (cd "{{root}}" && cargo run -p centaur-console -- serve) &
+    pnpm -C "{{source_directory()}}/web" dev &
+    wait -n
 
+# Run the console worker (the Slack channel catalog loops) against the dev database.
+worker: postgres
+    cd "{{root}}" && cargo run -p centaur-console -- worker
+
+# Set CENTAUR_CONSOLE_MANAGE_POSTGRES=false to use your own server.
 # Start the persistent PostgreSQL container used by local Console development.
 postgres:
-    script/start-postgres
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "${CENTAUR_CONSOLE_MANAGE_POSTGRES:-true}" in
+      false|FALSE|0|no|NO) echo "== Using configured external PostgreSQL =="; exit 0 ;;
+    esac
+    container=centaur-console-postgres
+    if ! docker info >/dev/null 2>&1; then
+      echo "Docker is required for Console development. Start Docker and retry." >&2
+      exit 1
+    fi
+    if docker container inspect "$container" >/dev/null 2>&1; then
+      if [[ "$(docker inspect --format '{{{{.State.Running}}' "$container")" != "true" ]]; then
+        echo "== Starting existing PostgreSQL container =="
+        docker start "$container" >/dev/null
+      fi
+    else
+      echo "== Creating PostgreSQL container =="
+      docker run --detach --name "$container" \
+        --publish "127.0.0.1:{{db_port}}:5432" \
+        --env "POSTGRES_USER={{db_user}}" --env "POSTGRES_PASSWORD={{db_password}}" \
+        --env "POSTGRES_DB={{db_name}}" \
+        --volume "$container-data:/var/lib/postgresql/data" \
+        postgres:16 -c max_connections=200 >/dev/null
+    fi
+    for _ in {1..60}; do
+      if docker exec "$container" pg_isready -U "{{db_user}}" >/dev/null 2>&1; then
+        echo "== PostgreSQL ready on 127.0.0.1:{{db_port}} =="
+        exit 0
+      fi
+      sleep 1
+    done
+    docker logs "$container" >&2
+    echo "PostgreSQL did not become ready within 60 seconds." >&2
+    exit 1
 
-# Install gem and SPA dependencies if needed.
+# Install the SPA dependencies.
 deps:
-    @bundle check || bundle install
-    pnpm install --frozen-lockfile --filter @centaur/console-web
+    pnpm -C "{{root}}" install --frozen-lockfile --filter @centaur/console-web
 
-# Build the SPA: assets into public/spa, the shell into spa-shell/ (served by SpaController).
+# Build the SPA: assets into public/spa, the shell into spa-shell/ (served by centaur-console).
 web-build:
     pnpm -C web build
 
@@ -50,14 +108,18 @@ web-check:
     pnpm -C web lint
     pnpm -C web test
 
-# Run the full local CI sequence (bin/ci): Ruby and SPA checks, audits, tests.
-ci:
-    bin/ci
+# DB-backed tests need CONSOLE_DB_TEST_DATABASE_URL (see AGENTS.md).
+# Run the console's local CI: SPA checks and build, then Rust format, lint, and tests.
+ci: web-check web-build
+    cd "{{root}}" && cargo fmt --all --check
+    cd "{{root}}" && cargo clippy --locked --all-targets -p centaur-console-db -p centaur-console-auth -p centaur-console-api -p centaur-console -- -D warnings
+    cd "{{root}}" && cargo test --locked -p centaur-console-db -p centaur-console-auth -p centaur-console-api -p centaur-console
 
 # Print the dev API key for use as a bearer token.
 api-key:
     @echo "$CENTAUR_CONSOLE_INITIAL_API_KEY"
 
-# Drop, recreate, and migrate the dev database. Re-bootstraps on next `just dev`.
+# Drop and recreate the dev database. `just dev` migrates and re-bootstraps it.
 db-reset: postgres
-    bin/rails db:drop db:create db:migrate
+    docker exec centaur-console-postgres dropdb -U "{{db_user}}" --if-exists --force "{{db_name}}"
+    docker exec centaur-console-postgres createdb -U "{{db_user}}" "{{db_name}}"

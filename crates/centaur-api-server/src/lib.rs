@@ -5,6 +5,7 @@ pub mod client;
 mod error;
 mod mcp;
 mod routes;
+mod scheduled_tasks;
 mod slack_external_teams;
 mod slack_proxy;
 mod tool_discovery;

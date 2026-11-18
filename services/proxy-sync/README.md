@@ -32,9 +32,7 @@ Integration tests run the HTTP handlers against Postgres with Console's schema.
 Load the schema into an empty database, then point the tests at it:
 
 ```bash
-cd services/console
-RAILS_ENV=test CENTAUR_CONSOLE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/proxy_sync_test bin/rails db:prepare
-cd ../..
+CENTAUR_CONSOLE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/proxy_sync_test cargo run -p centaur-console -- migrate
 PROXY_SYNC_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/proxy_sync_test cargo test -p centaur-proxy-sync
 ```
 

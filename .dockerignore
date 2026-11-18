@@ -38,6 +38,10 @@ coverage/**
 **/coverage/
 **/coverage/**
 
+# Console SPA build output; the api-rs image builds it in its own stage.
+services/console/public/spa
+services/console/spa-shell
+
 # Sandbox cached repos (4GB+)
 services/sandbox/repos
 

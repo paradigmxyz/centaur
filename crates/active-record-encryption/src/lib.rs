@@ -5,12 +5,12 @@ use aes_gcm::{
     aead::{Aead, Generate, Payload, consts::U12},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use flate2::read::ZlibDecoder;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use pbkdf2::pbkdf2_hmac;
 use serde::Deserialize;
-use serde_json::json;
 use sha1::Sha1;
 use sha2::Sha256;
+use std::io::Write;
 
 #[derive(Debug)]
 pub struct Error(&'static str);
@@ -23,7 +23,9 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[derive(Debug)]
+/// Rails compresses plaintexts longer than this many bytes.
+const COMPRESSION_THRESHOLD: usize = 140;
+
 pub struct ActiveRecordEncryption {
     keys: [[u8; 32]; 2],
 }
@@ -41,6 +43,12 @@ struct EncryptedHeaders {
     at: String,
     #[serde(default)]
     c: bool,
+}
+
+impl fmt::Debug for ActiveRecordEncryption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ActiveRecordEncryption { .. }")
+    }
 }
 
 impl ActiveRecordEncryption {
@@ -64,27 +72,54 @@ impl ActiveRecordEncryption {
         }
     }
 
-    /// Encrypts like a non-deterministic Rails `encrypts` attribute, with the
-    /// current (SHA-256-derived) key and no compression, which Rails reads.
+    /// Encrypts like a non-deterministic Rails `encrypts` attribute
+    /// (`ActiveRecord::Encryption::Encryptor` with the default Zlib
+    /// compressor): the current (SHA-256-derived) key, a random 12-byte IV,
+    /// and Zlib compression with the `"c": true` header when the plaintext is
+    /// longer than 140 bytes. The envelope is the JSON Rails'
+    /// `MessageSerializer` writes: `{"p":..,"h":{"iv":..,"at":..[,"c":true]}}`.
     pub fn encrypt(&self, plaintext: &str) -> Result<String, Error> {
         let nonce =
             Nonce::<U12>::try_generate().map_err(|_| Error("random IV generation failed"))?;
+        self.encrypt_with_iv(plaintext, nonce.into())
+    }
+
+    /// [`Self::encrypt`] with a caller-chosen IV. Only for tests that compare
+    /// output byte for byte with Rails; never reuse an IV with a real key.
+    #[doc(hidden)]
+    pub fn encrypt_with_iv(&self, plaintext: &str, iv: [u8; 12]) -> Result<String, Error> {
+        // Rails: THRESHOLD_TO_JUSTIFY_COMPRESSION = 140.bytes, `bytesize > 140`.
+        let compressed = plaintext.len() > COMPRESSION_THRESHOLD;
+        let clear = if compressed {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(plaintext.as_bytes())
+                .and_then(|()| encoder.finish())
+                .map_err(|_| Error("attribute compression failed"))?
+        } else {
+            plaintext.as_bytes().to_vec()
+        };
+        let nonce = Nonce::<U12>::from(iv);
         let mut ciphertext = Aes256Gcm::new_from_slice(&self.keys[0])
             .map_err(|_| Error("invalid encryption key"))?
             .encrypt(
                 &nonce,
                 Payload {
-                    msg: plaintext.as_bytes(),
+                    msg: &clear,
                     aad: b"",
                 },
             )
             .map_err(|_| Error("attribute encryption failed"))?;
         let tag = ciphertext.split_off(ciphertext.len() - 16);
-        Ok(json!({
-            "p": STANDARD.encode(ciphertext),
-            "h": { "iv": STANDARD.encode(nonce), "at": STANDARD.encode(tag) },
-        })
-        .to_string())
+        // Rails' key order (payload, then iv, auth tag, compressed). Base64
+        // needs no JSON escaping, so the envelope is written directly.
+        Ok(format!(
+            r#"{{"p":"{}","h":{{"iv":"{}","at":"{}"{}}}}}"#,
+            STANDARD.encode(ciphertext),
+            STANDARD.encode(nonce),
+            STANDARD.encode(tag),
+            if compressed { r#","c":true"# } else { "" },
+        ))
     }
 
     pub fn decrypt(&self, encoded: &str) -> Result<String, Error> {

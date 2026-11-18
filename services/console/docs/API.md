@@ -173,7 +173,7 @@ Shape:
 
 The `secret` field is encrypted at rest, is write-only, and is never returned in any response. It is only permitted for `control_plane` sources; supplying it for any other type is a validation error, and omitting it for `control_plane` is also an error.
 
-For static, PG DSN, GCP auth, and GCP ID token secrets, nested sources and rules are validated before anything is written, inside a transaction that row-locks an existing secret: an invalid nested source or rule is a `422` and nothing is dropped or half-written. Static secrets report the first invalid nested record's own keys (source first, then rules in order), e.g. `{ "cidr": [...] }`, unless the secret itself is invalid. PG DSN, GCP auth, and GCP ID token secrets report `"rules": ["is invalid"]` for an invalid rule and `"dsn_source"` / `"keyfile_source"`: `["is invalid"]` for an invalid source; a create also reports the secret's own validation errors.
+A write is validated as a whole before anything is written, inside a transaction that row-locks an existing secret: an invalid document is a `422` and nothing is dropped or half-written. Errors in a nested source or rule are keyed by where they are (`source.config`, `dsn.secret`, `keyfile.source_type`, `credentials.<role>.secret`, `rules[0].cidr`, 0-based); a missing required source is `dsn_source` / `keyfile_source` / `sources`.
 
 `token_broker` is also resolved by iron-control rather than by the proxy. `credential_id` names a [broker credential](#broker-credentials), and at sync time iron-control substitutes that credential's current access token, delivered inline exactly like a `control_plane` value. The reference never reaches the proxy. If the credential has no current token (it is still bootstrapping, or it is dead), the owning secret is omitted from the proxy's config until the credential recovers.
 
@@ -1788,7 +1788,7 @@ Notes on the proxy-sync payload, which differs from the REST representation:
 ## Console API
 
 Everything the operator console SPA calls lives under `/api/v1/console`
-(`Api::V1::Console` controllers). These endpoints take the console session
+(the console area routers in `crates/centaur-console-api`). These endpoints take the console session
 only and are not for machine callers: use the bearer resources above, which
 the console API never changes. Responses use the same [conventions](#conventions)
 and [error envelope](#errors).
@@ -1850,7 +1850,7 @@ callback, and is `{}` otherwise.
 
 The login and pending pages, the [MCP OAuth consent](#mcp-oauth-consent) page,
 and the broker OAuth result page ([consent flow](#oauth-consent-flow)) are
-server-rendered by Rails with plain CSS and no JavaScript, because sign-in is a
+server-rendered by the console with plain CSS and no JavaScript, because sign-in is a
 step of the MCP OAuth flow. They are not API endpoints or SPA routes.
 Keep their form contract stable so pods on either side of a rolling deploy or
 rollback accept each other's forms.
@@ -1889,7 +1889,7 @@ rollback accept each other's forms.
   sessions are redirected to their landing page, signed-out browsers to
   `/login`.
 - SSO failures (`/auth/<provider>/*`) and disabled accounts bounced by a
-  Rails-owned route redirect to `/login` with an alert.
+  server-owned route redirect to `/login` with an alert.
 
 #### MCP OAuth consent
 
@@ -1911,7 +1911,7 @@ resource. Invalid requests redirect to the registered `redirect_uri` with
 client or `redirect_uri` is not trusted. A valid request renders the consent
 page.
 
-The consent page posts a standard Rails form to `POST /mcp/oauth/authorize`
+The consent page posts a standard HTML form to `POST /mcp/oauth/authorize`
 with `authenticity_token`, the original `response_type`, `client_id`,
 `redirect_uri`, `scope`, `state`, `resource`, `code_challenge`,
 `code_challenge_method`, and `decision`. It needs an active console session and
@@ -1943,18 +1943,22 @@ sources or values:
 
 #### Console secret writes
 
-- A `PATCH` whose `control_plane` source omits `secret` (or sends it blank)
-  keeps the stored value when the stored source is also `control_plane`, so
-  the SPA saves other edits without reading the plaintext. `PUT` (full
-  replace) and a write that switches a source to `control_plane` still
-  require `secret`.
-- A `422` for an invalid nested source or rule adds a path-style key for every
-  nested error (`source.config`, `dsn.secret`, `keyfile.source_type`,
-  `rules[0].cidr`, 0-based) next to the bearer API's keys:
+- A write whose single `control_plane` source (static `source`, `dsn`,
+  `keyfile`) omits `secret` (or sends it blank) keeps the stored value when
+  the stored source is also `control_plane`, so the SPA saves other edits
+  without reading the plaintext. A write that switches a source to
+  `control_plane` still requires `secret`. The stored value is read under the
+  secret's row lock, so a rotation that commits first is kept.
+- A write replaces the document: optional columns the body leaves out take
+  their defaults, and sources and rules are replaced as a set. A body equal to
+  what is stored changes nothing (no new rows, no `updated_at`, no proxy
+  config refresh). Only the columns that differ are written.
+- A `422` for an invalid nested source or rule uses path-style keys
+  (`source.config`, `dsn.secret`, `keyfile.source_type`, `rules[0].cidr`,
+  0-based):
 
   ```json
   { "error": { "message": "validation failed", "details": {
-    "rules": ["is invalid"],
     "rules[0].base": ["host and cidr are mutually exclusive"]
   } } }
   ```
@@ -1962,7 +1966,8 @@ sources or values:
 - An OID-addressed write clears an optional `foreign_id` on an explicit JSON
   `"foreign_id": null`; omitting it or sending a blank string keeps it, and a
   `foreign_id`-addressed write always keeps it. PG DSN secrets (where
-  `foreign_id` is required) return `422` instead.
+  `foreign_id` is required) return `422` instead. Console writes address a
+  secret by OID only.
 
 #### Console broker credentials
 

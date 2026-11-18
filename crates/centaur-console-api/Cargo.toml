@@ -1,0 +1,56 @@
+[package]
+name = "centaur-console-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ammonia.workspace = true
+askama = "0.14"
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+centaur-console-auth = { path = "../centaur-console-auth" }
+centaur-console-db.workspace = true
+centaur-telemetry.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+jsonwebtoken.workspace = true
+http = "1"
+ipnet.workspace = true
+jsonschema.workspace = true
+pulldown-cmark.workspace = true
+serde_urlencoded = "0.7"
+http-body-util = "0.1"
+percent-encoding = "2"
+reqwest.workspace = true
+rustls-native-certs = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+ssh-key = { version = "0.6.7", default-features = false, features = ["alloc", "std"] }
+sqlx.workspace = true
+tempfile = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "sync"] }
+tower.workspace = true
+tower-http.workspace = true
+url.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+centaur-console-api = { path = ".", features = ["testing"] }
+centaur-console-db = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+
+[features]
+# Test helpers (`testing::TestApp`) for this and the area crates' tests.
+testing = ["centaur-console-db/testing", "dep:tempfile"]
+
+[lints]
+workspace = true

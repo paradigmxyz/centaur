@@ -124,7 +124,8 @@ pub struct HmacHeader {
     pub value: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// `Debug` redacts `secret`, `broker_access_token`, and the config values.
+#[derive(Deserialize)]
 pub struct SecretSource {
     pub source_type: String,
     pub config: Map<String, Value>,
@@ -132,6 +133,23 @@ pub struct SecretSource {
     pub broker_access_token: Option<String>,
     pub role: Option<String>,
     pub role_kind: Option<String>,
+}
+
+impl std::fmt::Debug for SecretSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{self, Keys};
+        f.debug_struct("SecretSource")
+            .field("source_type", &self.source_type)
+            .field("config", &Keys(self.config.keys()))
+            .field("secret", &redact::option(&self.secret))
+            .field(
+                "broker_access_token",
+                &redact::option(&self.broker_access_token),
+            )
+            .field("role", &self.role)
+            .field("role_kind", &self.role_kind)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,9 +161,20 @@ pub struct RequestRule {
 }
 
 /// A principal's proxy configuration: what iron-proxy receives on sync.
-#[derive(Debug, Default)]
+/// `Debug` shows counts only (the entries carry secret values).
+#[derive(Default)]
 pub struct Config {
     pub secrets: Vec<Value>,
     pub transforms: Vec<Value>,
     pub postgres: Vec<Value>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("secrets", &self.secrets.len())
+            .field("transforms", &self.transforms.len())
+            .field("postgres", &self.postgres.len())
+            .finish_non_exhaustive()
+    }
 }

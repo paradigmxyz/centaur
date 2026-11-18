@@ -1,0 +1,36 @@
+[package]
+name = "centaur-console-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+bcrypt = "0.17"
+centaur-console-db.workspace = true
+chrono.workspace = true
+cookie.workspace = true
+crc32fast = "1"
+getrandom = "0.3"
+hex.workspace = true
+hmac.workspace = true
+jsonwebtoken.workspace = true
+http = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+url.workspace = true
+
+[dev-dependencies]
+centaur-console-db = { workspace = true, features = ["testing"] }
+base64.workspace = true
+hex.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

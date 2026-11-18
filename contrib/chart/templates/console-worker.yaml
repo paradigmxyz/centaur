@@ -3,18 +3,17 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
-# console background job worker — runs Solid Queue (`bin/jobs`) so
-# console's enqueued jobs actually execute. The most important of these is
-# the broker-credential OAuth refresh loop, which mints and refreshes the access
-# tokens delivered inline via `token_broker` sources (e.g. the `openai-codex`
-# brokered token); the web (Puma) pod runs no worker, so without this those jobs
-# never run. The web Deployment owns database setup (create-db init + the image's
-# Rails db:prepare on boot), so this worker only processes jobs and waits for the
-# Solid Queue database to exist before starting.
+# console background worker — `centaur-console worker` from the api-rs image
+# (RFC 0006, Decision 3): the Slack channel catalog and membership refresh
+# loops, each under a Postgres advisory lock, so replicas never work a loop
+# twice. There is no job queue; broker-credential refresh belongs to
+# token-broker and scheduled tasks to api-rs. The web Deployment owns database
+# setup (create-db init + `centaur-console serve`'s migrate on boot), so this
+# worker waits for the console database to exist before starting.
 #
-# It shares the web image and the same infra-Secret env (DB URL, ActiveRecord
-# encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. It uses
-# its own `console-worker` component label so it is NOT selected by the
+# It uses the same infra-Secret env (DB URL, ActiveRecord encryption keys,
+# SECRET_KEY_BASE) as the web pods so it can decrypt stored credentials. It
+# uses its own `console-worker` component label so it is NOT selected by the
 # console Service (which load-balances HTTP to the web pods).
 apiVersion: apps/v1
 kind: Deployment
@@ -41,10 +40,10 @@ spec:
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" $console.worker "indent" 6) }}
       initContainers:
-        # Wait for the Solid Queue database (created by the web pod's Rails
-        # db:prepare) so a cold start does not crash-loop before it exists.
-        # Read-only and idempotent; connects as the admin (ai_v2) DSN.
-        - name: wait-for-queue-db
+        # Wait for the console database (created by the web pod's create-db
+        # init container) so a cold start does not crash-loop before it
+        # exists. Read-only and idempotent; connects as the admin (ai_v2) DSN.
+        - name: wait-for-db
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
           command:
@@ -52,8 +51,8 @@ spec:
             - -ec
             - |
               until [ "$(psql "$ADMIN_DATABASE_URL" -tAc \
-                "SELECT 1 FROM pg_database WHERE datname = '$QUEUE_DB_NAME'")" = "1" ]; do
-                echo "waiting for database $QUEUE_DB_NAME to exist…"
+                "SELECT 1 FROM pg_database WHERE datname = '$CONSOLE_DB_NAME'")" = "1" ]; do
+                echo "waiting for database $CONSOLE_DB_NAME to exist…"
                 sleep 2
               done
           env:
@@ -62,25 +61,23 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Rails 8 names the Solid Queue database "<primary>_queue".
-            - name: QUEUE_DB_NAME
-              value: {{ printf "%s_queue" $console.database.name | quote }}
+            - name: CONSOLE_DB_NAME
+              value: {{ $console.database.name | quote }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             seccompProfile:
               type: RuntimeDefault
       containers:
         - name: console-worker
-          image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
-          imagePullPolicy: {{ $console.image.pullPolicy }}
-          # Solid Queue supervisor. Claims and runs jobs from the
-          # <primary>_queue database; serves no HTTP.
+{{ include "centaur.consoleImage" . | indent 10 }}
+          # The advisory-locked background loops; serves no HTTP.
           command:
-            - bin/jobs
+            - /usr/local/bin/centaur-console
+            - worker
           env:
             # Same secretKeyRefs as the web container so the worker can reach
-            # Postgres and decrypt stored credentials. No PORT / static-file
-            # serving — this process serves no HTTP.
+            # Postgres and decrypt stored credentials. No PORT — this process
+            # serves no HTTP.
             - name: IRON_CONTROL_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -91,8 +88,8 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Slack channel catalog refresh jobs run in this worker, so it
-            # needs the same bot token as the web Console process.
+            # The Slack channel catalog loops run in this worker, so it needs
+            # the same bot token as the web Console process.
             - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -143,57 +140,24 @@ spec:
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}
-{{- with $console.sentryDsn }}
-            - name: SENTRY_DSN
-              value: {{ . | quote }}
-{{- end }}
 {{- if $mcpPublicUrl }}
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}
 {{- end }}
-{{- if $console.googleOauth.enabled }}
-            # Google OAuth app credentials, needed by the broker-credential
-            # OAuth refresh loop. Gated on console.googleOauth.enabled.
-            - name: IRON_CONTROL_GOOGLE_CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretEnv }}
-                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_ID" $prefix }}
-            - name: IRON_CONTROL_GOOGLE_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretEnv }}
-                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" $prefix }}
-{{- end }}
-            - name: RAILS_ENV
-              value: {{ $console.railsEnv | quote }}
-{{- with $console.slackDmSync.oauthAppSlug }}
-            - name: CENTAUR_CONSOLE_SLACK_DM_SYNC_OAUTH_APP_SLUG
-              value: {{ . | quote }}
-{{- end }}
-            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED
-              value: {{ $console.googleDocsSync.enabled | quote }}
-{{- with $console.googleDocsSync.oauthAppSlug }}
-            - name: CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_OAUTH_APP_SLUG
-              value: {{ . | quote }}
-{{- end }}
-            - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
-              value: {{ .Values.companyContextV1.enabled | quote }}
-            - name: RAILS_LOG_TO_STDOUT
-              value: "1"
+            - name: RUST_LOG
+              value: info
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
-            # Console OAuth sync workers submit normalized provider data to the
-            # in-cluster API; credentials themselves never leave this pod.
             - name: CENTAUR_CONSOLE_CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
 {{- end }}
+{{- range $name, $value := $console.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+{{- end }}
           securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-            # No readOnlyRootFilesystem — Rails writes to tmp/ at runtime.
-            seccompProfile:
-              type: RuntimeDefault
+{{ include "centaur.consoleSecurityContext" . | indent 12 }}
           resources:
 {{ toYaml $console.worker.resources | nindent 12 }}
 {{- if .Values.networkPolicy.enabled }}
@@ -223,7 +187,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
 {{- end }}
-    # Outbound HTTPS to OAuth token endpoints for the broker refresh loop.
+    # Outbound HTTPS (the Slack API for the channel catalog loops).
     - ports:
         - protocol: TCP
           port: 443

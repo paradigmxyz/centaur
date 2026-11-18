@@ -149,3 +149,24 @@ fn principal(row: &PgRow) -> Result<Principal> {
         sandbox_observability_enabled: row.try_get("sandbox_observability_enabled")?,
     })
 }
+
+fn upper_alnum(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Slack user ids: `U`/`W` plus 8+ uppercase alphanumerics, or `USLACK`.
+pub fn valid_slack_user_id(value: &str) -> bool {
+    if value == "USLACK" {
+        return true;
+    }
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('U' | 'W')) && value.len() >= 9 && upper_alnum(&value[1..])
+}
+
+/// Slack team ids: `T`/`E` plus 8+ uppercase alphanumerics.
+pub fn valid_slack_team_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('T' | 'E')) && value.len() >= 9 && upper_alnum(&value[1..])
+}

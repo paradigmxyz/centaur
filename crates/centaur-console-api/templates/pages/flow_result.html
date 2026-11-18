@@ -1,0 +1,13 @@
+{% extends "pages/layout.html" %}
+{%- block title %}{{ heading }} · Centaur Console{% endblock -%}
+{% block content %}
+<section class="oauth-card" aria-labelledby="oauth-result-heading">
+  <img src="{{ assets.path("centaur-lockup-white.svg") }}" alt="Centaur" class="oauth-logo-small" width="497" height="127">
+  <h1 id="oauth-result-heading" class="oauth-result-heading {{ tone }}">{{ heading }}</h1>
+
+  <p class="oauth-result-message">{{ message }}</p>
+{% if let Some(retry) = retry_path %}  <div class="oauth-result-retry">
+    <a href="{{ retry }}" class="oauth-button oauth-button-primary">Try again</a>
+  </div>
+{% endif %}</section>
+{% endblock %}

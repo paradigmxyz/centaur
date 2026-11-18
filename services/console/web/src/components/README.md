@@ -22,7 +22,7 @@ Sidebar, Tooltip, Skeleton, Sonner) and keep the stock focus ring.
 
 | Component | File | Use |
 |---|---|---|
-| `AppLink` | `app-link.tsx` | Link to any console path. Client-side for SPA routes, full page load for Rails protocol routes (`/oauth/:slug/start`, `/auth/:provider/start`). Use it for cross-slice links. |
+| `AppLink` | `app-link.tsx` | Link to any console path. Client-side for SPA routes, full page load for server-owned protocol routes (`/oauth/:slug/start`, `/auth/:provider/start`). Use it for cross-slice links. |
 | `PageHeader`, `SectionHeading`, `useDocumentTitle` | `page-header.tsx` | Page title/subtitle/actions (legacy `_page_header`); sets `<title>` to "X · Centaur Console". `SectionHeading` is the in-page section title. |
 | `BackLink` | `back-link.tsx` | "← back to …" link. |
 | `ControlTabs` | `control-tabs.tsx` | The Control tab strip. Render at the top of Control index pages; tabs come from feature `controlTabs`. |
@@ -92,5 +92,5 @@ The SPA keeps tests for logic and for secret handling only: `lib/api`,
 `lib/format`, `LocalTime`, stale-page clamping in `Pagination`, the Slack channel picker's saved label, the secret form model, `SecretField`, the shell,
 navigation, and `features/secret-handling.test.tsx` (plaintext gone from the
 inputs, the page, and both TanStack caches after each secret-bearing submit,
-and the show-once API client secret). Page behaviour is covered by the Rails
-request tests and a browser pass.
+and the show-once API client secret). Page behaviour is covered by the console
+crate tests and a browser pass.

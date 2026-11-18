@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// One SSH key a principal may use, with its strongest grant priority.
-#[derive(Debug)]
+/// `Debug` redacts the private key.
 pub struct SshKey {
     pub id: i64,
     pub priority: i32,
@@ -20,6 +20,17 @@ pub struct SshKey {
     pub version: String,
     /// The private key as an iron-proxy secret source.
     pub private_key: Value,
+}
+
+impl std::fmt::Debug for SshKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshKey")
+            .field("id", &self.id)
+            .field("priority", &self.priority)
+            .field("version", &self.version)
+            .field("private_key", &crate::redact::Redacted)
+            .finish()
+    }
 }
 
 const SSH_KEYS_SQL: &str = "\

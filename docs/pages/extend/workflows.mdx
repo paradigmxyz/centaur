@@ -175,7 +175,7 @@ one from the running Console instead of storing a separate static key:
 
 ```bash
 CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+  centaur-console service-token)
 ```
 
 Create a run through the API:

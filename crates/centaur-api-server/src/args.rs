@@ -87,6 +87,8 @@ pub(crate) struct Args {
     session_principal_admission: SessionPrincipalAdmissionArg,
     #[command(flatten)]
     activity_summary: ActivitySummaryArgs,
+    #[command(flatten)]
+    scheduled_tasks: ScheduledTaskRunnerArgs,
 }
 
 impl Args {
@@ -101,6 +103,17 @@ impl Args {
     /// Console's database pool, when configured. Call within a Tokio runtime.
     pub(crate) fn console_db(&self) -> Option<PgPool> {
         self.sandbox.iron_control.console_db().ok()
+    }
+
+    /// The scheduled-task runner's settings when it is enabled. Call within a
+    /// Tokio runtime.
+    pub(crate) fn scheduled_task_runner(
+        &self,
+    ) -> Result<Option<ScheduledTaskRunnerSettings>, ServerError> {
+        self.scheduled_tasks.settings(
+            &self.sandbox.iron_control,
+            env::var("CENTAUR_JWT_SIGNING_SECRET").ok(),
+        )
     }
 
     pub(crate) fn persona_registry(&self) -> Result<PersonaRegistry, ServerError> {
@@ -175,6 +188,83 @@ pub(crate) struct IronControlRuntime {
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
     pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
+}
+
+/// The scheduled-task runner (RFC 0006a "Configuration").
+#[derive(Debug, ClapArgs)]
+struct ScheduledTaskRunnerArgs {
+    /// Run the console scheduled-task runner. Enable together with the Rust
+    /// console, never while the Rails console's scheduler runs.
+    #[arg(
+        long = "scheduled-task-runner-enabled",
+        env = "SCHEDULED_TASK_RUNNER_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    runner_enabled: bool,
+    /// Seconds between reconcile passes; 0 reconciles only at startup.
+    #[arg(
+        long = "scheduled-task-reconcile-interval-secs",
+        env = "SCHEDULED_TASK_RECONCILE_INTERVAL_SECS",
+        default_value_t = 60
+    )]
+    runner_reconcile_interval_secs: u64,
+    #[arg(
+        long = "scheduled-task-worker-concurrency",
+        env = "SCHEDULED_TASK_WORKER_CONCURRENCY",
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    runner_worker_concurrency: u64,
+}
+
+pub(crate) struct ScheduledTaskRunnerSettings {
+    pub(crate) config: centaur_scheduled_tasks::RunnerConfig,
+    pub(crate) console: centaur_scheduled_tasks::ConsoleClient,
+    pub(crate) console_db: PgPool,
+}
+
+impl ScheduledTaskRunnerArgs {
+    fn settings(
+        &self,
+        iron_control: &IronControlArgs,
+        jwt_signing_secret: Option<String>,
+    ) -> Result<Option<ScheduledTaskRunnerSettings>, ServerError> {
+        if !self.runner_enabled {
+            return Ok(None);
+        }
+        let console_url = non_empty(iron_control.url.as_deref()).ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "the scheduled task runner calls the console: set IRON_CONTROL_URL".to_owned(),
+            )
+        })?;
+        let secret = jwt_signing_secret
+            .filter(|secret| !secret.trim().is_empty())
+            .ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "the scheduled task runner signs console requests: set CENTAUR_JWT_SIGNING_SECRET"
+                        .to_owned(),
+                )
+            })?;
+        let console = centaur_scheduled_tasks::ConsoleClient::new(
+            console_url,
+            &secret,
+            centaur_scheduled_tasks::console::DEFAULT_TIMEOUT,
+        )
+        .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))?;
+        let config = centaur_scheduled_tasks::RunnerConfig {
+            reconcile_interval: (self.runner_reconcile_interval_secs > 0)
+                .then(|| Duration::from_secs(self.runner_reconcile_interval_secs)),
+            worker_concurrency: usize::try_from(self.runner_worker_concurrency)
+                .unwrap_or(usize::MAX),
+            ..centaur_scheduled_tasks::RunnerConfig::default()
+        };
+        Ok(Some(ScheduledTaskRunnerSettings {
+            config,
+            console,
+            console_db: iron_control.console_db()?,
+        }))
+    }
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2955,6 +3045,65 @@ mod tests {
 
         let config = args.activity_summary_config().unwrap();
         assert_eq!(config.api_key, "sk-mounted");
+    }
+
+    #[tokio::test]
+    async fn scheduled_task_runner_is_opt_in_and_needs_the_console() {
+        let parse = |flags: &[&str]| {
+            Args::try_parse_from(
+                [
+                    "centaur-api-server",
+                    "--database-url",
+                    "postgres://localhost/centaur",
+                ]
+                .into_iter()
+                .chain(flags.iter().copied()),
+            )
+            .unwrap()
+        };
+        let secret = || Some("jwt-secret".to_owned());
+        let disabled = parse(&[]);
+        assert!(
+            disabled
+                .scheduled_tasks
+                .settings(&disabled.sandbox.iron_control, secret())
+                .unwrap()
+                .is_none()
+        );
+
+        let no_console = parse(&["--scheduled-task-runner-enabled", "true"]);
+        assert!(
+            no_console
+                .scheduled_tasks
+                .settings(&no_console.sandbox.iron_control, secret())
+                .is_err()
+        );
+
+        let enabled = parse(&[
+            "--scheduled-task-runner-enabled",
+            "true",
+            "--scheduled-task-reconcile-interval-secs",
+            "0",
+            "--iron-control-url",
+            "http://console.local:3000/",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
+        ]);
+        assert!(
+            enabled
+                .scheduled_tasks
+                .settings(&enabled.sandbox.iron_control, None)
+                .is_err()
+        );
+        let settings = enabled
+            .scheduled_tasks
+            .settings(&enabled.sandbox.iron_control, secret())
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.console.base_url(), "http://console.local:3000");
+        assert_eq!(settings.config.reconcile_interval, None);
+        assert_eq!(settings.config.worker_concurrency, 2);
+        assert_eq!(settings.config.queue_name, "centaur_scheduled_tasks");
     }
 
     #[tokio::test]

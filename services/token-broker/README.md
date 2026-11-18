@@ -113,8 +113,6 @@ local token endpoint. Load the schema into an empty database, then point the
 tests at it:
 
 ```bash
-cd services/console
-RAILS_ENV=test CENTAUR_CONSOLE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/token_broker_test bin/rails db:prepare
-cd ../..
+CENTAUR_CONSOLE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/token_broker_test cargo run -p centaur-console -- migrate
 TOKEN_BROKER_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/token_broker_test cargo test -p centaur-token-broker
 ```

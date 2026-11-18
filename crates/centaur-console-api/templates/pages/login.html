@@ -1,0 +1,28 @@
+{% extends "pages/layout.html" %}
+{%- block title %}Sign In · Centaur Console{% endblock -%}
+{%- block content %}
+<div class="oauth-header">
+  <img src="{{ assets.path("centaur-lockup-white.svg") }}" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <h1 class="oauth-subtitle">Operator console sign in.</h1>
+</div>
+{% if let Some(notice) = notice %}<div class="oauth-notice" role="status">{{ notice }}</div>{% endif %}
+<section class="oauth-card">
+{% if let Some(alert) = alert %}  <div class="oauth-alert" role="alert">{{ alert }}</div>{% endif %}
+{% if !providers.is_empty() %}  <div class="oauth-stack">
+{% for provider in providers %}    <a href="/auth/{{ provider.0 }}/start" class="oauth-button oauth-button-outline">Continue with {{ provider.1 }}</a>
+{% endfor %}  </div>
+{% if password_login %}  <div class="oauth-divider">or sign in with email</div>{% endif %}{% endif %}
+{% if password_login %}  <form class="oauth-login-form" action="/login" accept-charset="UTF-8" method="post">
+    <input type="hidden" name="authenticity_token" value="{{ csrf }}" autocomplete="off">
+    <div class="oauth-field">
+      <label class="oauth-label" for="email">Email</label>
+      <input class="oauth-input" placeholder="you@example.com" autocomplete="username" autofocus required type="email" name="email" id="email">
+    </div>
+    <div class="oauth-field">
+      <label class="oauth-label" for="password">Password</label>
+      <input class="oauth-input" autocomplete="current-password" required type="password" name="password" id="password">
+    </div>
+    <input type="submit" name="commit" value="Sign in" class="oauth-button oauth-button-primary">
+  </form>{% endif %}
+</section>
+{% endblock %}

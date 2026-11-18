@@ -16,3 +16,32 @@ Useful commands:
   kubectl get pods -n {{ .Release.Namespace }}
   kubectl get ingress -n {{ .Release.Namespace }}
   helm template {{ .Release.Name }} {{ .Chart.Name }} -n {{ .Release.Namespace }} -f your-values.yaml
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- $retired := list }}
+{{- if hasKey .Values "companyContextV1" }}
+{{- $retired = append $retired "companyContextV1 (company context v1 is retired; the api-rs Slack ETL follows apiRs.etl.slack, and an explicit companyContextV1.enabled=false still keeps it off until you remove the key)" }}
+{{- end }}
+{{- if hasKey $console "googleDocsSync" }}
+{{- $retired = append $retired "console.googleDocsSync (the console's Google Docs sync is retired; use experimentalCompanyContext)" }}
+{{- end }}
+{{- if hasKey $console "image" }}
+{{- $retired = append $retired "console.image (the console runs from apiRs.image)" }}
+{{- end }}
+{{- if hasKey $console "railsEnv" }}
+{{- $retired = append $retired "console.railsEnv" }}
+{{- end }}
+{{- if hasKey $console "sentryDsn" }}
+{{- $retired = append $retired "console.sentryDsn (the console does not report to Sentry)" }}
+{{- end }}
+{{- if $retired }}
+
+DEPRECATED values (no longer chart settings); remove them from your values files:
+{{- range $retired }}
+  - {{ . }}
+{{- end }}
+{{- end }}
+
+The console runs `centaur-console` from the api-rs image. It no longer uses the
+Rails console's Solid Queue/Cache/Cable databases ({{ $console.database.name }}_queue,
+_cache, _cable); the chart leaves them in place so the previous release can be
+rolled back to. A later release drops them, never automatically.

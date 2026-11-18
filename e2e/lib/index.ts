@@ -93,10 +93,13 @@ const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
 const consoleUrl = required('E2E_CONSOLE_URL')
 const consoleApiKey = required('E2E_CONSOLE_API_KEY')
+const consoleAdminEmail = required('E2E_CONSOLE_ADMIN_EMAIL')
+const consoleAdminPassword = required('E2E_CONSOLE_ADMIN_PASSWORD')
 const logDir = required('E2E_LOG_DIR')
 const namespace = 'centaur'
 const sshNamespace = 'centaur-e2e-ssh'
 const release = 'centaur'
+const kubeContext = required('E2E_KUBE_CONTEXT')
 
 /** How the stack's Codex and Claude Code authenticate: api_key, or access_token (subscriptions). */
 export const authMode = required('E2E_AUTH_MODE')
@@ -394,6 +397,65 @@ export const ironControl = {
   }
 }
 
+/**
+ * The console API (`/api/v1/console/*`) as the SPA calls it: signed in with
+ * the bootstrap operator's password, sending the session's CSRF token and a
+ * same-origin Origin on every write. Admin actions such as API clients live
+ * only there, never on the bearer API.
+ */
+export const consoleSession = (() => {
+  const cookies = new Map<string, string>()
+  let csrfToken: string | undefined
+  const remember = (response: Response) => {
+    for (const cookie of response.headers.getSetCookie()) {
+      const [pair] = cookie.split(';')
+      const index = pair.indexOf('=')
+      if (index > 0) cookies.set(pair.slice(0, index).trim(), pair.slice(index + 1).trim())
+    }
+  }
+  const cookieHeader = () => [...cookies].map(([name, value]) => `${name}=${value}`).join('; ')
+  const send = async (method: string, path: string, init: { headers?: Record<string, string>; body?: string } = {}) => {
+    const response = await fetch(`${consoleUrl}${path}`, {
+      method,
+      redirect: 'manual',
+      headers: { origin: consoleUrl, cookie: cookieHeader(), ...init.headers },
+      ...(init.body === undefined ? {} : { body: init.body })
+    })
+    remember(response)
+    return response
+  }
+  const signIn = async () => {
+    cookies.clear()
+    const page = await (await send('GET', '/login')).text()
+    const token = page.match(/name="authenticity_token" value="([^"]+)"/)?.[1]
+    if (!token) throw new Error('the console login page has no authenticity token')
+    const login = await send('POST', '/login', {
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ authenticity_token: token, email: consoleAdminEmail, password: consoleAdminPassword }).toString()
+    })
+    if (login.status !== 302) throw new Error(`console sign-in failed: ${login.status}`)
+    const me = await send('GET', '/api/v1/console/me', { headers: { accept: 'application/json' } })
+    if (me.status !== 200) throw new Error(`console /me after sign-in failed: ${me.status}`)
+    csrfToken = (await me.json()).data?.csrf_token
+    if (!csrfToken) throw new Error('console /me returned no CSRF token')
+  }
+  return {
+    /** Calls the console API, failing unless it answers 2xx. */
+    async ok(method: string, path: string, body?: unknown): Promise<any> {
+      if (!csrfToken) await signIn()
+      const response = await send(method, path, {
+        headers: { accept: 'application/json', 'content-type': 'application/json', 'x-csrf-token': csrfToken! },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
+      })
+      const text = await response.text()
+      if (response.status < 200 || response.status > 299) {
+        throw new Error(`${method} ${path} failed: ${response.status} ${text}`)
+      }
+      return text ? JSON.parse(text) : undefined
+    }
+  }
+})()
+
 /** An API client an operator created in the console, with its one dedicated principal. */
 export type ApiClient = { clientId: string; secret: string; principalId: string; principalForeignId: string }
 
@@ -407,46 +469,29 @@ export type SessionEvent = { event: string; data: string }
  */
 export const apiClients = {
   async create(options: { scopes?: string[] } = {}): Promise<ApiClient> {
-    const params = JSON.stringify({
-      name: `e2e-${randomUUID().slice(0, 8)}`,
-      scopes: options.scopes ?? ['sessions:read', 'sessions:write']
+    const name = `e2e-${randomUUID().slice(0, 8)}`
+    // The client's dedicated principal, created as the bearer API creates
+    // any principal (with the default sandbox capabilities).
+    const principal = await ironControl.api.ok('POST', '/api/v1/principals', {
+      data: { foreign_id: name, name, kind: 'unknown' }
     })
-    const out = await kubectl(
-      {},
-      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', `
-        params = JSON.parse(${JSON.stringify(params)})
-        admin = User.where(admin: true).order(:id).first or raise "no admin user"
-        principal = Principal.new(kind: "unknown", foreign_id: params["name"], name: params["name"], created_by: admin)
-        principal.apply_default_sandbox_capabilities!
-        principal.save!
-        client = ApiClient.create!(name: params["name"], scopes: params["scopes"], created_by: admin)
-        client.attach_principal!(principal)
-        puts "E2E_API_CLIENT " + { clientId: client.oid, secret: client.secret, principalId: principal.oid,
-                                   principalForeignId: principal.foreign_id }.to_json`
-    )
-    const line = out.split('\n').find(line => line.startsWith('E2E_API_CLIENT '))
-    if (!line) throw new Error('creating an API client printed no result')
-    return JSON.parse(line.slice('E2E_API_CLIENT '.length))
+    const created = await consoleSession.ok('POST', '/api/v1/console/api_clients', {
+      data: { name, scopes: options.scopes ?? ['sessions:read', 'sessions:write'], principal: principal.data.id }
+    })
+    return {
+      clientId: created.data.id,
+      secret: created.data.secret,
+      principalId: principal.data.id,
+      principalForeignId: principal.data.foreign_id
+    }
   },
   /** Rotates the client's secret; returns the client with its new secret. */
   async rotate(client: ApiClient): Promise<ApiClient> {
-    const out = await kubectl(
-      {},
-      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', `
-        client = ApiClient.find_by_oid!(${JSON.stringify(client.clientId)})
-        client.rotate_secret!
-        puts "E2E_API_CLIENT_SECRET " + client.secret`
-    )
-    const line = out.split('\n').find(line => line.startsWith('E2E_API_CLIENT_SECRET '))
-    if (!line) throw new Error('rotating the API client secret printed no secret')
-    return { ...client, secret: line.slice('E2E_API_CLIENT_SECRET '.length) }
+    const rotated = await consoleSession.ok('POST', `/api/v1/console/api_clients/${encodeURIComponent(client.clientId)}/rotate_secret`)
+    return { ...client, secret: rotated.data.secret }
   },
   async disable(client: ApiClient): Promise<void> {
-    await kubectl(
-      {},
-      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner',
-      `ApiClient.find_by_oid!(${JSON.stringify(client.clientId)}).update!(disabled_at: Time.current)`
-    )
+    await consoleSession.ok('POST', `/api/v1/console/api_clients/${encodeURIComponent(client.clientId)}/disable`)
   },
   /** The client credentials token exchange, authenticating with HTTP Basic. */
   async token(client: ApiClient, scope?: string): Promise<{ status: number; body: any }> {
@@ -758,7 +803,7 @@ async function slackApi<T>(user: SlackUser, method: string, body: Record<string,
 }
 
 async function kubectl(options: { stdin?: string; namespace?: string }, ...args: string[]): Promise<string> {
-  const proc = Bun.spawn(['kubectl', '-n', options.namespace ?? namespace, ...args], {
+  const proc = Bun.spawn(['kubectl', '--context', kubeContext, '-n', options.namespace ?? namespace, ...args], {
     stdin: options.stdin === undefined ? 'ignore' : new Blob([options.stdin]),
     stdout: 'pipe',
     stderr: 'pipe'

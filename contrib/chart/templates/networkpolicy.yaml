@@ -102,7 +102,7 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 14 }}
 {{- end }}
-        # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
+        # console worker (centaur-console worker) reaches the console DB.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
@@ -183,11 +183,12 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-        # Console pages call api-rs for admin-backed views such as ETLs.
+        # Console pages call api-rs for admin-backed views such as ETLs and
+        # to reconcile or run scheduled tasks.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-        # Console background jobs call api-rs for sync ingestion/checkpoints.
+        # The console worker has the same api-rs URL as the web pods.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}

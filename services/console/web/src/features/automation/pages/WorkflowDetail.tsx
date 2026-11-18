@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 
 import { forceStartWorkflow, useWorkflow, useWorkflowRuns, type WorkflowDetail, type WorkflowRun } from "../api";
 import { Attempts, Started, WorkflowStatusPill } from "../sections/workflow-cells";
-import { statusLabel, WORKFLOW_DB_UNAVAILABLE } from "../sections/workflow-format";
+import { durationLabel, statusLabel, WORKFLOW_DB_UNAVAILABLE } from "../sections/workflow-format";
 
 export default function WorkflowDetailPage() {
   return (
@@ -94,7 +94,7 @@ function WorkflowDashboard({ workflow }: { workflow: WorkflowDetail }) {
     ["Engine", workflow.engine_label],
     ...(schedule?.summary ? ([["Schedule", schedule.summary]] as [string, ReactNode][]) : []),
     ["Started", workflow.started_at ? <LocalTime value={workflow.started_at} /> : null],
-    ["Duration", workflow.duration_label],
+    ["Duration", durationLabel(workflow)],
     ["Attempts", <Attempts key="attempts" run={workflow} />],
     ["Runs", totalRuns],
   ];

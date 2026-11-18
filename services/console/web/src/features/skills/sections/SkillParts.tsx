@@ -42,7 +42,7 @@ export function SkillTabs({ tab, q }: { tab: SkillTab; q: string }) {
   );
 }
 
-// Styles for SkillMarkdown's output (app/services/skill_markdown.rb), which
+// Styles for the console's skill Markdown output (crates/centaur-console-api/src/support/markdown.rs), which
 // emits bare semantic HTML plus `console-markdown-link` and the table
 // alignment classes (text-left / text-center / text-right).
 const MARKDOWN_CLASSES = [

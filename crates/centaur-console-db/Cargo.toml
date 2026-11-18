@@ -7,15 +7,37 @@ repository.workspace = true
 
 [dependencies]
 active-record-encryption = { path = "../active-record-encryption" }
+chrono.workspace = true
+chrono-tz.workspace = true
+croner.workspace = true
+futures-util.workspace = true
 hex.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+pkcs1 = "0.7"
+pkcs8 = "0.10"
+sec1 = "0.7"
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+p384 = { version = "0.13", features = ["pkcs8", "pem"] }
+p521 = { version = "0.13", features = ["pkcs8", "pem"] }
+rsa = { version = "0.9", features = ["pem"] }
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 sha2.workspace = true
 sqids = "0.4"
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["chrono"] }
+ssh-key = { version = "0.6.7", default-features = false, features = ["alloc", "ecdsa", "ed25519", "p256", "p384", "p521", "rsa", "std"] }
+tokio = { workspace = true, features = ["sync", "time"], optional = true }
+thiserror.workspace = true
+
+[features]
+# Disposable per-test databases (`testing::TestDb`) for this and dependent crates.
+testing = ["dep:tokio"]
 
 [dev-dependencies]
+centaur-console-db = { path = ".", features = ["testing"] }
 rand = "0.10"
+futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

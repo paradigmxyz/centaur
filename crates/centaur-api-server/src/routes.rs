@@ -20,6 +20,7 @@ use axum::{
     routing::{any, delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
+use centaur_scheduled_tasks::{RunnerHandle, ScheduledTaskRunner};
 use centaur_session_core::{ChatDestination, ThreadKey};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionPrincipalRegistrar,
@@ -53,6 +54,7 @@ use crate::{
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
     mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
+    scheduled_tasks,
     slack_external_teams::{get_slack_external_team_ids, replace_slack_external_team_ids},
     slack_proxy::slack_proxy_router,
     types::{
@@ -72,7 +74,13 @@ pub struct AppState {
     auth: ApiAuthConfig,
     /// Console's database, read for API client authentication.
     console_db: Option<PgPool>,
+    /// The scheduled-task runner, once started (RFC 0006a), and its worker,
+    /// kept alive for the life of the process like the workflow workers.
+    scheduled_tasks: Arc<RwLock<Option<StartedScheduledTaskRunner>>>,
 }
+
+/// A started runner and its worker handle.
+type StartedScheduledTaskRunner = (ScheduledTaskRunner, Arc<RunnerHandle>);
 
 #[derive(Clone)]
 struct AppRuntimeState {
@@ -88,7 +96,25 @@ impl AppState {
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             auth,
             console_db: None,
+            scheduled_tasks: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Serves `/api/admin/scheduled-tasks/*` with `runner`, whose worker is
+    /// `handle`.
+    pub fn set_scheduled_task_runner(&self, runner: ScheduledTaskRunner, handle: RunnerHandle) {
+        *self
+            .scheduled_tasks
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((runner, Arc::new(handle)));
+    }
+
+    pub(crate) fn scheduled_task_runner(&self) -> Option<ScheduledTaskRunner> {
+        self.scheduled_tasks
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|(runner, _)| runner.clone())
     }
 
     /// Enables API clients, which Console stores in its database.
@@ -275,6 +301,14 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/api/workflows/actions/invoke",
             post(invoke_workflow_button),
+        )
+        .route(
+            "/api/admin/scheduled-tasks/{oid}/reconcile",
+            post(scheduled_tasks::reconcile_scheduled_task),
+        )
+        .route(
+            "/api/admin/scheduled-tasks/{oid}/run",
+            post(scheduled_tasks::run_scheduled_task),
         )
         .route(
             "/api/admin/slack/dm-sync/checkpoints",
@@ -598,6 +632,11 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         // Keep other methods out of the principal-only `/api/slack/` family.
         (_, "/api/slack/external-team-ids") => None,
         (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
+        (&Method::POST, "/api/admin/scheduled-tasks/{oid}/reconcile")
+        | (&Method::POST, "/api/admin/scheduled-tasks/{oid}/run")
+        | (&Method::POST, "/api/admin/scheduled-tasks/advance") => {
+            capability(Capability::ScheduledTasksAdmin)
+        }
         (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
             capability(Capability::AdminSync)
         }

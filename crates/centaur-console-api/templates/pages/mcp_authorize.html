@@ -1,0 +1,40 @@
+{% extends "pages/layout.html" %}
+{%- block title %}Authorize MCP Client · Centaur Console{% endblock -%}
+{% block content %}
+<div class="oauth-header">
+  <img src="{{ assets.path("centaur-lockup-white.svg") }}" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <p class="oauth-subtitle">Authorize MCP access.</p>
+</div>
+
+<section class="oauth-card" aria-labelledby="oauth-client-name">
+  <div>
+    <h1 id="oauth-client-name" class="oauth-client-name">{{ client_name }}</h1>
+    <p class="oauth-client-host">{{ redirect_host }}</p>
+  </div>
+
+  <dl class="oauth-details">
+    <div>
+      <dt>Resource</dt>
+      <dd>{{ resource }}</dd>
+    </div>
+    <div>
+      <dt>Scope</dt>
+      <dd>{{ scope }}</dd>
+    </div>
+    <div>
+      <dt>Signed in as</dt>
+      <dd>{{ email }}</dd>
+    </div>
+  </dl>
+
+  <form class="oauth-form" action="/mcp/oauth/authorize" accept-charset="UTF-8" method="post">
+    <input type="hidden" name="authenticity_token" value="{{ csrf }}" autocomplete="off">
+{% for (key, value) in fields %}    <input type="hidden" name="{{ key }}" id="{{ key }}" value="{{ value }}">
+{% endfor %}
+    <div class="oauth-actions">
+      <button name="decision" type="submit" value="deny" class="oauth-button oauth-button-outline">Deny</button>
+      <button name="decision" type="submit" value="approve" class="oauth-button oauth-button-primary">Allow</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

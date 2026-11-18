@@ -26,11 +26,32 @@
 # from access_token back to api_key needs `down` first: api-rs does not remove
 # the subscription credentials it registered, so they would still be injected.
 # Every command uses a private kubeconfig, never the ambient context.
+#
+# The host ports the test runner uses default to 30080-30082, 30432, and 30443.
+# Set E2E_PORT_OFFSET to add an offset to all of them, so another kind cluster
+# can keep the defaults. The generated manifests and the test URLs use the same
+# values.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 CLUSTER="${CENTAUR_E2E_CLUSTER:-centaur-e2e}"
+PORT_OFFSET="${E2E_PORT_OFFSET:-0}"
+if ! [[ "$PORT_OFFSET" =~ ^[0-9]+$ ]]; then
+  echo "E2E_PORT_OFFSET must be a non-negative integer, not $PORT_OFFSET" >&2
+  exit 2
+fi
+# NodePorts plus the same offset stay inside Kubernetes' default range and the
+# host port range.
+MODEL_PORT=$((30080 + PORT_OFFSET))
+API_PORT=$((30081 + PORT_OFFSET))
+CONSOLE_PORT=$((30082 + PORT_OFFSET))
+POSTGRES_PORT=$((30432 + PORT_OFFSET))
+SLACK_PORT=$((30443 + PORT_OFFSET))
+if (( SLACK_PORT > 32767 )); then
+  echo "E2E_PORT_OFFSET=$PORT_OFFSET puts the host ports above 32767" >&2
+  exit 2
+fi
 RELEASE=centaur # contrib/scripts/bootstrap-k8s-secrets.sh assumes this name
 NAMESPACE=centaur
 SLACK_NAMESPACE=centaur-e2e-slack
@@ -58,15 +79,46 @@ case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
+# The console runs from the api-rs image (centaur-console), so it has no entry.
+IMAGES=(api-rs:apiRs proxy-sync:proxySync token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$KUBECONFIG" "$WORK"' EXIT
+# Name the cluster in every call as well as in the private kubeconfig, so a
+# command can never fall back to an ambient context.
+CONTEXT="kind-$CLUSTER"
+kubectl() { command kubectl --context "$CONTEXT" "$@"; }
+helm() { command helm --kube-context "$CONTEXT" "$@"; }
 
 use_cluster() {
   kind get kubeconfig --name "$CLUSTER" > "$KUBECONFIG"
+}
+
+# Render the manifests whose NodePorts and hostPorts are offset together, so the
+# checked-in defaults stay usable as documentation and with the default offset.
+render_manifests() {
+  # each mapping takes the container's NodePort to the same offset host port
+  sed -e "s/containerPort: 30443/containerPort: ${SLACK_PORT}/" \
+      -e "s/hostPort: 30443/hostPort: ${SLACK_PORT}/" \
+      -e "s/containerPort: 30080/containerPort: ${MODEL_PORT}/" \
+      -e "s/hostPort: 30080/hostPort: ${MODEL_PORT}/" \
+      -e "s/containerPort: 30432/containerPort: ${POSTGRES_PORT}/" \
+      -e "s/hostPort: 30432/hostPort: ${POSTGRES_PORT}/" \
+      -e "s/containerPort: 30081/containerPort: ${API_PORT}/" \
+      -e "s/hostPort: 30081/hostPort: ${API_PORT}/" \
+      -e "s/containerPort: 30082/containerPort: ${CONSOLE_PORT}/" \
+      -e "s/hostPort: 30082/hostPort: ${CONSOLE_PORT}/" \
+      e2e/infra/kind.yaml > "$WORK/kind.yaml"
+  sed -e "s/nodePort: 30432/nodePort: ${POSTGRES_PORT}/" \
+      -e "s/nodePort: 30081/nodePort: ${API_PORT}/" \
+      -e "s/nodePort: 30082/nodePort: ${CONSOLE_PORT}/" \
+      e2e/infra/test-access.yaml > "$WORK/test-access.yaml"
+  sed -e "s/nodePort: 30080/nodePort: ${MODEL_PORT}/" \
+      e2e/infra/model-server.yaml > "$WORK/model-server.yaml"
+  sed -e "s/nodePort: 30443/nodePort: ${SLACK_PORT}/" \
+      e2e/infra/fake-slack.yaml > "$WORK/fake-slack.yaml"
 }
 
 apply_stdin() {
@@ -74,14 +126,15 @@ apply_stdin() {
 }
 
 up() {
+  render_manifests
   if kind get clusters | grep -qx "$CLUSTER"; then
     use_cluster
-    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30082/tcp'; then
-      echo "cluster $CLUSTER predates e2e/infra/kind.yaml; run e2e/stack.sh down first" >&2
+    if ! docker port "${CLUSTER}-control-plane" | grep -q "^${CONSOLE_PORT}/tcp"; then
+      echo "cluster $CLUSTER predates the current host ports; run e2e/stack.sh down first" >&2
       exit 1
     fi
   else
-    kind create cluster --name "$CLUSTER" --config e2e/infra/kind.yaml --kubeconfig "$KUBECONFIG" --wait 120s
+    kind create cluster --name "$CLUSTER" --config "$WORK/kind.yaml" --kubeconfig "$KUBECONFIG" --wait 120s
   fi
 
   # Pods inherit the host's DNS search domains, so every external lookup first
@@ -158,7 +211,7 @@ up() {
     seed_broker_credentials
   fi
   wait "$helm_pid"
-  kubectl apply -f e2e/infra/test-access.yaml > /dev/null
+  kubectl apply -f "$WORK/test-access.yaml" > /dev/null
   wait_for_test_access
   admit_external_team
 }
@@ -167,9 +220,9 @@ up() {
 # until then connections are reset, so wait before declaring the stack up.
 wait_for_test_access() {
   for _ in $(seq 60); do
-    if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30081/readyz 2> /dev/null &&
-      curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30082/up 2> /dev/null &&
-      timeout 2 bash -c '< /dev/tcp/127.0.0.1/30432' 2> /dev/null; then
+    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:${API_PORT}/readyz" 2> /dev/null &&
+      curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:${CONSOLE_PORT}/up" 2> /dev/null &&
+      timeout 2 bash -c "< /dev/tcp/127.0.0.1/${POSTGRES_PORT}" 2> /dev/null; then
       return 0
     fi
     sleep 1
@@ -180,7 +233,7 @@ wait_for_test_access() {
 
 # Admits EXTERNAL_TEAM in e2e/fakes/slack-fixture.ts, a Slack Connect partner.
 admit_external_team() {
-  curl -fsS -o /dev/null -X PUT http://127.0.0.1:30081/api/slack/external-team-ids \
+  curl -fsS -o /dev/null -X PUT "http://127.0.0.1:${API_PORT}/api/slack/external-team-ids" \
     -H "Authorization: Bearer $API_ADMIN_KEY" -H 'Content-Type: application/json' \
     -d '{"slack_external_team_ids":["TE2EEXT01"]}'
 }
@@ -191,12 +244,15 @@ seed_broker_credentials() {
   local console="deploy/${RELEASE}-centaur-console"
   until kubectl -n "$NAMESPACE" get "$console" > /dev/null 2>&1; do sleep 2; done
   kubectl -n "$NAMESPACE" rollout status "$console" --timeout=15m
-  kubectl -n "$NAMESPACE" exec "$console" -- bin/rails runner "
-    { 'openai-codex' => '$CODEX_ACCESS_TOKEN', 'anthropic-claude' => '$CLAUDE_ACCESS_TOKEN' }.each do |id, token|
-      BrokerCredential.find_or_initialize_by(foreign_id: id).update!(
-        token_endpoint: 'https://oauth.invalid/token', client_id: 'centaur-e2e',
-        access_token: token, last_refresh: Time.current, expires_at: 1.year.from_now)
-    end"
+  secret_value() {
+    kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath="{.data.$1}" | base64 -d
+  }
+  CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY="$(secret_value IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY)" \
+  CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(secret_value IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT)" \
+    bun e2e/lib/broker-credentials-sql.ts \
+      "openai-codex=$CODEX_ACCESS_TOKEN" "anthropic-claude=$CLAUDE_ACCESS_TOKEN" \
+    | kubectl -n "$NAMESPACE" exec -i "statefulset/${RELEASE}-centaur-postgres" -- \
+      sh -c 'psql -v ON_ERROR_STOP=1 -q -U "$POSTGRES_USER" -d iron_control_production' > /dev/null
   # Skip the crash-loop backoff api-rs built up while it waited.
   kubectl -n "$NAMESPACE" delete pod -l app.kubernetes.io/component=api-rs --wait=false > /dev/null
 }
@@ -232,7 +288,7 @@ deploy_model_server() {
     --from-literal=CHATGPT_ACCOUNT_ID="$CHATGPT_ACCOUNT_ID" --dry-run=client -o yaml | apply_stdin
   kubectl -n "$MODEL_NAMESPACE" create configmap model-server \
     --from-file=e2e/fakes/model-server.ts --dry-run=client -o yaml | apply_stdin
-  kubectl apply -f e2e/infra/model-server.yaml > /dev/null
+  kubectl apply -f "$WORK/model-server.yaml" > /dev/null
   kubectl -n "$MODEL_NAMESPACE" rollout restart deploy/model-server > /dev/null
   kubectl -n "$MODEL_NAMESPACE" rollout status deploy/model-server --timeout=180s
 }
@@ -269,7 +325,7 @@ deploy_fake_slack() {
     --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
     --from-literal=SLACK_EVENTS_URL="http://${RELEASE}-centaur-slackbotv2.${NAMESPACE}.svc.cluster.local:3001/api/webhooks/slack" \
     --dry-run=client -o yaml | apply_stdin
-  kubectl -n "$SLACK_NAMESPACE" apply -f e2e/infra/fake-slack.yaml > /dev/null
+  kubectl -n "$SLACK_NAMESPACE" apply -f "$WORK/fake-slack.yaml" > /dev/null
   kubectl -n "$SLACK_NAMESPACE" rollout restart deploy/fake-slack > /dev/null
   kubectl -n "$SLACK_NAMESPACE" rollout status deploy/fake-slack --timeout=180s
 }
@@ -279,15 +335,21 @@ run_tests() {
   remove_sandboxes
   local password
   password="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
-  export E2E_SLACK_URL=http://127.0.0.1:30443
-  export E2E_MODEL_URL=http://127.0.0.1:30080
-  export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
-  # The console names its database after the Rails environment (contrib/chart/templates/console.yaml).
-  export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
-  export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
+  export E2E_SLACK_URL="http://127.0.0.1:${SLACK_PORT}"
+  export E2E_MODEL_URL="http://127.0.0.1:${MODEL_PORT}"
+  export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:${POSTGRES_PORT}/ai_v2"
+  # The console's database (console.database.name in contrib/chart/values.yaml).
+  export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:${POSTGRES_PORT}/iron_control_production"
+  export E2E_API_URL="http://127.0.0.1:${API_PORT}" E2E_API_KEY="$API_ADMIN_KEY"
+  # Every kubectl call the tests make names the cluster too.
+  export E2E_KUBE_CONTEXT="$CONTEXT"
   # The key api-rs administers the console with.
   E2E_CONSOLE_API_KEY="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_API_KEY}' | base64 -d)"
-  export E2E_CONSOLE_URL=http://127.0.0.1:30082 E2E_CONSOLE_API_KEY
+  export E2E_CONSOLE_URL="http://127.0.0.1:${CONSOLE_PORT}" E2E_CONSOLE_API_KEY
+  # The bootstrap operator, for the console API, which takes only a session.
+  E2E_CONSOLE_ADMIN_EMAIL="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_USER_EMAIL}' | base64 -d)"
+  E2E_CONSOLE_ADMIN_PASSWORD="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_USER_PASSWORD}' | base64 -d)"
+  export E2E_CONSOLE_ADMIN_EMAIL E2E_CONSOLE_ADMIN_PASSWORD
   # The private key the SSH gateway authorizes, for tests to store and grant.
   E2E_SSH_PRIVATE_KEY="$(kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key -o jsonpath='{.data.id_ed25519}' | base64 -d)"
   export E2E_SSH_PRIVATE_KEY
@@ -334,7 +396,7 @@ dump_logs() {
 
   mkdir -p "$LOG_DIR"
   local component
-  for component in slackbotv2 api-rs; do
+  for component in slackbotv2 api-rs console console-worker; do
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-${component}" --tail=-1 \
       > "$LOG_DIR/${component}.log" 2>&1 || true
   done

@@ -52,6 +52,10 @@ proxySync:
 # The test runner calls the console API through its NodePort (test-access.yaml).
 console:
   allowedHosts: [127.0.0.1]
+  # The console worker refreshes the Slack channel catalog, so its Slack calls
+  # must reach the fake too.
+  extraEnv:
+    SLACK_API_URL: http://fake-slack.centaur-e2e-slack.svc.cluster.local:443/api
 
 slackbotv2:
   extraEnv:

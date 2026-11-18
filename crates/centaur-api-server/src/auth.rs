@@ -33,10 +33,13 @@ pub(crate) enum Capability {
     AdminSync,
     SlackExternalTeamsRead,
     SlackExternalTeamsWrite,
+    /// `/api/admin/scheduled-tasks/*`: the console's reconcile and run-now
+    /// calls (RFC 0006a).
+    ScheduledTasksAdmin,
 }
 
 impl Capability {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -47,6 +50,7 @@ impl Capability {
         Self::AdminSync,
         Self::SlackExternalTeamsRead,
         Self::SlackExternalTeamsWrite,
+        Self::ScheduledTasksAdmin,
     ];
 
     /// The capability an API client OAuth scope grants.

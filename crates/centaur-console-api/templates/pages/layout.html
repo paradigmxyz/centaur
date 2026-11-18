@@ -1,0 +1,23 @@
+{#- The standalone layout of the server-rendered sign-in and OAuth pages:
+    plain CSS from public/assets/oauth-page, no JavaScript. Pages extend it
+    and fill the `title` and `content` blocks; their struct has `assets`. -#}
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{% block title %}Centaur Console{% endblock %}</title>
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ assets.path("oauth.css") }}">
+  </head>
+  <body>
+    <main class="oauth-main">
+      <div class="oauth-column">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </body>
+</html>

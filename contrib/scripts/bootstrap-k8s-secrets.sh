@@ -72,7 +72,7 @@ Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
 Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
                                bundled Postgres server with no database path, so
-                               Rails resolves db names from its database.yml)
+                               the console uses its fixed database name)
   IRON_CONTROL_INITIAL_USER_EMAIL
                                initial admin email (default admin@centaur.local)
   The initial password, API key, the three ActiveRecord encryption keys, and
@@ -234,8 +234,8 @@ if secret_exists centaur-infra-env; then
       ic_db_url="$IRON_CONTROL_DATABASE_URL"
     else
       # Reuse the same Postgres host/credentials as the API's DATABASE_URL but
-      # strip the database path, so Rails resolves the database name from the
-      # image's database.yml. Avoids decoding the password ourselves.
+      # strip the database path, so the console uses its fixed database name
+      # (iron_control_production). Avoids decoding the password ourselves.
       existing_db_url="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env \
         -o 'jsonpath={.data.DATABASE_URL}' | openssl base64 -d -A)"
       ic_db_url="${existing_db_url%/ai_v2}"
@@ -299,8 +299,8 @@ else
   POSTGRES_PASSWORD="$(rand_hex)"
   DATABASE_URL="postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432/ai_v2"
   # iron-control runs against a dedicated logical DB on the same Postgres. The
-  # URL carries connection info only (no database path) so Rails resolves each
-  # connection's database name from the image's database.yml. Override via the
+  # URL carries connection info only (no database path) so the console uses
+  # its fixed database name (iron_control_production). Override via the
   # IRON_CONTROL_DATABASE_URL env var to point at an external server.
   IRON_CONTROL_DATABASE_URL="${IRON_CONTROL_DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432}"
   IRON_CONTROL_INITIAL_USER_EMAIL="${IRON_CONTROL_INITIAL_USER_EMAIL:-admin@centaur.local}"

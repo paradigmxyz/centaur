@@ -240,8 +240,9 @@ chart-managed workloads.
 {{- end -}}
 
 {{- /*
-console — Rails control plane (formerly "iron-control") for authenticated API
-access and encrypted secret storage. Required in-cluster ClusterIP Service.
+console — the credential-control API and operator UI (formerly
+"iron-control"), the `centaur-console` binary from the api-rs image (RFC 0006).
+Required in-cluster ClusterIP Service.
 
 Backwards compatibility: the canonical values key is `console`; `ironControl` is
 a deprecated alias that is still honored. `centaur.consoleValues` returns the
@@ -274,6 +275,27 @@ IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 {{- define "centaur.consoleUrl" -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
+{{- end -}}
+
+{{- /*
+The console and console-worker containers' image: the api-rs image, which
+ships the `centaur-console` binary and the console's static files. The
+retired `console.image` (the Rails image) is ignored; NOTES.txt warns when it
+is still set.
+*/ -}}
+{{- define "centaur.consoleImage" -}}
+image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
+imagePullPolicy: {{ .Values.apiRs.image.pullPolicy }}
+{{- end -}}
+
+{{- /*
+The console containers' security context: the chart default plus a non-root
+user (the api-rs image has no USER, and the Rails image ran as 1000) and a
+read-only root filesystem, since the Rust console writes no files.
+*/ -}}
+{{- define "centaur.consoleSecurityContext" -}}
+{{- $context := mergeOverwrite (dict "runAsNonRoot" true "runAsUser" 1000 "runAsGroup" 1000 "readOnlyRootFilesystem" true "seccompProfile" (dict "type" "RuntimeDefault")) (deepCopy (.Values.containerSecurityContext | default dict)) -}}
+{{- toYaml $context -}}
 {{- end -}}
 
 {{- define "centaur.proxySyncName" -}}

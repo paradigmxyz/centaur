@@ -57,26 +57,13 @@ Set `SLACK_SYNC_INDEX_PRIVATE_CHANNELS=true` to also sync private channels
 visible to that token. It does not sync DMs or Slackbot-only live thread events.
 Private channel rows are protected by RLS.
 
-### User-scoped private-channel ingestion
+### User-scoped DMs and private channels
 
-The console's Slack OAuth flow can ingest private channels through the same
-user-scoped pipeline used for DMs. Add `groups:read` and `groups:history` to the
-Slack OAuth app's allowed user scopes and have existing users consent again.
-DM-only credentials continue syncing DMs while credentials with the new scopes
-also request `private_channel` conversations.
-
-Every 10 minutes the console worker fans out across healthy Slack broker
-credentials. Each credential lists the private channels visible to that user,
-reads channel history, and fetches the complete `conversations.members` list.
-Messages are deduplicated by Slack conversation and message timestamp when
-multiple credentials can see the same channel.
-
-User-scoped private channels are stored with DMs and MPIMs in the neutral
-`slack_private_sync_*` and `slack_private_*_context_documents` tables rather than
-`company_context_documents`. RLS checks `(team_id, channel_id, user_id)` against
-the reconciled membership list. A successful sync marks members omitted from
-Slack's complete member list inactive; a partial or truncated member list is
-never applied.
+The console's own user-scoped Slack DM and private-channel sync was part of
+company context v1 and is retired. `experimentalCompanyContext` discovers DMs
+and private channels through the per-user Slack credentials users connect in
+the Console (see `services/company-context/README.md`). Rows the retired sync
+wrote to the `slack_private_*` tables stay searchable.
 
 ## Enable the schedules
 

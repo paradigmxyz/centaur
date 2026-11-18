@@ -4,7 +4,8 @@ use sqlx::{PgPool, Row};
 use crate::{Error, Result};
 
 /// A machine client of the api-rs session API, as Console stores it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `Debug` redacts `secret_digest`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApiClient {
     pub id: i64,
     pub name: String,
@@ -12,6 +13,18 @@ pub struct ApiClient {
     pub secret_digest: String,
     pub scopes: Vec<String>,
     pub disabled: bool,
+}
+
+impl std::fmt::Debug for ApiClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiClient")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("secret_digest", &crate::redact::Redacted)
+            .field("scopes", &self.scopes)
+            .field("disabled", &self.disabled)
+            .finish()
+    }
 }
 
 /// A principal attached to an API client.

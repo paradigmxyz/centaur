@@ -35,8 +35,6 @@
           "items": { "type": "string" },
           "uniqueItems": true
         },
-        "sentryDsn": { "type": "string" },
-        "railsEnv": { "type": "string" },
         "oktaOauth": {
           "type": "object",
           "properties": {
@@ -54,14 +52,6 @@
             "enabled": { "type": "boolean" }
           }
         },
-        "image": {
-          "type": "object",
-          "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string" }
-          }
-        },
         "database": {
           "type": "object",
           "properties": {
@@ -71,13 +61,6 @@
         "slackDmSync": {
           "type": "object",
           "properties": {
-            "oauthAppSlug": { "type": "string" }
-          }
-        },
-        "googleDocsSync": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
             "oauthAppSlug": { "type": "string" }
           }
         },
@@ -177,12 +160,6 @@
             "required": ["repo"]
           }
         }
-      }
-    },
-    "companyContextV1": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" }
       }
     },
     "console": { "$ref": "#/definitions/consoleConfig" },
@@ -455,6 +432,14 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "scheduledTaskRunner": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "reconcileIntervalSeconds": { "type": "integer", "minimum": 0 },
+            "workerConcurrency": { "type": "integer", "minimum": 1 }
+          }
+        },
         "mcpV2Enabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "sessionPrincipalAdmission": {

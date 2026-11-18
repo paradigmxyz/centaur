@@ -169,7 +169,6 @@ export interface WorkflowDetail extends WorkflowTiming {
   task_name: string | null;
   harness_type: string | null;
   engine_label: string | null;
-  duration_label: string;
   run_count: number;
   status_counts: { status: string; count: number }[];
   queues: { queue_name: string; queue_label: string }[];
