@@ -1,5 +1,6 @@
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -7,6 +8,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+use support::write_executable;
 
 /// Turns recorded from `pi --mode rpc` 1.0.0: commentary text and a bash call
 /// in one message, then a final answer; and one codemode script running two
@@ -41,8 +44,7 @@ fn fake_pi(dir: &Path) -> PathBuf {
         codemode = CODEMODE_TURN,
     );
     let path = dir.join("pi");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, script);
     path
 }
 
