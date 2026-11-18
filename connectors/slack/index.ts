@@ -385,6 +385,23 @@ export async function thread_replies(
   return { messages: body.messages ?? [], has_more: Boolean(body.has_more), next_cursor: nextCursor(body) };
 }
 
+/**
+ * Member user IDs of a conversation (C…, G… or D…), as Slack's `conversations.members` returns
+ * them; resolve each with `user_details` or match against `users`. Through Centaur this needs
+ * the caller's history grant on the channel. Follow `next_cursor` as `cursor`; `limit` at most
+ * 1000.
+ */
+export async function channel_members(
+  args: { channel: string; limit?: number; cursor?: string },
+  ctx: Ctx,
+): Promise<{ members: string[]; next_cursor: string | null }> {
+  const params: Params = { limit: args.limit === undefined ? undefined : Math.min(args.limit, 1000), cursor: args.cursor };
+  const body = access(ctx) === "centaur"
+    ? await centaur(ctx, `/api/slack/channels/${seg(args.channel)}/members`, params)
+    : await slackGet(ctx, "conversations.members", { ...params, channel: args.channel.trim() });
+  return { members: body.members ?? [], next_cursor: nextCursor(body) };
+}
+
 /** A message's permalink by conversation ID and ts. */
 export async function permalink(args: { channel: string; ts: string }, ctx: Ctx): Promise<{ permalink: string }> {
   const body = access(ctx) === "centaur"
