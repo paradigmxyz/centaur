@@ -828,6 +828,8 @@ export async function list_workspace_members(args: {}, ctx: Ctx): Promise<{ memb
  * runtime streams it as the multipart body), `filename` is the name to show in Attio (default: the
  * path's last segment) and `content_type` its MIME type (default `application/octet-stream`).
  * Attio accepts files up to 50 MB. `parent_folder_id` files it in an Attio folder.
+ *
+ * @requires files
  */
 export async function upload_file(
   args: {

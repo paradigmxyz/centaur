@@ -432,6 +432,8 @@ export async function user_details(args: { user: string }, ctx: Ctx): Promise<{ 
  * `channel` is the conversation the file is shared in, required through the Centaur API. `path`
  * defaults to `downloads/slack/<file name>`. Read it back with `files.read` or hand it to another
  * tool.
+ *
+ * @requires files
  */
 export async function download_file(
   args: { file: string; channel?: string; path?: string },
@@ -500,6 +502,8 @@ export async function add_reaction(
  * Write: upload a file from the sandbox (`path`, for example one saved by `download_file` or
  * `files.write`) and share it into `channel`, optionally in a thread. `filename` defaults to the
  * path's last segment; the file is streamed from disk, not read into the cell.
+ *
+ * @requires files
  */
 export async function upload_file(
   args: { channel: string; path: string; filename?: string; title?: string; initial_comment?: string; thread_ts?: string },

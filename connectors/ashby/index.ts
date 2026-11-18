@@ -605,6 +605,8 @@ async function saveFile(
  * the files root or absolute inside it; default `downloads/ashby/<filename>`, from the handle's name
  * or the URL). Returns the saved file's absolute `path`, `bytes`, `mime_type`, `filename` and the
  * signed `url` it downloaded from.
+ *
+ * @requires files
  */
 export async function download_file(
   args: { file_handle: string; path?: string },
@@ -625,6 +627,8 @@ export async function download_file(
  * `path` says where to save it (relative to the files root or absolute inside it; default
  * `downloads/ashby/<filename>`). Returns the saved file's absolute `path`, `bytes`, `mime_type`,
  * `filename` and the signed `url` it downloaded from; fails when the candidate has no resume.
+ *
+ * @requires files
  */
 export async function download_resume(
   args: { candidate_id: string; path?: string },

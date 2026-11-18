@@ -220,6 +220,8 @@ async function generateImage(
  * `image_size`: 1K (default), 2K or 4K; larger than 1K is pro-model territory.
  * The image arrives inline in Gemini's JSON, so a single response must stay inside the runtime's
  * 10 MiB response limit; the saved file may be up to 100 MiB.
+ *
+ * @requires files
  */
 export async function generate(
   args: {
@@ -251,6 +253,8 @@ export async function generate(
  * The edited image is saved to `path` (default `downloads/nano_banana/edited-<input name>.<ext>`),
  * and the result has the same shape as `generate`'s; `model`, `aspect_ratio` and `image_size`
  * mean the same as there.
+ *
+ * @requires files
  */
 export async function edit(
   args: {

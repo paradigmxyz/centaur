@@ -190,7 +190,7 @@ fn main() -> Result<()> {
 
 async fn run(cli: Cli) -> Result<()> {
     let Cli { common, command } = cli;
-    let catalog = Arc::new(Catalog::load(&common.roots)?);
+    let catalog = Arc::new(Catalog::load(&common.roots, common.files_dir.is_some())?);
     match command {
         Command::List => {
             let policy = common.policy();
