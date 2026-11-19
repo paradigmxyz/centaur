@@ -254,4 +254,21 @@ class CentaurApiClientTest < ActiveSupport::TestCase
 
     http.verify
   end
+
+  test "runs a scheduled task for an optional occurrence" do
+    http = Minitest::Mock.new
+    expect_request(http, status: 202, body: { ok: true, run_id: "r1" }.to_json) do |request|
+      assert_equal "http://api.internal:8080/api/scheduled-tasks/tsk_abc/runs", request[:url]
+      assert_equal({}, JSON.parse(request[:body]))
+    end
+    expect_request(http, status: 202, body: { ok: true, run_id: "r2" }.to_json) do |request|
+      assert_equal({ "scheduled_for" => "2026-08-19T12:00:00Z" }, JSON.parse(request[:body]))
+    end
+    client = api_client(base_url: "http://api.internal:8080", http: http)
+
+    assert_equal "r1", client.run_scheduled_task("tsk_abc")["run_id"]
+    assert_equal "r2", client.run_scheduled_task("tsk_abc", scheduled_for: Time.utc(2026, 8, 19, 12))["run_id"]
+
+    http.verify
+  end
 end

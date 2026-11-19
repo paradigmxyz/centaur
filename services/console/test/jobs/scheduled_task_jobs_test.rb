@@ -1,190 +1,52 @@
 require "test_helper"
 
+# api-rs runs scheduled tasks; the run job only drains runs Console enqueued
+# before that.
 class ScheduledTaskJobsTest < ActiveJob::TestCase
-  class FakeApiClient
-    attr_reader :requests
-
-    def initialize
-      @requests = []
-    end
-
-    def create_workflow_run(**request)
-      @requests << request
-      { "run_id" => "run-123", "created" => true }
-    end
-  end
-
   setup do
-    @original_client_factory = ScheduledTaskRunJob.client_factory
-    user = users(:acme_admin)
-    user.user_identities.create!(
-      provider: "slack",
-      subject: "U0123456789",
-      team_id: "T0123456789"
-    )
-  end
-
-  teardown do
-    ScheduledTaskRunJob.client_factory = @original_client_factory
-  end
-
-  test "scheduler claims a due task once and advances its next run" do
-    task = create_task
-    scheduled_for = Time.utc(2026, 8, 19, 12)
-    task.update_columns(next_run_at: scheduled_for)
-
-    assert_enqueued_with(job: ScheduledTaskRunJob, args: [ task.id, scheduled_for.iso8601 ]) do
-      ScheduledTaskSchedulerJob.perform_now(scheduled_for)
-    end
-
-    task.reload
-    assert_equal scheduled_for, task.last_enqueued_at
-    assert_equal Time.utc(2026, 8, 19, 13), task.next_run_at
-
-    assert_no_enqueued_jobs only: ScheduledTaskRunJob do
-      ScheduledTaskSchedulerJob.perform_now(scheduled_for)
-    end
-  end
-
-  test "scheduler leaves a task due when the run job cannot be enqueued" do
-    task = create_task
-    scheduled_for = Time.utc(2026, 8, 19, 12)
-    task.update_columns(next_run_at: scheduled_for)
-
-    ScheduledTaskRunJob.stub(:perform_later, false) do
-      assert_raises(ActiveJob::EnqueueError) do
-        ScheduledTaskSchedulerJob.perform_now(scheduled_for)
-      end
-    end
-
-    task.reload
-    assert_equal scheduled_for, task.next_run_at
-    assert_nil task.last_enqueued_at
-  end
-
-  test "runner sends the scheduled task input and a stable idempotency key" do
-    task = create_task
-    client = FakeApiClient.new
-    ScheduledTaskRunJob.client_factory = -> { client }
-
-    travel_to Time.utc(2026, 8, 19, 12, 5) do
-      ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
-    end
-
-    request = client.requests.fetch(0)
-    assert_equal "console_workflow", request[:workflow_name]
-    assert_equal task.execution_principal.foreign_id, request.dig(:input, :principal)
-    assert_equal users(:acme_admin), task.execution_principal.console_user
-    assert_equal "Summarize open incidents.", request.dig(:input, :prompt)
-    assert_equal "C0123456789", request.dig(:input, :channel)
-    assert_equal "U0123456789", request.dig(:input, :slack_user_id)
-    assert_equal "scheduled-task:#{task.id}:2026-08-19T12:00:00Z", request[:idempotency_key]
-    assert_equal ScheduledTaskRunJob::MAX_ATTEMPTS, request[:max_attempts]
-    assert_equal "run-123", task.reload.last_run_id
-    assert_equal Time.utc(2026, 8, 19, 12, 5), task.last_run_at
-  end
-
-  test "scheduler still advances and other tasks run after a channel task's bot leaves" do
-    scheduled_for = Time.utc(2026, 8, 19, 12)
-    channel_task = ScheduledTask.create!(
-      name: "Channel digest",
-      prompt: "Summarize this channel.",
-      principal: principals(:acme_channel),
-      cron_expression: "0 * * * *"
-    )
-    other_task = create_task(delivery_channel: "U0123456789")
-    channel_task.update_columns(next_run_at: scheduled_for - 1.minute)
-    other_task.update_columns(next_run_at: scheduled_for)
-    slack_bot_channels(:general).update!(active: false)
-
-    ScheduledTaskSchedulerJob.perform_now(scheduled_for)
-
-    assert_enqueued_with(job: ScheduledTaskRunJob, args: [ channel_task.id, (scheduled_for - 1.minute).iso8601 ])
-    assert_enqueued_with(job: ScheduledTaskRunJob, args: [ other_task.id, scheduled_for.iso8601 ])
-    assert_equal Time.utc(2026, 8, 19, 13), channel_task.reload.next_run_at
-
-    channel_task.update!(enabled: false)
-    assert_nil channel_task.reload.next_run_at
-  end
-
-  test "runner runs a channel task as the channel and delivers to it" do
-    channel = principals(:acme_channel)
-    task = ScheduledTask.create!(
-      name: "Channel digest",
-      prompt: "Summarize this channel.",
-      principal: channel,
-      cron_expression: "0 * * * *"
-    )
-    client = FakeApiClient.new
-    ScheduledTaskRunJob.client_factory = -> { client }
-
-    ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
-
-    input = client.requests.fetch(0)[:input]
-    assert_equal channel.foreign_id, input[:principal]
-    assert_equal channel.slack_channel_id, input[:channel]
-    assert_nil input[:slack_user_id]
-  end
-
-  test "runner refuses a channel task after the bot leaves the channel" do
-    task = ScheduledTask.create!(
-      name: "Channel digest",
-      prompt: "Summarize this channel.",
-      principal: principals(:acme_channel)
-    )
-    client = FakeApiClient.new
-    ScheduledTaskRunJob.client_factory = -> { client }
-    slack_bot_channels(:general).update!(active: false)
-
-    assert_raises(ScheduledTask::DeliveryDestinationUnavailable) do
-      ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
-    end
-    assert_empty client.requests
-  end
-
-  test "runner skips a task disabled after it was enqueued" do
-    task = create_task
-    task.update!(enabled: false)
-    client = FakeApiClient.new
-    ScheduledTaskRunJob.client_factory = -> { client }
-
-    ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
-
-    assert_empty client.requests
-    assert_nil task.reload.last_run_id
-  end
-
-  test "runner refuses a private destination after the author or bot leaves the channel" do
-    channel = SlackBotChannel.create!(
-      team_id: "T0123456789",
-      bot_user_id: "U0999999999",
-      channel_id: "G1111111111",
-      name: "private-shared",
-      private: true,
-      active: true,
-      member_user_ids: [ "U0123456789", "U0999999999" ]
-    )
-    task = create_task(delivery_channel: channel.channel_id)
-    client = FakeApiClient.new
-    ScheduledTaskRunJob.client_factory = -> { client }
-    channel.update!(member_user_ids: [ "U0999999999" ])
-
-    assert_raises(ScheduledTask::DeliveryDestinationUnavailable) do
-      ScheduledTaskRunJob.perform_now(task.id, "2026-08-19T12:00:00Z")
-    end
-    assert_empty client.requests
-  end
-
-  private
-
-  def create_task(delivery_channel: "C0123456789")
-    ScheduledTask.create!(
-      name: "Incident summary #{SecureRandom.hex(4)}",
+    @task = ScheduledTask.create!(
+      name: "Incident summary",
       prompt: "Summarize open incidents.",
       author: users(:acme_admin),
-      delivery_channel: delivery_channel,
-      cron_expression: "0 * * * *",
-      enabled: true
+      delivery_channel: "C0123456789",
+      cron_expression: "0 * * * *"
     )
+    users(:acme_admin).user_identities.create!(provider: "slack", subject: "U0123456789", team_id: "T0123456789")
+  end
+
+  test "an enqueued run starts in api-rs for the occurrence it was enqueued for" do
+    with_scheduled_task_client do |client|
+      ScheduledTaskRunJob.perform_now(@task.id, "2026-08-19T12:00:00Z")
+
+      assert_equal [ { task_oid: @task.oid, scheduled_for: Time.utc(2026, 8, 19, 12) } ], client.runs
+    end
+  end
+
+  test "a task disabled after its run was enqueued does not run" do
+    @task.update!(enabled: false)
+
+    assert_scheduled_task_runs 0 do
+      ScheduledTaskRunJob.perform_now(@task.id, "2026-08-19T12:00:00Z")
+    end
+  end
+
+  test "a run api-rs refuses is not retried" do
+    refused = CentaurApiClient::Error.new("Slack delivery destination is no longer available", status: 422)
+
+    with_scheduled_task_client(ScheduledTaskRunHelper::FakeClient.new(error: refused)) do
+      assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+        ScheduledTaskRunJob.perform_now(@task.id, "2026-08-19T12:00:00Z")
+      end
+    end
+  end
+
+  test "a run api-rs could not start is retried" do
+    unavailable = CentaurApiClient::Error.new("database unavailable", status: 503)
+
+    with_scheduled_task_client(ScheduledTaskRunHelper::FakeClient.new(error: unavailable)) do
+      assert_enqueued_jobs 1, only: ScheduledTaskRunJob do
+        ScheduledTaskRunJob.perform_now(@task.id, "2026-08-19T12:00:00Z")
+      end
+    end
   end
 end

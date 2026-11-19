@@ -7,16 +7,19 @@ repository.workspace = true
 
 [dependencies]
 active-record-encryption = { path = "../active-record-encryption" }
+chrono.workspace = true
+chrono-tz.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqids = "0.4"
 sqlx.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 rand = "0.10"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

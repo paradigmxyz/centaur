@@ -215,15 +215,32 @@ module Api
         assert_equal "C0123456789", task.delivery_channel
       end
 
-      test "queues a manual run" do
+      test "starts a manual run" do
         task = create_task
 
-        assert_enqueued_jobs 1, only: ScheduledTaskRunJob do
+        with_scheduled_task_client do |client|
           post run_api_v1_console_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
+          assert_equal [ { task_oid: task.oid, scheduled_for: nil } ], client.runs
         end
 
         assert_response :accepted
         assert_equal true, json_body.dig("data", "queued")
+        assert_equal "run-123", json_body.dig("data", "run_id")
+      end
+
+      test "reports a run api-rs refused" do
+        task = create_task
+        refused = CentaurApiClient::Error.new(
+          "Slack delivery destination is no longer available to the task owner", status: 422
+        )
+
+        with_scheduled_task_client(ScheduledTaskRunHelper::FakeClient.new(error: refused)) do
+          post run_api_v1_console_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
+        end
+
+        assert_response :unprocessable_entity
+        assert_equal "Slack delivery destination is no longer available to the task owner",
+                     json_body.dig("error", "message")
       end
 
       test "does not allow a disabled task to run" do
@@ -233,7 +250,7 @@ module Api
         get api_v1_console_scheduled_tasks_path
         assert_equal false, json_body["data"].sole["enabled"]
 
-        assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+        assert_scheduled_task_runs 0 do
           post run_api_v1_console_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
         end
         assert_response :unprocessable_entity
@@ -256,7 +273,7 @@ module Api
                                                           headers: csrf_headers, as: :json
         assert_response :not_found
 
-        assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+        assert_scheduled_task_runs 0 do
           post run_api_v1_console_scheduled_task_path(other_task.oid), headers: csrf_headers, as: :json
         end
         assert_response :not_found
@@ -289,7 +306,7 @@ module Api
                                                     headers: csrf_headers, as: :json
         assert_response :not_found
 
-        assert_no_enqueued_jobs only: ScheduledTaskRunJob do
+        assert_scheduled_task_runs 0 do
           post run_api_v1_console_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
         end
         assert_response :not_found
@@ -342,7 +359,7 @@ module Api
         assert_response :ok
         assert_equal "Updated member task", task.reload.name
 
-        assert_enqueued_jobs 1, only: ScheduledTaskRunJob do
+        assert_scheduled_task_runs 1 do
           post run_api_v1_console_scheduled_task_path(task.oid), headers: csrf_headers, as: :json
         end
         assert_response :accepted

@@ -243,7 +243,8 @@ deploy_model_server() {
 # cluster: the gateway authorizes the public half, and tests grant the private
 # half to the principals that may use it.
 deploy_ssh_gateway() {
-  docker build -q -t centaur-e2e-ssh-gateway:latest e2e/infra/ssh-gateway > /dev/null
+  docker build -q ${CENTAUR_BUILD_HTTP_PROXY:+--build-arg "http_proxy=$CENTAUR_BUILD_HTTP_PROXY"} \
+    -t centaur-e2e-ssh-gateway:latest e2e/infra/ssh-gateway > /dev/null
   kind load docker-image --name "$CLUSTER" centaur-e2e-ssh-gateway:latest
   issue_cert ssh-gateway workspace.ssh-gateway.test
 

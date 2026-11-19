@@ -2,6 +2,8 @@ module Api
   module V1
     module Sandbox
       class ScheduledTasksController < Api::SandboxBaseController
+        include ScheduledTaskRunErrors
+
         class ChannelDeliveryMismatch < StandardError; end
 
         rescue_from ChannelDeliveryMismatch do
@@ -46,12 +48,11 @@ module Api
             return render_error(status: :unprocessable_entity, message: "scheduled task is disabled")
           end
 
-          queued_job = ScheduledTaskRunJob.perform_later(task.id, Time.current.iso8601)
-          unless queued_job
-            return render_error(status: :service_unavailable, message: "scheduled task run could not be queued")
-          end
-
-          render json: { data: task_payload(task).merge(queued: true) }, status: :accepted
+          run = ScheduledTaskRunner.call(task)
+          render json: { data: task_payload(task.reload).merge(queued: true, run_id: run["run_id"]) },
+                 status: :accepted
+        rescue CentaurApiClient::Error => e
+          render_run_error(e)
         end
 
         private

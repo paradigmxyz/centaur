@@ -168,7 +168,7 @@ impl AppState {
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))
     }
 
-    fn workflows(&self) -> Result<WorkflowRuntime, ApiError> {
+    pub(crate) fn workflows(&self) -> Result<WorkflowRuntime, ApiError> {
         let initialized = self
             .initialized()
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))?;
@@ -272,6 +272,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             post(cancel_workflow_run),
         )
         .route("/api/workflows/events", post(emit_workflow_event))
+        .route(
+            "/api/scheduled-tasks/{task_id}/runs",
+            post(crate::scheduled_tasks::run_scheduled_task),
+        )
         .route(
             "/api/workflows/actions/invoke",
             post(invoke_workflow_button),
@@ -582,7 +586,8 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         | (&Method::GET, "/api/workflows/runs")
         | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
         (&Method::POST, "/api/workflows/runs")
-        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel") => {
+        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel")
+        | (&Method::POST, "/api/scheduled-tasks/{task_id}/runs") => {
             capability(Capability::WorkflowsWrite)
         }
         (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
@@ -1057,7 +1062,10 @@ fn principal_subject_owns_session(subject: Option<&str>, session_principal: Opti
 /// A workflow that declares `WORKFLOW_STARTERS` may only be started through
 /// the API by those caller classes; undeclared workflows accept any caller
 /// with workflow write access.
-fn caller_may_start_workflow(starters: Option<&BTreeSet<String>>, caller: CallerClass) -> bool {
+pub(crate) fn caller_may_start_workflow(
+    starters: Option<&BTreeSet<String>>,
+    caller: CallerClass,
+) -> bool {
     starters.is_none_or(|starters| starters.contains(caller.as_str()))
 }
 

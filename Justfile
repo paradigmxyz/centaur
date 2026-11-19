@@ -19,6 +19,11 @@ registry := env_var_or_default("CENTAUR_LOCAL_REGISTRY", "localhost:5000")
 agent_dockerfile := env_var_or_default("CENTAUR_AGENT_DOCKERFILE", "services/sandbox/Dockerfile")
 agent_build_target := env_var_or_default("CENTAUR_AGENT_BUILD_TARGET", "sandbox")
 agent_image := env_var_or_default("CENTAUR_AGENT_IMAGE", "centaur-agent:latest")
+# Optional HTTP proxy for plain-HTTP downloads during image builds, such as
+# an apt-cacher-ng instance (CENTAUR_BUILD_HTTP_PROXY=http://172.17.0.1:3142).
+# HTTPS downloads still go direct.
+build_http_proxy := env_var_or_default("CENTAUR_BUILD_HTTP_PROXY", "")
+docker_build := if build_http_proxy == "" { "docker build" } else { "docker build --build-arg http_proxy=" + build_http_proxy }
 
 default:
     just --list
@@ -78,40 +83,40 @@ build-one service:
     esac
 
 _build-api-rs:
-    docker build -t centaur-api-rs:latest -f services/api-rs/Dockerfile .
+    {{docker_build}} -t centaur-api-rs:latest -f services/api-rs/Dockerfile .
 
 _build-company-context:
-    docker build -t centaur-company-context:latest -f services/company-context/Dockerfile .
+    {{docker_build}} -t centaur-company-context:latest -f services/company-context/Dockerfile .
 
 _build-proxy-sync:
-    docker build -t centaur-proxy-sync:latest -f services/proxy-sync/Dockerfile .
+    {{docker_build}} -t centaur-proxy-sync:latest -f services/proxy-sync/Dockerfile .
 
 _build-codemode:
-    docker build -t centaur-codemode:latest -f services/codemode/Dockerfile .
+    {{docker_build}} -t centaur-codemode:latest -f services/codemode/Dockerfile .
 
 _build-token-broker:
-    docker build -t centaur-token-broker:latest -f services/token-broker/Dockerfile .
+    {{docker_build}} -t centaur-token-broker:latest -f services/token-broker/Dockerfile .
 
 _build-iron-proxy:
-    docker build -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
+    {{docker_build}} -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
 
 _build-slackbotv2:
-    docker build -t centaur-slackbotv2:latest -f services/slackbotv2/Dockerfile .
+    {{docker_build}} -t centaur-slackbotv2:latest -f services/slackbotv2/Dockerfile .
 
 _build-linearbot:
-    docker build -t centaur-linearbot:latest -f services/linearbot/Dockerfile .
+    {{docker_build}} -t centaur-linearbot:latest -f services/linearbot/Dockerfile .
 
 _build-discordbot:
-    docker build -t centaur-discordbot:latest -f services/discordbot/Dockerfile .
+    {{docker_build}} -t centaur-discordbot:latest -f services/discordbot/Dockerfile .
 
 _build-githubbot:
-    docker build -t centaur-githubbot:latest -f services/githubbot/Dockerfile .
+    {{docker_build}} -t centaur-githubbot:latest -f services/githubbot/Dockerfile .
 
 _build-teamsbot:
-    docker build -t centaur-teamsbot:latest -f services/teamsbot/Dockerfile .
+    {{docker_build}} -t centaur-teamsbot:latest -f services/teamsbot/Dockerfile .
 
 _build-agent:
-    docker build --target "{{agent_build_target}}" -t "{{agent_image}}" -f "{{agent_dockerfile}}" .
+    {{docker_build}} --target "{{agent_build_target}}" -t "{{agent_image}}" -f "{{agent_dockerfile}}" .
 
 # The Python workflow host is embedded in both consumer images.
 _build-workflow-python:
@@ -121,7 +126,7 @@ _build-workflow-python:
 # The console builds from the repo root so its SPA can use the pnpm workspace
 # lockfile; services/console/Dockerfile.dockerignore limits the context.
 _build-console:
-    docker build -t centaur-console:latest -f services/console/Dockerfile .
+    {{docker_build}} -t centaur-console:latest -f services/console/Dockerfile .
 
 # Push locally-built images to the local registry under library/ so k3s pulls
 # them via its docker.io mirror. Used by `just up k3s`. Only changed layers are

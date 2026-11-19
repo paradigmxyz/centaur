@@ -3,7 +3,7 @@ mod args;
 
 use centaur_api_server::{
     ApiAuthConfig, AppState, build_router_with_app_state, partition_slack_external_team_ids,
-    warm_slack_public_channel_cache,
+    spawn_scheduled_task_scheduler, warm_slack_public_channel_cache,
 };
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
@@ -167,15 +167,19 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let workflow_host_sandbox = args
         .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
         .await?;
-    let workflows = Some(
-        WorkflowRuntime::new(
-            store,
-            runtime.clone(),
-            workflow_host_sandbox,
-            iron_control.workflow_principal_registrar,
-        )
-        .await?,
-    );
+    let workflows = WorkflowRuntime::new(
+        store,
+        runtime.clone(),
+        workflow_host_sandbox,
+        iron_control.workflow_principal_registrar,
+    )
+    .await?;
+    // Console stores scheduled tasks; api-rs runs them.
+    match args.console_db() {
+        Some(console_db) => spawn_scheduled_task_scheduler(console_db, workflows.clone()),
+        None => warn!("Console database is not configured; scheduled tasks will not run"),
+    }
+    let workflows = Some(workflows);
 
     // Adopt executions orphaned by another control plane process
     // (deploy/crash): recover finished turns from recorded sandbox output,

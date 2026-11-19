@@ -109,6 +109,14 @@ class CentaurApiClient
     post("/api/workflows/runs", payload)
   end
 
+  # Starts a scheduled task's console_workflow run now. `scheduled_for` names
+  # the occurrence in the run's idempotency key; api-rs defaults it to now.
+  def run_scheduled_task(task_oid, scheduled_for: nil)
+    payload = {}
+    payload[:scheduled_for] = scheduled_for.utc.iso8601 if scheduled_for
+    post("/api/scheduled-tasks/#{escape_path(task_oid)}/runs", payload)
+  end
+
   private
 
   def get(path, params = {})
