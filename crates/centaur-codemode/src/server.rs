@@ -15,7 +15,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Query, Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -28,6 +28,7 @@ use crate::{
     catalog::{Policy, connector_brief},
     engine::{CallRecord, Engine, ExecRequest},
     search,
+    telemetry::TraceParent,
 };
 
 /// Concurrent `/exec` requests per process.
@@ -207,8 +208,17 @@ async fn healthz(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
-async fn exec(State(state): State<AppState>, Json(request): Json<ExecRequest>) -> Response {
+async fn exec(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<ExecRequest>,
+) -> Response {
     let started = Instant::now();
+    // api-rs sends the MCP tool call's trace context; the cell's spans join it.
+    request.trace = headers
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok())
+        .and_then(TraceParent::parse);
     let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
         tracing::warn!(route = "/exec", "busy");
         return busy();

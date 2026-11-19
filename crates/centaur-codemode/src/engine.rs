@@ -42,6 +42,7 @@ use tokio::sync::Semaphore;
 use crate::{
     catalog::{Catalog, Policy, lib_name},
     files::{FileInfo, Files, MAX_FILE_BYTES},
+    telemetry::{self, CallTrace, CellTrace, RequestTrace, TraceParent},
     websocket::{self, Sockets},
 };
 
@@ -99,6 +100,10 @@ pub struct ExecRequest {
     /// The principal's tool filter, which wins over `tools` when present.
     #[serde(default)]
     pub policy: Option<Policy>,
+    /// The trace the cell's spans join. The CLI reads it from the turn trace
+    /// file and `serve` from the `traceparent` header, never from the body.
+    #[serde(skip)]
+    pub trace: Option<TraceParent>,
 }
 
 impl ExecRequest {
@@ -198,6 +203,8 @@ pub struct Engine {
     /// in a Code Mode sandbox).
     console: Option<Arc<ConsoleContext>>,
     files: Option<Files>,
+    /// Where traced cells export; `None` uses the process's OTLP tracer.
+    tracer: Option<opentelemetry_sdk::trace::SdkTracer>,
 }
 
 impl Engine {
@@ -233,6 +240,7 @@ impl Engine {
             context_file,
             console: None,
             files: files_dir.map(Files::new).transpose()?,
+            tracer: None,
         })
     }
 
@@ -260,6 +268,13 @@ impl Engine {
             return;
         };
         console.start();
+    }
+
+    /// Export traced cells to `tracer` instead of the process's OTLP tracer.
+    #[cfg(test)]
+    fn with_tracer(mut self, tracer: opentelemetry_sdk::trace::SdkTracer) -> Self {
+        self.tracer = Some(tracer);
+        self
     }
 
     /// The active catalog. A cell takes one snapshot when it starts.
@@ -357,7 +372,32 @@ impl Engine {
             ))),
         }
         .and_then(parse_result);
-        response(&cell, started, outcome)
+        let response = response(&cell, started, outcome);
+        if let Some(parent) = &request.trace {
+            self.trace_cell(parent, &cell, started, &response);
+        }
+        response
+    }
+
+    /// Export the cell's span tree. Never fails the cell.
+    fn trace_cell(
+        &self,
+        parent: &TraceParent,
+        cell: &Cell,
+        started: Instant,
+        response: &ExecResponse,
+    ) {
+        let Some(tracer) = self.tracer.clone().or_else(telemetry::tracer) else {
+            return;
+        };
+        let trace = CellTrace {
+            started,
+            ended: Instant::now(),
+            error: response.error.as_ref().map(|error| error.message.clone()),
+            error_tool: response.error.as_ref().and_then(|error| error.tool.clone()),
+            calls: cell.call_traces(),
+        };
+        telemetry::record_cell(&tracer, parent, &trace);
     }
 }
 
@@ -622,7 +662,8 @@ struct Call {
     tool: String,
     started: Instant,
     ended: Option<(Instant, Result<(), String>)>,
-    requests: Vec<RequestRecord>,
+    /// Each request with when it started and ended, for its span.
+    requests: Vec<(Instant, Instant, RequestRecord)>,
     files: Vec<FileRecord>,
 }
 
@@ -651,8 +692,45 @@ impl Cell {
                     ok: result.is_ok(),
                     error: result.err(),
                     ms: ended.duration_since(call.started).as_millis() as u64,
-                    requests: call.requests.clone(),
+                    requests: call.requests.iter().map(|(_, _, r)| r.clone()).collect(),
                     files: call.files.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// The calls as spans see them; an unsettled call ends now, failed.
+    fn call_traces(&self) -> Vec<CallTrace> {
+        let now = Instant::now();
+        let calls = self.calls.lock().expect("calls lock");
+        calls
+            .iter()
+            .map(|call| {
+                let (ended, error) = match &call.ended {
+                    Some((ended, result)) => (*ended, result.clone().err()),
+                    None => (
+                        now,
+                        Some("unfinished: the cell ended before this call settled".to_owned()),
+                    ),
+                };
+                CallTrace {
+                    tool: call.tool.clone(),
+                    started: call.started,
+                    ended,
+                    error,
+                    requests: call
+                        .requests
+                        .iter()
+                        .map(|(started, ended, request)| RequestTrace {
+                            method: request.method.clone(),
+                            url: request.url.clone(),
+                            status: request.status,
+                            error: request.error.clone(),
+                            started: *started,
+                            ended: *ended,
+                        })
+                        .collect(),
+                    files: call.files.len(),
                 }
             })
             .collect()
@@ -674,7 +752,7 @@ impl Cell {
             ms: started.elapsed().as_millis() as u64,
         };
         if let Some(call) = self.calls.lock().expect("calls lock").get_mut(call) {
-            call.requests.push(request);
+            call.requests.push((started, Instant::now(), request));
         }
     }
 
@@ -1875,6 +1953,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
                 code: code.to_owned(),
                 tools,
                 policy: None,
+                trace: None,
             })
             .await
     }
@@ -2218,6 +2297,84 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             }
         });
         (format!("ws://{address}/ws"), events)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_traced_cell_exports_cell_call_and_request_spans() {
+        use opentelemetry::trace::TracerProvider as _;
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let base = upstream().await;
+        let (_dir, engine) = engine();
+        let engine = engine.with_tracer(provider.tracer("test"));
+        let code = format!(
+            r#"await tools.demo.get({{ url: "{base}/hello?key=secret" }});
+            await tools.demo.boom({{}}).catch(() => null);
+            return 1;"#
+        );
+        let traceparent = "00-0123456789abcdef0123456789abcdef-1111111111111111-01";
+        let response = engine
+            .exec(ExecRequest {
+                code,
+                tools: None,
+                policy: None,
+                trace: TraceParent::parse(traceparent),
+            })
+            .await;
+        assert!(response.ok, "{:?}", response.error);
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+        let find = |name: &str| {
+            spans
+                .iter()
+                .find(|span| span.name == name)
+                .unwrap_or_else(|| panic!("no span {name} in {names:?}"))
+        };
+        let cell = find("codemode.cell");
+        let get = find("codemode.tool.demo.get");
+        let boom = find("codemode.tool.demo.boom");
+        let request = find("GET 127.0.0.1");
+        assert_eq!(spans.len(), 4, "{names:?}");
+        assert_eq!(
+            cell.parent_span_id,
+            opentelemetry::trace::SpanId::from_hex("1111111111111111").unwrap()
+        );
+        assert_eq!(get.parent_span_id, cell.span_context.span_id());
+        assert_eq!(boom.parent_span_id, cell.span_context.span_id());
+        assert_eq!(request.parent_span_id, get.span_context.span_id());
+        assert!(matches!(
+            boom.status,
+            opentelemetry::trace::Status::Error { .. }
+        ));
+        let url = request
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == "url.full")
+            .map(|attribute| attribute.value.to_string())
+            .unwrap();
+        assert!(!url.contains("secret"), "{url}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_untraced_cell_exports_nothing() {
+        use opentelemetry::trace::TracerProvider as _;
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let (_dir, engine) = engine();
+        let engine = engine.with_tracer(provider.tracer("test"));
+        let response = exec(
+            &engine,
+            r#"return await tools.demo.shout({ text: "a" });"#,
+            None,
+        )
+        .await;
+        assert!(response.ok, "{:?}", response.error);
+        assert!(exporter.get_finished_spans().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2621,6 +2778,7 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             code: "return Object.keys(tools);".to_owned(),
             tools,
             policy,
+            trace: None,
         };
         let response = engine
             .exec(request(

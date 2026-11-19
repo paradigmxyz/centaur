@@ -200,7 +200,7 @@ fn fetch_once(client: &reqwest::blocking::Client, url: &str) -> Result<Value, (S
 
 /// Writes beside the target and renames into place, so a reader never sees a
 /// partial file.
-fn write_atomically(path: &Path, context: &Value) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, context: &Value) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let file_name = path

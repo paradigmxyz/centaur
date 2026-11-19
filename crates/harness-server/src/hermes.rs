@@ -96,6 +96,9 @@ pub fn run_hermes_blocks_server() -> Result<()> {
             }) => {
                 turn += 1;
                 crate::session_prompt::run_session_prompt_hooks(Some(&trace_context), "hermes");
+                // Hermes has no turn telemetry, but programs it runs still
+                // parent their spans on the turn.
+                let _trace_file = crate::turn_trace::TurnTraceFile::write(&trace_context);
                 let result = ensure_child(&mut hermes, model).and_then(|child| {
                     run_hermes_turn(
                         child,

@@ -228,6 +228,7 @@ API-set variables:
 | `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
 | `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY` | API sandbox creation. | API callback and thread key. Warm-pool sandboxes boot without `CENTAUR_THREAD_KEY`; read the sandbox context file instead. |
 | `CENTAUR_SANDBOX_CONTEXT_FILE` | Optional override. | Path of the sandbox context file; defaults to `~/.centaur/sandbox.json`. |
+| `CENTAUR_TURN_TRACE_FILE` | Optional override. | Path of the turn trace file; defaults to `~/.centaur/turn-trace.json`. |
 | `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
 | `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
 | `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
@@ -241,6 +242,11 @@ grants from `GET /api/v1/sandbox/permissions`. If Console cannot be reached,
 `centaur_sdk.sandbox_context()` and `centaur_sdk.sandbox_thread_key()`. The file
 is informational and agent-writable; never base an authorization decision on
 it.
+
+Turn trace file: while a turn runs, `harness-server` keeps
+`~/.centaur/turn-trace.json` with the turn's `traceparent`, `thread_key`, and
+`execution_id`, and removes it when the turn ends. `centaur-codemode exec`
+parents its cell, tool-call, and request spans on it.
 
 Kubernetes backend:
 
