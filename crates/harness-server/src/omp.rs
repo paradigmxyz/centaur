@@ -150,7 +150,17 @@ impl HarnessServer for OmpHarness {
     fn stdin_for_turn(&self, input: &[UserInput]) -> Result<Vec<u8>> {
         prompt_command("prompt", input)
     }
-    fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
+    /// OMP takes the steer into the running prompt and answers it before the
+    /// prompt's `prompt_result` (real_omp_streaming_steer_and_resume).
+    fn steers_mid_turn(&self) -> bool {
+        true
+    }
+
+    fn stdin_for_steer(
+        &self,
+        _normalizer: &mut Self::EventNormalizer,
+        input: &[UserInput],
+    ) -> Result<Vec<u8>> {
         prompt_command("steer", input)
     }
 

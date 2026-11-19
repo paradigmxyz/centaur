@@ -29,6 +29,12 @@ pub enum AnthropicStreamEvent {
         tool_use_result: Option<Value>,
         #[serde(default)]
         parent_tool_use_id: Option<String>,
+        /// Claude Code (`--replay-user-messages`) echoes each user message it
+        /// takes in, keeping the `uuid` it was sent with.
+        #[serde(default)]
+        uuid: Option<String>,
+        #[serde(default, rename = "isReplay")]
+        is_replay: bool,
     },
     StreamEvent {
         event: AnthropicRawStreamEvent,

@@ -76,7 +76,8 @@ apply_stdin() {
 up() {
   if kind get clusters | grep -qx "$CLUSTER"; then
     use_cluster
-    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30082/tcp'; then
+    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30082/tcp' \
+      || [[ "$(kubectl get node "${CLUSTER}-control-plane" -o jsonpath='{.status.capacity.pods}')" -lt 250 ]]; then
       echo "cluster $CLUSTER predates e2e/infra/kind.yaml; run e2e/stack.sh down first" >&2
       exit 1
     fi

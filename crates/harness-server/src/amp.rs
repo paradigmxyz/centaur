@@ -150,7 +150,15 @@ impl HarnessServer for AmpHarness {
         amp_user_stdin(input, false)
     }
 
-    fn stdin_for_steer(&self, input: &[UserInput]) -> Result<Vec<u8>> {
+    /// Amp's native steer (`steer: true`) is not sent mid-turn: Amp's turn
+    /// completes on its terminal assistant stop with no settle window, so a
+    /// steer Amp queues and answers after that stop would land outside the
+    /// turn. Steers wait for the stop and continue the turn instead.
+    fn stdin_for_steer(
+        &self,
+        _normalizer: &mut Self::EventNormalizer,
+        input: &[UserInput],
+    ) -> Result<Vec<u8>> {
         amp_user_stdin(input, true)
     }
 
@@ -242,10 +250,13 @@ mod tests {
     #[test]
     fn steer_stdin_sets_amp_native_steer_flag() {
         let bytes = AmpHarness
-            .stdin_for_steer(&[UserInput::Text {
-                text: "new guidance".to_string(),
-                text_elements: Vec::new(),
-            }])
+            .stdin_for_steer(
+                &mut Default::default(),
+                &[UserInput::Text {
+                    text: "new guidance".to_string(),
+                    text_elements: Vec::new(),
+                }],
+            )
             .unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
 

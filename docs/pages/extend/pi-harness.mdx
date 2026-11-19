@@ -8,7 +8,9 @@ available from Slack only for now.
 The sandbox keeps one `pi --mode rpc` process per thread. Pi saves the session
 on disk under an id derived from the thread key, so an interrupt (which stops
 the Pi process, as with Claude Code), a model switch, or a sandbox restart with
-persistent state resumes the same conversation. Pi trusts the
+persistent state resumes the same conversation. A mention sent while Pi is
+working reaches it as a native `steer` command, which Pi answers before the
+turn settles. Pi trusts the
 workspace (`--approve`), so it loads the skills the sandbox installs, and runs
 with telemetry and version checks off.
 

@@ -50,6 +50,7 @@ pub const SESSION_EXECUTIONS_TOTAL: &str = "centaur_session_executions_total";
 pub const SESSION_EXECUTION_DURATION_SECONDS: &str = "centaur_session_execution_duration_seconds";
 pub const SESSION_FIRST_TOKEN_LATENCY_SECONDS: &str = "centaur_session_first_token_latency_seconds";
 pub const SESSION_FAILURES_TOTAL: &str = "centaur_session_failures_total";
+pub const SESSION_STDOUT_LINES_DROPPED_TOTAL: &str = "centaur_session_stdout_lines_dropped_total";
 pub const SANDBOX_OPERATIONS_TOTAL: &str = "centaur_sandbox_operations_total";
 pub const SANDBOX_STARTUP_DURATION_SECONDS: &str = "centaur_sandbox_startup_duration_seconds";
 pub const SANDBOX_WARM_POOL_CLAIMS_TOTAL: &str = "centaur_sandbox_warm_pool_claims_total";
@@ -320,6 +321,11 @@ pub fn record_session_failure(harness: &str, failure_class: &str) {
     .increment(1);
 }
 
+/// A sandbox stdout line no execution owns, which no client will ever see.
+pub fn record_session_stdout_line_dropped(reason: &'static str) {
+    metrics::counter!(SESSION_STDOUT_LINES_DROPPED_TOTAL, "reason" => reason).increment(1);
+}
+
 pub fn record_sandbox_operation(backend: &str, operation: &'static str, status: &'static str) {
     metrics::counter!(
         SANDBOX_OPERATIONS_TOTAL,
@@ -548,6 +554,10 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Telemet
 }
 
 fn describe_metrics() {
+    metrics::describe_counter!(
+        SESSION_STDOUT_LINES_DROPPED_TOTAL,
+        "Sandbox stdout lines dropped because no execution owned them."
+    );
     metrics::describe_counter!(
         HTTP_REQUESTS_TOTAL,
         "Total HTTP requests served by the Rust API."
