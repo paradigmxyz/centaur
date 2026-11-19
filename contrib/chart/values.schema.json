@@ -468,7 +468,7 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
-        "mcpV2Enabled": { "type": "boolean" },
+        "mcpEnabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "sessionPrincipalAdmission": {
           "type": "string",

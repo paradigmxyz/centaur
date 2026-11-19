@@ -33,10 +33,7 @@ async fn main() -> Result<(), ServerError> {
     }
 
     let args = Args::parse();
-    info!(
-        codemode = centaur_api_server::mcp_codemode_enabled(),
-        "MCP surface"
-    );
+    info!(enabled = centaur_api_server::mcp_enabled(), "MCP endpoint");
     let api_auth = ApiAuthConfig::from_env()?;
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(
@@ -145,8 +142,8 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .with_session_principal_admission(args.session_principal_admission())
         .with_openai_session_title_generator_from_env();
     runtime = runtime.with_personas(args.persona_registry()?);
-    if centaur_api_server::mcp_codemode_enabled() {
-        let image = args.codemode_image()?;
+    if centaur_api_server::mcp_enabled() {
+        let image = args.codemode_image();
         info!(image = %image, "MCP Code Mode sandboxes enabled");
         runtime = runtime.with_codemode(image);
     }

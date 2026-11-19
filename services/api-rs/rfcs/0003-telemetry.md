@@ -47,10 +47,10 @@ Prometheus/VictoriaMetrics metrics, and domain spans in the session runtime.
   enabled, and api-rs does not reconstruct spans from sandbox stdout.
 - Remote MCP `tools/call` telemetry is implemented at the authenticated API
   boundary. Each accepted call emits a Laminar `TOOL` span with Centaur tool
-  kind, MCP entry point, validated method, status, and correlation identifiers.
-  Correlation identifiers are retained when the durable execution fails. The
-  tool span's trace context is persisted as the parent of the durable tool-host
-  execution. Arguments, results, stdout, and stderr are not exported.
+  kind, MCP entry point, validated method, status, and the Code Mode sandbox
+  id. The tool span's trace context is sent to the Code Mode sandbox, which
+  parents the cell on it. Arguments, results, stdout, and stderr are not
+  exported.
 - The harness OpenTelemetry SDK batches and exports directly to the configured
   OTLP endpoint. There is no collector or loopback OTLP proxy in the sandbox.
   The api-rs process's own OTLP env
@@ -293,9 +293,9 @@ the cell on it. Cell spans carry names, timings, statuses, and query-free URLs
 only.
 
 Remote MCP calls have no harness turn. The API creates a root `TOOL` span for
-the accepted `tools/call` and uses its `traceparent` when creating the durable
-tool-host execution. This keeps sandbox lifecycle work in the same trace while
-grouping calls by the stable `mcp:<principal_id>` Laminar session association.
+the accepted `tools/call` and sends its `traceparent` to the Code Mode sandbox.
+This keeps the cell in the same trace while grouping calls by the stable
+`mcp:<principal_id>` Laminar session association.
 
 ## Implementation Plan
 

@@ -4,11 +4,7 @@ Connect Codex, Claude Code, and other MCP clients to the tools approved for your
 
 ## Running Tools
 
-A deployment serves `/mcp` one of two ways.
-
-### Code Mode
-
-With `apiRs.mcpV2Enabled: true` (`CENTAUR_MCP_V2_ENABLED=true`), Centaur exposes four stable MCP tools while the connector catalog behind them changes dynamically:
+Centaur serves `/mcp` through Code Mode. It is on by default; operators can turn it off with `apiRs.mcpEnabled: false` (`CENTAUR_MCP_ENABLED=false`). Centaur exposes four stable MCP tools while the connector catalog behind them changes dynamically:
 
 Connector credentials come from the deployment's tool secret declarations: a connector works only if a tool declares the secrets it needs, and the proxy injects them on the sandbox's outbound requests.
 
@@ -31,16 +27,6 @@ return { channels: slack.channels.slice(0, 5), issues: linear.issues };
 ```
 
 Call connectors as `await tools.<connector>.<function>(args)`. Run independent calls together with `Promise.all` or `Promise.allSettled` in the same cell instead of issuing several tool calls. `return` the JSON-serializable value you want back; `console.log` output is returned with the result. A cell has no `fetch`, no module imports, no file access, and no state between calls, and is limited to 120 s, 1000 calls and 8 concurrent calls.
-
-### One tool per CLI tool
-
-Otherwise Centaur exposes one MCP tool per CLI tool approved for your principal. Call a tool with a `method` and an `arguments` object:
-
-```json
-{"name": "slack", "arguments": {"method": "search_messages", "arguments": {"query": "incident response"}}}
-```
-
-Call it with `{"method": "help"}` when its methods or arguments are unclear, and treat that help output as the current contract.
 
 ## Codex
 

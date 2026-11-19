@@ -302,9 +302,9 @@ codex:
   customProviders: {}
 
 # Code Mode runtime image. api-rs builds one sandbox per principal from this
-# slim image when `apiRs.mcpV2Enabled` is true; it must be set then. Pull policy
-# and pull secrets reuse `sandbox.image.pullPolicy` and
-# `global.imagePullSecrets`. Rendered as CENTAUR_CODEMODE_IMAGE.
+# slim image when `apiRs.mcpEnabled` is true. Pull policy and pull secrets
+# reuse `sandbox.image.pullPolicy` and `global.imagePullSecrets`. Rendered as
+# CENTAUR_CODEMODE_IMAGE.
 codemode:
   image:
     repository: centaur-codemode
@@ -671,10 +671,10 @@ apiRs:
   # A principal normally has one sandbox; with several api-rs replicas (or
   # during a rolling deploy) it may briefly have more, which is harmless.
   # Readiness is the sandbox pod's own readiness probe; api-rs neither polls the
-  # sandbox nor waits for one shared instance. false serves one MCP tool per
-  # Centaur CLI tool.
-  # Rendered as CENTAUR_MCP_V2_ENABLED.
-  mcpV2Enabled: false
+  # sandbox nor waits for one shared instance. false turns off /mcp and its
+  # OAuth protected-resource metadata, and api-rs starts no Code Mode sandboxes.
+  # Rendered as CENTAUR_MCP_ENABLED.
+  mcpEnabled: true
   sandboxReadyTimeoutSecs: 90
   # Warm pool of default-harness sandboxes with full repo-cache access.
   # Ignored when sandboxWarmPools is set.

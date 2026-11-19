@@ -5,7 +5,7 @@ calls TypeScript connectors (`connectors/<name>/index.ts`) in QuickJS and
 returns one JSON value. One cell replaces a chain of single-tool MCP turns.
 
 Status: experimental. `serve` is the HTTP API api-rs talks to when
-`CENTAUR_MCP_V2_ENABLED=true`; the CLI is for local work and tests.
+serving `/mcp` (on unless `CENTAUR_MCP_ENABLED=false`); the CLI is for local work and tests.
 
 ## Try it
 
@@ -69,7 +69,7 @@ read a real key from the environment (`CRUNCHBASE_API_KEY`, `SLACK_BOT_TOKEN`).
 
 A dedicated slim image, built from `services/codemode/Dockerfile`, runs Code
 Mode sandboxes and is configured by `codemode.image` /
-`CENTAUR_CODEMODE_IMAGE` (required when `CENTAUR_MCP_V2_ENABLED=true`). It
+`CENTAUR_CODEMODE_IMAGE` (default `centaur-codemode:latest`). It
 contains only the `centaur-codemode` binary at
 `/usr/local/bin/centaur-codemode` and the repository connectors at
 `/opt/centaur/connectors`, with `CENTAUR_CODEMODE_CONNECTORS` defaulting to
