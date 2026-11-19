@@ -94,16 +94,11 @@ impl Args {
         self.sandbox.runtime().await
     }
 
-    /// The image Code Mode sandboxes run. Missing or blank fails startup when
-    /// MCP is enabled, because the session sandbox image cannot serve it.
-    pub(crate) fn codemode_image(&self) -> Result<String, ServerError> {
-        clean_optional_value(self.sandbox.codemode_image.as_deref()).ok_or_else(|| {
-            ServerError::UnsupportedConfig(
-                "CENTAUR_CODEMODE_IMAGE (--codemode-image) is required when \
-                 MCP is enabled (set CENTAUR_MCP_ENABLED=false to disable it)"
-                    .to_owned(),
-            )
-        })
+    /// The image Code Mode sandboxes run. Missing or blank falls back to
+    /// `centaur-codemode:latest`, like the session sandbox image.
+    pub(crate) fn codemode_image(&self) -> String {
+        clean_optional_value(self.sandbox.codemode_image.as_deref())
+            .unwrap_or_else(|| DEFAULT_CODEMODE_IMAGE.to_owned())
     }
 
     pub(crate) async fn iron_control_runtime(&self) -> Result<IronControlRuntime, ServerError> {
@@ -813,8 +808,8 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_IMAGE"
     )]
     agent_image: Option<String>,
-    /// Full image reference for MCP Code Mode sandboxes. Required unless MCP
-    /// is disabled (`CENTAUR_MCP_ENABLED=false`).
+    /// Full image reference for MCP Code Mode sandboxes. Defaults to
+    /// `centaur-codemode:latest`.
     #[arg(long = "codemode-image", env = "CENTAUR_CODEMODE_IMAGE")]
     codemode_image: Option<String>,
     #[arg(
@@ -2556,6 +2551,7 @@ impl IronProxyHarnessArgs {
 }
 
 const DEFAULT_SANDBOX_IMAGE: &str = "centaur-agent:latest";
+const DEFAULT_CODEMODE_IMAGE: &str = "centaur-codemode:latest";
 /// Where the sandbox image installs the Python workflow host.
 const WORKFLOW_HOST_PATH: &str = "/usr/local/bin/workflow-host";
 
@@ -2972,32 +2968,22 @@ mod tests {
     }
 
     #[test]
-    fn codemode_image_is_required_and_non_blank() {
+    fn codemode_image_defaults_when_missing_or_blank() {
         let base = [
             "centaur-api-server",
             "--database-url",
             "postgres://postgres:postgres@localhost/centaur",
         ];
         for (flags, expected) in [
-            (vec![], None),
-            (vec!["--codemode-image", "   "], None),
+            (vec![], "centaur-codemode:latest"),
+            (vec!["--codemode-image", "   "], "centaur-codemode:latest"),
             (
                 vec!["--codemode-image", "registry.local/centaur-codemode:tag"],
-                Some("registry.local/centaur-codemode:tag"),
+                "registry.local/centaur-codemode:tag",
             ),
         ] {
             let args = Args::try_parse_from(base.into_iter().chain(flags)).unwrap();
-            match expected {
-                Some(image) => assert_eq!(args.codemode_image().unwrap(), image),
-                None => assert!(
-                    matches!(
-                        args.codemode_image(),
-                        Err(ServerError::UnsupportedConfig(message))
-                            if message.contains("CENTAUR_CODEMODE_IMAGE")
-                    ),
-                    "missing or blank images must fail startup"
-                ),
-            }
+            assert_eq!(args.codemode_image(), expected);
         }
     }
 

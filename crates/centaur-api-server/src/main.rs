@@ -143,7 +143,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         .with_openai_session_title_generator_from_env();
     runtime = runtime.with_personas(args.persona_registry()?);
     if centaur_api_server::mcp_enabled() {
-        let image = args.codemode_image()?;
+        let image = args.codemode_image();
         info!(image = %image, "MCP Code Mode sandboxes enabled");
         runtime = runtime.with_codemode(image);
     }
