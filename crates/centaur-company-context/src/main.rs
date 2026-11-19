@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     let config = Arc::new(Config::from_args());
     let metrics = telemetry::init_metrics()?;
-    let pool = database::connect_and_migrate(&config.database_url).await?;
+    let pool = database::connect_and_migrate(&config.database_url, config.text_search).await?;
     let credentials = Arc::new(ConsoleCredentials::connect(&config).await?);
     let absurd = Client::from_pool_with_options(
         pool.clone(),
@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
     let embeddings = EmbeddingsClient::new(&config)?;
     let query_state = query::QueryState {
         pool: pool.clone(),
+        text_search: config.text_search,
         credentials: credentials.clone(),
         embeddings: embeddings.clone(),
         jwt: Arc::new(query::JwtVerifier::new(&config)),

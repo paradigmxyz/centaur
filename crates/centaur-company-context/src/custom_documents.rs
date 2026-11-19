@@ -355,12 +355,18 @@ mod tests {
         body: Value,
     ) -> Result<Vec<(String, String)>> {
         let request: QueryRequest = serde_json::from_value(body).unwrap();
-        let mut results: Vec<_> = query::search(pool, None, identity, &request)
-            .await?
-            .results
-            .into_iter()
-            .map(|result| (result.document.document_id, result.document.text))
-            .collect();
+        let mut results: Vec<_> = query::search(
+            pool,
+            crate::test_support::text_search(pool).await,
+            None,
+            identity,
+            &request,
+        )
+        .await?
+        .results
+        .into_iter()
+        .map(|result| (result.document.document_id, result.document.text))
+        .collect();
         results.sort();
         Ok(results)
     }

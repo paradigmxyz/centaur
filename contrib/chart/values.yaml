@@ -574,6 +574,14 @@ experimentalCompanyContext:
   # synchronized: those with drive.readonly for Drive and those with
   # calendar.readonly for Calendar. The embeddings API key comes from
   # OPENAI_API_KEY in the shared Kubernetes Secret.
+  # Keyword search backend the service migrates and queries with: "paradedb"
+  # or "postgres". Empty uses the backend api-rs gets (externalDatabase.textSearch,
+  # or paradedb with the bundled Postgres). Set it only for a database the
+  # service already migrated with another backend than api-rs uses, such as
+  # paradedb on an external ParadeDB server with externalDatabase.textSearch
+  # unset; the service refuses to start with a backend its database was not
+  # migrated with.
+  textSearch: ""
   googleOauthAppSlug: google
   # Rails Console OAuth app whose live per-user Granola MCP credentials are
   # synchronized.
@@ -1182,7 +1190,9 @@ externalDatabase:
   # namespace.
   namespace: ""
   port: 5432
-  # Keyword search backend for company context. "postgres" (used when empty)
+  # Keyword search backend for company context, in api-rs and, unless
+  # experimentalCompanyContext.textSearch is set, the company-context service.
+  # "postgres" (used when empty)
   # uses built-in full-text search and works on RDS and Cloud SQL; "paradedb"
   # uses BM25 and requires the pg_search extension. Must be empty while
   # postgres.enabled=true: the bundled Postgres always uses "paradedb". A

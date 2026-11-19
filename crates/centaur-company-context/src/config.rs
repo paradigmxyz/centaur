@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, str::FromStr, time::Duration};
 
 use clap::Parser;
 
@@ -63,6 +63,17 @@ pub const SLACK_CONVERSATION_TYPES: [&str; 3] = ["public_channel", "private_chan
 pub struct Config {
     #[arg(long, env = "DATABASE_URL", value_parser = nonempty)]
     pub database_url: String,
+    /// Keyword search backend that migrations install and queries use:
+    /// `paradedb` (requires the pg_search extension) or `postgres` (built-in
+    /// full-text search). A database keeps the backend it was first migrated
+    /// with.
+    #[arg(
+        long,
+        env = "DATABASE_TEXT_SEARCH",
+        default_value = "paradedb",
+        value_parser = crate::database::TextSearchBackend::from_str
+    )]
+    pub text_search: crate::database::TextSearchBackend,
     #[arg(long, env = "IRON_CONTROL_DATABASE_URL", value_parser = nonempty)]
     pub console_database_url: String,
     #[arg(long, env = "IRON_CONTROL_DATABASE_NAME", value_parser = nonempty)]
