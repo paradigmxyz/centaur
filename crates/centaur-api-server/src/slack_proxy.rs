@@ -419,6 +419,11 @@ async fn download_slack_file(
         .or_else(|| file.get("url_private"))
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::BadRequest("Slack file has no download URL".to_owned()))?;
+    if !is_slack_file_url(download_url) {
+        return Err(ApiError::BadRequest(
+            "Slack file is not hosted by Slack and cannot be downloaded".to_owned(),
+        ));
+    }
 
     let upstream = client
         .get(download_url)
@@ -468,6 +473,16 @@ async fn download_slack_file(
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
+}
+
+// Where Slack serves private file downloads. A file's URL comes from file
+// metadata, so it must not decide where the bot token goes. Only the first URL
+// needs checking: reqwest drops Authorization when a redirect leaves the host.
+const SLACK_FILE_ORIGINS: [&str; 2] = ["https://files.slack.com", "https://files.slack-gov.com"];
+
+fn is_slack_file_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .is_ok_and(|url| SLACK_FILE_ORIGINS.contains(&url.origin().ascii_serialization().as_str()))
 }
 
 async fn get_slack_files(
@@ -3404,6 +3419,30 @@ mod tests {
             .unwrap_err(),
             ApiError::Unauthorized(_)
         ));
+    }
+
+    #[test]
+    fn only_slack_file_urls_get_the_bot_token() {
+        for url in [
+            "https://files.slack.com/files-pri/T1-F1/download/report.pdf",
+            "https://files.slack.com:443/files-pri/T1-F1/report.pdf",
+            "https://files.slack-gov.com/files-pri/T1-F1/download/report.pdf",
+        ] {
+            assert!(is_slack_file_url(url), "{url}");
+        }
+        for url in [
+            "https://example.com/files-pri/T1-F1/report.pdf",
+            "http://files.slack.com/files-pri/T1-F1/report.pdf",
+            "https://files.slack.com:8443/files-pri/T1-F1/report.pdf",
+            "https://files.slack.com.example.com/report.pdf",
+            "https://files.slack.com@example.com/report.pdf",
+            "https://slack.com/api/auth.test",
+            "https://other.files.slack.com/report.pdf",
+            "files.slack.com/report.pdf",
+            "",
+        ] {
+            assert!(!is_slack_file_url(url), "{url}");
+        }
     }
 
     #[test]
