@@ -758,8 +758,7 @@ pub async fn search(
     let candidates = limit.max(MIN_CANDIDATES) as i64;
     let mut tx = read_only(pool).await?;
     // ParadeDB cannot evaluate a parameterized `|||` in the generic plan
-    // Postgres switches cached statements to after five executions. Custom
-    // plans also let built-in full-text search see the query's terms.
+    // Postgres switches cached statements to after five executions.
     sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
         .execute(&mut *tx)
         .await?;
@@ -1055,8 +1054,6 @@ async fn query_vector(embeddings: &EmbeddingsClient, query: &str) -> Option<(Str
     }
 }
 
-/// Runs one ranked lane: `$1` is the query text or vector, `$2` the subjects,
-/// `$3` the limit, `$4`..`$9` the filters, and `$10` the embedding model.
 /// Title boost for ranked keyword matches, as a multiple of body matches.
 const TITLE_MATCH_BOOST: u32 = 2;
 
@@ -1095,6 +1092,8 @@ fn all_terms_match(text_search: TextSearchBackend) -> &'static str {
     }
 }
 
+/// Runs one ranked lane: `$1` is the query text or vector, `$2` the subjects,
+/// `$3` the limit, `$4`..`$9` the filters, and `$10` the embedding model.
 async fn lane(
     tx: &mut Transaction<'_, Postgres>,
     sql: &str,

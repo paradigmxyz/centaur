@@ -59,13 +59,9 @@ impl TestDatabase {
     }
 }
 
-/// The text-search backend tests migrate with: `COMPANY_CONTEXT_TEST_TEXT_SEARCH`
-/// when set, otherwise `paradedb` where pg_search is available and `postgres`
-/// elsewhere.
+/// The text-search backend tests migrate with: `paradedb` where pg_search is
+/// available, `postgres` elsewhere.
 async fn test_text_search(admin: &mut PgConnection) -> TextSearchBackend {
-    if let Ok(value) = std::env::var("COMPANY_CONTEXT_TEST_TEXT_SEARCH") {
-        return value.parse().unwrap();
-    }
     let pg_search: bool = sqlx::query_scalar(
         "select exists (select 1 from pg_available_extensions where name = 'pg_search')",
     )

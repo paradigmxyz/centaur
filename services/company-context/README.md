@@ -85,6 +85,12 @@ Keyword search backend:
   the backend it was first migrated with, and the service refuses to start
   with the other one. The Helm chart passes the backend it gives api-rs.
 
+  The backends match terms slightly differently. `postgres` uses the `english`
+  text-search configuration, so it matches stemmed forms ("launches" finds
+  "launch") and ignores stopwords; a query of only stopwords matches nothing.
+  Its `keyword` mode requires every term in the title and body together, while
+  `paradedb` requires them all in the title or all in the body.
+
 Indexer switches (default `true`):
 
 - `COMPANY_CONTEXT_DRIVE_ENABLED`: schedule Google Drive sync.

@@ -21,10 +21,9 @@ static PARADEDB_MIGRATOR: Migrator = sqlx::migrate!("./migrations/paradedb");
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 
 /// Keyword search implementation installed in a database.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextSearchBackend {
     /// ParadeDB `pg_search` BM25 indexes.
-    #[default]
     Paradedb,
     /// Built-in PostgreSQL full-text search (`tsvector` and GIN).
     Postgres,
