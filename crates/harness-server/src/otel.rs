@@ -115,6 +115,8 @@ pub(crate) struct TurnTelemetry {
     capture_tool_commands: bool,
     observed_status: Option<TurnStatus>,
     finished: bool,
+    /// The turn's trace for programs the agent runs; removed with the turn.
+    _trace_file: Option<crate::turn_trace::TurnTraceFile>,
 }
 
 struct ActiveTool {
@@ -147,7 +149,8 @@ impl TurnTelemetry {
         let trace = trace.cloned().unwrap_or_default();
         let parent = trace.parent_context();
         let tracer = parent.as_ref().and_then(|_| telemetry_tracer());
-        Self::with_tracer(
+        let trace_file = crate::turn_trace::TurnTraceFile::write(&trace);
+        let mut telemetry = Self::with_tracer(
             trace,
             parent,
             tracer,
@@ -158,7 +161,9 @@ impl TurnTelemetry {
             input,
             env_flag_enabled(TRANSCRIPT_CAPTURE_ENV),
             env_flag_enabled(TOOL_TRACE_CAPTURE_ENV),
-        )
+        );
+        telemetry._trace_file = trace_file;
+        telemetry
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -196,6 +201,7 @@ impl TurnTelemetry {
             capture_tool_commands,
             observed_status: None,
             finished: false,
+            _trace_file: None,
         }
     }
 

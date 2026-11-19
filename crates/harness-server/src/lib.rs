@@ -15,6 +15,7 @@ mod server;
 mod session_prompt;
 mod traits;
 mod turn;
+mod turn_trace;
 mod util;
 pub mod wire;
 

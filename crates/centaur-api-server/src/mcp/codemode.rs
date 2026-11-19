@@ -148,9 +148,12 @@ async fn forward(
         endpoint.base_url.trim_end_matches('/'),
         request.path()
     );
-    let response = client()
-        .post(url)
-        .timeout(request.timeout())
+    let mut builder = client().post(url).timeout(request.timeout());
+    // The sandbox parents its cell spans on the MCP tool call's span.
+    if let Some(traceparent) = centaur_telemetry::traceparent_for_span(&Span::current()) {
+        builder = builder.header("traceparent", traceparent);
+    }
+    let response = builder
         .json(&request.body(policy))
         .send()
         .await

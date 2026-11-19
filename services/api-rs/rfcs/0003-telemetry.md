@@ -225,6 +225,9 @@ Initial span set:
 | `centaur.api_rs.mcp.tool` | `centaur-api-server` |
 | `<harness>.session_task.turn` | `harness-server` |
 | `<harness>.tool.<name>[ <subcommand>]` | `harness-server` |
+| `codemode.cell` | `centaur-codemode` |
+| `codemode.tool.<connector>.<function>` | `centaur-codemode` |
+| `<METHOD> <host>` (connector request) | `centaur-codemode` |
 
 Spans may carry:
 
@@ -278,6 +281,16 @@ not a reconstructed model-call tree. Every harness span carries the Laminar
 session association and execution metadata. Tool state is scoped to one turn;
 finishing, failing, cancelling, or dropping the turn closes any unfinished tool
 spans.
+
+Code Mode cells run as harness shell commands, so the harness sees one command
+span per cell. `harness-server` writes the turn's `traceparent`, `thread_key`,
+and `execution_id` to a turn trace file for the length of the turn;
+`centaur-codemode exec` reads it and exports a `codemode.cell` span as another
+child of the execution span, with a `TOOL` span per connector call and a client
+span per upstream request beneath it. For remote MCP, api-rs sends the tool
+span's `traceparent` header to the Code Mode sandbox's `/exec`, which parents
+the cell on it. Cell spans carry names, timings, statuses, and query-free URLs
+only.
 
 Remote MCP calls have no harness turn. The API creates a root `TOOL` span for
 the accepted `tools/call` and uses its `traceparent` when creating the durable

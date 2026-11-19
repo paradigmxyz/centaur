@@ -20,6 +20,7 @@ mod files;
 mod reload;
 mod search;
 mod server;
+mod telemetry;
 mod websocket;
 
 use std::{io::Read, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -171,7 +172,8 @@ fn main() -> Result<()> {
     // tool calls, whose stderr lands in the agent's context: only problems.
     let default_filter = match cli.command {
         Command::Serve { .. } => "centaur_codemode=info,warn",
-        _ => "warn",
+        // A failed span export is not the agent's problem.
+        _ => "warn,opentelemetry=off,opentelemetry_sdk=off,opentelemetry_otlp=off",
     };
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -237,8 +239,11 @@ async fn run(cli: Cli) -> Result<()> {
                     code,
                     tools: None,
                     policy: common.policy(),
+                    trace: telemetry::TraceParent::for_cli(),
                 })
                 .await;
+            // Before any exit: the process ends right after this.
+            telemetry::flush();
             let ok = response.ok;
             if result_only {
                 match (&response.result, &response.error) {
@@ -270,6 +275,7 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::info!(%listen, "centaur-codemode serving");
             let served = server::serve(listener, engine, server::Config::default()).await;
             reloader.abort();
+            telemetry::flush();
             served?;
             Ok(())
         }

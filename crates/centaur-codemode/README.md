@@ -236,6 +236,27 @@ authorizes from it.
   `connectors` summary (`tool.function:ok|err:<ms>ms[:<status>]`). Code,
   arguments, results, cell logs, bodies, headers and URLs are never logged.
 
+## Tracing
+
+A cell with a parent trace context exports OpenTelemetry spans over OTLP/HTTP
+(the standard `OTEL_EXPORTER_OTLP_*` variables; `OTEL_TRACES_EXPORTER=none`
+turns it off) as service `centaur-codemode`:
+
+- `codemode.cell`, with call counts and the cell's status;
+- a `TOOL` span per call, `codemode.tool.<connector>.<function>`;
+- a client span per upstream request or websocket, `<METHOD> <host>`, with
+  the method, the URL without its query string, and the status.
+
+`exec` parents the cell on the running turn: harness-server writes the turn's
+`traceparent`, `thread_key` and `execution_id` to `~/.centaur/turn-trace.json`
+(`CENTAUR_TURN_TRACE_FILE`) when a turn starts and removes it when the turn
+ends, so cell spans sit beside the harness's spans for that execution. Without
+the file, a `TRACEPARENT` environment variable is used. `serve` takes the
+`traceparent` header api-rs sends with the MCP tool call. With no parent,
+nothing is exported. `exec` waits up to 3 s (or `OTEL_EXPORTER_OTLP_TIMEOUT`)
+for the export before it exits. Spans never carry code, arguments, results,
+logs or query strings.
+
 ## Environment
 
 Every setting a sandbox or local run configures has a CLI flag and an
@@ -249,6 +270,7 @@ environment variable.
 | `CENTAUR_SANDBOX_CONTEXT_FILE` | `--context-file` | `~/.centaur/sandbox.json` | Sandbox context file. |
 | `CENTAUR_CONSOLE_URL` | | none | Console base URL; `serve` uses it for the calling context when there is no context file. |
 | `CENTAUR_CODEMODE_FILES_DIR` | `--files-dir` | none | Turns on the files capability, rooted here. |
+| `CENTAUR_TURN_TRACE_FILE` | | `~/.centaur/turn-trace.json` | Turn trace file `exec` parents its spans on. |
 
 ## Limits (hard-coded)
 
