@@ -3380,6 +3380,18 @@ impl SessionRuntime {
         let thread_key = &execution.thread_key;
         let execution_id = execution.execution_id.as_str();
         if execution.status == ExecutionStatus::Queued {
+            // A queued request from the removed MCP v1 tool host carries a
+            // tool-host protocol line that no harness understands.
+            if is_legacy_mcp_tool_host_execution(execution) {
+                self.fail_orphaned_execution(
+                    thread_key,
+                    execution_id,
+                    "",
+                    "MCP v1 tool host calls are no longer supported",
+                )
+                .await;
+                return Ok(OrphanAdoption::Failed);
+            }
             // mark_execution_running is an atomic claim, so a periodic scan
             // can safely race the accepting process without double delivery.
             let request = match self.store.execution_request(execution_id).await {
@@ -6945,6 +6957,16 @@ fn nonzero_duration_millis(value: u64) -> Result<Duration, SessionRuntimeError> 
     Ok(Duration::from_millis(value))
 }
 
+/// Executions created by the removed MCP v1 tool host are marked with
+/// `mcp_tool_host_call` metadata.
+fn is_legacy_mcp_tool_host_execution(execution: &SessionExecution) -> bool {
+    execution
+        .metadata
+        .get("mcp_tool_host_call")
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 pub fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeError> {
     ThreadKey::parse(format!("mcp:{}", principal_id.trim()))
         .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))
@@ -7436,6 +7458,31 @@ mod tests {
                 Some("honk")
             );
         }
+    }
+
+    #[test]
+    fn legacy_mcp_tool_host_executions_are_recognized_by_metadata() {
+        let now = OffsetDateTime::now_utc();
+        let execution = |metadata: Value| SessionExecution {
+            execution_id: "exe-1".to_owned(),
+            idempotency_key: None,
+            thread_key: ThreadKey::parse("mcp:prn_test").unwrap(),
+            status: ExecutionStatus::Queued,
+            metadata,
+            error: None,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+        };
+
+        assert!(is_legacy_mcp_tool_host_execution(&execution(
+            json!({"mcp_tool_host_call": true, "tool": "slack"})
+        )));
+        assert!(!is_legacy_mcp_tool_host_execution(&execution(json!({}))));
+        assert!(!is_legacy_mcp_tool_host_execution(&execution(
+            json!({"mcp_tool_host_call": false})
+        )));
     }
 
     #[test]
