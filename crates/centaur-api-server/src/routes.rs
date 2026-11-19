@@ -52,7 +52,7 @@ use crate::{
     },
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
-    mcp::{mcp_get, mcp_post, mcp_protected_resource_metadata},
+    mcp::{mcp_enabled, mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_external_teams::{get_slack_external_team_ids, replace_slack_external_team_ids},
     slack_proxy::slack_proxy_router,
     types::{
@@ -313,21 +313,24 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             authorize_api_request,
         ));
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
-        .route("/mcp", post(mcp_post).get(mcp_get))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(mcp_protected_resource_metadata),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(mcp_protected_resource_metadata),
-        )
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .merge(protected);
+    if mcp_enabled() {
+        app = app
+            .route("/mcp", post(mcp_post).get(mcp_get))
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(mcp_protected_resource_metadata),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                get(mcp_protected_resource_metadata),
+            );
+    }
     let app = if state.auth().api_clients_enabled() {
         app.route("/oauth/token", post(issue_api_client_token))
     } else {

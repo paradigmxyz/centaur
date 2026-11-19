@@ -56,20 +56,6 @@ pub struct DiscoveredToolProxyFragment {
     pub secret_count: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DiscoveredToolCatalog {
-    pub(crate) tools: Vec<DiscoveredTool>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DiscoveredTool {
-    pub(crate) name: String,
-    pub(crate) package: String,
-    pub(crate) description: Option<String>,
-    pub(crate) client_module: String,
-    pub(crate) project_dir: PathBuf,
-}
-
 #[derive(Debug, Error)]
 pub enum ToolDiscoveryError {
     #[error("failed to read {path}: {source}")]
@@ -168,25 +154,6 @@ pub fn discover_persona_registry(
     let plugins = collect_plugin_metadata(tool_dirs)?;
     PersonaRegistry::new(plugins.personas, default_persona_id, plugins.overlay_chain)
         .map_err(ToolDiscoveryError::Invalid)
-}
-
-pub(crate) fn discover_tool_catalog(
-    tool_dirs: &[PathBuf],
-) -> Result<DiscoveredToolCatalog, ToolDiscoveryError> {
-    let mut tools = Vec::new();
-    for tool in collect_plugin_metadata(tool_dirs)?.tools {
-        for script_name in tool.script_names {
-            tools.push(DiscoveredTool {
-                name: script_name,
-                package: tool.package.clone(),
-                description: tool.description.clone(),
-                client_module: tool.client_module.clone(),
-                project_dir: tool.dir.clone(),
-            });
-        }
-    }
-    tools.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(DiscoveredToolCatalog { tools })
 }
 
 fn split_tool_dirs(value: &str) -> Vec<PathBuf> {
@@ -325,11 +292,6 @@ fn parse_toml(path: &Path, contents: &str) -> Result<TomlValue, ToolDiscoveryErr
 #[derive(Clone, Debug)]
 struct LoadedToolMeta {
     name: String,
-    dir: PathBuf,
-    package: String,
-    description: Option<String>,
-    client_module: String,
-    script_names: Vec<String>,
     secrets: Vec<ToolSecret>,
 }
 
@@ -485,7 +447,7 @@ fn load_plugin_meta(
         .and_then(|value| value.get("centaur"))
         .unwrap_or(&default_tool_conf);
     if tool_conf.get("type").and_then(TomlValue::as_str) != Some("persona") {
-        return load_tool_meta(source_root, plugin_dir, &pyproject, tool_conf)
+        return load_tool_meta(source_root, plugin_dir, tool_conf)
             .map(|meta| meta.map(LoadedPluginMeta::Tool));
     }
     let id = plugin_dir
@@ -578,7 +540,6 @@ fn persona_models(
 fn load_tool_meta(
     source_root: &Path,
     tool_dir: &Path,
-    pyproject: &TomlValue,
     tool_conf: &TomlValue,
 ) -> Result<Option<LoadedToolMeta>, ToolDiscoveryError> {
     let name = tool_dir
@@ -588,40 +549,6 @@ fn load_tool_meta(
             ToolDiscoveryError::Invalid(format!("invalid tool path {}", tool_dir.display()))
         })?
         .to_owned();
-    let default_project_conf = TomlValue::Table(Default::default());
-    let project_conf = pyproject.get("project").unwrap_or(&default_project_conf);
-    let package = project_conf
-        .get("name")
-        .and_then(TomlValue::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| name.clone());
-    let description = project_conf
-        .get("description")
-        .and_then(TomlValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    let client_module = tool_conf
-        .get("module")
-        .and_then(TomlValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("client.py")
-        .to_owned();
-    let script_names = project_conf
-        .get("scripts")
-        .and_then(TomlValue::as_table)
-        .map(|scripts| {
-            let mut names = scripts
-                .keys()
-                .filter(|script| !script.contains('/') && !script.contains('\0'))
-                .cloned()
-                .collect::<Vec<_>>();
-            names.sort();
-            names
-        })
-        .filter(|names| !names.is_empty())
-        .unwrap_or_else(|| vec![name.clone()]);
     let default_hosts = string_array(tool_conf.get("hosts"));
     let labels = tool_labels(&name, &overlay_name_for_root(source_root));
     let secrets = match parse_secret_list(tool_conf.get("secrets"), &default_hosts, &labels)
@@ -643,15 +570,7 @@ fn load_tool_meta(
             return Ok(None);
         }
     };
-    Ok(Some(LoadedToolMeta {
-        name,
-        dir: tool_dir.to_path_buf(),
-        package,
-        description,
-        client_module,
-        script_names,
-        secrets,
-    }))
+    Ok(Some(LoadedToolMeta { name, secrets }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

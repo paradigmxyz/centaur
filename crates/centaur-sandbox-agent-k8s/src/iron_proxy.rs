@@ -2483,7 +2483,7 @@ fn iron_proxy_labels(id: &SandboxId, observability_enabled: bool) -> BTreeMap<St
 /// Whether a sandbox's annotations already record the requested proxy binding,
 /// so the ensure path can skip a redundant reassignment. An absent requester
 /// annotation means "no requester" and compares equal to `None`, keeping
-/// label-less sessions (tool-host, non-Slack) on the skip path. Any label
+/// label-less (non-Slack) sessions on the skip path. Any label
 /// refresh always reassigns, mirroring the pre-requester behavior.
 fn proxy_binding_matches(
     annotations: Option<&BTreeMap<String, String>>,

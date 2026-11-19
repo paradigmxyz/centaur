@@ -208,8 +208,8 @@ def validate(root: Path = ROOT) -> list[str]:
     )
     for invariant in (
         "centaur_whoami",
-        "method",
-        "arguments",
+        "centaur_catalog_search",
+        "centaur_execute",
         "codex mcp add centaur --url",
     ):
         _require(

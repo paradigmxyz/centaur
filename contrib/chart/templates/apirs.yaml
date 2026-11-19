@@ -285,9 +285,9 @@ spec:
 {{- end }}
             - name: CENTAUR_API_CLIENTS_ENABLED
               value: {{ .Values.apiClients.enabled | quote }}
-{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_V2_ENABLED") }}
-            - name: CENTAUR_MCP_V2_ENABLED
-              value: {{ .Values.apiRs.mcpV2Enabled | quote }}
+{{- if not (hasKey .Values.apiRs.extraEnv "CENTAUR_MCP_ENABLED") }}
+            - name: CENTAUR_MCP_ENABLED
+              value: {{ .Values.apiRs.mcpEnabled | quote }}
 {{- end }}
             - name: IRON_CONTROL_SYNC_INFRA_SECRETS
               value: {{ .Values.apiRs.syncInfraSecrets | quote }}

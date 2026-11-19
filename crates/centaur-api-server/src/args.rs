@@ -95,12 +95,12 @@ impl Args {
     }
 
     /// The image Code Mode sandboxes run. Missing or blank fails startup when
-    /// Code Mode is enabled, because the session sandbox image cannot serve it.
+    /// MCP is enabled, because the session sandbox image cannot serve it.
     pub(crate) fn codemode_image(&self) -> Result<String, ServerError> {
         clean_optional_value(self.sandbox.codemode_image.as_deref()).ok_or_else(|| {
             ServerError::UnsupportedConfig(
                 "CENTAUR_CODEMODE_IMAGE (--codemode-image) is required when \
-                 CENTAUR_MCP_V2_ENABLED=true"
+                 MCP is enabled (set CENTAUR_MCP_ENABLED=false to disable it)"
                     .to_owned(),
             )
         })
@@ -813,8 +813,8 @@ struct SandboxArgs {
         env = "SESSION_SANDBOX_IMAGE"
     )]
     agent_image: Option<String>,
-    /// Full image reference for MCP Code Mode sandboxes. Required when Code
-    /// Mode is enabled (`CENTAUR_MCP_V2_ENABLED=true`).
+    /// Full image reference for MCP Code Mode sandboxes. Required unless MCP
+    /// is disabled (`CENTAUR_MCP_ENABLED=false`).
     #[arg(long = "codemode-image", env = "CENTAUR_CODEMODE_IMAGE")]
     codemode_image: Option<String>,
     #[arg(

@@ -10,12 +10,11 @@ Use Centaur's MCP tools for actions and context exposed by the user's deployment
 ## Workflow
 
 1. When identity or authorization matters, call `centaur_whoami` before other Centaur tools.
-2. If `centaur_execute` is listed, the deployment serves Code Mode:
+2. Centaur serves Code Mode:
    - Call `centaur_catalog_search` whenever a task involves an external service, private or current data, an external action, or a service URL. Search terms should include service names, URLs, domains, and the requested action; results include each function's signature.
    - Call `centaur_catalog_load` with a connector name when the one-line signature is not enough. Treat the returned TypeScript declarations and their JSDoc as the current contract.
    - Do the work in one `centaur_execute` cell. `code` is the body of an async function: call connectors as `await tools.<connector>.<function>(args)`, run independent calls together with `Promise.all` or `Promise.allSettled` in the same cell instead of several tool calls, and `return` the JSON-serializable value you want back. `console.log` output is returned with the result. A cell has no `fetch`, no module imports, no file access, and no state between cells, and is limited to 120 s, 1000 calls and 8 concurrent calls.
-3. Otherwise the deployment exposes one MCP tool per service. Choose the service tool by name; each accepts a `method` and an `arguments` object. Call it with `method: "help"` when its methods or arguments are unclear, and treat that help output as the current contract.
-4. Summarize consequential writes and return relevant identifiers or links.
+3. Summarize consequential writes and return relevant identifiers or links.
 
 Centaur authorizes calls using the signed-in principal's live roles and grants. Never request, paste, print, or store Centaur OAuth tokens.
 
