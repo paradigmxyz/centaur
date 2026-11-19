@@ -1563,7 +1563,7 @@ Returns `201`. The plaintext `token` is included **only** in this create respons
 
 ## Scheduled Tasks
 
-Tasks run one agent prompt and deliver the result to Slack. A task may have a five-field cron schedule in Pacific Time; omitting `cron_expression` or sending `null` or an empty string makes it manual-only. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
+Tasks run one agent prompt and deliver the result to Slack. api-rs runs them, on schedule and on demand. A task may have a five-field cron schedule in Pacific Time: each field takes numbers, `*`, ranges (`1-5`), steps on `*` or a range (`*/15`, `9-17/2`), and comma-separated lists, and the month and weekday fields also take three-letter names (`jan`, `mon-fri`). Sunday is `0` or `7`. When both day fields are restricted, a day matching either runs. Seconds, `@daily`-style shortcuts, `L`, `#`, `?`, and wrapping ranges such as `fri-mon` are rejected with `422` on `cron_expression`. Omitting `cron_expression` or sending `null` or an empty string makes it manual-only. Task IDs use the `tsk_` prefix. The `delivery_channel` can be a Slack channel ID available to the task author, or the special value `dm`, which resolves to the linked user's Slack direct message when the task is created or updated.
 
 These endpoints use the sandbox entitlement JWT injected by `iron-proxy`. For most sandboxes, every operation requires an active Console user linked to the sandbox principal and is scoped to tasks owned by that user. A task owned by another user returns `404`.
 
@@ -1576,7 +1576,7 @@ When the sandbox principal is a Slack channel, the endpoints manage that channel
 | `POST` | `/api/v1/sandbox/scheduled_tasks` | Create a task from `data.name`, `data.prompt`, and optional `data.delivery_channel` (default `dm`), `data.cron_expression`, and `data.enabled`. |
 | `PUT`/`PATCH` | `/api/v1/sandbox/scheduled_tasks/:id` | Update any supplied task fields. Set `data.cron_expression` to `null` or an empty string to make the task manual-only. |
 | `DELETE` | `/api/v1/sandbox/scheduled_tasks/:id` | Delete an owned task. Returns `204`. |
-| `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202`; disabled tasks return `422`. |
+| `POST` | `/api/v1/sandbox/scheduled_tasks/:id/run` | Start an immediate run. Returns `202` with the task, `queued: true`, and the workflow `run_id`. Disabled tasks, and tasks whose owner can no longer deliver to the destination, return `422`; `503` means the run could not be started. |
 
 The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key, returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
 
@@ -2332,7 +2332,7 @@ returned. Responses set `Cache-Control: no-store`.
 | `POST` | `/api/v1/console/scheduled_tasks` | Create a task authored by the caller. Returns `201`. |
 | `PUT`/`PATCH` | `/api/v1/console/scheduled_tasks/:id` | Update the fields sent; keep the rest. |
 | `DELETE` | `/api/v1/console/scheduled_tasks/:id` | Returns `204`. |
-| `POST` | `/api/v1/console/scheduled_tasks/:id/run` | Queue an immediate run. Returns `202` with the task and `queued: true`. A disabled task returns `422` with `details.reason=task_disabled` and `Enable the task before running it.` |
+| `POST` | `/api/v1/console/scheduled_tasks/:id/run` | Start an immediate run. Returns `202` with the task, `queued: true`, and the workflow `run_id`. A disabled task returns `422` with `details.reason=task_disabled` and `Enable the task before running it.`; a destination the author can no longer deliver to returns `422` with the reason, and `503` means the run could not be started. |
 | `GET` | `/api/v1/console/scheduled_tasks/slack_channel_options` | Delivery channel search (`q`, at most 20): public channels plus private channels both the caller and the bot are in. `?task_id=` (when editing) must be one of the caller's tasks, else `404`. Same shape as `GET /api/v1/console/slack_channels`; `meta.catalog_error` can also be `Slack channel memberships are loading.` |
 
 Write bodies take `data` with:
@@ -2340,7 +2340,7 @@ Write bodies take `data` with:
 | Field | Notes |
 |---|---|
 | `name`, `prompt`, `enabled` | Same validation as the sandbox endpoints. |
-| `schedule_preset` | `manual`, `daily`, `weekdays`, `mondays`, `fridays` (all at 9:00 PT), `custom`, or `cron` (uses `cron_expression` verbatim). Omitted keeps the stored schedule. |
+| `schedule_preset` | `manual`, `daily`, `weekdays`, `mondays`, `fridays` (all at 9:00 PT), `custom`, or `cron` (uses `cron_expression` verbatim, in the grammar above). Omitted keeps the stored schedule. |
 | `custom_days`, `custom_time` | For `custom`: weekday values `"1"`..`"6"` and `"0"` (Sunday), plus `"HH:MM"`. Missing days or time returns `422` on `cron_expression`. |
 | `delivery_mode` | `dm` delivers to the author's linked Slack DM and ignores `delivery_channel`; `channel` uses `delivery_channel`. A destination the author's Slack permissions do not allow returns `422` on `delivery_channel`. |
 

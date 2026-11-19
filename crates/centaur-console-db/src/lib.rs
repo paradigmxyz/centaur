@@ -1,14 +1,18 @@
 //! Reads Console's PostgreSQL schema: principals, the credentials granted to
-//! them, and the proxy configuration built from those credentials.
+//! them, and the proxy configuration built from those credentials. It also
+//! runs Console's scheduled tasks, the only rows it writes (see
+//! [`scheduled_tasks`]).
 
 mod api_clients;
 mod config;
 mod conflicts;
 mod credentials;
+pub mod cron;
 mod error;
 pub mod models;
 mod oid;
 mod principals;
+pub mod scheduled_tasks;
 mod ssh_keys;
 
 pub use api_clients::{ApiClient, ApiClientPrincipal, api_client_principals, find_api_client};

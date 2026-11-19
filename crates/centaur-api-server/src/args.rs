@@ -567,7 +567,8 @@ struct IronControlArgs {
     #[arg(long = "iron-control-api-key", env = "IRON_CONTROL_API_KEY")]
     api_key: Option<String>,
     /// Console's database. Principals and their effective config are read from
-    /// it directly instead of through the Console API.
+    /// it directly instead of through the Console API, and Console's scheduled
+    /// tasks are run from it.
     #[arg(
         long = "iron-control-database-url",
         env = "IRON_CONTROL_DATABASE_URL",
@@ -652,8 +653,9 @@ impl IronControlArgs {
 /// sooner than sqlx's 30 second default.
 const CONSOLE_DB_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Connection options for Console's database. Sessions are read-only:
-/// Console owns every write to its schema.
+/// Connection options for Console's database. Sessions are read-only by
+/// default: Console owns its schema, and the scheduled-task scheduler writes
+/// its rows only in explicitly read-write transactions.
 fn console_db_options(
     url: &str,
     database_name: Option<&str>,

@@ -6,6 +6,8 @@ module Api
       # included. (The bearer GET /api/v1/scheduled_tasks/:id execution-state
       # lookup is Api::V1::ScheduledTasksController.)
       class ScheduledTasksController < BaseController
+        include ScheduledTaskRunErrors
+
         MAX_CHANNEL_OPTIONS = 20
 
         allow_active_users
@@ -52,11 +54,11 @@ module Api
                                 details: { reason: "task_disabled" })
           end
 
-          unless ScheduledTaskRunJob.perform_later(@task.id, Time.current.iso8601)
-            return render_error(status: :service_unavailable, message: "scheduled task run could not be queued")
-          end
-
-          render json: { data: console_payload(@task).merge(queued: true) }, status: :accepted
+          run = ScheduledTaskRunner.call(@task)
+          render json: { data: console_payload(@task.reload).merge(queued: true, run_id: run["run_id"]) },
+                 status: :accepted
+        rescue CentaurApiClient::Error => e
+          render_run_error(e)
         end
 
         # Delivery channels for the task form: public channels plus private

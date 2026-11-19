@@ -28,6 +28,3 @@ production:
   granola_poll_sync:
     class: "Granola::PollSyncJob"
     schedule: every 30 minutes
-  scheduled_task_scheduler:
-    class: "ScheduledTaskSchedulerJob"
-    schedule: every minute

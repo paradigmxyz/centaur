@@ -1,8 +1,10 @@
 require "fugit"
 
+# A prompt that runs on a schedule or on demand and posts its response to
+# Slack. api-rs runs the tasks: it claims due rows, starts their
+# console_workflow runs, and writes next_run_at, last_enqueued_at, last_run_*,
+# and last_error back here (crates/centaur-console-db/src/scheduled_tasks.rs).
 class ScheduledTask < ApplicationRecord
-  class DeliveryDestinationUnavailable < StandardError; end
-
   oid_prefix "tsk"
 
   WORKFLOW_NAME = "console_workflow".freeze
@@ -36,6 +38,16 @@ class ScheduledTask < ApplicationRecord
     [ "Sun", "0" ]
   ].freeze
   DELIVERY_DESTINATION_FORMAT = /\A[CDGUW][A-Z0-9]{8,}\z/
+  # Standard five-field cron: numbers and names, *, ranges, steps, and lists.
+  # api-rs computes next runs for exactly this grammar
+  # (crates/centaur-console-db/src/cron.rs), so keep the two in step.
+  CRON_FIELDS = [
+    { min: 0, max: 59 },
+    { min: 0, max: 23 },
+    { min: 1, max: 31 },
+    { min: 1, max: 12, names: %w[jan feb mar apr may jun jul aug sep oct nov dec] },
+    { min: 0, max: 7, names: %w[sun mon tue wed thu fri sat] }
+  ].freeze
 
   # A task is owned by exactly one of a Console user (author) or a Slack channel
   # principal. Channel tasks run with the channel's permissions and always
@@ -62,12 +74,16 @@ class ScheduledTask < ApplicationRecord
                                  with: DELIVERY_DESTINATION_FORMAT,
                                  message: "must be a Slack channel or user ID"
                                }
-  validates :timezone, presence: true
+  validates :timezone, presence: true, inclusion: {
+    in: ->(_) { TZInfo::Timezone.all_identifiers }, message: "must be an IANA timezone name"
+  }
   validate :cron_schedule_is_valid
   validate :owner_is_valid
   # Runs re-check the destination (see #api_input), so a destination that
   # later becomes unavailable never blocks disabling or scheduling the task.
   validate :delivery_destination_is_available, if: :delivery_destination_changed?
+  # api-rs runs a user's task as their Console principal but cannot create it.
+  after_commit :provision_author_principal, on: %i[create update], if: :author
 
   def self.cron_for(preset, custom_expression = nil, custom_days: [], custom_time: nil)
     return if preset.to_s == "manual"
@@ -76,6 +92,43 @@ class ScheduledTask < ApplicationRecord
 
     SCHEDULE_PRESETS.fetch(preset.to_s, custom_expression.to_s.strip)
   end
+
+  def self.standard_cron?(expression)
+    fields = expression.to_s.split
+    fields.length == CRON_FIELDS.length &&
+      fields.zip(CRON_FIELDS).all? { |field, spec| standard_cron_field?(field, **spec) }
+  end
+
+  # A list of values and ranges, each optionally stepped, or * on its own.
+  # Unlike fugit, a step needs a range, and a range must not wrap.
+  def self.standard_cron_field?(field, min:, max:, names: [])
+    elements = field.split(",", -1)
+    return false if elements.length > 1 && elements.any? { |element| element.start_with?("*") }
+
+    elements.all? do |element|
+      range, step = element.split("/", 2)
+      next false if step && !(step.match?(/\A\d{1,2}\z/) && step.to_i.positive?)
+      next true if range == "*"
+
+      first, last = range.to_s.split("-", 2)
+      next false if step && last.nil?
+
+      start = cron_value(first, min, max, names)
+      finish = last ? cron_value(last, min, max, names) : start
+      start && finish && start <= finish
+    end
+  end
+
+  def self.cron_value(text, min, max, names)
+    value =
+      if text.to_s.match?(/\A\d{1,2}\z/)
+        text.to_i
+      elsif (index = names.index(text.to_s.downcase))
+        names.length == 12 ? index + 1 : index
+      end
+    value if value&.between?(min, max)
+  end
+  private_class_method :cron_value
 
   def self.custom_cron(days, time)
     ordered_days = CUSTOM_SCHEDULE_DAYS.filter_map do |(_label, value)|
@@ -118,25 +171,11 @@ class ScheduledTask < ApplicationRecord
     parsed_cron&.next_time(after)&.to_t
   end
 
+  # The principal runs execute as: the owning channel, or the author's Console
+  # principal. Channel task output is not attributed to a person, since anyone
+  # in the channel can edit its tasks.
   def execution_principal
     principal || ConsoleUserPrincipalProvisioner.call(author)
-  end
-
-  def api_input
-    unless delivery_destination_available?
-      raise DeliveryDestinationUnavailable, "Slack delivery destination is no longer available to the task owner"
-    end
-
-    {
-      prompt: prompt,
-      principal: execution_principal.foreign_id,
-      channel: delivery_channel,
-      # Anyone in a channel can edit its tasks, so their output is not
-      # attributed to a person.
-      slack_user_id: author && SlackDeliveryPolicy.new(author).slack_user_id,
-      scheduled_task_id: oid,
-      scheduled_task_name: name
-    }.compact
   end
 
   private
@@ -212,8 +251,13 @@ class ScheduledTask < ApplicationRecord
 
   def cron_schedule_is_valid
     return if cron_expression.blank?
+    return if self.class.standard_cron?(cron_expression) && parsed_cron
 
-    errors.add(:cron_expression, "is not a valid cron schedule") unless parsed_cron
+    errors.add(:cron_expression, "is not a valid five-field cron schedule")
+  end
+
+  def provision_author_principal
+    ConsoleUserPrincipalProvisioner.call(author)
   end
 
   def delivery_destination_available?
