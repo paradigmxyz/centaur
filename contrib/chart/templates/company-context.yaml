@@ -64,6 +64,9 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
+            # The same keyword search backend api-rs migrates the database with.
+            - name: DATABASE_TEXT_SEARCH
+              value: {{ get .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH" | default (ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled) | quote }}
             - name: IRON_CONTROL_DATABASE_URL
               valueFrom:
                 secretKeyRef:

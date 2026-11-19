@@ -489,13 +489,19 @@ mod tests {
 
     async fn found(pool: &PgPool, identity: &PrincipalIdentity, query: &str) -> Vec<String> {
         let request: QueryRequest = serde_json::from_value(json!({ "query": query })).unwrap();
-        query::search(pool, None, identity, &request)
-            .await
-            .unwrap()
-            .results
-            .into_iter()
-            .map(|result| result.document.text)
-            .collect()
+        query::search(
+            pool,
+            crate::test_support::text_search(pool).await,
+            None,
+            identity,
+            &request,
+        )
+        .await
+        .unwrap()
+        .results
+        .into_iter()
+        .map(|result| result.document.text)
+        .collect()
     }
 
     /// The document `identity` lists with `id`, if any.

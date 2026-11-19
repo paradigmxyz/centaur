@@ -616,8 +616,9 @@ matching those ranges. Set `podSelector` before upgrading such a deployment.
 `pg_dsn` secrets for other in-cluster Postgres servers are no longer reachable.
 
 `externalDatabase.textSearch` selects how company-context keyword search is
-indexed. Set it only with `postgres.enabled: false`; the bundled Postgres always
-uses `paradedb`.
+indexed, both by api-rs and by the company-context service
+(`experimentalCompanyContext`). Set it only with `postgres.enabled: false`; the
+bundled Postgres always uses `paradedb`.
 
 - `postgres` (the default when unset) uses PostgreSQL's built-in full-text search and works on
   any server above.

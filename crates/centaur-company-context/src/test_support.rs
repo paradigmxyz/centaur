@@ -6,11 +6,15 @@ use serde_json::{Value, json};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use tokio::sync::Mutex;
 
-use crate::{config::Config, database, embeddings::EmbeddingsClient};
+use crate::{
+    config::Config,
+    database::{self, TextSearchBackend},
+    embeddings::EmbeddingsClient,
+};
 
 /// Migrations create cluster-global roles with a check-then-create, so
 /// concurrently migrating test databases would race on `pg_authid`.
-static MIGRATIONS: Mutex<()> = Mutex::const_new(());
+pub(crate) static MIGRATIONS: Mutex<()> = Mutex::const_new(());
 
 /// A freshly migrated database that is dropped at the end of a test.
 pub struct TestDatabase {
@@ -33,9 +37,12 @@ impl TestDatabase {
             .unwrap();
         let mut url = url::Url::parse(database_url).unwrap();
         url.set_path(&name);
+        let backend = test_text_search(&mut admin).await;
         let pool = {
             let _guard = MIGRATIONS.lock().await;
-            database::connect_and_migrate(url.as_str()).await.unwrap()
+            database::connect_and_migrate(url.as_str(), backend)
+                .await
+                .unwrap()
         };
         Self { pool, admin, name }
     }
@@ -49,6 +56,41 @@ impl TestDatabase {
             .execute(format!(r#"drop database if exists "{}" with (force)"#, self.name).as_str())
             .await
             .unwrap();
+    }
+}
+
+/// The text-search backend tests migrate with: `paradedb` where pg_search is
+/// available, `postgres` elsewhere.
+async fn test_text_search(admin: &mut PgConnection) -> TextSearchBackend {
+    let pg_search: bool = sqlx::query_scalar(
+        "select exists (select 1 from pg_available_extensions where name = 'pg_search')",
+    )
+    .fetch_one(admin)
+    .await
+    .unwrap();
+    if pg_search {
+        TextSearchBackend::Paradedb
+    } else {
+        TextSearchBackend::Postgres
+    }
+}
+
+/// The text-search backend a test database was migrated with.
+pub async fn text_search(pool: &PgPool) -> TextSearchBackend {
+    let postgres: bool = sqlx::query_scalar(
+        "select exists (
+            select 1 from pg_attribute
+            where attrelid = 'company_context_data.slack_documents'::regclass
+              and attname = 'search_vector'
+        )",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    if postgres {
+        TextSearchBackend::Postgres
+    } else {
+        TextSearchBackend::Paradedb
     }
 }
 

@@ -78,7 +78,7 @@ def _migration_version(path: Path) -> int:
 
 
 async def _migrate(url: str, backend: str) -> None:
-    """Apply the migrations that api-rs and, on ParadeDB, the company-context service run."""
+    """Apply the migrations that api-rs and the company-context service run."""
     conn = await asyncpg.connect(url)
     try:
         migrations = [
@@ -87,14 +87,13 @@ async def _migrate(url: str, backend: str) -> None:
         ]
         for path in sorted(migrations, key=_migration_version):
             await conn.execute(path.read_text())
-        if backend == "paradedb":
-            # The service needs pg_search and migrates with this search_path.
-            await conn.execute(
-                "CREATE SCHEMA IF NOT EXISTS company_context_system;"
-                "SET search_path TO company_context_system, public"
-            )
-            for path in sorted(COMPANY_CONTEXT_SERVICE_MIGRATIONS.glob("*.sql")):
-                await conn.execute(path.read_text())
+        # The service migrates with this search_path, from its backend's tree.
+        await conn.execute(
+            "CREATE SCHEMA IF NOT EXISTS company_context_system;"
+            "SET search_path TO company_context_system, public"
+        )
+        for path in sorted((COMPANY_CONTEXT_SERVICE_MIGRATIONS / backend).glob("*.sql")):
+            await conn.execute(path.read_text())
     finally:
         await conn.close()
 
