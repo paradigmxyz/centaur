@@ -18,6 +18,7 @@ import {
 import { Hono } from "hono";
 import pg from "pg";
 import {
+  isAllowedDiscordChannel,
   isAllowedDiscordGuild,
   isAllowedDiscordMessage,
   isGuildAllowlistEmpty,
@@ -191,11 +192,13 @@ export function createDiscordbot(options: DiscordbotOptions): Discordbot {
     logger,
     // Discord delta (patched adapter): gate mentions BEFORE the adapter
     // creates a public thread — a mention rejected by the fail-closed guild
-    // allowlist must not mutate the server (no orphan threads in
-    // non-allowlisted guilds). The full message gate (isAllowedDiscordMessage)
-    // still runs in the handlers below.
-    shouldHandleMention: ({ guildId }) =>
-      isAllowedDiscordGuild(guildId, options),
+    // allowlist or the channel allowlist must not mutate the server (no
+    // orphan threads in non-allowlisted guilds or channels). A mention inside
+    // a thread is checked against the thread's parent channel. The full
+    // message gate (isAllowedDiscordMessage) still runs in the handlers below.
+    shouldHandleMention: ({ guildId, parentChannelId }) =>
+      isAllowedDiscordGuild(guildId, options) &&
+      isAllowedDiscordChannel(parentChannelId, options),
     // Discord delta (patched adapter): the gateway drops bot-authored
     // messages by default; forward only allowlisted trigger bots in
     // allowlisted guilds. The allowlist entry must be the id the message is

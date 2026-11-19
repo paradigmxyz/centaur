@@ -110,6 +110,26 @@ describe("isAllowedDiscordMessage", () => {
     ).toBe(false);
   });
 
+  it("allows a thread under an allowlisted channel", () => {
+    expect(
+      isAllowedDiscordMessage(
+        message({ threadId: "discord:G1:C1:T1" }),
+        options({ channelAllowlist: ["C1"] }),
+        silentLogger,
+      ),
+    ).toBe(true);
+  });
+
+  it("denies a channel not on the channel allowlist", () => {
+    expect(
+      isAllowedDiscordMessage(
+        message({ threadId: "discord:G1:C2:T2" }),
+        options({ channelAllowlist: ["C1"] }),
+        silentLogger,
+      ),
+    ).toBe(false);
+  });
+
   it("denies bot-authored messages", () => {
     expect(
       isAllowedDiscordMessage(

@@ -40,6 +40,7 @@ ingress** — only a `GET /health` endpoint that reflects the Gateway connection
 | `DISCORD_PUBLIC_KEY` | ✅ | Ed25519 public key (used by the adapter for any HTTP interactions). |
 | `DISCORD_APPLICATION_ID` | ✅ | Doubles as the bot user id for mention detection. |
 | `DISCORDBOT_GUILD_ALLOWLIST` | ✅ to do anything | Comma/space-separated guild IDs. **Fail-closed: empty ⇒ the bot ignores all messages.** |
+| `DISCORDBOT_CHANNEL_ALLOWLIST` | – | Comma/space-separated channel IDs the bot answers in; threads count as their parent channel. Empty (default) ⇒ every channel in an allowlisted guild. A mention elsewhere is ignored before any thread is created. The chart sets it from `discordbot.channelAllowlist`. |
 | `DISCORDBOT_API_KEY` | – | Bearer to api-rs. Use a dedicated key, not the Slack one. |
 | `CENTAUR_API_URL` | – | api-rs base URL (default `http://127.0.0.1:8080`). |
 | `DISCORDBOT_DATABASE_URL` / `DATABASE_URL` / `POSTGRES_URL` | ✅ | Thread-state store. The bot refuses to boot without one (no silent localhost fallback). |
