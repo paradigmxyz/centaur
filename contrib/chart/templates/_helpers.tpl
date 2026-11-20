@@ -268,6 +268,29 @@ IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 {{- toYaml (mergeOverwrite $console $legacy) -}}
 {{- end -}}
 
+{{- /*
+Company-context values. `companyContext` used to be named
+`experimentalCompanyContext`, and `legacyCompanyContext` used to be named
+`companyContextV1`; the old keys are deprecated aliases that are still honored.
+As with `ironControl`, explicitly set alias values are layered over the chart
+defaults and win for any key set under both. Templates should consume these
+helpers rather than the raw values.
+*/ -}}
+{{- define "centaur.companyContextValues" -}}
+{{- $companyContext := deepCopy (.Values.companyContext | default dict) -}}
+{{- $legacy := .Values.experimentalCompanyContext | default dict -}}
+{{- toYaml (mergeOverwrite $companyContext $legacy) -}}
+{{- end -}}
+
+{{- define "centaur.legacyCompanyContextEnabled" -}}
+{{- $legacy := .Values.companyContextV1 | default dict -}}
+{{- if hasKey $legacy "enabled" -}}
+{{- ternary "true" "false" (eq (toString $legacy.enabled) "true") -}}
+{{- else -}}
+{{- ternary "true" "false" (eq (toString (dig "enabled" false (.Values.legacyCompanyContext | default dict))) "true") -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.consoleName" -}}
 {{- include "centaur.componentName" (dict "root" . "component" "console") -}}
 {{- end -}}

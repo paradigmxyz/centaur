@@ -25,7 +25,7 @@ The service owns these Postgres schemas:
 - `company_context_system`: private cursors, staging (including Slack messages and users, and custom documents), and processing state.
 - `company_context_data`: retrieval-facing Drive documents, Calendar events, Granola notes, Slack channel and file documents, custom document chunks, access observations (including Slack identities, channel memberships, and the conversations each Slack file is shared in), and embeddings. The query endpoints read only this schema, as the `centaur_company_context_v2_query` role, which can only select from it; the service switches to that role for each query transaction, so its login role must be able to grant itself membership (`CREATEROLE` or superuser).
 
-Documents are exposed to retrieval only through the query endpoints; no other database role can read them. The Helm deployment is gated by `experimentalCompanyContext.enabled` until it is ready for production.
+Documents are exposed to retrieval only through the query endpoints; no other database role can read them. The Helm deployment is gated by `companyContext.enabled` (formerly `experimentalCompanyContext.enabled`, still accepted as an alias), which defaults to `false`. See `docs/pages/operate/company-context.mdx`.
 
 ## Required infrastructure
 

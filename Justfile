@@ -165,7 +165,7 @@ deploy:
       ghcr)
         extra_args+=(
           --set apiRs.image.repository=ghcr.io/paradigmxyz/centaur/centaur-api-rs
-          --set experimentalCompanyContext.image.repository=ghcr.io/paradigmxyz/centaur/centaur-company-context
+          --set companyContext.image.repository=ghcr.io/paradigmxyz/centaur/centaur-company-context
           --set proxySync.image.repository=ghcr.io/paradigmxyz/centaur/centaur-proxy-sync
           --set codemode.image.repository=ghcr.io/paradigmxyz/centaur/centaur-codemode
           --set tokenBroker.image.repository=ghcr.io/paradigmxyz/centaur/centaur-token-broker

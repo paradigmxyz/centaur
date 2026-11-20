@@ -179,7 +179,14 @@
         }
       }
     },
+    "legacyCompanyContext": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
     "companyContextV1": {
+      "description": "Deprecated alias for legacyCompanyContext.",
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" }
