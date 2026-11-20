@@ -137,6 +137,35 @@ module Granola
       assert_equal "2026-08-05T17:00:00-06:00", batch[:checkpoint][:watermark_time]
     end
 
+    test "imports meeting_at dates and advances the checkpoint" do
+      api_client = FakeApiClient.new(checkpoint: { "watermark_time" => "2026-11-17T12:00:00Z" })
+      timestamp = "2026-11-18T21:01:00Z"
+      meeting = meeting_xml(date: timestamp, date_attribute: "meeting_at")
+      mcp_http = lambda do |tool:, arguments:, **|
+        case tool
+        when "get_account_info"
+          { email: "owner@example.com" }.to_json
+        when "list_meetings"
+          %(<meetings_data count="1">#{meeting}</meetings_data>)
+        when "get_meetings"
+          assert_equal [ "meeting-1" ], arguments.fetch("meeting_ids")
+          meeting
+        when "get_meeting_transcript"
+          ""
+        else
+          flunk "unexpected Granola MCP tool #{tool}"
+        end
+      end
+
+      SyncCredential.new(credential, api_client: api_client, mcp_http: mcp_http).call
+
+      batch = api_client.batches.fetch(0)
+      note = batch[:notes].fetch(0)
+      assert_equal timestamp, note["source_created_at"]
+      assert_equal timestamp, note["source_updated_at"]
+      assert_equal timestamp, batch[:checkpoint][:watermark_time]
+    end
+
     test "records a successful sync when there are no new meetings" do
       checkpoint_time = "2026-07-08T12:00:00Z"
       api_client = FakeApiClient.new(
@@ -287,9 +316,9 @@ module Granola
 
     private
 
-    def meeting_xml(id: "meeting-1", date: "Jul 8, 2026 5:30 PM GMT+2")
+    def meeting_xml(id: "meeting-1", date: "Jul 8, 2026 5:30 PM GMT+2", date_attribute: "date")
       <<~XML
-        <meeting id="#{id}" title="Planning" date="#{date}" captured_by_me="true" listed_as_participant="true" is_workspace_visible="false">
+        <meeting id="#{id}" title="Planning" #{date_attribute}="#{date}" captured_by_me="true" listed_as_participant="true" is_workspace_visible="false">
           <known_participants>Ada (note creator) from Acme &lt;ada@example.com&gt;
           Bob &lt;bob@example.com&gt;</known_participants>
           <summary>Ship the Granola sync.</summary>
