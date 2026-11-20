@@ -464,14 +464,16 @@ async function processCi(
   }
   if (!firstSettle) return;
 
-  // Red: back off if a human pushed the failing commit (don't step on them) —
-  // unless this is a forced takeover (the PR was just assigned to us, so the
-  // human has explicitly handed it over and we fix it regardless of who pushed).
+  // Red: back off unless the bot pushed the failing commit (don't step on a
+  // human) — unless this is a forced takeover (the PR was just assigned to us, so
+  // the human has explicitly handed it over and we fix it regardless of who
+  // pushed). An author that doesn't resolve to the bot's login, such as a commit
+  // email not linked to an account or a failed lookup, counts as a human's.
   if (!force) {
     const headAuthor = await commitAuthor(ctx, owner, repo, headSha);
-    if (headAuthor && headAuthor.toLowerCase() !== ctx.userName.toLowerCase()) {
+    if (headAuthor?.toLowerCase() !== ctx.userName.toLowerCase()) {
       traceLog(ctx.options, "githubbot_ci_human_commit_skipped", trace, {
-        author: headAuthor,
+        author: headAuthor ?? "unknown",
       });
       return;
     }
