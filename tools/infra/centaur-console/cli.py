@@ -123,6 +123,11 @@ def create_scheduled_task(
         help="dm (default) or a permitted Slack channel ID; omit in a Slack channel thread",
     ),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
+    personal: bool = typer.Option(
+        False,
+        "--personal",
+        help="In a Slack channel thread, create the task for the requester; it always delivers to their DM",
+    ),
     url: str | None = typer.Option(None, "--url", help="centaur-console base URL"),
     bearer_token: str | None = typer.Option(
         None,
@@ -139,6 +144,7 @@ def create_scheduled_task(
             cron_expression=cron_expression,
             delivery_channel=delivery_channel,
             enabled=enabled,
+            personal=personal,
         )
     console.print_json(json.dumps({"data": result}, default=str))
 
