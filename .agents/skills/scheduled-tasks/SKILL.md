@@ -22,7 +22,9 @@ Only `name` and `prompt` are required to create a task; omitted fields on update
 ## Ownership and delivery
 
 - In MCP or direct-message (DM) sessions, tasks belong to the user and deliver to `dm` (the default when `delivery_channel` is omitted) or an allowed Slack channel ID.
-- In a Slack channel thread, tasks belong to that channel: they run with the channel's permissions, always post to it (omit `delivery_channel`), and anyone in the channel can manage them.
+- In a Slack channel thread, tasks belong to that channel by default: they run with the channel's permissions, always post to it (omit `delivery_channel`), and anyone in the channel can manage them.
+- When someone in a channel thread wants the task for themselves ("remind me", "DM me", "send me"), pass `owner: "me"` to `create_scheduled_task` and omit `delivery_channel`. The task belongs to the person who sent the current message, runs with their permissions, and always delivers to their DM. Nobody can create a task for, or deliver it to, another person; say so if asked. Personal tasks cannot be listed or changed from the channel, so tell the user to manage them from their DM.
+- If it is unclear whether the user wants a channel task or a personal one, ask before creating it.
 
 ## Schedules and prompts
 

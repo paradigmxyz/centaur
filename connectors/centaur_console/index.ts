@@ -377,7 +377,10 @@ export async function scheduled_task(
  * Create a scheduled task owned by the caller. Omit `cron_expression` for a manual (run-on-demand)
  * task; otherwise pass five cron fields, interpreted in Pacific Time. Omit `delivery_channel` to
  * deliver to the caller's DM, or to the current channel in a Slack channel thread. `enabled`
- * defaults to true.
+ * defaults to true. Pass `owner: "me"` in a Slack channel thread to create the task for the person
+ * who sent the current message instead of the channel: it runs with their permissions and always
+ * delivers to their DM (any other `delivery_channel` is refused). It cannot target anyone else, and
+ * such tasks are listed and managed from that person's DM, not the channel.
  */
 export async function create_scheduled_task(
   args: {
@@ -386,6 +389,7 @@ export async function create_scheduled_task(
     cron_expression?: string;
     delivery_channel?: string;
     enabled?: boolean;
+    owner?: "me";
   },
   ctx: Ctx,
 ): Promise<{ task: ScheduledTask }> {
@@ -396,6 +400,7 @@ export async function create_scheduled_task(
     enabled: args.enabled === undefined ? true : args.enabled,
   };
   if (args.delivery_channel !== undefined) data.delivery_channel = args.delivery_channel;
+  if (args.owner !== undefined) data.owner = args.owner;
   return {
     task: dataObject(
       await request(ctx, SCHEDULED_TASKS_PATH, {
