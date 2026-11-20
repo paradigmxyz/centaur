@@ -1,6 +1,6 @@
 import { resolveAllowedAuthorAssociations } from "./authorization";
 import { backgroundWaitUntil } from "./context";
-import { buildCommentReplyBody } from "./comment-bot";
+import { buildTurnReplyBody } from "./comment-bot";
 import type { PrManagerContext } from "./pr-manager";
 import { reactWorkingOnSubject, settleSubjectReaction } from "./reactions";
 import { githubContextPreamble, runTurnStream } from "./turn";
@@ -70,6 +70,9 @@ export function handleBodyMention(
     startedAtMs: nowMs(),
     threadId: threadKey,
   };
+  // The chain of thought goes only to private repositories (see buildTurnReplyBody).
+  const showChainOfThought =
+    isRecord(payload.repository) && payload.repository.private === true;
   if (!authorized) {
     traceLog(options, "githubbot_body_mention_unauthorized_skipped", trace, {
       association: association ?? "unknown",
@@ -113,16 +116,7 @@ export function handleBodyMention(
     };
 
     const result = await runTurnStream(options, forwardInput);
-    const reply = result.failed
-      ? buildCommentReplyBody({
-          answer: `⚠️ I ran into an error before finishing:\n\n${result.errorText || "unknown error"}`,
-          cotLines: result.cotLines,
-        })
-      : buildCommentReplyBody({
-          answer: result.answer,
-          cotLines: result.cotLines,
-          fallback: result.fallbackText,
-        });
+    const reply = buildTurnReplyBody(result, showChainOfThought);
     try {
       await ctx.octokit.rest.issues.createComment({
         owner: repo.owner,

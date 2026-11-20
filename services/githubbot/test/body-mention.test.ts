@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { handleBodyMention, mentionsBot } from "../src/body-mention";
 import type { PrManagerContext } from "../src/pr-manager";
+import { FAKE_TURN_COMMAND, fakeSessionApiFetch } from "./fake-session-api";
 
 describe("mentionsBot", () => {
   test("matches a standalone @-mention case-insensitively", () => {
@@ -16,9 +17,14 @@ describe("mentionsBot", () => {
   });
 });
 
-type Spies = { reactions: number; comments: number };
+type Spies = { reactions: number; comments: number; bodies?: string[] };
 
-function makeCtx(spies: Spies): PrManagerContext {
+function makeCtx(
+  spies: Spies,
+  // Non-retryable so the backgrounded turn settles instantly off the network.
+  fetchFn: typeof fetch = (() =>
+    Promise.resolve(new Response("no", { status: 400 }))) as unknown as typeof fetch,
+): PrManagerContext {
   const m = new Map<string, unknown>();
   const state = {
     get: async (k: string) => m.get(k),
@@ -41,8 +47,9 @@ function makeCtx(spies: Spies): PrManagerContext {
           },
         },
         issues: {
-          createComment: async () => {
+          createComment: async (params: { body: string }) => {
             spies.comments += 1;
+            spies.bodies?.push(params.body);
             return { data: { id: 2 } };
           },
         },
@@ -60,18 +67,25 @@ function makeCtx(spies: Spies): PrManagerContext {
           return this;
         },
       },
-      // Non-retryable so the backgrounded turn settles instantly off the network.
-      fetch: () => Promise.resolve(new Response("no", { status: 400 })),
+      fetch: fetchFn,
     },
     state,
     userName: "centaur-bot",
   } as unknown as PrManagerContext;
 }
 
-function openedPr(body: string, association = "MEMBER", author = "someone") {
+function openedPr(
+  body: string,
+  association = "MEMBER",
+  author = "someone",
+  isPrivate?: boolean,
+) {
   return JSON.stringify({
     action: "opened",
-    repository: { full_name: "0xSplits/centaur" },
+    repository: {
+      full_name: "0xSplits/centaur",
+      ...(isPrivate === undefined ? {} : { private: isPrivate }),
+    },
     pull_request: {
       number: 7,
       body,
@@ -154,4 +168,24 @@ describe("handleBodyMention", () => {
     expect(spies.comments).toBe(1);
     expect(spies.reactions).toBeGreaterThanOrEqual(1);
   });
+
+  for (const [visibility, isPrivate, shown] of [
+    ["a private", true, true],
+    ["a public", false, false],
+    ["an unspecified", undefined, false],
+  ] as const) {
+    test(`replies on ${visibility} repository ${shown ? "with" : "without"} the chain of thought`, async () => {
+      const spies: Spies = { reactions: 0, comments: 0, bodies: [] };
+      await handleBodyMention(
+        makeCtx(spies, fakeSessionApiFetch("Done.")),
+        "pull_request",
+        openedPr("@centaur-bot please review", "MEMBER", "someone", isPrivate),
+      );
+      expect(spies.bodies).toHaveLength(1);
+      const [reply] = spies.bodies ?? [];
+      expect(reply).toStartWith("Done.");
+      expect(reply?.includes(FAKE_TURN_COMMAND)).toBe(shown);
+      expect(reply?.includes("<details>")).toBe(shown);
+    });
+  }
 });

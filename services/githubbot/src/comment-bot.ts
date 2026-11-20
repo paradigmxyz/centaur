@@ -199,6 +199,34 @@ export function buildCommentReplyBody(input: {
 }
 
 /**
+ * The comment posted for a finished turn. The chain of thought carries tool
+ * commands and their output, so it is included only when the caller has
+ * established that the repository is private.
+ */
+export function buildTurnReplyBody(
+  result: {
+    answer: string;
+    cotLines: string[];
+    errorText: string;
+    failed: boolean;
+    fallbackText: string;
+  },
+  showChainOfThought: boolean,
+): string {
+  const cotLines = showChainOfThought ? result.cotLines : [];
+  return result.failed
+    ? buildCommentReplyBody({
+        answer: `⚠️ I ran into an error before finishing:\n\n${result.errorText || "unknown error"}`,
+        cotLines,
+      })
+    : buildCommentReplyBody({
+        answer: result.answer,
+        cotLines,
+        fallback: result.fallbackText,
+      });
+}
+
+/**
  * A GitHub-flavored-markdown collapsible section. GitHub renders raw HTML
  * <details>/<summary> in issue and PR comments, so the chain-of-thought folds
  * away by default and expands on click.
