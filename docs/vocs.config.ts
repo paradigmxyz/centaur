@@ -49,7 +49,7 @@ export default defineConfig({
   // absolute URL form (baseUrl prefix) is required for Slack/Twitter/
   // Discord previews to resolve the image — relative paths fail in
   // every major unfurl previewer. New routes added under pages/ (e.g.
-  // operate/slack-etl) get picked up automatically the next time the
+  // operate/company-context) get picked up automatically the next time the
   // prebuild script runs — no manual map maintenance required.
   ogImageUrl: (path: string, { baseUrl }: { baseUrl: string }) => {
     const key = path.replace(/\/$/, '') || '/'

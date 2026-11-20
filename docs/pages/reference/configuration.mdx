@@ -23,7 +23,7 @@ Use these as the main extension points:
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
 | `companyContext.*` | Company-context ingestion service, default off. Formerly `experimentalCompanyContext.*`, still accepted as an alias. Requires `OPENAI_API_KEY`, `SLACK_BOT_TOKEN`, and `CENTAUR_JWT_SIGNING_SECRET`. See [Company Context](/operate/company-context). |
-| `legacyCompanyContext.enabled` | Legacy company-context sync jobs and Slack ETL master switch, default `false`. Formerly `companyContextV1.enabled`, still accepted as an alias. See [Company Context](/operate/company-context). |
+| `legacyCompanyContext.enabled` | Deprecated v1 company-context sync jobs and Slack ETL master switch, default `false`; will be removed in a future release. Formerly `companyContextV1.enabled`, still accepted as an alias. See [Company Context](/operate/company-context). |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, skills, and Code Mode connectors; subdirs default to `tools`, `workflows`, `.agents/skills`, and `connectors`. |

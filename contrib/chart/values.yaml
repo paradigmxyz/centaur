@@ -528,11 +528,11 @@ tokenBroker:
 
 # Legacy (v1) company-context ingestion: the api-rs Slack workflows (slack_sync,
 # slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
-# Granola sync jobs. Off by default; new deployments should use companyContext
-# instead. Setting true runs the Console Slack DM and
-# Granola sync for connected users and allows the Slack ETL
-# (apiRs.etl.slack.enabled) and Google Docs sync (console.googleDocsSync.enabled)
-# to run. While false, already-synced data is kept and Slack retention does not
+# Granola sync jobs. Deprecated and off by default; it will be removed in a
+# future release. New deployments should use companyContext instead. Setting
+# true runs the Console Slack DM and Granola sync for connected users and allows
+# the Slack ETL (apiRs.etl.slack.enabled) and Google Docs sync
+# (console.googleDocsSync.enabled) to run. While false, already-synced data is kept and Slack retention does not
 # run. See docs/pages/operate/company-context.mdx.
 #
 # Backwards compatibility: this block used to be named `companyContextV1`. That
