@@ -214,7 +214,8 @@ module Granola
     def parse_meetings(text)
       document = text.is_a?(Nokogiri::XML::Node) ? text : parse_meeting_document(text)
       document.xpath(".//meeting").filter_map do |meeting|
-        next unless %w[id title date].all? { |attribute| meeting[attribute].present? }
+        date = meeting["meeting_at"].presence || meeting["date"].presence
+        next unless meeting["id"].present? && meeting["title"].present? && date
 
         participants = participant_list(meeting.at_xpath("./known_participants")&.text)
         owner = participants.find { |participant| participant["name"].include?("(note creator)") } || participants.first || {}
@@ -224,7 +225,7 @@ module Granola
         {
           "id" => meeting["id"],
           "title" => meeting["title"],
-          "date" => meeting["date"],
+          "date" => date,
           "owner" => owner,
           "attendees" => participants,
           "summary_markdown" => meeting.at_xpath("./summary")&.text.to_s.strip
@@ -245,6 +246,8 @@ module Granola
     end
 
     def parse_mcp_date(value)
+      return value if parse_time(value)
+
       parts = Date._strptime(value.to_s, "%b %d, %Y %I:%M %p %Z")
       return nil if parts.empty? || parts[:leftover].present? || parts[:offset].nil?
 

@@ -40,7 +40,7 @@ pub struct Participant {
 pub struct Meeting {
     pub id: String,
     pub title: String,
-    /// Granola's display date, such as `Jul 8, 2026 5:30 PM GMT+2`.
+    /// Granola's RFC 3339 timestamp or legacy display date.
     pub date: String,
     pub owner: Option<Participant>,
     pub attendees: Vec<Participant>,
@@ -334,7 +334,7 @@ fn parse_meetings(text: &str) -> Result<(Vec<Meeting>, usize)> {
             Some(Meeting {
                 id: attribute("id")?,
                 title: attribute("title")?,
-                date: attribute("date")?,
+                date: attribute("meeting_at").or_else(|| attribute("date"))?,
                 owner,
                 attendees,
                 summary_markdown: child_text("summary").trim().to_owned(),
@@ -365,9 +365,14 @@ fn parse_participants(text: &str) -> Vec<Participant> {
     participants
 }
 
-/// Parses dates like `Jul 8, 2026 5:30 PM GMT+2` or `Aug 5, 2026 5:00 PM CST`.
+/// Parses RFC 3339 timestamps and legacy dates like `Jul 8, 2026 5:30 PM GMT+2`.
 pub fn parse_meeting_date(value: &str) -> Option<DateTime<FixedOffset>> {
-    let (local, zone) = value.trim().rsplit_once(' ')?;
+    let value = value.trim();
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Some(timestamp);
+    }
+
+    let (local, zone) = value.rsplit_once(' ')?;
     let offset = zone_offset(zone)?;
     let local = NaiveDateTime::parse_from_str(local, "%b %d, %Y %I:%M %p").ok()?;
     offset.from_local_datetime(&local).single()
@@ -476,6 +481,37 @@ mod tests {
         assert_eq!(reported, 1);
         assert!(parse_meetings("").unwrap().0.is_empty());
         assert!(is_rejected(&parse_meetings("<meeting").unwrap_err()));
+    }
+
+    #[test]
+    fn parses_meeting_at_in_listing_and_details() {
+        let listing = r#"
+            <pagination has_more="false" total_count="1" remaining_count="0"/>
+            <meetings_data count="1">
+              <meeting id="meeting-1" title="Planning" meeting_at="2026-11-18T21:01:00.000Z"/>
+            </meetings_data>
+        "#;
+        let details = r#"
+            <meetings_data count="1">
+              <meeting id="meeting-1" title="Planning" meeting_at="2026-11-18T16:01:00-05:00">
+                <summary>Plan the next release.</summary>
+              </meeting>
+            </meetings_data>
+        "#;
+
+        let (listed, reported) = parse_meetings(listing).unwrap();
+        let (fetched, _) = parse_meetings(details).unwrap();
+
+        assert_eq!(reported, 1);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(listed[0].id, fetched[0].id);
+        assert_eq!(
+            listed[0].occurred_at().unwrap().to_rfc3339(),
+            "2026-11-18T21:01:00+00:00"
+        );
+        assert_eq!(listed[0].occurred_at(), fetched[0].occurred_at());
+        assert_eq!(fetched[0].summary_markdown, "Plan the next release.");
     }
 
     #[test]
