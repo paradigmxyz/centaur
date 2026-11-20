@@ -148,15 +148,27 @@ Pass when the call succeeds and returns valid search output. Empty results are a
 
 ### 7. Download File From Current Channel And Re-Upload
 
-Find another accessible Slack file from the current channel's recent messages. Prefer a file outside the current thread, and avoid the file uploaded earlier in this QA run so the check proves download-and-reupload of an existing channel file:
+Find another accessible Slack file from the current channel's recent messages, including thread replies: in many channels every file sits in a reply, so top-level messages alone often find nothing. Skip the current thread and the `centaur-qa-upload.txt` files earlier QA runs leave behind, so the check proves download-and-reupload of an existing channel file:
 
 ```js
 const { messages } = await tools.slack.channel_history({ channel: "SLACK_CHANNEL_ID", limit: 200 });
-return messages
-  .filter((m) => m.files?.length && m.ts !== "SLACK_THREAD_TS")
-  .flatMap((m) => m.files.map((f) => ({ ts: m.ts, id: f.id, name: f.name, size: f.size })))
-  .filter((f) => f.name !== "centaur-qa-upload.txt")
-  .slice(0, 5);
+const toFiles = (m) => (m.files ?? []).map((f) => ({ ts: m.ts, thread_ts: m.thread_ts, id: f.id, name: f.name, size: f.size }));
+const keep = (f) => f.name !== "centaur-qa-upload.txt";
+const others = messages.filter((m) => m.ts !== "SLACK_THREAD_TS");
+const found = others.flatMap(toFiles).filter(keep);
+// Then scan thread replies, newest threads first, in batches of 8 (the Code Mode concurrency limit).
+const threads = others.filter((m) => (m.reply_count ?? 0) > 0);
+for (let i = 0; i < threads.length && found.length < 5; i += 8) {
+  const batch = await Promise.allSettled(
+    threads.slice(i, i + 8).map((t) => tools.slack.thread_replies({ channel: "SLACK_CHANNEL_ID", ts: t.ts, limit: 200 })),
+  );
+  for (const r of batch) {
+    if (r.status !== "fulfilled") continue;
+    // The first message is the parent, already counted above.
+    found.push(...r.value.messages.slice(1).flatMap(toFiles).filter(keep));
+  }
+}
+return { top_level: messages.length, threads_with_replies: threads.length, files: found.slice(0, 5) };
 ```
 
 Download it through the proxy and re-upload it to the current thread in one cell:
@@ -176,7 +188,7 @@ const uploaded = await tools.slack.upload_file({
 return { downloaded: { path: downloaded.path, bytes: downloaded.bytes }, uploaded };
 ```
 
-Verify the current thread now shows the re-uploaded file. If no accessible current-channel file exists, record `SKIP: no readable file in current channel` and include the `channel_history` result.
+Verify the current thread now shows the re-uploaded file. If no accessible file exists in the channel's top-level messages or thread replies, record `SKIP: no readable file in current channel` and include the `top_level` and `threads_with_replies` counts.
 
 ### 8. Company Context
 
