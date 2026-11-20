@@ -526,13 +526,20 @@ tokenBroker:
     annotations: {}
   resources: {}
 
-# v1 company-context ingestion: the api-rs Slack workflows (slack_sync,
+# Legacy (v1) company-context ingestion: the api-rs Slack workflows (slack_sync,
 # slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
-# Granola sync jobs. Set false to stop all of them, for example to roll out
-# experimentalCompanyContext in isolation. Already-synced data is kept, and
-# Slack retention does not run while this is false.
-companyContextV1:
-  enabled: true
+# Granola sync jobs. Off by default; new deployments should use companyContext
+# instead. Setting true runs the Console Slack DM and
+# Granola sync for connected users and allows the Slack ETL
+# (apiRs.etl.slack.enabled) and Google Docs sync (console.googleDocsSync.enabled)
+# to run. While false, already-synced data is kept and Slack retention does not
+# run. See docs/pages/operate/company-context.mdx.
+#
+# Backwards compatibility: this block used to be named `companyContextV1`. That
+# key is still honored as a deprecated alias and wins when set (see the
+# `centaur.legacyCompanyContextEnabled` helper).
+legacyCompanyContext:
+  enabled: false
 
 # API clients: machine callers, such as eval runners, that exchange a client
 # secret for a session API token at api-rs /oauth/token. Off hides them in the
@@ -542,9 +549,16 @@ apiClients:
 
 # Standalone company-context ingestion service. It indexes Google Docs and PDFs
 # from Google Drive, Google Calendar events, and Granola meeting notes into its
-# private system and data schemas. Disabled while the corpus is validated
-# alongside the legacy Python workflows.
-experimentalCompanyContext:
+# private system and data schemas. Off by default. Enabling it requires
+# OPENAI_API_KEY, SLACK_BOT_TOKEN, and CENTAUR_JWT_SIGNING_SECRET in the shared
+# Secret; the pod does not start without them. Review the indexers and
+# syncLimits below before enabling. See docs/pages/operate/company-context.mdx.
+#
+# Backwards compatibility: this block used to be named
+# `experimentalCompanyContext`. That key is still honored as a deprecated alias:
+# anything set under it is merged on top of these `companyContext` values (see
+# the `centaur.companyContextValues` helper), and wins for keys set under both.
+companyContext:
   enabled: false
   replicaCount: 1
   nodeSelector: {}

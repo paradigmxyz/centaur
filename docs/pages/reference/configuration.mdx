@@ -22,6 +22,8 @@ Use these as the main extension points:
 | `tokenBroker.*` | token-broker, which refreshes Console broker credentials: replicas, poll interval, concurrency, scheduling, and metrics. |
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
+| `companyContext.*` | Company-context ingestion service, default off. Formerly `experimentalCompanyContext.*`, still accepted as an alias. Requires `OPENAI_API_KEY`, `SLACK_BOT_TOKEN`, and `CENTAUR_JWT_SIGNING_SECRET`. See [Company Context](/operate/company-context). |
+| `legacyCompanyContext.enabled` | Legacy company-context sync jobs and Slack ETL master switch, default `false`. Formerly `companyContextV1.enabled`, still accepted as an alias. See [Company Context](/operate/company-context). |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, skills, and Code Mode connectors; subdirs default to `tools`, `workflows`, `.agents/skills`, and `connectors`. |
@@ -271,7 +273,7 @@ Kubernetes backend:
 | `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `api.extraEnv`. | 1Password Connect endpoint details. |
 | `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
 | `KUBERNETES_IRON_PROXY_SYNC_POD_LABEL_SELECTOR` | Chart-rendered proxy-sync labels or `apiRs.extraEnv`. | Proxy-sync pod selector for API-created proxy egress policies. Defaults to `app.kubernetes.io/component=proxy-sync`; the destination port comes from `IRON_CONTROL_PROXY_SYNC_URL`. |
-| `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_URL`, `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR` | Chart-rendered when `experimentalCompanyContext.enabled`, or `apiRs.extraEnv`. | Company-context query API that API-created proxies may reach, and its pod selector (default `app.kubernetes.io/component=company-context`). The destination port comes from the URL. Unset allows no such egress. |
+| `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_URL`, `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR` | Chart-rendered when `companyContext.enabled`, or `apiRs.extraEnv`. | Company-context query API that API-created proxies may reach, and its pod selector (default `app.kubernetes.io/component=company-context`). The destination port comes from the URL. Unset allows no such egress. |
 | `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
 | `REPOS_PATH` | `sandbox.reposPath`. | Repo cache path mounted into sandboxes. |
 
@@ -282,7 +284,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `CENTAUR_CODEMODE_CONNECTORS` | Chart-rendered from `overlays.sources[*].connectorsSubdir` (default `connectors`) through `SESSION_SANDBOX_EXTRA_ENV`, appended to the image's `/opt/centaur/connectors` in source order. | Ordered connector roots for the Code Mode sandbox process; a later root shadows earlier ones, and missing roots are skipped. |
-| `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `experimentalCompanyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API the `company_context v2` commands call through the sandbox proxy, which injects the principal API JWT. Unset disables those commands. |
+| `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `companyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API the `company_context v2` commands call through the sandbox proxy, which injects the principal API JWT. Unset disables those commands. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
@@ -316,13 +318,13 @@ Slack ETL workflows:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `SLACK_ETL_ENABLED` | `apiRs.etl.slack.enabled`; forced off when `companyContextV1.enabled=false`. | Master switch for Slack sync/backfill/context schedules. |
+| `SLACK_ETL_ENABLED` | `apiRs.etl.slack.enabled`; forced off unless `legacyCompanyContext.enabled=true` (default `false`). | Master switch for Slack sync/backfill/context schedules. |
 | `SLACK_SYNC_INTERVAL_SECONDS`, `SLACK_BACKFILL_INTERVAL_SECONDS`, `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `apiRs.etl.slack.syncIntervalSeconds`, `apiRs.etl.slack.backfill.intervalSeconds`, `apiRs.etl.companyContextDocuments.intervalSeconds`. | Slack ETL schedule intervals. |
 | `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS`, `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `apiRs.etl.slack.syncBackfillLookbackDays`, `apiRs.etl.slack.syncThreadLookbackDays`. | Slack history/thread lookback windows. |
 | `SLACK_SYNC_INDEX_PRIVATE_CHANNELS` | `apiRs.etl.slack.indexPrivateChannels`. | Includes private channels visible to the ETL token. |
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `apiRs.etl.slack.excludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `apiRs.etl.slack.backfill.*`. | Backfill enablement and batch sizing. |
-| `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`; retention is forced off when `companyContextV1.enabled=false`. | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
+| `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`; retention is forced off unless `legacyCompanyContext.enabled=true` (default `false`). | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
 | `DATABASE_TEXT_SEARCH` | `externalDatabase.textSearch`, default `postgres`; always `paradedb` with the bundled PostgreSQL, where setting `externalDatabase.textSearch` fails rendering. | Company-context keyword search backend that api-rs and the company-context service migrate and query with: `postgres` (built-in full-text search) or `paradedb` (BM25, requires `pg_search`). The chart gives the service the same value as api-rs, including an `apiRs.extraEnv` override. Fixed per database once migrated. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `apiRs.etl.companyContextDocuments.enabled`. | Enables company-context projection when any ETL is on. |
 | `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `apiRs.etl.companyContextDocuments.maxWindowSeconds`. | Maximum source `updated_at` window projected by one company-context documents run. |

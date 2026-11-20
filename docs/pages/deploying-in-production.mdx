@@ -617,7 +617,7 @@ matching those ranges. Set `podSelector` before upgrading such a deployment.
 
 `externalDatabase.textSearch` selects how company-context keyword search is
 indexed, both by api-rs and by the company-context service
-(`experimentalCompanyContext`). Set it only with `postgres.enabled: false`; the
+(`companyContext`). Set it only with `postgres.enabled: false`; the
 bundled Postgres always uses `paradedb`.
 
 - `postgres` (the default when unset) uses PostgreSQL's built-in full-text search and works on

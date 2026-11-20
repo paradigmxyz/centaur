@@ -1,4 +1,4 @@
-{{- $companyContext := .Values.experimentalCompanyContext }}
+{{- $companyContext := include "centaur.companyContextValues" . | fromYaml }}
 {{- if $companyContext.enabled }}
 {{- $name := include "centaur.componentName" (dict "root" . "component" "company-context") }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}

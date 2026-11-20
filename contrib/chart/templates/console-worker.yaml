@@ -178,7 +178,7 @@ spec:
               value: {{ . | quote }}
 {{- end }}
             - name: CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED
-              value: {{ .Values.companyContextV1.enabled | quote }}
+              value: {{ include "centaur.legacyCompanyContextEnabled" . | quote }}
             - name: RAILS_LOG_TO_STDOUT
               value: "1"
 {{- if .Values.apiRs.enabled }}
