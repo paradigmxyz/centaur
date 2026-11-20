@@ -2,6 +2,7 @@ require "digest"
 
 class ConsoleUserPrincipalProvisioner
   USER_MCP_ROLE_FOREIGN_ID = "user-mcp".freeze
+  MAX_ATTEMPTS = 3
 
   def self.call(user)
     new(user).call
@@ -12,6 +13,29 @@ class ConsoleUserPrincipalProvisioner
   end
 
   def call
+    attempts = 0
+    begin
+      attempts += 1
+      provision
+    rescue ActiveRecord::RecordNotUnique
+      retry if attempts < MAX_ATTEMPTS
+      raise
+    rescue ActiveRecord::RecordInvalid => error
+      # Concurrent callers for one user (or the first users to need the shared
+      # role) race to insert the same foreign_id. The uniqueness validator can
+      # observe the winner before INSERT, so RecordInvalid is the same race as
+      # RecordNotUnique; the retry finds the winner's row.
+      raise unless error.record.errors.of_kind?(:foreign_id, :taken) && attempts < MAX_ATTEMPTS
+
+      retry
+    end
+  end
+
+  private
+
+  attr_reader :user
+
+  def provision
     Principal.transaction do
       principal = Principal.find_or_initialize_by(foreign_id: foreign_id)
       newly_created = principal.new_record?
@@ -27,13 +51,7 @@ class ConsoleUserPrincipalProvisioner
       assign_user_mcp_role(principal) if newly_created
       principal
     end
-  rescue ActiveRecord::RecordNotUnique
-    retry
   end
-
-  private
-
-  attr_reader :user
 
   def foreign_id
     normalized = user.email.to_s.downcase.strip
