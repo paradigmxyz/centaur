@@ -313,7 +313,8 @@ export type SlackbotV2 = {
   app: Hono
   chat: Chat
   /**
-   * Waits up to `timeoutMs` for in-flight webhook handoffs and replies.
+   * Stops scheduling late-file recovery and waits up to `timeoutMs` for
+   * in-flight webhook handoffs and replies. Pending files survive in state.
    * Resolves to how many are still running.
    */
   drain(timeoutMs: number): Promise<number>
@@ -417,6 +418,8 @@ export type ForwardSessionInput = {
   generativeUiNote?: string
   executionId?: string
   executeMessage?: SlackbotV2ApiMessage
+  /** Durable late-file retry of the original execute payload. */
+  executeRequest?: SlackbotV2ExecuteSessionRequest
   /** Effective harness selected by sticky thread flags or channel defaults. */
   harnessType?: string
   /** Harness persisted by api-rs. */

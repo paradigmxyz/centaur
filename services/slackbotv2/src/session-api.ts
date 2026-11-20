@@ -181,6 +181,8 @@ export async function withSlackApiTimeout<T>(
 type ForwardSessionApiCallbacks = {
   /** Runs after append; returning false skips execute. */
   shouldExecute?(): Promise<boolean>
+  /** Runs after create/append and request preparation, immediately before dispatch. */
+  beforeExecute?(request: SlackbotV2ExecuteSessionRequest): Promise<void>
   onExecutionStarted?(execution: SlackbotV2ExecuteSessionResponse): Promise<void>
   onMessagesAppended?(result: { steering?: SlackbotV2AppendSteering }): Promise<void>
   onSessionCreated?(outcome: CreateSessionOutcome): Promise<void>
@@ -574,7 +576,9 @@ export async function forwardToSessionApi(
       input.metadataModel,
       input.metadataHarnessType,
       input.proactiveContext,
-      input.generativeUiNote
+      input.generativeUiNote,
+      input.executeRequest,
+      callbacks.beforeExecute
     ),
     sessionApiTimeoutMs(options),
     'execute session'
@@ -1440,13 +1444,15 @@ async function executeSession(
   metadataModel?: string,
   metadataHarnessType?: string,
   proactiveContext?: string,
-  generativeUiNote?: string
+  generativeUiNote?: string,
+  preparedRequest?: SlackbotV2ExecuteSessionRequest,
+  beforeExecute?: ForwardSessionApiCallbacks['beforeExecute']
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
-  const requesterIdentity = await resolveRequesterIdentity(options, message)
+  const requesterIdentity = preparedRequest ? undefined : await resolveRequesterIdentity(options, message)
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const recordedModel = metadataModel ?? model
-  const body: SlackbotV2ExecuteSessionRequest = {
+  const body: SlackbotV2ExecuteSessionRequest = preparedRequest ?? {
     idempotency_key: message.id,
     // Record the model this execution runs on (persona pin, else explicit
     // override, else the configured/baked harness default) so downstream
@@ -1479,6 +1485,7 @@ async function executeSession(
     idle_timeout_ms: idleTimeoutMs,
     ...(options.maxDurationMs === undefined ? {} : { max_duration_ms: options.maxDurationMs })
   }
+  await beforeExecute?.(body)
   const response = await fetchWithTimeout(
     fetchFn,
     apiSessionUrl(options.apiUrl, threadId, 'execute'),
