@@ -458,22 +458,31 @@ export const scheduledTasks = {
     })
     const out = await consoleRunner(`
       params = JSON.parse(${JSON.stringify(params)})
-      # Concurrent tests share the user and channel; whichever loses the race
-      # to create them finds the winner's rows on retry.
-      attempts = 0
-      begin
-        user = User.find_or_create_by!(email: params["email"]) { |u| u.name = params["user_name"] }
-        user.update!(status: "active") unless user.active?
+      # Concurrent tests share the user, identity, and channel; whichever loses
+      # the race to create one finds the winner's row on retry. Each step
+      # retries on its own: a shared budget runs out when one process loses
+      # all three races in a row.
+      upsert = lambda do |&step|
+        attempts = 0
+        begin
+          step.call
+        rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique
+          attempts += 1
+          retry if attempts < 3
+          raise
+        end
+      end
+      user = upsert.call { User.find_or_create_by!(email: params["email"]) { |u| u.name = params["user_name"] } }
+      user.update!(status: "active") unless user.active?
+      upsert.call do
         user.user_identities.find_or_create_by!(provider: "slack", subject: params["slack_user_id"]) do |identity|
           identity.team_id = params["team_id"]
         end
+      end
+      upsert.call do
         SlackBotChannel.find_or_initialize_by(team_id: params["team_id"], channel_id: params["channel"]).update!(
           bot_user_id: params["bot_user_id"], name: params["channel_name"], private: false, active: true, archived: false
         )
-      rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique
-        attempts += 1
-        retry if attempts < 3
-        raise
       end
       task = ScheduledTask.create!(author: user, name: params["name"], prompt: params["prompt"],
                                    delivery_channel: params["channel"], cron_expression: params["cron"])
