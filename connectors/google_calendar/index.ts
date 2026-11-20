@@ -88,6 +88,27 @@ export interface CalendarListEntry {
   [field: string]: unknown;
 }
 
+/** A busy interval in a free/busy answer; `start`/`end` are RFC 3339. */
+export interface TimePeriod {
+  start: string;
+  end: string;
+  [field: string]: unknown;
+}
+
+/** One calendar's free/busy answer. `errors` explains a missing answer, for example `notFound`. */
+export interface FreeBusyCalendar {
+  busy?: TimePeriod[];
+  errors?: { domain?: string; reason?: string; [field: string]: unknown }[];
+  [field: string]: unknown;
+}
+
+/** One group's free/busy expansion: the member calendar IDs, or `errors` when it was not expanded. */
+export interface FreeBusyGroup {
+  calendars?: string[];
+  errors?: { domain?: string; reason?: string; [field: string]: unknown }[];
+  [field: string]: unknown;
+}
+
 /** RSVP answer, as Calendar spells it. */
 export type ResponseStatus = "accepted" | "declined" | "tentative";
 
@@ -273,6 +294,49 @@ export async function list_events(
     },
   });
   return { events: body.items ?? [], next_page_token: body.nextPageToken ?? null };
+}
+
+/**
+ * Busy intervals for calendars, people or groups between `time_min` and `time_max` (both required,
+ * RFC 3339). `calendar_ids` takes calendar IDs or email addresses and defaults to `["primary"]`;
+ * it works with free/busy-only access, where `list_events` is refused. Answers are keyed by the
+ * requested ID; a calendar that cannot be read comes back with `errors` instead of `busy`. Groups
+ * are expanded up to `group_expansion_max` members (at most 100) and the whole query up to
+ * `calendar_expansion_max` calendars (at most 50). `time_zone` sets the zone of the returned times.
+ */
+export async function free_busy(
+  args: {
+    time_min: string;
+    time_max: string;
+    calendar_ids?: string[];
+    time_zone?: string;
+    group_expansion_max?: number;
+    calendar_expansion_max?: number;
+  },
+  ctx: Ctx,
+): Promise<{
+  time_min: string;
+  time_max: string;
+  calendars: Record<string, FreeBusyCalendar>;
+  groups: Record<string, FreeBusyGroup>;
+}> {
+  const ids = args.calendar_ids?.length ? args.calendar_ids : ["primary"];
+  const body = await calendar(ctx, "/freeBusy", {
+    body: {
+      timeMin: args.time_min,
+      timeMax: args.time_max,
+      timeZone: args.time_zone,
+      groupExpansionMax: args.group_expansion_max,
+      calendarExpansionMax: args.calendar_expansion_max,
+      items: ids.map((id) => ({ id: id.trim() })),
+    },
+  });
+  return {
+    time_min: body.timeMin ?? args.time_min,
+    time_max: body.timeMax ?? args.time_max,
+    calendars: body.calendars ?? {},
+    groups: body.groups ?? {},
+  };
 }
 
 /**

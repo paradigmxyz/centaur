@@ -1,4 +1,4 @@
-description = "Google Calendar: list calendars and events, create, update and delete events, RSVP, Google Meet links"
+description = "Google Calendar: list calendars and events, free/busy, create, update and delete events, RSVP, Google Meet links"
 
 # Authentication is minted by iron-proxy's oauth_token transform. The
 # refresh_token grant exchanges the GOOGLE_TOKEN_JSON authorized-user
