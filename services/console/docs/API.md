@@ -1582,7 +1582,7 @@ To create a task for the requester instead, a Slack channel session sends `data.
 
 The admin API also exposes `GET /api/v1/scheduled_tasks/:id` for scheduled workflows to read the task's current ID, enabled state, and delivery channel. It requires an active admin API key, returns `404` for deleted tasks, and sets `Cache-Control: no-store`.
 
-Responses include the task's optional cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur-console` CLI exposes the same operations through `tasks`, `task`, `create-task`, `update-task`, `delete-task`, and `run-task`. Omit `--cron` when creating a manual-only task, or pass `update-task --cron ""` to remove an existing recurring schedule.
+Responses include the task's optional cron expression, fixed timezone, human-readable schedule, enabled state, next run time, and latest run metadata. The `centaur_console` Code Mode connector exposes the same operations through `scheduled_tasks`, `scheduled_task`, `create_scheduled_task`, `update_scheduled_task`, `delete_scheduled_task`, and `run_scheduled_task`. Omit `cron_expression` when creating a manual-only task, or pass `cron_expression: ""` to `update_scheduled_task` to remove an existing recurring schedule.
 
 ## Skills
 
