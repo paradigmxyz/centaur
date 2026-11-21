@@ -266,6 +266,7 @@ pub fn harness_auth_fragment(engine: &str, auth_mode: &str) -> Result<Option<Pro
         ("hermes", "api_key") => HERMES_API_KEY_FRAGMENT,
         ("openrouter", "api_key") => OPENROUTER_API_KEY_FRAGMENT,
         ("meta-ai", "api_key") => META_AI_API_KEY_FRAGMENT,
+        ("google", "api_key") => GOOGLE_GEMINI_API_KEY_FRAGMENT,
         ("claude-code", "api_key") => CLAUDE_CODE_API_KEY_FRAGMENT,
         ("claude-code", "access_token") => CLAUDE_CODE_ACCESS_TOKEN_FRAGMENT,
         _ => return Ok(None),
@@ -477,6 +478,20 @@ transforms:
             proxy_value: META_AI_API_KEY
             match_headers: ["Authorization"]
           rules: [{ host: api.ai.meta.com }]
+"#;
+
+// Pi's `google` provider calls the Generative Language API through Google's
+// SDK, which sends the key in `x-goog-api-key`.
+const GOOGLE_GEMINI_API_KEY_FRAGMENT: &str = r#"
+transforms:
+  - name: secrets
+    config:
+      secrets:
+        - id: GEMINI_API_KEY_GOOG_API_KEY
+          replace:
+            proxy_value: GEMINI_API_KEY
+            match_headers: ["X-Goog-Api-Key"]
+          rules: [{ host: generativelanguage.googleapis.com }]
 "#;
 
 // The `openai-codex` broker credential this references is managed by

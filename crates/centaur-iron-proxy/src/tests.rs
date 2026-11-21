@@ -49,6 +49,19 @@ fn harness_auth_fragments_are_baked_in() {
         Some("META_AI_API_KEY")
     );
 
+    let google = harness_auth_fragment("google", "api_key").unwrap().unwrap();
+    assert_eq!(
+        google.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+        Some("generativelanguage.googleapis.com")
+    );
+    let google_placeholders = placeholder_env(&[google]);
+    assert_eq!(
+        google_placeholders
+            .get("GEMINI_API_KEY")
+            .map(String::as_str),
+        Some("GEMINI_API_KEY")
+    );
+
     let claude_code = harness_auth_fragment("claude-code", "api_key")
         .unwrap()
         .unwrap();

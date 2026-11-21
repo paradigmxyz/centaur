@@ -27,8 +27,10 @@ use crate::{
 const TOOLS: &str = "read,bash,edit,write,codemode";
 /// Thinking level for turns without a per-turn override.
 const DEFAULT_THINKING_LEVEL: &str = "medium";
-/// Models Centaur supports on Pi, matching the Claude and GPT models the chat
-/// ingresses offer. Each needs its provider's `api_key` credential.
+/// Models Centaur supports on Pi: the Claude and GPT models the chat ingresses
+/// offer, plus Gemini models. Each needs its provider's `api_key` credential.
+/// Gemini models missing from Pi's bundled catalog are declared in the
+/// sandbox's `~/.pi/agent/models.json` (see `services/sandbox/entrypoint.sh`).
 const MODELS: &[(&str, &str)] = &[
     ("anthropic", "claude-fable-5"),
     ("anthropic", "claude-fable-5-1"),
@@ -42,6 +44,7 @@ const MODELS: &[(&str, &str)] = &[
     ("anthropic", "claude-sonnet-4-6"),
     ("anthropic", "claude-sonnet-5"),
     ("anthropic", "claude-sonnet-5-5"),
+    ("google", "gemini-4-neon"),
     ("openai", "gpt-5.4"),
     ("openai", "gpt-5.4-mini"),
     ("openai", "gpt-5.4-nano"),
@@ -394,6 +397,8 @@ mod tests {
             "openai/gpt-5.5",
             "openai/gpt-6.1-sol",
             "gpt-6.1-terra",
+            "google/gemini-4-neon",
+            "gemini-4-neon",
         ] {
             assert_eq!(check_model(model), Ok(()), "{model}");
         }
@@ -402,6 +407,8 @@ mod tests {
             "openai/claude-sonnet-5",
             "openai/o3",
             "openai/gpt-5.5:high",
+            "openai/gemini-4-neon",
+            "google/gemini-4",
         ] {
             assert!(check_model(model).is_err(), "{model}");
         }
