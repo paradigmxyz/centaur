@@ -14,7 +14,8 @@ chart's `workflow-discovery` Deployment: `workflow-host serve` answers each
 workflows in a forked child with `env` applied, and returning
 `{"workflows": [...]}`. The child is discarded after each pass, so nothing a
 module does at import reaches the server or the next pass. `api-rs` sends the
-`WORKFLOW_DIRS`, passthrough env, and enablement policy run sandboxes get.
+`WORKFLOW_DIRS` and passthrough env run sandboxes get, plus the enablement
+policy, which only discovery receives.
 Keep that server small, stateless, and unauthenticated; its NetworkPolicy is the
 trust boundary.
 

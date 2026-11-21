@@ -36,8 +36,10 @@ next discovery pass runs, with no restart.
 
 Discovery imports every enabled workflow module, which runs its top-level code.
 api-rs asks for it at startup and every `WORKFLOW_RECONCILE_INTERVAL_SECS`
-(default 60), sending the same `WORKFLOW_DIRS`, passthrough env, and enablement
-policy run sandboxes get. The `workflow-discovery` Deployment, running the agent
+(default 60), sending the `WORKFLOW_DIRS` and passthrough env run sandboxes get,
+plus the enablement policy so disabled modules are not imported during
+discovery. (Run sandboxes import every module, as before.) The
+`workflow-discovery` Deployment, running the agent
 image, imports the workflow files afresh in a forked process for each request,
 with no credentials, no database, and, under `networkPolicy.enabled`, no
 outbound network. A pass that takes longer than 120 seconds is stopped and
