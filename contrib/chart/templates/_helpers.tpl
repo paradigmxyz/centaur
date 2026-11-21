@@ -301,39 +301,3 @@ consume this helper rather than the raw values.
 {{- define "centaur.proxySyncUrl" -}}
 {{- printf "http://%s:%v" (include "centaur.proxySyncName" .) .Values.proxySync.port -}}
 {{- end -}}
-
-{{- /* Host path sandboxes mount at /home/agent/github, or "" for none. */ -}}
-{{- define "centaur.reposPath" -}}
-{{- if .Values.sandbox.reposPath -}}
-{{- .Values.sandbox.reposPath -}}
-{{- else if .Values.repoCache.enabled -}}
-{{- .Values.repoCache.hostPath -}}
-{{- end -}}
-{{- end -}}
-
-{{- /*
-Pod settings api-rs applies to the sandbox pods it creates: sandbox.* values,
-overridden by the SESSION_SANDBOX_* entries in apiRs.extraEnv exactly as api-rs
-reads them. Returns JSON for pods the chart renders that must match sandboxes.
-*/ -}}
-{{- define "centaur.sandboxPodSettings" -}}
-{{- $sandbox := .Values.sandbox -}}
-{{- $env := .Values.apiRs.extraEnv -}}
-{{- $settings := dict
-  "nodeSelector" ($sandbox.nodeSelector | default dict)
-  "podAnnotations" ($sandbox.podAnnotations | default dict)
-  "tolerations" ($sandbox.tolerations | default list)
-  "containerSecurityContext" ($sandbox.containerSecurityContext | default dict)
-  "runtimeClassName" ($sandbox.runtimeClassName | default "")
-  "priorityClassName" ($sandbox.priorityClassName | default "")
-  "hostUsers" $sandbox.hostUsers -}}
-{{- range $key, $name := dict "nodeSelector" "SESSION_SANDBOX_NODE_SELECTOR" "podAnnotations" "SESSION_SANDBOX_POD_ANNOTATIONS" "containerSecurityContext" "SESSION_SANDBOX_CONTAINER_SECURITY_CONTEXT" -}}
-{{- with get $env $name }}{{- if kindIs "string" . }}{{- $_ := set $settings $key (fromJson .) -}}{{- end }}{{- end -}}
-{{- end -}}
-{{- with get $env "SESSION_SANDBOX_TOLERATIONS" }}{{- if kindIs "string" . }}{{- $_ := set $settings "tolerations" (fromJsonArray .) -}}{{- end }}{{- end -}}
-{{- range $key, $name := dict "runtimeClassName" "SESSION_SANDBOX_RUNTIME_CLASS_NAME" "priorityClassName" "SESSION_SANDBOX_PRIORITY_CLASS_NAME" -}}
-{{- if hasKey $env $name }}{{- $_ := set $settings $key (get $env $name | toString) -}}{{- end -}}
-{{- end -}}
-{{- with get $env "SESSION_SANDBOX_HOST_USERS" }}{{- $_ := set $settings "hostUsers" (eq (toString . | lower) "true") -}}{{- end -}}
-{{- toJson $settings -}}
-{{- end -}}

@@ -2,22 +2,22 @@
 Workflow discovery: imports workflow modules for api-rs so their code never runs
 there. api-rs sends the workflow env with each request. No secrets, read-only
 sources, and (under networkPolicy) reachable only from api-rs with no egress.
-It runs workflow code, so it is placed and isolated like a sandbox pod (the
-sandbox.* values api-rs applies to the pods it creates), minus the sandbox
-service account, which exists to grant credentials.
+It runs workflow code, so it is placed and isolated like a sandbox pod: it
+follows the sandbox.* values (not apiRs.extraEnv SESSION_SANDBOX_* overrides),
+minus the sandbox service account, which exists to grant credentials.
 */ -}}
 {{- if .Values.apiRs.enabled }}
 {{- $component := "workflow-discovery" -}}
 {{- $name := include "centaur.componentName" (dict "root" . "component" $component) -}}
-{{- $sandbox := include "centaur.sandboxPodSettings" . | fromJson -}}
+{{- $sandbox := .Values.sandbox -}}
 {{- /* Chart defaults, then the sandbox's keys (an explicit false wins), then a
 read-only root filesystem, which discovery always keeps. */ -}}
 {{- $securityContext := deepCopy (.Values.containerSecurityContext | default dict) -}}
-{{- range $key, $value := $sandbox.containerSecurityContext -}}
+{{- range $key, $value := ($sandbox.containerSecurityContext | default dict) -}}
 {{- $_ := set $securityContext $key $value -}}
 {{- end -}}
 {{- $_ := set $securityContext "readOnlyRootFilesystem" true -}}
-{{- $reposPath := include "centaur.reposPath" . -}}
+{{- $reposPath := .Values.sandbox.reposPath | default (ternary .Values.repoCache.hostPath "" .Values.repoCache.enabled) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

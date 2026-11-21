@@ -6,7 +6,7 @@
 {{- $repoCacheStorageType := include "centaur.repoCacheStorageType" . -}}
 {{- $repoCacheUsePvc := eq $repoCacheStorageType "persistentVolumeClaim" -}}
 {{- $repoCachePvcName := include "centaur.repoCachePvcName" . -}}
-{{- $reposPath := include "centaur.reposPath" . -}}
+{{- $reposPath := .Values.sandbox.reposPath | default (ternary .Values.repoCache.hostPath "" .Values.repoCache.enabled) -}}
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $toolSources := list -}}
 {{- $publicToolSources := list -}}
