@@ -57,6 +57,13 @@ centaur-tools list
 my-tool --help
 ```
 
+To retire a tool CLI that a Code Mode connector replaces, delete the package and
+add its script name to `RETIRED_TOOLS` in `install_tool_shims.py`, mapped to the
+connector. Old prompts, scheduled tasks, and workflows that still run the
+command, or call it through `centaur-tools run` or `call`, then fail with
+directions to the connector instead of `command not found`. A mounted tool with
+the same script name takes precedence.
+
 ## Available Plugins
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.

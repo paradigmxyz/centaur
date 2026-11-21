@@ -102,5 +102,7 @@ jobs. The `legacyCompanyContext` (formerly `companyContextV1`),
 `console.googleDocsSync` values no longer have any effect, and neither do
 `apiRs.etl.companyContextEmbeddings` and the other `apiRs.etl` values, now that
 the `company_context` shell CLI that searched the v1 tables has also been
-removed. Data those paths already synced is kept in the database but is no
-longer updated. Use the company-context service described above.
+removed. Running `company_context` in a sandbox now fails with directions to the
+`company_context` Code Mode connector. Data those paths already synced is kept
+in the database but is no longer updated. Use the company-context service
+described above.

@@ -608,5 +608,104 @@ class RefreshInstallTest(unittest.TestCase):
             index = json.loads((bin_dir / ".centaur-tools.json").read_text())
             self.assertEqual([tool["name"] for tool in index], ["websearch"])
 
+
+class RetiredToolShimTest(unittest.TestCase):
+    def _install(self, tool_dir: Path, bin_dir: Path) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), mock.patch.object(
+            install_tool_shims, "RETIRED_TOOLS", {"old_tool": "new_connector"}
+        ):
+            install_tool_shims._install_tool_shims([tool_dir], bin_dir, refresh=False)
+
+    def test_retired_tool_shim_points_to_connector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            tool_dir.mkdir()
+            bin_dir.mkdir()
+
+            self._install(tool_dir, bin_dir)
+
+            result = subprocess.run(
+                [str(bin_dir / "old_tool"), "v2", "search", "anything"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("The `old_tool` CLI has been removed", result.stderr)
+            self.assertIn("centaur-codemode load new_connector", result.stderr)
+            index = json.loads((bin_dir / ".centaur-tools.json").read_text())
+            self.assertEqual(index, [])
+
+            for args in (
+                ["run", "old_tool", "search", "x"],
+                ["call", "old_tool", "search", "{}"],
+                ["which", "old_tool"],
+            ):
+                result = subprocess.run(
+                    [str(bin_dir / "centaur-tools"), *args],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, args)
+                self.assertIn("centaur-codemode load new_connector", result.stderr, args)
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "run", "missing"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr.strip(), "unknown tool: missing")
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "list"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("old_tool", result.stdout)
+
+    def test_mounted_tool_takes_precedence_over_retired_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            package_dir = tool_dir / "research" / "old_tool"
+            package_dir.mkdir(parents=True)
+            bin_dir.mkdir()
+            (package_dir / "pyproject.toml").write_text(
+                '[project]\nname = "old_tool"\n\n[project.scripts]\nold_tool = "client:main"\n'
+            )
+
+            self._install(tool_dir, bin_dir)
+
+            shim = (bin_dir / "old_tool").read_text()
+            self.assertIn(" run old_tool ", shim)
+            self.assertNotIn("has been removed", shim)
+
+    def test_retired_shim_does_not_replace_unmanaged_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            tool_dir.mkdir()
+            bin_dir.mkdir()
+            (bin_dir / "old_tool").write_text("#!/bin/sh\necho mine\n")
+
+            self._install(tool_dir, bin_dir)
+
+            self.assertEqual((bin_dir / "old_tool").read_text(), "#!/bin/sh\necho mine\n")
+
+    def test_company_context_is_retired_to_its_connector(self) -> None:
+        self.assertEqual(install_tool_shims.RETIRED_TOOLS["company_context"], "company_context")
+
+
 if __name__ == "__main__":
     unittest.main()
