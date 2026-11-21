@@ -361,6 +361,56 @@ class Api::V1::SandboxAdminControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "an admin's Slack DM sandbox creates a GCP auth secret from another's keyfile and edits it" do
+    original = gcp_auth_secrets(:acme_gcs_keyfile)
+
+    with_token(dm_proxy_for(users(:acme_admin))) do |headers|
+      get "/api/v1/sandbox/admin/gcp_auth_secrets/#{original.oid}", headers: headers
+      assert_response :ok
+      keyfile = json_body.dig("data", "keyfile")
+
+      post "/api/v1/sandbox/admin/gcp_auth_secrets",
+           params: { data: { foreign_id: "gcp-gcs-writer", name: "gcs writer", subject: "writer-bot@acme.example",
+                             scopes: [ "https://www.googleapis.com/auth/devstorage.read_write" ],
+                             keyfile: keyfile, rules: [ { host: "storage.googleapis.com" } ] } },
+           headers: headers, as: :json
+      assert_response :created
+      copy = GcpAuthSecret.find_by_oid!(json_body.dig("data", "id"))
+      assert_equal [ "env", { "var" => "GCP_SA_KEYFILE" }, "writer-bot@acme.example", users(:acme_admin) ],
+                   [ copy.keyfile_source.source_type, copy.keyfile_source.config, copy.subject, copy.created_by ]
+
+      patch "/api/v1/sandbox/admin/gcp_auth_secrets/#{copy.oid}",
+            params: { data: { scopes: [ "https://www.googleapis.com/auth/cloud-platform" ] } },
+            headers: headers, as: :json
+      assert_response :ok
+      copy.reload
+      assert_equal [ %w[https://www.googleapis.com/auth/cloud-platform], %w[storage.googleapis.com],
+                     "writer-bot@acme.example", "env" ],
+                   [ copy.scopes, copy.rules.map(&:host), copy.subject, copy.keyfile_source.source_type ]
+
+      patch "/api/v1/sandbox/admin/gcp_auth_secrets/#{copy.oid}",
+            params: { data: { keyfile: nil, subject: nil, credentials_provider: { type: "workload_identity" } } },
+            headers: headers, as: :json
+      assert_response :ok
+      copy.reload
+      assert_equal [ { "type" => "workload_identity" }, nil, nil, %w[storage.googleapis.com] ],
+                   [ copy.credentials_provider, copy.keyfile_source, copy.subject, copy.rules.map(&:host) ]
+
+      patch "/api/v1/sandbox/admin/gcp_auth_secrets/#{copy.oid}",
+            params: { data: { description: "GCS via workload identity" } }, headers: headers, as: :json
+      assert_response :ok
+      assert_equal [ "GCS via workload identity", { "type" => "workload_identity" } ],
+                   [ copy.reload.description, copy.credentials_provider ]
+
+      post "/api/v1/sandbox/admin/gcp_auth_secrets",
+           params: { data: { scopes: [ "https://www.googleapis.com/auth/cloud-platform" ],
+                             rules: [ { host: "x.example" } ],
+                             keyfile: { source_type: "control_plane", secret: "pasted", config: {} } } },
+           headers: headers, as: :json
+      assert_response :forbidden
+    end
+  end
+
   test "an admin's Slack DM sandbox edits a static secret's fields and keeps its source" do
     secret = static_secrets(:acme_staging_api_key)
     secret.create_source!(source_type: "control_plane", secret: "value-set-by-operator")

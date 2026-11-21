@@ -21,6 +21,7 @@ const ADMIN_PAGE_LIMIT = 200;
 const ADMIN_WRITABLE_SECRET_PATHS: Record<string, string> = {
   static: "/api/v1/sandbox/admin/static_secrets",
   pg_dsn: "/api/v1/sandbox/admin/pg_dsn_secrets",
+  gcp_auth: "/api/v1/sandbox/admin/gcp_auth_secrets",
   gcp_id_token: "/api/v1/sandbox/admin/gcp_id_token_secrets",
 };
 
@@ -155,7 +156,7 @@ export interface EffectiveGrant {
   [field: string]: unknown;
 }
 
-/** A static, pg_dsn, or gcp_id_token secret document; its source reference, never its value. */
+/** A static, pg_dsn, gcp_auth, or gcp_id_token secret document; its source reference, never its value. */
 export interface SecretDocument {
   id: string;
   foreign_id: string;
@@ -608,7 +609,7 @@ export async function admin_secrets(
 }
 
 /**
- * Read a static, pg_dsn, or gcp_id_token secret's document by OID, foreign ID or unambiguous name:
+ * Read a static, pg_dsn, gcp_auth, or gcp_id_token secret's document by OID, foreign ID or unambiguous name:
  * its source reference and rules, never the secret value. Other secret kinds can only be inspected
  * in the Console UI.
  */
@@ -621,21 +622,22 @@ export async function admin_secret(
 }
 
 /**
- * Create a static, pg_dsn, or gcp_id_token secret from a Console API document. `data` is that
- * kind's document, for example `{ name, foreign_id, description, labels, source: { source_type,
- * config } }` for static, `{ name, foreign_id, database, role, dsn: {...} }` for pg_dsn, or
- * `{ name, foreign_id, audience, keyfile: {...} }` for gcp_id_token. Sources must reference an
- * external secret store. Console admins only.
+ * Create a static, pg_dsn, gcp_auth, or gcp_id_token secret from a Console API document. `data` is
+ * that kind's document, for example `{ name, foreign_id, description, labels, source: {
+ * source_type, config } }` for static, `{ name, foreign_id, database, role, dsn: {...} }` for
+ * pg_dsn, `{ name, foreign_id, scopes, rules, keyfile: {...} }` or `{ ..., credentials_provider: {
+ * type: "workload_identity" } }` for gcp_auth, or `{ name, foreign_id, audience, keyfile: {...} }`
+ * for gcp_id_token. Sources must reference an external secret store. Console admins only.
  */
 export async function admin_create_secret(
   args: {
-    kind: "static" | "pg_dsn" | "gcp_id_token";
+    kind: "static" | "pg_dsn" | "gcp_auth" | "gcp_id_token";
     data: Record<string, unknown>;
   },
   ctx: Ctx,
 ): Promise<{ secret: SecretDocument }> {
   const path = ADMIN_WRITABLE_SECRET_PATHS[args.kind];
-  if (!path) throw new Error("kind must be static, pg_dsn, or gcp_id_token");
+  if (!path) throw new Error("kind must be static, pg_dsn, gcp_auth, or gcp_id_token");
   return {
     secret: dataObject(
       await request(ctx, path, { method: "POST", data: { data: args.data }, label: admin }),
@@ -645,8 +647,9 @@ export async function admin_create_secret(
 }
 
 /**
- * Replace the given fields of a static, pg_dsn, or gcp_id_token secret, addressed by OID, foreign
- * ID or unambiguous name; omitted fields, including its source, are kept. Console admins only.
+ * Replace the given fields of a static, pg_dsn, gcp_auth, or gcp_id_token secret, addressed by OID,
+ * foreign ID or unambiguous name; omitted fields, including its source, are kept. Console admins
+ * only.
  */
 export async function admin_update_secret(
   args: { secret: string; data: Record<string, unknown> },
