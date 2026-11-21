@@ -301,3 +301,12 @@ consume this helper rather than the raw values.
 {{- define "centaur.proxySyncUrl" -}}
 {{- printf "http://%s:%v" (include "centaur.proxySyncName" .) .Values.proxySync.port -}}
 {{- end -}}
+
+{{- /* Host path sandboxes mount at /home/agent/github, or "" for none. */ -}}
+{{- define "centaur.reposPath" -}}
+{{- if .Values.sandbox.reposPath -}}
+{{- .Values.sandbox.reposPath -}}
+{{- else if .Values.repoCache.enabled -}}
+{{- .Values.repoCache.hostPath -}}
+{{- end -}}
+{{- end -}}

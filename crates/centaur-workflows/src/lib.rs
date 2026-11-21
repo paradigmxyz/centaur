@@ -50,6 +50,13 @@ const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
 /// Upper bound on one discovery request. The discovery service bounds its own
 /// pass at 120s by default; this leaves room for the response.
 const WORKFLOW_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(150);
+/// The workflow-host env a discovery request carries, so discovery sees the
+/// same workflows, and the same enablement policy, as runs.
+const WORKFLOW_DISCOVERY_ENV: [&str; 3] = [
+    "WORKFLOW_DIRS",
+    "WORKFLOW_ENABLE_MODE",
+    "WORKFLOW_ALLOWED_NAMES",
+];
 const WORKFLOW_STARTUP_DISCOVERY_INITIAL_DELAY: Duration = Duration::from_secs(2);
 const WORKFLOW_STARTUP_DISCOVERY_MAX_DELAY: Duration = Duration::from_secs(30);
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
@@ -281,6 +288,10 @@ impl WorkflowHostSandboxRuntime {
         workflow_host_spec(&self.spec)
     }
 
+    fn discovery_env(&self) -> BTreeMap<String, String> {
+        workflow_discovery_env(&self.spec)
+    }
+
     fn update_workflow_principals(
         &self,
         registered: BTreeMap<String, String>,
@@ -324,6 +335,14 @@ fn workflow_host_spec(base: &SandboxSpec) -> SandboxSpec {
     spec.env("CENTAUR_JWT_SIGNING_SECRET", "")
 }
 
+fn workflow_discovery_env(spec: &SandboxSpec) -> BTreeMap<String, String> {
+    spec.env
+        .iter()
+        .filter(|entry| WORKFLOW_DISCOVERY_ENV.contains(&entry.name.as_str()))
+        .map(|entry| (entry.name.clone(), entry.value.clone()))
+        .collect()
+}
+
 /// Client for the workflow discovery service (`workflow-host serve`).
 /// Discovery imports every enabled workflow module, which runs its top-level
 /// code, so it happens in that service and never in the API process.
@@ -341,11 +360,16 @@ impl WorkflowDiscoveryClient {
         }
     }
 
-    async fn discover(&self) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError> {
+    /// Discovers the workflows a host started with `env` would load.
+    async fn discover(
+        &self,
+        env: &BTreeMap<String, String>,
+    ) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError> {
         let response = self
             .http
             .post(&self.discover_url)
             .timeout(WORKFLOW_DISCOVERY_TIMEOUT)
+            .json(&json!({ "env": env }))
             .send()
             .await
             .map_err(|error| {
@@ -710,7 +734,11 @@ impl WorkflowRuntime {
             etl_backfill: etl_backfill_client.clone(),
         };
 
-        let discovery = discover_python_workflow_metadata_at_startup(&workflow_discovery).await;
+        let discovery = discover_python_workflow_metadata_at_startup(
+            &workflow_discovery,
+            &workflow_host_sandbox,
+        )
+        .await;
         let enablement = WorkflowEnablement::from_env()?;
         reconcile_workflow_principals(
             &workflow_host_sandbox,
@@ -1947,10 +1975,12 @@ async fn reconcile_workflow_principals(
 /// workflow as unrestricted by `WORKFLOW_STARTERS`.
 async fn discover_python_workflow_metadata_at_startup(
     discovery: &WorkflowDiscoveryClient,
+    workflow_host_sandbox: &WorkflowHostSandboxRuntime,
 ) -> PythonWorkflowMetadata {
+    let env = workflow_host_sandbox.discovery_env();
     let mut delay = WORKFLOW_STARTUP_DISCOVERY_INITIAL_DELAY;
     loop {
-        match discovery.discover().await {
+        match discovery.discover(&env).await {
             Ok(metadata) => return metadata,
             Err(error) => {
                 warn!(%error, retry_in_secs = delay.as_secs(), "workflow discovery failed at startup; retrying");
@@ -2078,7 +2108,9 @@ async fn reconcile_workflow_metadata_once(
     WorkflowRuntimeError,
 > {
     let enablement = WorkflowEnablement::from_env()?;
-    let discovery = workflow_discovery.discover().await?;
+    let discovery = workflow_discovery
+        .discover(&workflow_host_sandbox.discovery_env())
+        .await?;
     let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
     let next_schedules = build_schedule_registry(&discovery, &enablement)?;
     reconcile_workflow_principals(
@@ -4646,9 +4678,30 @@ mod tests {
         let status = status.to_owned();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..read]).to_string();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).to_string();
             let body = body.to_string();
             write!(
                 stream,
@@ -4656,7 +4709,7 @@ mod tests {
                 body.len()
             )
             .unwrap();
-            request.lines().next().unwrap_or_default().to_owned()
+            request
         });
         (url, handle)
     }
@@ -4678,12 +4731,28 @@ mod tests {
             }),
         );
 
+        let env = workflow_discovery_env(
+            &SandboxSpec::new("centaur-agent:latest")
+                .env("WORKFLOW_DIRS", "/opt/centaur/workflows")
+                .env("WORKFLOW_ENABLE_MODE", "all")
+                .env("DATABASE_URL", "postgres://real-secret")
+                .env("CENTAUR_API_URL", "http://api"),
+        );
         let metadata = WorkflowDiscoveryClient::new(&format!("{url}/"))
-            .discover()
+            .discover(&env)
             .await
             .unwrap();
 
-        assert_eq!(server.join().unwrap(), "POST /discover HTTP/1.1");
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("POST /discover HTTP/1.1\r\n"),
+            "{request}"
+        );
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            json!({"env": {"WORKFLOW_DIRS": "/opt/centaur/workflows", "WORKFLOW_ENABLE_MODE": "all"}})
+        );
         assert_eq!(
             metadata.workflow_names,
             BTreeSet::from(["nightly_report".to_owned()])
@@ -4705,7 +4774,7 @@ mod tests {
         );
 
         let error = WorkflowDiscoveryClient::new(&url)
-            .discover()
+            .discover(&BTreeMap::new())
             .await
             .unwrap_err();
         server.join().unwrap();

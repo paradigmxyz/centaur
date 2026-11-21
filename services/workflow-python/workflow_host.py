@@ -8,7 +8,10 @@ context operations back to api-rs.
 ``workflow-host serve`` instead runs the workflow discovery service: a small
 HTTP server whose ``POST /discover`` runs discovery in a fresh host process and
 returns its ``workflow.discovery`` message. api-rs calls it so that importing
-workflow modules, which runs their top-level code, never happens in api-rs.
+workflow modules, which runs their top-level code, never happens in api-rs. The
+request body carries the host env api-rs gives workflow-host sandboxes
+(``{"env": {"WORKFLOW_DIRS": ...}}``), so the service needs no configuration of
+its own.
 """
 
 from __future__ import annotations
@@ -40,6 +43,12 @@ DEFAULT_DISCOVERY_PORT = 8090
 DISCOVERY_TIMEOUT_ENV = "WORKFLOW_DISCOVERY_TIMEOUT_SECONDS"
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 120.0
 STDERR_TAIL_BYTES = 8 * 1024
+MAX_DISCOVERY_REQUEST_BYTES = 64 * 1024
+# The host env a discovery request may set: where workflows live and which are
+# enabled. Anything else stays the service's own environment.
+DISCOVERY_REQUEST_ENV = frozenset(
+    {"WORKFLOW_DIRS", "WORKFLOW_ENABLE_MODE", "WORKFLOW_ALLOWED_NAMES"}
+)
 
 
 class ProtocolError(RuntimeError):
@@ -585,7 +594,24 @@ async def main() -> int:
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
-def run_discovery_process(timeout_seconds: float) -> tuple[int, dict[str, Any]]:
+def discovery_request_env(body: Any) -> dict[str, str]:
+    """Validate a discovery request body and return the host env it sets."""
+    if not isinstance(body, dict) or set(body) - {"env"}:
+        raise ValueError('discovery request must be {"env": {...}}')
+    env = body.get("env", {})
+    if not isinstance(env, dict) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in env.items()
+    ):
+        raise ValueError("discovery request env must map names to strings")
+    unknown = sorted(set(env) - DISCOVERY_REQUEST_ENV)
+    if unknown:
+        raise ValueError(f"discovery request may not set {', '.join(unknown)}")
+    return env
+
+
+def run_discovery_process(
+    timeout_seconds: float, env: dict[str, str] | None = None
+) -> tuple[int, dict[str, Any]]:
     """Discover workflows in a fresh host process and return (HTTP status, body).
 
     A new process per pass imports current workflow files instead of modules
@@ -599,6 +625,7 @@ def run_discovery_process(timeout_seconds: float) -> tuple[int, dict[str, Any]]:
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
+            env={**os.environ, **(env or {})},
         )
     except subprocess.TimeoutExpired as exc:
         return 504, {
@@ -649,8 +676,16 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/discover":
             self._send_json(404, {"error": "not found"})
             return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_DISCOVERY_REQUEST_BYTES:
+                raise ValueError("discovery request is too large")
+            env = discovery_request_env(json.loads(self.rfile.read(length) or b"{}"))
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
         with self.discovery_lock:
-            status, body = run_discovery_process(self.timeout_seconds)
+            status, body = run_discovery_process(self.timeout_seconds, env)
         if status != 200:
             print(f"workflow_discovery_failed status={status} error={body.get('error')}", file=sys.stderr)
         self._send_json(status, body)

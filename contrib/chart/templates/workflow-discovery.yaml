@@ -1,43 +1,13 @@
 {{- /*
-Workflow discovery service. Discovery imports every enabled workflow module,
-which runs its top-level code, so api-rs never does it in its own process: it
-calls this service, which runs `workflow-host serve` from the agent image and
-answers each POST /discover with a fresh host process. The pod gets no
-deployment env beyond where workflows live and which are enabled, holds no
-secrets, mounts workflow sources read-only, and under networkPolicy accepts
-traffic only from api-rs and makes no outbound connections.
+Workflow discovery: imports workflow modules for api-rs so their code never runs
+there. api-rs sends the workflow env with each request. No secrets, read-only
+sources, and (under networkPolicy) reachable only from api-rs with no egress.
 */ -}}
 {{- if .Values.apiRs.enabled }}
 {{- $component := "workflow-discovery" -}}
 {{- $name := include "centaur.componentName" (dict "root" . "component" $component) -}}
 {{- $discovery := .Values.workflowDiscovery -}}
-{{- $extraEnv := .Values.apiRs.extraEnv -}}
-{{- $repoCacheUsePvc := eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim" -}}
-{{- $reposPath := .Values.sandbox.reposPath -}}
-{{- if and .Values.repoCache.enabled (not $reposPath) -}}
-{{- $reposPath = .Values.repoCache.hostPath -}}
-{{- end -}}
-{{- /* The same workflow directories and import roots workflow-host sandboxes get. */ -}}
-{{- $workflowDirList := list -}}
-{{- $pythonPath := list "/opt/centaur" -}}
-{{- range $source := include "centaur.overlaySources" . | fromJsonArray -}}
-{{- $repo := get $source "repo" | default "" -}}
-{{- if and $repo $.Values.repoCache.enabled -}}
-{{- with (get $source "workflowsSubdir") -}}
-{{- $workflowDirList = append $workflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}
-{{- end -}}
-{{- with (get $source "toolsSubdir") -}}
-{{- $pythonPath = append $pythonPath (dir (printf "/home/agent/github/%s/%s" $repo .)) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- $workflowDirs := "/opt/centaur/workflows" -}}
-{{- if gt (len $workflowDirList) 0 -}}
-{{- $workflowDirs = join ":" $workflowDirList -}}
-{{- end -}}
-{{- with (get $extraEnv "KUBERNETES_WORKFLOW_DIRS") -}}
-{{- $workflowDirs = . -}}
-{{- end -}}
+{{- $reposPath := include "centaur.reposPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -72,16 +42,10 @@ spec:
           env:
             - name: WORKFLOW_DISCOVERY_PORT
               value: {{ $discovery.port | quote }}
-            - name: WORKFLOW_DIRS
-              value: {{ $workflowDirs | quote }}
             - name: PYTHONPATH
-              value: {{ join ":" (uniq $pythonPath) | quote }}
+              value: /opt/centaur
             - name: HOME
               value: /tmp
-            - name: WORKFLOW_ENABLE_MODE
-              value: {{ get $extraEnv "WORKFLOW_ENABLE_MODE" | default .Values.apiRs.workflowEnableMode | quote }}
-            - name: WORKFLOW_ALLOWED_NAMES
-              value: {{ get $extraEnv "WORKFLOW_ALLOWED_NAMES" | default .Values.apiRs.workflowAllowedNames | quote }}
           ports:
             - name: http
               containerPort: {{ $discovery.port }}
@@ -110,7 +74,7 @@ spec:
           emptyDir: {}
 {{- if $reposPath }}
         - name: repos
-{{- if and .Values.repoCache.enabled $repoCacheUsePvc }}
+{{- if and .Values.repoCache.enabled (eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim") }}
           persistentVolumeClaim:
             claimName: {{ include "centaur.repoCachePvcName" . | quote }}
             readOnly: true
@@ -135,9 +99,7 @@ spec:
       targetPort: http
 {{- if .Values.networkPolicy.enabled }}
 ---
-# This policy is the service's trust boundary: its API is unauthenticated. Only
-# api-rs may call it, and it makes no outbound connections (DNS aside), so
-# workflow module top-level code cannot reach anything during discovery.
+# The service is unauthenticated; this policy is its trust boundary.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
