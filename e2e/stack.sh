@@ -32,6 +32,11 @@ cd "$(dirname "$0")/.."
 
 CLUSTER="${CENTAUR_E2E_CLUSTER:-centaur-e2e}"
 RELEASE=centaur # contrib/scripts/bootstrap-k8s-secrets.sh assumes this name
+NODE="${CLUSTER}-control-plane"
+# The node directory sandboxes mount (sandbox.reposPath in e2e/infra/values.yaml)
+# and the workflow directory under it that tests install workflow files into.
+REPOS_DIR=/var/lib/centaur-e2e/repos
+WORKFLOW_DIR="$REPOS_DIR/centaur-e2e/workflows"
 NAMESPACE=centaur
 SLACK_NAMESPACE=centaur-e2e-slack
 MODEL_NAMESPACE=centaur-e2e-model
@@ -90,6 +95,8 @@ up() {
   # which is slow under load. resolv.conf is bind-mounted, so write in place.
   docker exec "${CLUSTER}-control-plane" sh -c \
     "grep -v '^search ' /etc/resolv.conf > /tmp/resolv.conf && cat /tmp/resolv.conf > /etc/resolv.conf"
+
+  docker exec "$NODE" mkdir -p "$WORKFLOW_DIR"
 
   kubectl -n kube-system create configmap coredns --from-file=Corefile=e2e/infra/Corefile \
     --dry-run=client -o yaml | apply_stdin
@@ -279,6 +286,9 @@ deploy_fake_slack() {
 run_tests() {
   use_cluster
   remove_sandboxes
+  # Workflows installed by earlier runs would otherwise be discovered forever.
+  docker exec "$NODE" sh -c "mkdir -p '$WORKFLOW_DIR' && rm -f '$WORKFLOW_DIR'/*.py"
+  export E2E_KIND_NODE="$NODE" E2E_WORKFLOW_DIR="$WORKFLOW_DIR"
   local password
   password="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
   export E2E_SLACK_URL=http://127.0.0.1:30443

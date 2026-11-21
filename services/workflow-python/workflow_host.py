@@ -4,12 +4,20 @@
 The host speaks newline-delimited JSON over stdin/stdout. It imports existing
 Centaur workflow modules, runs ``handler(input, ctx)``, and delegates durable
 context operations back to api-rs.
+
+``workflow-host serve`` instead runs the workflow discovery service: a small
+HTTP server whose ``POST /discover {"workflow_dirs": "a:b", "env": {...}}``
+imports the workflows in those directories, with ``env`` (the passthrough env
+workflow-host sandboxes get) applied, and returns their metadata. api-rs calls
+it so that importing workflow modules, which runs their top-level code, never
+happens in api-rs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ast
+import contextlib
 import dataclasses
 import importlib.util
 import inspect
@@ -18,6 +26,7 @@ import os
 import sys
 import traceback
 import typing
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +36,7 @@ from api.workflow_engine import WorkflowContext
 DATABASE_CONNECT_ATTEMPTS = 5
 DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
 DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
+DISCOVERY_PORT = 8090
 
 
 class ProtocolError(RuntimeError):
@@ -89,9 +99,10 @@ class RegisteredWorkflow:
     agent_defaults: dict[str, Any] | None = None
 
 
-def workflow_dirs() -> list[Path]:
+def workflow_dirs(raw: str | None = None) -> list[Path]:
     dirs = []
-    raw = os.getenv("WORKFLOW_DIRS", "")
+    if raw is None:
+        raw = os.getenv("WORKFLOW_DIRS", "")
     for entry in raw.split(":"):
         entry = entry.strip()
         if entry:
@@ -198,8 +209,8 @@ def workflow_name_from_source(path: Path) -> str | None:
     return name
 
 
-def discover_workflows() -> dict[str, RegisteredWorkflow]:
-    dirs = workflow_dirs()
+def discover_workflows(raw_dirs: str | None = None) -> dict[str, RegisteredWorkflow]:
+    dirs = workflow_dirs(raw_dirs)
     configure_workflow_import_paths(dirs)
     discovered: dict[str, RegisteredWorkflow] = {}
     for directory in dirs:
@@ -425,10 +436,33 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
             await pool.close()
 
 
-def discovery_payload() -> dict[str, Any]:
-    workflows = discover_workflows()
+@contextlib.contextmanager
+def temporary_env(env: dict[str, str]) -> typing.Iterator[None]:
+    previous = {name: os.environ.get(name) for name in env}
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def discovery_payload(raw_dirs: str) -> dict[str, Any]:
+    """Import the workflows in ``raw_dirs`` and describe them.
+
+    Workflow files are re-executed on every pass; helper modules they import
+    from those directories are evicted first so edits to them land too.
+    """
+    roots = tuple(str(path) + os.sep for path in workflow_dirs(raw_dirs))
+    for name, module in list(sys.modules.items()):
+        source = getattr(module, "__file__", None) or ""
+        if name.startswith("_centaur_workflow_host.") or (roots and source.startswith(roots)):
+            del sys.modules[name]
+    workflows = discover_workflows(raw_dirs)
     return {
-        "type": "workflow.discovery",
         "workflows": [
             {
                 "workflow_name": workflow.workflow_name,
@@ -540,9 +574,6 @@ async def main() -> int:
                 if message_type == "ctx.response":
                     rpc.resolve(message)
                     continue
-                if message_type == "workflow.discover":
-                    await rpc.write(discovery_payload())
-                    return 0
                 if message_type == "workflow.start":
                     if active_workflow is not None:
                         await rpc.write(
@@ -572,5 +603,65 @@ async def main() -> int:
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
+class DiscoveryRequestHandler(BaseHTTPRequestHandler):
+    server_version = "centaur-workflow-discovery"
+
+    def do_GET(self) -> None:
+        if self.path == "/healthz":
+            self._send_json(200, {"ok": True})
+            return
+        self._send_json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        if self.path != "/discover":
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            raw_dirs = body["workflow_dirs"]
+            env = body.get("env", {})
+            if not isinstance(raw_dirs, str) or not isinstance(env, dict):
+                raise TypeError("workflow_dirs must be a string and env an object")
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+                raise TypeError("env values must be strings")
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            self._send_json(400, {"error": f'expected {{"workflow_dirs": "...", "env": {{...}}}}: {exc}'})
+            return
+        try:
+            with temporary_env(env):
+                payload = discovery_payload(raw_dirs)
+        except Exception as exc:
+            print(f"workflow_discovery_failed error={exc}", file=sys.stderr)
+            self._send_json(500, {"error": str(exc), "traceback": traceback.format_exc()})
+            return
+        self._send_json(200, payload)
+
+    def _send_json(self, status: int, body: dict[str, Any]) -> None:
+        payload = json.dumps(body, separators=(",", ":"), default=str).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        if self.path != "/healthz":
+            print(f"workflow_discovery_request {format % args}", file=sys.stderr)
+
+
+def serve_discovery() -> int:
+    """Serve discovery one request at a time. A hung import blocks /healthz
+    too, so the liveness probe restarts the pod."""
+    server = HTTPServer(("0.0.0.0", DISCOVERY_PORT), DiscoveryRequestHandler)
+    print(f"workflow_discovery_listening port={DISCOVERY_PORT}", file=sys.stderr)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["serve"]:
+        raise SystemExit(serve_discovery())
     raise SystemExit(asyncio.run(main()))

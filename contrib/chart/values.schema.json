@@ -482,7 +482,6 @@
         "sessionEventsRetentionDays": { "type": "integer", "minimum": 0, "maximum": 3650 },
         "sessionEventsRetentionSweepIntervalSecs": { "type": "integer", "minimum": 1 },
         "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
-        "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
         "metrics": {
           "type": "object",
@@ -615,6 +614,12 @@
             "sizeLimit": { "type": "string" }
           }
         }
+      }
+    },
+    "workflowDiscovery": {
+      "type": "object",
+      "properties": {
+        "resources": { "type": "object" }
       }
     },
     "networkPolicy": {

@@ -9,8 +9,11 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -1276,6 +1279,136 @@ async def handler(inp, ctx):
             self.assertEqual(proc.returncode, 0)
             assert proc.stderr is not None
             self.assertEqual(proc.stderr.read(), "")
+
+
+def http_json(method: str, url: str, body: dict | None = None) -> tuple[int, dict]:
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(url, data=data, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def discover(base: str, workflow_dir: str, **env: str) -> tuple[int, dict]:
+    return http_json("POST", f"{base}/discover", {"workflow_dirs": workflow_dir, "env": env})
+
+
+class DiscoveryServerTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def discovery_server(self) -> Iterator[str]:
+        host = load_workflow_host()
+        server = host.HTTPServer(("127.0.0.1", 0), host.DiscoveryRequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_address[1]}"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+    def test_each_discovery_imports_the_current_workflow_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "first.py").write_text(
+                'WORKFLOW_NAME = "first"\n\nasync def handler(inp, ctx):\n    return inp\n'
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["first"])
+
+                (Path(tmp) / "second.py").write_text(
+                    'WORKFLOW_NAME = "second"\n'
+                    'SCHEDULE = {"schedule_id": "second", "interval_seconds": 60}\n\n'
+                    "async def handler(inp, ctx):\n    return inp\n"
+                )
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                workflows = {w["workflow_name"]: w for w in body["workflows"]}
+                self.assertEqual(sorted(workflows), ["first", "second"])
+                self.assertEqual(workflows["second"]["schedule"]["interval_seconds"], 60)
+
+    def test_a_failed_discovery_is_an_error_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in ("one.py", "two.py"):
+                (Path(tmp) / filename).write_text(
+                    'WORKFLOW_NAME = "same"\n\nasync def handler(inp, ctx):\n    return inp\n'
+                )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 500)
+                self.assertIn("duplicate workflow name", body["error"])
+
+                (Path(tmp) / "two.py").unlink()
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["same"])
+
+    def test_output_from_workflow_code_does_not_affect_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "noisy.py").write_text(
+                'print("loading noisy")\nWORKFLOW_NAME = "noisy"\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["noisy"])
+
+    def test_edits_to_imported_helper_modules_are_picked_up(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workflows = Path(root) / "workflows"
+            (workflows / "helpers").mkdir(parents=True)
+            (workflows / "__init__.py").write_text("")
+            (workflows / "helpers" / "__init__.py").write_text("")
+            helper = workflows / "helpers" / "schedule.py"
+            helper.write_text("INTERVAL = 60\n")
+            (workflows / "report.py").write_text(
+                "from workflows.helpers.schedule import INTERVAL\n\n"
+                'WORKFLOW_NAME = "report"\n'
+                'SCHEDULE = {"schedule_id": "report", "interval_seconds": INTERVAL}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, str(workflows))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 60)
+
+                helper.write_text("INTERVAL = 120\n")
+                status, body = discover(base, str(workflows))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 120)
+
+    def test_module_level_config_reads_the_request_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "weekly.py").write_text(
+                "import os\n\n"
+                'WORKFLOW_NAME = "weekly"\n'
+                'SCHEDULE = {"schedule_id": "weekly", "cron": "0 8 * * MON",\n'
+                '            "enabled": os.environ.get("ENABLE_WEEKLY_WORKFLOW", "true") == "true"}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp, ENABLE_WEEKLY_WORKFLOW="false")
+                self.assertEqual(status, 200)
+                self.assertFalse(body["workflows"][0]["schedule"]["enabled"])
+                # The env applies to one pass only.
+                status, body = discover(base, tmp)
+                self.assertTrue(body["workflows"][0]["schedule"]["enabled"])
+                self.assertNotIn("ENABLE_WEEKLY_WORKFLOW", os.environ)
+
+    def test_unknown_paths_are_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.discovery_server() as base:
+                self.assertEqual(http_json("GET", f"{base}/discover")[0], 404)
+                self.assertEqual(http_json("POST", f"{base}/run")[0], 404)
+                self.assertEqual(http_json("POST", f"{base}/discover", {"dirs": tmp})[0], 400)
+                self.assertEqual(
+                    http_json("POST", f"{base}/discover", {"workflow_dirs": tmp, "env": {"X": 1}})[0],
+                    400,
+                )
 
 
 if __name__ == "__main__":
