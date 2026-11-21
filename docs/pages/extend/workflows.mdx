@@ -38,9 +38,11 @@ Discovery imports every enabled workflow module, which runs its top-level code.
 api-rs asks for it at startup and every `WORKFLOW_RECONCILE_INTERVAL_SECS`
 (default 60). The `workflow-discovery` Deployment answers each request in a
 fresh Python process from the agent image, with no credentials, no database,
-and, under `networkPolicy.enabled`, no outbound network. Keep module top level
-cheap and free of side effects: code that needs a credential or the network at
-import time fails discovery.
+no deployment env beyond `WORKFLOW_DIRS` and the enablement policy, and, under
+`networkPolicy.enabled`, no outbound network. Keep module top level cheap and
+free of side effects, and declare `SCHEDULE`, `WEBHOOKS`, `WORKFLOW_PRINCIPAL`,
+and `WORKFLOW_STARTERS` as constants: code that needs a credential, the
+network, or deployment config at import time fails discovery or sees defaults.
 
 ## Define a workflow
 

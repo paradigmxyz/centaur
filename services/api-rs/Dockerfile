@@ -51,19 +51,15 @@ FROM debian:bookworm-slim
 RUN --mount=type=cache,id=api-rs-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=api-rs-apt-lib,target=/var/lib/apt,sharing=locked \
     printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
-    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
-COPY centaur_sdk/ /app/centaur_sdk/
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
-    && pip3 install --break-system-packages --no-compile /app/centaur_sdk \
-    && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 # api-rs discovers tool secret metadata from pyproject.toml at startup so it can
 # register the full tool secret set with iron-control before sandboxes claim.
 COPY tools/ /app/tools/
-# Workflow code never runs here: discovery and runs both happen in
-# workflow-host sandboxes, which ship the host and workflows in the agent image.
+# No Python runs here: the workflow discovery service and workflow-host
+# sandboxes run workflow code from the agent image.
 # Infra + harness auth secrets are embedded in the binary at compile time
 # (include_str! of the in-crate infra.yaml); tool secrets are discovered from
 # /app/tools plus any mounted overlay tools.
