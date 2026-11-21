@@ -10,9 +10,9 @@ checkpoints, waits, retries, child runs, and terminal state.
 The host never runs in the `api-rs` process. `api-rs` starts a workflow-host
 sandbox for each run and talks to the host over its stdio. Discovery runs in the
 chart's `workflow-discovery` Deployment: `workflow-host serve` answers each
-`POST /discover` by running the host's `workflow.discover` in a fresh process,
-with the `WORKFLOW_DIRS` and enablement env `api-rs` sends in the request (the
-only env a request may set), so the service needs no configuration of its own.
+`POST /discover` by importing the workflows in-process, with the `WORKFLOW_DIRS`
+and enablement env `api-rs` sends in the request (the only env a request may
+set), so the service needs no configuration of its own.
 Keep that server small, stateless, and unauthenticated; its NetworkPolicy is the
 trust boundary.
 

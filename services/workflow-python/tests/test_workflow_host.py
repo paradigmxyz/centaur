@@ -1371,7 +1371,7 @@ class DiscoveryServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["same"])
 
-    def test_stdout_written_at_import_fails_discovery(self) -> None:
+    def test_output_from_workflow_code_does_not_affect_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "noisy.py").write_text(
                 'print("loading noisy")\nWORKFLOW_NAME = "noisy"\n\n'
@@ -1379,9 +1379,32 @@ class DiscoveryServerTests(unittest.TestCase):
             )
             with self.discovery_server() as base:
                 status, body = discover(base, tmp)
-                self.assertEqual(status, 500)
-                self.assertIn("non-protocol output", body["error"])
-                self.assertIn("loading noisy", body["error"])
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["noisy"])
+
+    def test_edits_to_imported_helper_modules_are_picked_up(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workflows = Path(root) / "workflows"
+            (workflows / "helpers").mkdir(parents=True)
+            (workflows / "__init__.py").write_text("")
+            (workflows / "helpers" / "__init__.py").write_text("")
+            helper = workflows / "helpers" / "schedule.py"
+            helper.write_text("INTERVAL = 60\n")
+            (workflows / "report.py").write_text(
+                "from workflows.helpers.schedule import INTERVAL\n\n"
+                'WORKFLOW_NAME = "report"\n'
+                'SCHEDULE = {"schedule_id": "report", "interval_seconds": INTERVAL}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, str(workflows))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 60)
+
+                helper.write_text("INTERVAL = 120\n")
+                status, body = discover(base, str(workflows))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 120)
 
     def test_the_request_sets_the_enablement_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

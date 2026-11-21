@@ -6,12 +6,11 @@ Centaur workflow modules, runs ``handler(input, ctx)``, and delegates durable
 context operations back to api-rs.
 
 ``workflow-host serve`` instead runs the workflow discovery service: a small
-HTTP server whose ``POST /discover`` runs discovery in a fresh host process and
-returns its ``workflow.discovery`` message. api-rs calls it so that importing
-workflow modules, which runs their top-level code, never happens in api-rs. The
-request body carries the host env api-rs gives workflow-host sandboxes
-(``{"env": {"WORKFLOW_DIRS": ...}}``), so the service needs no configuration of
-its own.
+HTTP server whose ``POST /discover`` imports the workflows and returns their
+metadata. api-rs calls it so that importing workflow modules, which runs their
+top-level code, never happens in api-rs. The request body carries the env
+api-rs gives workflow-host sandboxes (``{"env": {"WORKFLOW_DIRS": ...}}``), so
+the service needs no configuration of its own.
 """
 
 from __future__ import annotations
@@ -23,12 +22,10 @@ import importlib.util
 import inspect
 import json
 import os
-import subprocess
 import sys
-import threading
 import traceback
 import typing
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +37,6 @@ DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
 DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
 DISCOVERY_PORT_ENV = "WORKFLOW_DISCOVERY_PORT"
 DEFAULT_DISCOVERY_PORT = 8090
-DISCOVERY_TIMEOUT_ENV = "WORKFLOW_DISCOVERY_TIMEOUT_SECONDS"
-DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 120.0
-STDERR_TAIL_BYTES = 8 * 1024
 MAX_DISCOVERY_REQUEST_BYTES = 64 * 1024
 # The host env a discovery request may set: where workflows live and which are
 # enabled. Anything else stays the service's own environment.
@@ -562,9 +556,6 @@ async def main() -> int:
                 if message_type == "ctx.response":
                     rpc.resolve(message)
                     continue
-                if message_type == "workflow.discover":
-                    await rpc.write(discovery_payload())
-                    return 0
                 if message_type == "workflow.start":
                     if active_workflow is not None:
                         await rpc.write(
@@ -595,7 +586,7 @@ async def main() -> int:
 
 
 def discovery_request_env(body: Any) -> dict[str, str]:
-    """Validate a discovery request body and return the host env it sets."""
+    """Validate a discovery request body and return the env it sets."""
     if not isinstance(body, dict) or set(body) - {"env"}:
         raise ValueError('discovery request must be {"env": {...}}')
     env = body.get("env", {})
@@ -609,70 +600,35 @@ def discovery_request_env(body: Any) -> dict[str, str]:
     return env
 
 
-def run_discovery_process(
-    timeout_seconds: float, env: dict[str, str] | None = None
-) -> tuple[int, dict[str, Any]]:
-    """Discover workflows in a fresh host process and return (HTTP status, body).
+def discover_with_env(env: dict[str, str]) -> dict[str, Any]:
+    """Discover workflows as a host started with ``env`` would.
 
-    A new process per pass imports current workflow files instead of modules
-    cached by an earlier pass, and keeps a misbehaving module from affecting
-    the server or later passes.
+    Workflow files are re-executed on every pass; helper modules they import
+    from the workflow directories are evicted first so edits to them land too.
     """
+    previous = {name: os.environ.get(name) for name in DISCOVERY_REQUEST_ENV}
+    for name in DISCOVERY_REQUEST_ENV:
+        os.environ.pop(name, None)
+    os.environ.update(env)
     try:
-        completed = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve())],
-            input=b'{"type":"workflow.discover"}\n',
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-            env={**os.environ, **(env or {})},
-        )
-    except subprocess.TimeoutExpired as exc:
-        return 504, {
-            "error": f"workflow discovery did not finish within {timeout_seconds:g}s",
-            "stderr": _stderr_tail(exc.stderr),
-        }
-    stderr = _stderr_tail(completed.stderr)
-    # Runs parse every stdout line as protocol JSON, so discovery holds modules
-    # to the same contract: exactly one JSON message and a clean exit. A module
-    # that prints at import fails here instead of breaking every run.
-    lines = [line for line in completed.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
-    messages: list[Any] = []
-    for line in lines:
-        try:
-            messages.append(json.loads(line))
-        except json.JSONDecodeError:
-            return 500, {
-                "error": f"workflow code wrote non-protocol output to stdout: {line[:200]!r}",
-                "stderr": stderr,
-            }
-    message = messages[0] if len(messages) == 1 and isinstance(messages[0], dict) else None
-    if message is not None and message.get("type") in ("host.error", "workflow.error"):
-        return 500, {
-            "error": str(message.get("message") or "workflow discovery failed"),
-            "traceback": message.get("traceback"),
-            "stderr": stderr,
-        }
-    if message is not None and message.get("type") == "workflow.discovery" and completed.returncode == 0:
-        return 200, message
-    return 500, {
-        "error": (
-            f"workflow host exited with status {completed.returncode} after writing "
-            f"{len(messages)} protocol messages instead of one workflow.discovery"
-        ),
-        "stderr": stderr,
-    }
-
-
-def _stderr_tail(stderr: bytes | None) -> str:
-    return (stderr or b"")[-STDERR_TAIL_BYTES:].decode("utf-8", "replace")
+        roots = [str(path) + os.sep for path in workflow_dirs()]
+        for name, module in list(sys.modules.items()):
+            source = getattr(module, "__file__", None) or ""
+            if name.startswith("_centaur_workflow_host.") or any(
+                source.startswith(root) for root in roots
+            ):
+                del sys.modules[name]
+        return discovery_payload()
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 class DiscoveryRequestHandler(BaseHTTPRequestHandler):
     server_version = "centaur-workflow-discovery"
-    # One pass at a time: concurrent requests would each import every module.
-    discovery_lock = threading.Lock()
-    timeout_seconds = DEFAULT_DISCOVERY_TIMEOUT_SECONDS
 
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
         if self.path == "/healthz":
@@ -692,11 +648,13 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
             return
-        with self.discovery_lock:
-            status, body = run_discovery_process(self.timeout_seconds, env)
-        if status != 200:
-            print(f"workflow_discovery_failed status={status} error={body.get('error')}", file=sys.stderr)
-        self._send_json(status, body)
+        try:
+            payload = discover_with_env(env)
+        except Exception as exc:
+            print(f"workflow_discovery_failed error={exc}", file=sys.stderr)
+            self._send_json(500, {"error": str(exc), "traceback": traceback.format_exc()})
+            return
+        self._send_json(200, payload)
 
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         payload = json.dumps(body, separators=(",", ":"), default=str).encode("utf-8")
@@ -711,21 +669,11 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
             print(f"workflow_discovery_request {format % args}", file=sys.stderr)
 
 
-def discovery_server(port: int, timeout_seconds: float) -> ThreadingHTTPServer:
-    handler = type(
-        "ConfiguredDiscoveryRequestHandler",
-        (DiscoveryRequestHandler,),
-        {"timeout_seconds": timeout_seconds, "discovery_lock": threading.Lock()},
-    )
-    return ThreadingHTTPServer(("0.0.0.0", port), handler)
-
-
 def serve_discovery() -> int:
+    """Serve discovery one request at a time. A hung import blocks /healthz
+    too, so the liveness probe restarts the pod."""
     port = int(os.getenv(DISCOVERY_PORT_ENV, str(DEFAULT_DISCOVERY_PORT)))
-    timeout_seconds = float(
-        os.getenv(DISCOVERY_TIMEOUT_ENV, str(DEFAULT_DISCOVERY_TIMEOUT_SECONDS))
-    )
-    server = discovery_server(port, timeout_seconds)
+    server = HTTPServer(("0.0.0.0", port), DiscoveryRequestHandler)
     print(f"workflow_discovery_listening port={port}", file=sys.stderr)
     try:
         server.serve_forever()

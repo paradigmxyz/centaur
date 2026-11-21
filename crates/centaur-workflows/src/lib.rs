@@ -47,8 +47,7 @@ pub const WORKFLOW_SCHEDULE_QUEUE: &str = "centaur_workflow_schedules";
 pub const WORKFLOW_TASK: &str = "centaur.workflow";
 pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
-/// Upper bound on one discovery request. The discovery service bounds its own
-/// pass at 120s by default; this leaves room for the response.
+/// Upper bound on one discovery request.
 const WORKFLOW_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(150);
 /// The workflow-host env a discovery request carries, so discovery sees the
 /// same workflows, and the same enablement policy, as runs.
