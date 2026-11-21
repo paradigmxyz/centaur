@@ -83,9 +83,6 @@ const PUBLIC_REPO_CACHE_SUBPATH: &str = "public";
 const CENTAUR_SKILL_DIRS_ENV: &str = "CENTAUR_SKILL_DIRS";
 const CENTAUR_PUBLIC_SKILL_DIRS_ENV: &str = "CENTAUR_PUBLIC_SKILL_DIRS";
 const SANDBOX_REPO_CACHE_LABEL: &str = "centaur.sandbox_repo_cache";
-/// Tools that need the observability capability. Each user turn tells the
-/// agent whether they work; the sandbox network policy enforces it.
-const OBSERVABILITY_TOOLS: &str = "vlogs,vmetrics,grafana";
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
@@ -1981,7 +1978,6 @@ impl SessionRuntime {
             let input_lines = input_lines_with_session_context(
                 thread_key,
                 &trace,
-                Some(&desired_capabilities),
                 &input_lines,
             );
             if let Err(error) = write_input_lines(
@@ -2309,16 +2305,7 @@ impl SessionRuntime {
             execution_traceparent(&execution).map(ToOwned::to_owned),
             Some(&execution.execution_id),
         );
-        // Steering reaches the sandbox the session is already assigned, so its
-        // recorded capabilities are the ones in effect.
-        let input_lines = input_lines_with_session_context(
-            thread_key,
-            &trace,
-            session
-                .as_ref()
-                .and_then(|session| session.sandbox_capabilities.as_ref()),
-            &input_lines,
-        );
+        let input_lines = input_lines_with_session_context(thread_key, &trace, &input_lines);
 
         let pipe = match self
             .wait_for_active_steering_pipe(thread_key, &execution.execution_id)
@@ -2397,7 +2384,6 @@ impl SessionRuntime {
         let input_lines = input_lines_with_session_context(
             thread_key,
             &trace,
-            None,
             &[interrupt_input_line(thread_key, reason)],
         );
 
@@ -6451,19 +6437,17 @@ fn input_lines_with_persona_model(input_lines: Vec<String>, model: &str) -> Vec<
 fn input_lines_with_session_context(
     thread_key: &ThreadKey,
     trace: &SessionTraceContext,
-    capabilities: Option<&SessionSandboxCapabilities>,
     input_lines: &[String],
 ) -> Vec<String> {
     input_lines
         .iter()
-        .map(|line| input_line_with_session_context(thread_key, trace, capabilities, line))
+        .map(|line| input_line_with_session_context(thread_key, trace, line))
         .collect()
 }
 
 fn input_line_with_session_context(
     thread_key: &ThreadKey,
     trace: &SessionTraceContext,
-    capabilities: Option<&SessionSandboxCapabilities>,
     line: &str,
 ) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(line) else {
@@ -6491,9 +6475,6 @@ fn input_line_with_session_context(
                 .or_insert_with(|| Value::String(execution_id.to_owned()));
         }
     }
-    if let Some(capabilities) = capabilities {
-        prepend_user_note(map, sandbox_access_note(capabilities));
-    }
     if let Some(destination) = thread_key.chat_destination() {
         prepend_user_note(map, destination.context_line());
     }
@@ -6505,8 +6486,7 @@ fn input_line_with_session_context(
 ///
 /// The static system prompt is shared by every sandbox, so per-turn notes are
 /// the agent's authoritative signal for where its reply lands (the chat
-/// surface) and what its sandbox can reach (which changes when a warm sandbox
-/// is claimed or a principal's access changes). Notes are added only to `user`
+/// surface). Notes are added only to `user`
 /// turns whose content is an array of message parts; every other shape is left
 /// untouched.
 fn prepend_user_note(map: &mut serde_json::Map<String, Value>, note: String) {
@@ -6518,17 +6498,6 @@ fn prepend_user_note(map: &mut serde_json::Map<String, Value>, note: String) {
         return;
     };
     content.insert(0, json!({ "type": "text", "text": note }));
-}
-
-fn sandbox_access_note(capabilities: &SessionSandboxCapabilities) -> String {
-    let tools = OBSERVABILITY_TOOLS.replace(',', ", ");
-    if capabilities.observability_enabled {
-        format!("[sandbox access: observability enabled ({tools}).]")
-    } else {
-        format!(
-            "[sandbox access: observability disabled. {tools} requests are blocked for this sandbox.]"
-        )
-    }
 }
 
 fn merge_session_context(
@@ -8492,7 +8461,7 @@ mod tests {
         let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["type"], "user");
@@ -8515,7 +8484,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","trace_metadata":{"action":"execute"}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8529,7 +8497,7 @@ mod tests {
         let thread_key = ThreadKey::parse("slack:T123:C123:1780000000.000000").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "slack");
@@ -8545,7 +8513,7 @@ mod tests {
         let thread_key = ThreadKey::parse("discord:111:222:333").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "discord");
@@ -8560,7 +8528,7 @@ mod tests {
         let thread_key = ThreadKey::parse("linear:ISSUE:s:SESS").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "linear");
@@ -8582,7 +8550,7 @@ mod tests {
         let thread_key = ThreadKey::parse("github:0xSplits/centaur:704:rc:99").unwrap();
         let trace = SessionTraceContext::new(None, None);
 
-        let line = input_line_with_session_context(&thread_key, &trace, None, r#"{"type":"user"}"#);
+        let line = input_line_with_session_context(&thread_key, &trace, r#"{"type":"user"}"#);
         let value: Value = serde_json::from_str(&line).unwrap();
 
         assert_eq!(value["session_context"]["platform"], "github");
@@ -8601,7 +8569,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","session_context":{"requester":{"github_handle":"@ada"},"platform":"custom"}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8625,7 +8592,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","thread_key":"chat:existing","trace_id":"caller-trace"}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8637,7 +8603,7 @@ mod tests {
             "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
         );
         assert_eq!(
-            input_line_with_session_context(&thread_key, &trace, None, "raw"),
+            input_line_with_session_context(&thread_key, &trace, "raw"),
             "raw"
         );
     }
@@ -8650,7 +8616,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8665,48 +8630,6 @@ mod tests {
     }
 
     #[test]
-    fn input_line_states_current_observability_access_after_chat_surface() {
-        let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
-        let trace = SessionTraceContext::new(None, None);
-        let line =
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
-        let notes = |observability_enabled| {
-            let capabilities = SessionSandboxCapabilities {
-                repo_cache: SessionRepoCacheAccess::All,
-                observability_enabled,
-            };
-            let line =
-                input_line_with_session_context(&thread_key, &trace, Some(&capabilities), line);
-            let value: Value = serde_json::from_str(&line).unwrap();
-            let content = value["message"]["content"].as_array().unwrap().clone();
-            assert_eq!(content.len(), 3);
-            assert!(
-                content[0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Slack channel")
-            );
-            assert_eq!(content[2]["text"], "hi");
-            content[1]["text"].as_str().unwrap().to_owned()
-        };
-
-        assert!(notes(true).contains("observability enabled"));
-        let restricted = notes(false);
-        assert!(restricted.contains("observability disabled"));
-        assert!(restricted.contains("vlogs"));
-
-        // Control lines carry no message content and stay untouched.
-        let capabilities = SessionSandboxCapabilities::default_enabled();
-        let control = input_line_with_session_context(
-            &thread_key,
-            &trace,
-            Some(&capabilities),
-            r#"{"type":"interrupt"}"#,
-        );
-        assert!(!control.contains("observability"));
-    }
-
-    #[test]
     fn input_line_prepends_slack_channel_tool_policy_to_user_content() {
         let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
         let trace = SessionTraceContext::new(None, None);
@@ -8714,7 +8637,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8735,7 +8657,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8756,7 +8677,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8777,7 +8697,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
@@ -8799,7 +8718,6 @@ mod tests {
         let line = input_line_with_session_context(
             &thread_key,
             &trace,
-            None,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
         );
         let value: Value = serde_json::from_str(&line).unwrap();
