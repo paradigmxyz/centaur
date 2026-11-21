@@ -824,6 +824,9 @@ describe("CI fix counter and escalation", () => {
   function ciCtx(
     state: ReturnType<typeof makeState>,
     comments: string[],
+    getCommit: () => Promise<unknown> = async () => ({
+      data: { author: { login: "centaur-bot" } },
+    }),
   ): PrManagerContext {
     return {
       octokit: {
@@ -848,9 +851,7 @@ describe("CI fix counter and escalation", () => {
         }),
         rest: {
           repos: {
-            getCommit: async () => ({
-              data: { author: { login: "centaur-bot" } },
-            }),
+            getCommit,
           },
           pulls: {
             get: async () => ({
@@ -885,6 +886,24 @@ describe("CI fix counter and escalation", () => {
       consecutiveCiFixes: 1,
     });
   });
+
+  const headCommits: Record<string, () => Promise<unknown>> = {
+    "a human authored it": async () => ({ data: { author: { login: "human-dev" } } }),
+    "its email isn't linked to an account": async () => ({ data: { author: null } }),
+    "the commit lookup fails": async () => {
+      throw new Error("502 Bad Gateway");
+    },
+  };
+
+  for (const [name, getCommit] of Object.entries(headCommits)) {
+    test(`backs off red CI when ${name}`, async () => {
+      const state = makeState();
+      const comments: string[] = [];
+      await handleCiEvent(ciCtx(state, comments, getCommit), "check_run", redCheckRun);
+      expect(await state.get("centaur-githubbot:pr:base/repo#7")).toBeUndefined();
+      expect(comments).toEqual([]);
+    });
+  }
 
   test("escalates and fires no fix turn once the cap is reached", async () => {
     const state = makeState();

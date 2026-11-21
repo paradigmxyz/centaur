@@ -72,10 +72,11 @@ management thread (`github-manage:{owner}/{repo}:{n}`); the agent does its GitHu
 - **Fix CI.** When **all** checks for a head SHA are settled (not per failing job — interwoven jobs
   make early firing harmful) and red, a fix turn diagnoses and pushes a fix. Bounded to
   `GITHUBBOT_CI_FIX_MAX_ATTEMPTS` consecutive attempts (default 3, reset when CI goes green); on
-  exhaustion the bot comments tagging a human and stops. On the steady-state CI path it backs off if
-  the failing head commit was authored by a human (it won't step on someone mid-edit) — except right
-  after assignment, where being assigned is an explicit hand-off, so it fixes the PR regardless of who
-  pushed last. **`centaur-skip` checks** are excluded from that evaluation — see below.
+  exhaustion the bot comments tagging a human and stops. On the steady-state CI path it backs off
+  unless GitHub resolves the failing head commit's author to the bot's login (it won't step on
+  someone mid-edit, and a commit email not linked to the bot's account counts as a human's) — except
+  right after assignment, where being assigned is an explicit hand-off, so it fixes the PR regardless
+  of who pushed last. **`centaur-skip` checks** are excluded from that evaluation — see below.
 - **Skip a check.** Put `centaur-skip` anywhere in a job's display name and the bot ignores that
   check: it never counts as red, never triggers a fix turn, and never appears in the escalation
   comment's "still failing" list.
