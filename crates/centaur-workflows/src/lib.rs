@@ -314,16 +314,19 @@ impl WorkflowHostSandboxRuntime {
 pub struct WorkflowDiscoveryClient {
     discover_url: String,
     workflow_dirs: String,
+    env: BTreeMap<String, String>,
     http: reqwest::Client,
 }
 
 impl WorkflowDiscoveryClient {
-    /// `workflow_dirs` is the `WORKFLOW_DIRS` run sandboxes get, so discovery
-    /// sees the workflows runs load.
-    pub fn new(base_url: &str, workflow_dirs: &str) -> Self {
+    /// `workflow_dirs` and `env` are the `WORKFLOW_DIRS` and passthrough env
+    /// run sandboxes get, so discovery imports the same workflows with the same
+    /// config.
+    pub fn new(base_url: &str, workflow_dirs: &str, env: BTreeMap<String, String>) -> Self {
         Self {
             discover_url: format!("{}/discover", base_url.trim_end_matches('/')),
             workflow_dirs: workflow_dirs.to_owned(),
+            env,
             http: reqwest::Client::new(),
         }
     }
@@ -333,7 +336,7 @@ impl WorkflowDiscoveryClient {
             .http
             .post(&self.discover_url)
             .timeout(WORKFLOW_DISCOVERY_TIMEOUT)
-            .json(&json!({ "workflow_dirs": self.workflow_dirs }))
+            .json(&json!({ "workflow_dirs": self.workflow_dirs, "env": self.env }))
             .send()
             .await
             .map_err(|error| {
@@ -4687,10 +4690,14 @@ mod tests {
             }),
         );
 
-        let metadata = WorkflowDiscoveryClient::new(&format!("{url}/"), "/opt/centaur/workflows")
-            .discover()
-            .await
-            .unwrap();
+        let metadata = WorkflowDiscoveryClient::new(
+            &format!("{url}/"),
+            "/opt/centaur/workflows",
+            BTreeMap::from([("ENABLE_FOO_WORKFLOW".to_owned(), "false".to_owned())]),
+        )
+        .discover()
+        .await
+        .unwrap();
 
         let request = server.join().unwrap();
         assert!(
@@ -4700,7 +4707,10 @@ mod tests {
         let (_, body) = request.split_once("\r\n\r\n").unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(body).unwrap(),
-            json!({"workflow_dirs": "/opt/centaur/workflows"})
+            json!({
+                "workflow_dirs": "/opt/centaur/workflows",
+                "env": {"ENABLE_FOO_WORKFLOW": "false"},
+            })
         );
         assert_eq!(
             metadata.workflow_names,
@@ -4722,7 +4732,7 @@ mod tests {
             }),
         );
 
-        let error = WorkflowDiscoveryClient::new(&url, "/opt/centaur/workflows")
+        let error = WorkflowDiscoveryClient::new(&url, "/opt/centaur/workflows", BTreeMap::new())
             .discover()
             .await
             .unwrap_err();

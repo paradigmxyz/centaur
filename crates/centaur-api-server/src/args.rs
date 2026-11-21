@@ -173,6 +173,7 @@ impl Args {
         Ok(WorkflowDiscoveryClient::new(
             &url,
             &self.sandbox.agent_k8s_workflow_dirs(),
+            self.sandbox.passthrough_env(),
         ))
     }
 
@@ -1623,6 +1624,15 @@ impl SandboxArgs {
             .or(self.centaur_api_url.as_deref())
             .unwrap_or("http://api:8000")
             .to_owned()
+    }
+
+    /// The `SESSION_SANDBOX_PASSTHROUGH_ENV` values workflow-host sandboxes
+    /// get. Discovery receives the same values, so a module that reads config
+    /// at import (for example to enable a schedule) sees what runs see.
+    fn passthrough_env(&self) -> BTreeMap<String, String> {
+        self.passthrough_env_names()
+            .filter_map(|name| env::var(name).ok().map(|value| (name.to_owned(), value)))
+            .collect()
     }
 
     fn passthrough_env_names(&self) -> impl Iterator<Item = &str> {
@@ -3384,6 +3394,36 @@ mod tests {
                 && mount.read_only
                 && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
         }));
+    }
+
+    #[test]
+    fn discovery_gets_the_passthrough_env_workflow_hosts_get() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            (
+                "SESSION_SANDBOX_PASSTHROUGH_ENV",
+                "ENABLE_FOO_WORKFLOW, UNSET_FLAG",
+            ),
+            ("ENABLE_FOO_WORKFLOW", "false"),
+            ("SLACK_BOT_TOKEN", "xoxb-real"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.passthrough_env(),
+            BTreeMap::from([("ENABLE_FOO_WORKFLOW".to_owned(), "false".to_owned())])
+        );
+        let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
+        assert!(
+            spec.env
+                .iter()
+                .any(|env| env.name == "ENABLE_FOO_WORKFLOW" && env.value == "false")
+        );
     }
 
     #[test]

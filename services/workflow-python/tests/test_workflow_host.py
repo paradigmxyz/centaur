@@ -1291,8 +1291,8 @@ def http_json(method: str, url: str, body: dict | None = None) -> tuple[int, dic
         return error.code, json.loads(error.read())
 
 
-def discover(base: str, workflow_dir: str) -> tuple[int, dict]:
-    return http_json("POST", f"{base}/discover", {"workflow_dirs": workflow_dir})
+def discover(base: str, workflow_dir: str, **env: str) -> tuple[int, dict]:
+    return http_json("POST", f"{base}/discover", {"workflow_dirs": workflow_dir, "env": env})
 
 
 class DiscoveryServerTests(unittest.TestCase):
@@ -1381,12 +1381,34 @@ class DiscoveryServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 120)
 
+    def test_module_level_config_reads_the_request_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "weekly.py").write_text(
+                "import os\n\n"
+                'WORKFLOW_NAME = "weekly"\n'
+                'SCHEDULE = {"schedule_id": "weekly", "cron": "0 8 * * MON",\n'
+                '            "enabled": os.environ.get("ENABLE_WEEKLY_WORKFLOW", "true") == "true"}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp, ENABLE_WEEKLY_WORKFLOW="false")
+                self.assertEqual(status, 200)
+                self.assertFalse(body["workflows"][0]["schedule"]["enabled"])
+                # The env applies to one pass only.
+                status, body = discover(base, tmp)
+                self.assertTrue(body["workflows"][0]["schedule"]["enabled"])
+                self.assertNotIn("ENABLE_WEEKLY_WORKFLOW", os.environ)
+
     def test_unknown_paths_are_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.discovery_server() as base:
                 self.assertEqual(http_json("GET", f"{base}/discover")[0], 404)
                 self.assertEqual(http_json("POST", f"{base}/run")[0], 404)
                 self.assertEqual(http_json("POST", f"{base}/discover", {"dirs": tmp})[0], 400)
+                self.assertEqual(
+                    http_json("POST", f"{base}/discover", {"workflow_dirs": tmp, "env": {"X": 1}})[0],
+                    400,
+                )
 
 
 if __name__ == "__main__":

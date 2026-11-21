@@ -37,13 +37,17 @@ next discovery pass runs, with no restart.
 Discovery imports every workflow module, which runs its top-level code; api-rs
 then drops disabled workflows from the result. api-rs asks for it at startup and
 every `WORKFLOW_RECONCILE_INTERVAL_SECS` (default 60), sending the same
-`WORKFLOW_DIRS` run sandboxes get. The `workflow-discovery` Deployment, running
-the agent image, re-imports the workflow files for each request with no
-credentials, no database, no deployment env, and, under `networkPolicy.enabled`,
-no outbound network. Keep module top level cheap and free of side effects, and
-declare `SCHEDULE`, `WEBHOOKS`, `WORKFLOW_PRINCIPAL`, and `WORKFLOW_STARTERS` as
-constants: code that needs a credential, the network, or deployment config at
-import time fails discovery or sees defaults.
+`WORKFLOW_DIRS` and passthrough env run sandboxes get. The `workflow-discovery`
+Deployment, running the agent image, re-imports the workflow files for each
+request with no credentials, no database, and, under `networkPolicy.enabled`, no
+outbound network.
+
+Module-level code that reads deployment config, such as a `SCHEDULE` whose
+`enabled` comes from `os.environ.get("ENABLE_FOO_WORKFLOW")`, sees only the
+names listed in `apiRs.extraEnv.SESSION_SANDBOX_PASSTHROUGH_ENV`, the same env
+its runs get. A flag set only in `apiRs.extraEnv` without being listed there
+falls back to its default. Keep module top level cheap and free of side effects:
+code that needs a credential or the network at import time fails discovery.
 
 ## Define a workflow
 

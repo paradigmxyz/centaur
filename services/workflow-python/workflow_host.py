@@ -6,16 +6,18 @@ Centaur workflow modules, runs ``handler(input, ctx)``, and delegates durable
 context operations back to api-rs.
 
 ``workflow-host serve`` instead runs the workflow discovery service: a small
-HTTP server whose ``POST /discover {"workflow_dirs": "a:b"}`` imports the
-workflows in those directories and returns their metadata. api-rs calls it so
-that importing workflow modules, which runs their top-level code, never happens
-in api-rs.
+HTTP server whose ``POST /discover {"workflow_dirs": "a:b", "env": {...}}``
+imports the workflows in those directories, with ``env`` (the passthrough env
+workflow-host sandboxes get) applied, and returns their metadata. api-rs calls
+it so that importing workflow modules, which runs their top-level code, never
+happens in api-rs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ast
+import contextlib
 import dataclasses
 import importlib.util
 import inspect
@@ -434,6 +436,20 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
             await pool.close()
 
 
+@contextlib.contextmanager
+def temporary_env(env: dict[str, str]) -> typing.Iterator[None]:
+    previous = {name: os.environ.get(name) for name in env}
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def discovery_payload(raw_dirs: str) -> dict[str, Any]:
     """Import the workflows in ``raw_dirs`` and describe them.
 
@@ -603,13 +619,17 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
             raw_dirs = body["workflow_dirs"]
-            if not isinstance(raw_dirs, str):
-                raise TypeError("workflow_dirs must be a string")
-        except (ValueError, KeyError, TypeError) as exc:
-            self._send_json(400, {"error": f'expected {{"workflow_dirs": "..."}}: {exc}'})
+            env = body.get("env", {})
+            if not isinstance(raw_dirs, str) or not isinstance(env, dict):
+                raise TypeError("workflow_dirs must be a string and env an object")
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+                raise TypeError("env values must be strings")
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            self._send_json(400, {"error": f'expected {{"workflow_dirs": "...", "env": {{...}}}}: {exc}'})
             return
         try:
-            payload = discovery_payload(raw_dirs)
+            with temporary_env(env):
+                payload = discovery_payload(raw_dirs)
         except Exception as exc:
             print(f"workflow_discovery_failed error={exc}", file=sys.stderr)
             self._send_json(500, {"error": str(exc), "traceback": traceback.format_exc()})
