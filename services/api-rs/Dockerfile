@@ -55,18 +55,15 @@ RUN --mount=type=cache,id=api-rs-apt-cache,target=/var/cache/apt,sharing=locked 
 COPY --from=builder /usr/local/bin/centaur-api-server /usr/local/bin/centaur-api-server
 WORKDIR /app
 COPY centaur_sdk/ /app/centaur_sdk/
-COPY services/workflow-python/ /app/workflow-python/
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
-    && pip3 install --break-system-packages --no-compile /app/centaur_sdk /app/workflow-python \
-    && python3 -c "import boto3, botocore" \
+    && pip3 install --break-system-packages --no-compile /app/centaur_sdk \
     && rm -rf /usr/share/doc /usr/share/man /usr/share/info
 # api-rs discovers tool secret metadata from pyproject.toml at startup so it can
 # register the full tool secret set with iron-control before sandboxes claim.
 COPY tools/ /app/tools/
-COPY workflows/ /app/workflows/
-ENV PYTHON_WORKFLOW_HOST_PATH=/app/workflow-python/workflow_host.py
-ENV WORKFLOW_DIRS=/app/workflows
+# Workflow code never runs here: discovery and runs both happen in
+# workflow-host sandboxes, which ship the host and workflows in the agent image.
 # Infra + harness auth secrets are embedded in the binary at compile time
 # (include_str! of the in-crate infra.yaml); tool secrets are discovered from
 # /app/tools plus any mounted overlay tools.

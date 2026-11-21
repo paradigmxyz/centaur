@@ -7,6 +7,10 @@ discovers workflow modules, invokes `handler(input, ctx)`, and speaks newline-
 delimited JSON with `api-rs`. `api-rs` and Postgres own scheduling, leases,
 checkpoints, waits, retries, child runs, and terminal state.
 
+The host runs only in workflow-host sandboxes, never in the `api-rs` process:
+`api-rs` starts a sandbox for each discovery pass and each run, and talks to the
+host over the sandbox's stdio.
+
 ## Invariants
 
 - Stdout is protocol-only: exactly one JSON object per line. Send diagnostics
@@ -36,6 +40,6 @@ uv run --project services/workflow-python python -m unittest discover \
 For protocol changes, run the host as a subprocess and assert clean stdout,
 request/response correlation, stderr diagnostics, and shutdown behavior. For a
 context primitive change, add matching Rust-side coverage in `api-rs` and run a
-small workflow through the local stack. The host ships in both the `api-rs` and
-sandbox images rather than as an independent image, so validate both local and
-sandboxed host modes when its shared runtime behavior changes.
+small workflow through the local stack. The host ships in the agent image as
+`/usr/local/bin/workflow-host` rather than as an independent image, so rebuild
+the agent image to exercise a host change.

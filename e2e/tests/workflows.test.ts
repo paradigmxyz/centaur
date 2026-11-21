@@ -1,8 +1,9 @@
 // Durable workflows on the real control plane: discovery of workflow files,
 // run idempotency and identity, cancellation when a workflow disappears, the
 // Python host's durable context methods, including an agent turn on a real
-// harness, and Slack buttons a workflow posts, clicked in Slack. Workflow files are written into the api-rs pod's workflow
-// directory, which is what WORKFLOW_DIRS points at on this stack.
+// harness, and Slack buttons a workflow posts, clicked in Slack. Discovery and
+// every run happen in workflow-host sandboxes, never in api-rs: tests install
+// workflow files in the node directory those sandboxes mount.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import {
@@ -10,7 +11,6 @@ import {
   USER,
   USER_B,
   api,
-  cluster,
   eventually,
   model,
   providerCredentials,
@@ -21,16 +21,19 @@ import {
 
 releaseSandboxesAfterAll()
 
-const WORKFLOW_DIR = '/app/workflows'
+// A discovery pass starts a sandbox, so a change can take a few passes to land.
+const DISCOVERY_TIMEOUT_MS = 120_000
+// Each run, and each resumption after a durable wait, starts a sandbox.
+const RUN_TIMEOUT_MS = 180_000
 
-/** Writes a workflow file and waits until api-rs has scheduled it. */
+/** Installs a workflow file and waits until api-rs has scheduled it. */
 async function addWorkflow(name: string, source: string): Promise<void> {
-  await cluster.exec(`cat > ${WORKFLOW_DIR}/${name}.py`, source)
+  await workflows.install(name, source)
   await waitForSchedule(name, true)
 }
 
 async function waitForSchedule(name: string, present: boolean): Promise<void> {
-  await eventually(`workflow ${name} to be ${present ? 'scheduled' : 'unscheduled'}`, 30_000, async () => {
+  await eventually(`workflow ${name} to be ${present ? 'scheduled' : 'unscheduled'}`, DISCOVERY_TIMEOUT_MS, async () => {
     const { schedules } = await api.ok('GET', '/api/workflows/schedules')
     const scheduled = schedules.some((schedule: any) => schedule.schedule_id === name)
     return scheduled === present ? true : undefined
@@ -47,7 +50,7 @@ async function startRun(name: string, input: unknown, idempotencyKey = `${name}-
   })
 }
 
-async function waitForRun(runId: string, status: string, timeoutMs = 30_000): Promise<any> {
+async function waitForRun(runId: string, status: string, timeoutMs = RUN_TIMEOUT_MS): Promise<any> {
   return eventually(`workflow run ${runId} to be ${status}`, timeoutMs, async () => {
     const { run } = await api.ok('GET', `/api/workflows/runs/${runId}`)
     if (run.status === status) return run
@@ -62,7 +65,6 @@ async function waitForRun(runId: string, status: string, timeoutMs = 30_000): Pr
 function echoWorkflow(name: string): string {
   return `
 import asyncio
-from pathlib import Path
 
 WORKFLOW_NAME = "${name}"
 SCHEDULE = {
@@ -75,9 +77,8 @@ SCHEDULE = {
 
 
 async def handler(params, ctx):
-    started_path = params.get("started_path")
-    if started_path:
-        Path(started_path).touch()
+    if params.get("mark_started"):
+        await ctx.step("handler_started", lambda: True)
     sleep_ms = int(params.get("sleep_ms") or 0)
     if sleep_ms:
         await asyncio.sleep(sleep_ms / 1000)
@@ -97,7 +98,7 @@ test('an added workflow is discovered and runs', async () => {
   expect(started.created).toBe(true)
   const run = await waitForRun(started.run_id, 'completed')
   expect(run.result.output).toEqual({ workflow_name: name, received: { case: 'added' } })
-}, 120_000)
+}, 300_000)
 
 test('concurrent starts with one idempotency key share one run', async () => {
   const name = uniqueName('idempotent')
@@ -113,7 +114,7 @@ test('concurrent starts with one idempotency key share one run', async () => {
   }
   expect([first.created, second.created].sort()).toEqual([false, true])
   expect(first.initial_run_id).toBe(first.run_id)
-}, 120_000)
+}, 300_000)
 
 test('replaying a failed run keeps its initial identity', async () => {
   const name = uniqueName('replay')
@@ -136,23 +137,24 @@ test('replaying a failed run keeps its initial identity', async () => {
   expect(replayed.run_id).not.toBe(original.run_id)
   const { run } = await api.ok('GET', `/api/workflows/runs/${original.initial_run_id}`)
   expect(run.initial_run_id).toBe(original.initial_run_id)
-}, 120_000)
+}, 300_000)
 
 test('removing a workflow cancels its running run', async () => {
   const name = uniqueName('removed')
   await addWorkflow(name, echoWorkflow(name))
 
-  const startedPath = `/tmp/${name}.started`
-  const started = await startRun(name, { sleep_ms: 60_000, started_path: startedPath })
+  const started = await startRun(name, { sleep_ms: 180_000, mark_started: true })
   // The run is marked running before the host loads the module; wait for the
   // handler itself so removing the file cannot race loading it.
-  await eventually('the workflow handler to start', 30_000, async () =>
-    (await cluster.exec(`test -f ${startedPath} && echo started || true`)) === 'started' ? true : undefined
+  await eventually('the workflow handler to start', RUN_TIMEOUT_MS, async () =>
+    (await workflows.checkpoints(started.task_id, started.run_id)).some(name => name.startsWith('handler_started'))
+      ? true
+      : undefined
   )
-  await cluster.exec(`rm ${WORKFLOW_DIR}/${name}.py`)
+  await workflows.uninstall(name)
   await waitForSchedule(name, false)
   await waitForRun(started.run_id, 'cancelled')
-}, 120_000)
+}, 420_000)
 
 test('durable context methods survive host restarts and reach a real harness', async () => {
   const name = uniqueName('durable')
@@ -160,7 +162,7 @@ test('durable context methods survive host restarts and reach a real harness', a
   const correlationId = `${name}-event`
   const answer = model.says('Workflow agent answer.')
   await model.register(answer)
-  await cluster.exec(`cat > ${WORKFLOW_DIR}/${child}.py`, `
+  await workflows.install(child, `
 WORKFLOW_NAME = "${child}"
 
 
@@ -232,7 +234,7 @@ async def handler(params, ctx):
   expect(output.child.created).toBe(true)
   const childRun = await waitForRun(output.child.run_id, 'completed')
   expect(childRun.result.output.received).toEqual({ from_parent: true })
-}, 400_000)
+}, 600_000)
 
 /** A workflow that posts what its input asks for to Slack and returns the posted message. */
 function slackPoster(name: string, post: string): string {
@@ -290,7 +292,7 @@ test('a workflow button click starts its target once, for the person who clicked
       : undefined
   )
   expect(await runsOf(target)).toHaveLength(1)
-}, 120_000)
+}, 300_000)
 
 test('other Slack block actions reach workflows as events, without their response URL', async () => {
   const poster = uniqueName('poster')
@@ -317,4 +319,4 @@ test('other Slack block actions reach workflows as events, without their respons
   })
   expect(JSON.stringify(event)).not.toContain('response_url')
   expect(JSON.stringify(event)).not.toContain('e2e-response-token')
-}, 120_000)
+}, 300_000)

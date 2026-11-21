@@ -95,6 +95,8 @@ const apiKey = required('E2E_API_KEY')
 const consoleUrl = required('E2E_CONSOLE_URL')
 const consoleApiKey = required('E2E_CONSOLE_API_KEY')
 const logDir = required('E2E_LOG_DIR')
+const kindNode = required('E2E_KIND_NODE')
+const workflowDir = required('E2E_WORKFLOW_DIR')
 const namespace = 'centaur'
 const sshNamespace = 'centaur-e2e-ssh'
 const release = 'centaur'
@@ -230,13 +232,6 @@ export function releaseSandboxesAfterAll(): void {
 }
 
 export const cluster = {
-  /** Runs a shell script in the api-rs pod, optionally feeding it stdin. */
-  async exec(script: string, stdin?: string): Promise<string> {
-    return kubectl(
-      { stdin },
-      'exec', '-i', `deploy/${release}-centaur-api-rs`, '--', 'sh', '-c', script
-    )
-  },
   /** Kills a sandbox's pod without a graceful shutdown. */
   async killSandbox(sandboxId: string): Promise<void> {
     await kubectl({}, 'delete', 'pod', sandboxId, '--grace-period=0', '--force')
@@ -370,6 +365,25 @@ export const workflows = {
   async event(name: string): Promise<unknown> {
     const [row] = await db`select payload from absurd.e_centaur_workflows where event_name = ${name}`
     return row?.payload
+  },
+  /**
+   * Deploys a workflow file the way an operator updates a workflow repo: into
+   * the node directory every workflow-host sandbox mounts. The rename makes
+   * the file appear whole to a discovery pass that is reading the directory.
+   */
+  async install(name: string, source: string): Promise<void> {
+    const path = `${workflowDir}/${name}.py`
+    await docker(source, 'exec', '-i', kindNode, 'sh', '-c', `cat > '${path}.tmp' && mv '${path}.tmp' '${path}'`)
+  },
+  /** Deletes a workflow file installed with `install`. */
+  async uninstall(name: string): Promise<void> {
+    await docker(undefined, 'exec', kindNode, 'rm', '-f', `${workflowDir}/${name}.py`)
+  },
+  /** The names of the steps a run has checkpointed so far. */
+  async checkpoints(taskId: string, runId: string): Promise<string[]> {
+    const rows = await db`
+      select checkpoint_name from absurd.get_task_checkpoint_states('centaur_workflows', ${taskId}::uuid, ${runId}::uuid)`
+    return rows.map((row: { checkpoint_name: string }) => row.checkpoint_name)
   }
 }
 
@@ -923,6 +937,21 @@ async function kubectl(options: { stdin?: string; namespace?: string }, ...args:
     proc.exited
   ])
   if (code !== 0) throw new Error(`kubectl ${args.join(' ')} failed: ${stderr.trim()}`)
+  return stdout.trim()
+}
+
+async function docker(stdin: string | undefined, ...args: string[]): Promise<string> {
+  const proc = Bun.spawn(['docker', ...args], {
+    stdin: stdin === undefined ? 'ignore' : new Blob([stdin]),
+    stdout: 'pipe',
+    stderr: 'pipe'
+  })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited
+  ])
+  if (code !== 0) throw new Error(`docker ${args.join(' ')} failed: ${stderr.trim()}`)
   return stdout.trim()
 }
 

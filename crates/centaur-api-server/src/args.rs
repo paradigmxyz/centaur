@@ -151,7 +151,7 @@ impl Args {
     pub(crate) async fn workflow_host_sandbox_runtime(
         &self,
         bootstrap_iron_control_principal: &str,
-    ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
+    ) -> Result<WorkflowHostSandboxRuntime, ServerError> {
         self.sandbox
             .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
             .await
@@ -1041,12 +1041,6 @@ struct SandboxArgs {
         action = clap::ArgAction::Set
     )]
     iron_control_sync_infra_secrets: bool,
-    #[arg(
-        long = "workflow-host-sandbox",
-        env = "WORKFLOW_HOST_SANDBOX",
-        default_value_t = true
-    )]
-    workflow_host_sandbox: bool,
     #[arg(long = "workflow-host-image", env = "WORKFLOW_HOST_IMAGE")]
     workflow_host_image: Option<String>,
     #[arg(long = "workflow-host-command", env = "WORKFLOW_HOST_COMMAND")]
@@ -1153,10 +1147,8 @@ impl SandboxArgs {
     async fn workflow_host_sandbox_runtime(
         &self,
         bootstrap_iron_control_principal: &str,
-    ) -> Result<Option<WorkflowHostSandboxRuntime>, ServerError> {
-        if !self.workflow_host_sandbox {
-            return Ok(None);
-        }
+    ) -> Result<WorkflowHostSandboxRuntime, ServerError> {
+        reject_removed_local_workflow_host()?;
         let spec = self.workflow_host_spec(bootstrap_iron_control_principal)?;
         let runtime = SandboxRuntime::backend(
             Arc::new(AgentSandboxBackend::new(
@@ -1165,7 +1157,7 @@ impl SandboxArgs {
             )),
             spec.clone(),
         );
-        Ok(Some(WorkflowHostSandboxRuntime::new(runtime, spec)))
+        Ok(WorkflowHostSandboxRuntime::new(runtime, spec))
     }
 
     fn workflow_host_spec(
@@ -1202,11 +1194,15 @@ impl SandboxArgs {
         {
             spec = spec.env("DATABASE_URL", value);
         }
-        if env::var_os("PYTHON_WORKFLOW_HOST_PATH").is_some() {
-            spec = spec.env("PYTHON_WORKFLOW_HOST_PATH", WORKFLOW_HOST_PATH);
-        }
         if let Ok(value) = env::var("PYTHON_WORKFLOW_HOST_PYTHON") {
             spec = spec.env("PYTHON_WORKFLOW_HOST_PYTHON", value);
+        }
+        // The host applies the enablement policy before importing a module,
+        // so a disabled workflow's top-level code never runs.
+        for name in ["WORKFLOW_ENABLE_MODE", "WORKFLOW_ALLOWED_NAMES"] {
+            if let Some(value) = clean_optional_value(env::var(name).ok().as_deref()) {
+                spec = spec.env(name, value);
+            }
         }
         if let Some(repos_path) = clean_optional_value(self.repos_path.as_deref()) {
             spec = spec.mount(
@@ -2554,6 +2550,25 @@ const DEFAULT_SANDBOX_IMAGE: &str = "centaur-agent:latest";
 const DEFAULT_CODEMODE_IMAGE: &str = "centaur-codemode:latest";
 /// Where the sandbox image installs the Python workflow host.
 const WORKFLOW_HOST_PATH: &str = "/usr/local/bin/workflow-host";
+const REMOVED_WORKFLOW_HOST_SANDBOX_ENV: &str = "WORKFLOW_HOST_SANDBOX";
+
+/// Workflow hosts always run in sandboxes. Refuse a deployment that still asks
+/// for the removed in-process host rather than silently changing where its
+/// workflows run.
+fn reject_removed_local_workflow_host() -> Result<(), ServerError> {
+    check_removed_local_workflow_host(env::var(REMOVED_WORKFLOW_HOST_SANDBOX_ENV).ok().as_deref())
+}
+
+fn check_removed_local_workflow_host(value: Option<&str>) -> Result<(), ServerError> {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if matches!(value.as_str(), "false" | "0" | "no" | "off") => {
+            Err(ServerError::UnsupportedConfig(format!(
+                "{REMOVED_WORKFLOW_HOST_SANDBOX_ENV}={value} is no longer supported: workflow hosts always run in sandboxes; unset it"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
 
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
     match engine {
@@ -3373,6 +3388,52 @@ mod tests {
                 && mount.read_only
                 && mount.kind == MountKind::NamedVolume("centaur-repo-cache".to_owned())
         }));
+    }
+
+    #[test]
+    fn workflow_host_spec_carries_the_workflow_enablement_policy() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[
+            ("WORKFLOW_ENABLE_MODE", "allowlist"),
+            ("WORKFLOW_ALLOWED_NAMES", "nightly_report, weekly_digest"),
+        ]);
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+        ])
+        .unwrap();
+
+        let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
+        let value = |name: &str| {
+            spec.env
+                .iter()
+                .find(|env| env.name == name)
+                .map(|env| env.value.clone())
+        };
+
+        assert_eq!(value("WORKFLOW_ENABLE_MODE").as_deref(), Some("allowlist"));
+        assert_eq!(
+            value("WORKFLOW_ALLOWED_NAMES").as_deref(),
+            Some("nightly_report, weekly_digest")
+        );
+    }
+
+    #[test]
+    fn removed_local_workflow_host_setting_is_rejected() {
+        for value in ["false", "0", " FALSE ", "off", "no"] {
+            let error = check_removed_local_workflow_host(Some(value)).unwrap_err();
+            assert!(
+                error.to_string().contains("WORKFLOW_HOST_SANDBOX"),
+                "{value}: {error}"
+            );
+        }
+        for value in [None, Some("true"), Some("1"), Some("")] {
+            assert!(
+                check_removed_local_workflow_host(value).is_ok(),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

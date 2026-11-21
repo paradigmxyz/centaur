@@ -13,7 +13,6 @@
 {{- $overlaySources := include "centaur.overlaySources" . | fromJsonArray -}}
 {{- $toolSources := list -}}
 {{- $publicToolSources := list -}}
-{{- $apiWorkflowDirList := list -}}
 {{- $sandboxWorkflowDirList := list -}}
 {{- $skillDirs := list -}}
 {{- $publicSkillDirs := list -}}
@@ -33,7 +32,6 @@
 {{- end -}}
 {{- end -}}
 {{- with (get $source "workflowsSubdir") -}}
-{{- $apiWorkflowDirList = append $apiWorkflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath $repo .) -}}
 {{- $sandboxWorkflowDirList = append $sandboxWorkflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}
 {{- end -}}
 {{- with (get $source "skillsSubdir") -}}
@@ -53,7 +51,6 @@ connectors, so later sources come later in the list. */ -}}
 {{- $toolsUseRepoCache := and .Values.repoCache.enabled (gt (len $toolSources) 0) -}}
 {{- $useOverlayRepoCache := and .Values.repoCache.enabled (gt (len $overlaySources) 0) -}}
 {{- $toolDirs := list "/app/tools" -}}
-{{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
 {{- $toolDirs = list -}}
 {{- range $source := $toolSources }}
@@ -65,9 +62,6 @@ connectors, so later sources come later in the list. */ -}}
 {{- range $source := $publicToolSources }}
 {{- $publicToolDirs = append $publicToolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
 {{- end -}}
-{{- end -}}
-{{- if and .Values.repoCache.enabled (gt (len $apiWorkflowDirList) 0) -}}
-{{- $workflowDirs = join ":" $apiWorkflowDirList -}}
 {{- end -}}
 {{- $sandboxWorkflowDirs := "" -}}
 {{- if and .Values.repoCache.enabled (gt (len $sandboxWorkflowDirList) 0) -}}
@@ -268,15 +262,9 @@ spec:
             - name: KUBERNETES_PUBLIC_TOOL_DIRS
               value: {{ join ":" $publicToolDirs | quote }}
 {{- end }}
-            - name: WORKFLOW_DIRS
-              value: {{ $workflowDirs | quote }}
 {{- if $sandboxWorkflowDirs }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
-{{- end }}
-{{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_HOST_SANDBOX") }}
-            - name: WORKFLOW_HOST_SANDBOX
-              value: {{ .Values.apiRs.workflowHostSandbox | quote }}
 {{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "WORKFLOW_ENABLE_MODE") }}
             - name: WORKFLOW_ENABLE_MODE

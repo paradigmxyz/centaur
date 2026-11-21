@@ -702,7 +702,6 @@ apiRs:
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.
-  workflowHostSandbox: true
   workflowEnableMode: all
   workflowAllowedNames: ""
   # Requests/limits for the workflow-host sandbox pod (k8s resources map).

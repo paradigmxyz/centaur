@@ -118,9 +118,8 @@ _build-teamsbot:
 _build-agent:
     {{docker_build}} --target "{{agent_build_target}}" -t "{{agent_image}}" -f "{{agent_dockerfile}}" .
 
-# The Python workflow host is embedded in both consumer images.
+# The Python workflow host ships in the agent image, where workflows run.
 _build-workflow-python:
-    just _build-api-rs
     just _build-agent
 
 # The console builds from the repo root so its SPA can use the pnpm workspace

@@ -20,7 +20,7 @@ files can assume about their runtime.
 | Runtime owner | Python API service | `api-rs` |
 | Durable state | Python workflow engine tables | Absurd queue/checkpoint tables |
 | Python execution | In-process with the API | Separate workflow-host sandbox |
-| Workflow discovery | Python imports all workflow files | `api-rs` asks the Python host to discover workflow metadata |
+| Workflow discovery | Python imports all workflow files | `api-rs` asks the Python host, in a workflow-host sandbox, to discover workflow metadata |
 | Agent turns | Python control plane helpers | `ctx.agent_turn(...)` delegates to the `api-rs` session runtime |
 | Webhooks | Python workflow router | `api-rs` `/api/webhooks/{slug}` |
 | Schedules | Python workflow scheduler | Absurd schedule tasks |
@@ -190,10 +190,7 @@ WORKFLOW_PRINCIPAL = "finance-automation"
 
 The string form resolves the existing principal by foreign ID or OID and fails
 startup when it does not exist. It does not create or update the principal. The
-`True` form remains `workflow-` plus the slugged `WORKFLOW_NAME`. Any
-`WORKFLOW_PRINCIPAL` value requires `apiRs.workflowHostSandbox=true`, which
-renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
-principal while workflow-host sandboxing is disabled.
+`True` form remains `workflow-` plus the slugged `WORKFLOW_NAME`.
 
 #### Pick the model and reasoning effort
 

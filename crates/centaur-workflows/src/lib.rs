@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     future::Future,
-    path::PathBuf,
     str::FromStr,
     sync::{Arc, RwLock},
     time::Duration,
@@ -32,7 +31,6 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    process::Command,
     sync::mpsc,
     task::JoinHandle,
 };
@@ -48,9 +46,14 @@ pub const WORKFLOW_ETL_BACKFILL_QUEUE: &str = "centaur_workflows_etl_backfill";
 pub const WORKFLOW_SCHEDULE_QUEUE: &str = "centaur_workflow_schedules";
 pub const WORKFLOW_TASK: &str = "centaur.workflow";
 pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
-const PYTHON_HOST_ENV: &str = "PYTHON_WORKFLOW_HOST_PATH";
-const PYTHON_HOST_INTERPRETER_ENV: &str = "PYTHON_WORKFLOW_HOST_PYTHON";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
+const WORKFLOW_HOST_ROLE_LABEL: &str = "centaur.ai/workflow-host-role";
+const WORKFLOW_HOST_ROLE_DISCOVERY: &str = "discovery";
+/// Upper bound on one discovery pass once its sandbox is running.
+const WORKFLOW_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Startup discovery retries, so one failed sandbox start does not fail api-rs.
+const WORKFLOW_STARTUP_DISCOVERY_ATTEMPTS: u32 = 3;
+const WORKFLOW_STARTUP_DISCOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_AGENT_MAX_DURATION_MS: u64 = 30 * 60 * 1_000;
 const DEFAULT_AGENT_BATCH_CONCURRENCY: usize = 4;
@@ -276,6 +279,14 @@ impl WorkflowHostSandboxRuntime {
         }
     }
 
+    fn host_spec(&self) -> SandboxSpec {
+        workflow_host_spec(&self.spec)
+    }
+
+    fn discovery_spec(&self) -> SandboxSpec {
+        workflow_discovery_spec(&self.spec)
+    }
+
     fn update_workflow_principals(
         &self,
         registered: BTreeMap<String, String>,
@@ -291,8 +302,10 @@ impl WorkflowHostSandboxRuntime {
         };
     }
 
+    /// The sandbox that runs one workflow, bound to its scoped principal when it
+    /// declares one.
     fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
-        let mut spec = self.spec.clone();
+        let mut spec = self.host_spec();
         let principal = {
             let assignments = self
                 .workflow_principals
@@ -305,6 +318,23 @@ impl WorkflowHostSandboxRuntime {
         }
         Ok(spec)
     }
+}
+
+/// The base workflow-host sandbox. Workflow code never sees the API's JWT
+/// signing secret, including through the local process backend, which would
+/// otherwise inherit it.
+fn workflow_host_spec(base: &SandboxSpec) -> SandboxSpec {
+    let mut spec = base.clone();
+    spec.env
+        .retain(|entry| entry.name != "CENTAUR_JWT_SIGNING_SECRET");
+    spec.env("CENTAUR_JWT_SIGNING_SECRET", "")
+}
+
+/// The sandbox that discovers workflows. Discovery imports every enabled
+/// workflow module, which runs its top-level code, so it runs in a sandbox with
+/// the bootstrap workflow-host principal and never in the API process.
+fn workflow_discovery_spec(base: &SandboxSpec) -> SandboxSpec {
+    workflow_host_spec(base).label(WORKFLOW_HOST_ROLE_LABEL, WORKFLOW_HOST_ROLE_DISCOVERY)
 }
 
 #[derive(Clone)]
@@ -574,7 +604,7 @@ impl WorkflowRuntime {
     pub async fn new(
         store: PgSessionStore,
         session_runtime: SessionRuntime,
-        workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+        workflow_host_sandbox: WorkflowHostSandboxRuntime,
         workflow_principal_registrar: WorkflowPrincipalRegistrar,
     ) -> Result<Self, WorkflowRuntimeError> {
         let client = Client::from_pool_with_options(
@@ -640,15 +670,16 @@ impl WorkflowRuntime {
             etl_backfill: etl_backfill_client.clone(),
         };
 
-        let discovery = discover_python_workflow_metadata().await?;
+        let discovery =
+            discover_python_workflow_metadata_at_startup(&workflow_host_sandbox).await?;
         let enablement = WorkflowEnablement::from_env()?;
-        let workflow_host_sandbox = prepare_workflow_host_sandbox(
-            workflow_host_sandbox,
-            workflow_principal_registrar.clone(),
+        reconcile_workflow_principals(
+            &workflow_host_sandbox,
+            &workflow_principal_registrar,
             &discovery,
             &enablement,
         )
-        .await?;
+        .await;
         let schedule_registry = Arc::new(RwLock::new(build_schedule_registry(
             &discovery,
             &enablement,
@@ -1858,36 +1889,6 @@ fn metadata_from_discovery_payload(
     metadata
 }
 
-async fn prepare_workflow_host_sandbox(
-    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
-    workflow_principal_registrar: WorkflowPrincipalRegistrar,
-    discovery: &PythonWorkflowMetadata,
-    enablement: &WorkflowEnablement,
-) -> Result<Option<WorkflowHostSandboxRuntime>, WorkflowRuntimeError> {
-    let Some(sandbox) = workflow_host_sandbox else {
-        if !discovery.principals.is_empty() {
-            let workflow_names = discovery
-                .principals
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(WorkflowRuntimeError::BadRequest(format!(
-                "WORKFLOW_PRINCIPAL requires workflow-host sandboxing, but WORKFLOW_HOST_SANDBOX is disabled for workflows: {workflow_names}"
-            )));
-        }
-        return Ok(None);
-    };
-    reconcile_workflow_principals(
-        &sandbox,
-        &workflow_principal_registrar,
-        discovery,
-        enablement,
-    )
-    .await;
-    Ok(Some(sandbox))
-}
-
 async fn reconcile_workflow_principals(
     sandbox: &WorkflowHostSandboxRuntime,
     registrar: &WorkflowPrincipalRegistrar,
@@ -1901,51 +1902,72 @@ async fn reconcile_workflow_principals(
     sandbox.update_workflow_principals(registered, required);
 }
 
-async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, WorkflowRuntimeError>
-{
-    let host_path = python_workflow_host_path();
-    let mut command = Command::new(
-        env::var(PYTHON_HOST_INTERPRETER_ENV).unwrap_or_else(|_| "python3".to_owned()),
-    );
-    command
-        .env_remove("CENTAUR_JWT_SIGNING_SECRET")
-        .arg(&host_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if env::var_os("WORKFLOW_DIRS").is_none() {
-        command.env("WORKFLOW_DIRS", default_workflow_dirs());
-    }
-
-    let mut child = command.spawn().map_err(|error| {
-        WorkflowRuntimeError::Internal(format!(
-            "failed to spawn Python workflow host {}: {error}",
-            host_path.display()
-        ))
-    })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdin missing".to_owned()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdout missing".to_owned()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stderr missing".to_owned()))?;
+/// Discovers workflows in a fresh workflow-host sandbox. Discovery imports each
+/// enabled workflow module, so it must not run in the API process.
+async fn discover_python_workflow_metadata(
+    sandbox: &WorkflowHostSandboxRuntime,
+) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError> {
+    // Sandbox creation is bounded by the backend's ready timeout; cancelling it
+    // here could leave a created sandbox that nothing stops.
+    let (sandbox_id, io) = sandbox
+        .runtime
+        .create_running_io(sandbox.discovery_spec())
+        .await?;
+    let mut stdin = io.stdin;
     let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
+        let _guard = io.guard;
+        let mut lines = BufReader::new(io.stderr).lines();
         let mut collected = Vec::new();
         while let Ok(Some(line)) = lines.next_line().await {
             collected.push(line);
         }
         collected.join("\n")
     });
-
-    write_host_message(&mut stdin, &json!({"type": "workflow.discover"})).await?;
+    let result = tokio::time::timeout(
+        WORKFLOW_DISCOVERY_TIMEOUT,
+        run_python_workflow_discovery_protocol(&mut stdin, io.stdout, stderr_task),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(WorkflowRuntimeError::Internal(format!(
+            "workflow discovery did not finish within {}s",
+            WORKFLOW_DISCOVERY_TIMEOUT.as_secs()
+        )))
+    });
     drop(stdin);
+    if let Err(error) = sandbox.runtime.stop_sandbox(&sandbox_id).await {
+        warn!(sandbox_id = %sandbox_id.as_str(), %error, "failed to stop workflow discovery sandbox");
+    }
+    result
+}
+
+async fn discover_python_workflow_metadata_at_startup(
+    sandbox: &WorkflowHostSandboxRuntime,
+) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError> {
+    let mut attempt = 1;
+    loop {
+        match discover_python_workflow_metadata(sandbox).await {
+            Ok(metadata) => return Ok(metadata),
+            Err(error) if attempt < WORKFLOW_STARTUP_DISCOVERY_ATTEMPTS => {
+                warn!(%error, attempt, "workflow discovery failed at startup; retrying");
+                tokio::time::sleep(WORKFLOW_STARTUP_DISCOVERY_RETRY_DELAY).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn run_python_workflow_discovery_protocol<W, R>(
+    stdin: &mut W,
+    stdout: R,
+    stderr_task: JoinHandle<String>,
+) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncRead + Send + Unpin + 'static,
+{
+    write_host_message(stdin, &json!({"type": "workflow.discover"})).await?;
 
     let mut lines = BufReader::new(stdout).lines();
     while let Some(line) = lines.next_line().await? {
@@ -1955,7 +1977,6 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
         let message: Value = serde_json::from_str(&line)?;
         match message.get("type").and_then(Value::as_str) {
             Some("workflow.discovery") => {
-                let _ = child.wait().await;
                 let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(message)?;
                 let mut metadata = metadata_from_discovery_payload(payload);
                 WorkflowEnablement::from_env()?.filter_metadata(&mut metadata);
@@ -1977,10 +1998,9 @@ async fn discover_python_workflow_metadata() -> Result<PythonWorkflowMetadata, W
         }
     }
 
-    let status = child.wait().await?;
     let stderr = stderr_task.await.unwrap_or_default();
     Err(WorkflowRuntimeError::Internal(format!(
-        "Python workflow host exited before workflow.discovery: status={status}, stderr={stderr}"
+        "Python workflow host exited before workflow.discovery: stderr={stderr}"
     )))
 }
 
@@ -2031,12 +2051,16 @@ fn spawn_workflow_metadata_reconciler(
     webhook_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     starter_registry: Arc<RwLock<WorkflowStarters>>,
-    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_host_sandbox: WorkflowHostSandboxRuntime,
     workflow_principal_registrar: WorkflowPrincipalRegistrar,
     interval: Duration,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        // Discovery starts a sandbox, which can take longer than a short
+        // interval; run the next pass a full interval later instead of
+        // immediately to catch up.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut reaper = RemovedWorkflowReaper::from_env();
         let mut queue_metrics = WorkflowQueueMetricsRecorder::default();
         // Startup discovery already ran; wait one full period before refreshing.
@@ -2048,7 +2072,7 @@ fn spawn_workflow_metadata_reconciler(
                 &webhook_registry,
                 &schedule_registry,
                 &starter_registry,
-                workflow_host_sandbox.as_ref(),
+                &workflow_host_sandbox,
                 &workflow_principal_registrar,
             )
             .await
@@ -2086,7 +2110,7 @@ async fn reconcile_workflow_metadata_once(
     webhook_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowWebhook>>>,
     schedule_registry: &Arc<RwLock<BTreeMap<String, RegisteredWorkflowSchedule>>>,
     starter_registry: &Arc<RwLock<WorkflowStarters>>,
-    workflow_host_sandbox: Option<&WorkflowHostSandboxRuntime>,
+    workflow_host_sandbox: &WorkflowHostSandboxRuntime,
     workflow_principal_registrar: &WorkflowPrincipalRegistrar,
 ) -> Result<
     (
@@ -2096,18 +2120,16 @@ async fn reconcile_workflow_metadata_once(
     WorkflowRuntimeError,
 > {
     let enablement = WorkflowEnablement::from_env()?;
-    let discovery = discover_python_workflow_metadata().await?;
+    let discovery = discover_python_workflow_metadata(workflow_host_sandbox).await?;
     let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
     let next_schedules = build_schedule_registry(&discovery, &enablement)?;
-    if let Some(sandbox) = workflow_host_sandbox {
-        reconcile_workflow_principals(
-            sandbox,
-            workflow_principal_registrar,
-            &discovery,
-            &enablement,
-        )
-        .await;
-    }
+    reconcile_workflow_principals(
+        workflow_host_sandbox,
+        workflow_principal_registrar,
+        &discovery,
+        &enablement,
+    )
+    .await;
     {
         let mut webhooks = webhook_registry
             .write()
@@ -2751,7 +2773,7 @@ async fn run_centaur_workflow(
     mut input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
-    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_host_sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
     let mut cleanup_guard =
@@ -2794,7 +2816,7 @@ async fn run_centaur_workflow_inner(
     input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
-    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_host_sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> absurd::Result<WorkflowResult> {
     let _heartbeat_guard = start_workflow_task_heartbeat(ctx.clone())
@@ -2965,20 +2987,17 @@ async fn run_python_workflow_host(
     input: WorkflowTaskInput,
     ctx: TaskContext,
     session_runtime: SessionRuntime,
-    workflow_host_sandbox: Option<WorkflowHostSandboxRuntime>,
+    workflow_host_sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    if let Some(sandbox) = workflow_host_sandbox {
-        return run_python_workflow_host_in_sandbox(
-            input,
-            ctx,
-            session_runtime,
-            sandbox,
-            workflow_clients,
-        )
-        .await;
-    }
-    run_python_workflow_host_local(input, ctx, session_runtime, workflow_clients).await
+    run_python_workflow_host_in_sandbox(
+        input,
+        ctx,
+        session_runtime,
+        workflow_host_sandbox,
+        workflow_clients,
+    )
+    .await
 }
 
 async fn start_workflow_task_heartbeat(
@@ -2996,136 +3015,6 @@ async fn start_workflow_task_heartbeat(
     Ok(WorkflowTaskHeartbeatGuard { task })
 }
 
-async fn run_python_workflow_host_local(
-    input: WorkflowTaskInput,
-    ctx: TaskContext,
-    session_runtime: SessionRuntime,
-    workflow_clients: WorkflowQueueClients,
-) -> Result<Value, WorkflowRuntimeError> {
-    let host_path = python_workflow_host_path();
-    let mut command = Command::new(
-        env::var(PYTHON_HOST_INTERPRETER_ENV).unwrap_or_else(|_| "python3".to_owned()),
-    );
-    command
-        .env_remove("CENTAUR_JWT_SIGNING_SECRET")
-        .arg(&host_path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if env::var_os("WORKFLOW_DIRS").is_none() {
-        command.env("WORKFLOW_DIRS", default_workflow_dirs());
-    }
-
-    let mut child = command.spawn().map_err(|error| {
-        WorkflowRuntimeError::Internal(format!(
-            "failed to spawn Python workflow host {}: {error}",
-            host_path.display()
-        ))
-    })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdin missing".to_owned()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stdout missing".to_owned()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| WorkflowRuntimeError::Internal("workflow host stderr missing".to_owned()))?;
-    let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        let mut collected = Vec::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            collected.push(line);
-        }
-        collected.join("\n")
-    });
-
-    write_host_message(
-        &mut stdin,
-        &json!({
-            "type": "workflow.start",
-            "run_id": ctx.run_id(),
-            "task_id": ctx.task_id(),
-            "workflow_name": input.workflow_name,
-            "input": input.input,
-        }),
-    )
-    .await?;
-
-    let mut lines = HostStdoutLines::spawn(stdout);
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let message: Value = serde_json::from_str(&line)?;
-        match message.get("type").and_then(Value::as_str) {
-            Some("workflow.result") => {
-                drop(stdin);
-                let _ = child.wait().await;
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-            }
-            Some("workflow.error") | Some("host.error") => {
-                return Err(python_workflow_host_structured_error(
-                    "Python workflow host error",
-                    &message,
-                    stderr_task,
-                )
-                .await);
-            }
-            Some("ctx.log") => {
-                let workflow_log = message
-                    .get("message")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("workflow_log");
-                info!(
-                    workflow_log = %workflow_log,
-                    fields = %message.get("fields").cloned().unwrap_or_else(|| json!({})),
-                    task_id = ctx.task_id(),
-                    run_id = ctx.run_id(),
-                    "python workflow log"
-                );
-            }
-            Some("ctx.metric") => {
-                record_python_workflow_metric(&message);
-            }
-            Some(message_type) if message_type.starts_with("ctx.") => {
-                let response = match handle_python_context_request(
-                    &message,
-                    &ctx,
-                    &session_runtime,
-                    &input,
-                    &workflow_clients,
-                )
-                .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
-                        drop(stdin);
-                        let _ = child.start_kill();
-                        let _ = child.wait().await;
-                        return Err(error);
-                    }
-                };
-                write_host_message(&mut stdin, &response).await?;
-            }
-            other => {
-                return Err(WorkflowRuntimeError::Internal(format!(
-                    "unexpected Python workflow host message type {other:?}: {message}"
-                )));
-            }
-        }
-    }
-
-    let status = child.wait().await?;
-    let stderr = stderr_task.await.unwrap_or_default();
-    Err(WorkflowRuntimeError::Internal(format!(
-        "Python workflow host exited before workflow.result: status={status}, stderr={stderr}"
-    )))
-}
-
 async fn run_python_workflow_host_in_sandbox(
     input: WorkflowTaskInput,
     ctx: TaskContext,
@@ -3133,23 +3022,11 @@ async fn run_python_workflow_host_in_sandbox(
     sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
-    spec.env
-        .retain(|entry| entry.name != "CENTAUR_JWT_SIGNING_SECRET");
-    spec = spec
-        // Also mask inheritance from the development-only local process backend.
-        .env("CENTAUR_JWT_SIGNING_SECRET", "")
+    let spec = sandbox
+        .spec_for_workflow(&input.workflow_name)?
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
         .env("WORKFLOW_NAME", input.workflow_name.clone());
-    if env::var_os("WORKFLOW_DIRS").is_none() && !sandbox_spec_has_env(&spec, "WORKFLOW_DIRS") {
-        spec = spec.env("WORKFLOW_DIRS", default_workflow_dirs());
-    }
-    if let Ok(database_url) = env::var("DATABASE_URL")
-        && !sandbox_spec_has_env(&spec, "DATABASE_URL")
-    {
-        spec = spec.env("DATABASE_URL", database_url);
-    }
     let (sandbox_id, io) = sandbox.runtime.create_running_io(spec).await?;
     let mut stdin = io.stdin;
     let stderr_task = tokio::spawn(async move {
@@ -3176,10 +3053,6 @@ async fn run_python_workflow_host_in_sandbox(
         warn!(sandbox_id = %sandbox_id.as_str(), %error, "failed to stop workflow host sandbox");
     }
     result
-}
-
-fn sandbox_spec_has_env(spec: &SandboxSpec, name: &str) -> bool {
-    spec.env.iter().any(|entry| entry.name == name)
 }
 
 async fn run_python_workflow_host_protocol<W, R>(
@@ -4182,25 +4055,6 @@ where
     Ok(())
 }
 
-fn python_workflow_host_path() -> PathBuf {
-    if let Ok(path) = env::var(PYTHON_HOST_ENV) {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("services")
-        .join("workflow-python")
-        .join("workflow_host.py")
-}
-
-fn default_workflow_dirs() -> String {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
-    repo_root.join("workflows").to_string_lossy().to_string()
-}
-
 fn run_time_now_tool() -> ToolResult {
     let now = chrono::Utc::now();
     ToolResult {
@@ -4823,6 +4677,109 @@ mod tests {
             notifications += 1;
         }
         assert_eq!(notifications, 100);
+    }
+
+    #[tokio::test]
+    async fn discovery_reads_a_payload_larger_than_the_attach_buffer() {
+        let (mut host_stdout, from_host) = tokio::io::duplex(64 * 1024);
+        let (to_host, host_stdin) = tokio::io::duplex(64 * 1024);
+        let (api_stdout, mut api_stdin) = spawn_attach_transport(from_host, to_host);
+        let workflows = (0..200)
+            .map(|index| {
+                json!({
+                    "workflow_name": format!("workflow_{index}"),
+                    "source_path": format!("/opt/centaur/workflows/workflow_{index}.py"),
+                    "webhooks": [],
+                    "schedule": null,
+                    "principal": null,
+                    "starters": ["user"],
+                })
+            })
+            .collect::<Vec<_>>();
+        let host = tokio::spawn(async move {
+            let mut request = String::new();
+            BufReader::new(host_stdin)
+                .read_line(&mut request)
+                .await
+                .unwrap();
+            write_host_message(
+                &mut host_stdout,
+                &json!({"type": "workflow.discovery", "workflows": workflows}),
+            )
+            .await
+            .unwrap();
+            request
+        });
+        let stderr_task = tokio::spawn(async { String::new() });
+
+        let metadata = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_python_workflow_discovery_protocol(&mut api_stdin, api_stdout, stderr_task),
+        )
+        .await
+        .expect("discovery did not finish")
+        .unwrap();
+
+        let request: Value = serde_json::from_str(&host.await.unwrap()).unwrap();
+        assert_eq!(request, json!({"type": "workflow.discover"}));
+        assert_eq!(metadata.workflow_names.len(), 200);
+        assert_eq!(
+            metadata.starters.get("workflow_7"),
+            Some(&BTreeSet::from(["user".to_owned()]))
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_host_exit_before_a_payload() {
+        let (host_stdout, api_stdout) = tokio::io::duplex(1024);
+        let (mut api_stdin, _host_stdin) = tokio::io::duplex(1024);
+        drop(host_stdout);
+        let stderr_task = tokio::spawn(async { "Traceback: import failed".to_owned() });
+
+        let error = run_python_workflow_discovery_protocol(&mut api_stdin, api_stdout, stderr_task)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("exited before workflow.discovery")
+        );
+        assert!(error.to_string().contains("import failed"));
+    }
+
+    #[test]
+    fn workflow_host_sandboxes_never_carry_the_jwt_signing_secret() {
+        let base = SandboxSpec::new("centaur-agent:latest")
+            .label("centaur.ai/component", "workflow-run")
+            .env("CENTAUR_JWT_SIGNING_SECRET", "real-secret")
+            .env("WORKFLOW_DIRS", "/opt/centaur/workflows");
+
+        for spec in [workflow_host_spec(&base), workflow_discovery_spec(&base)] {
+            let secrets = spec
+                .env
+                .iter()
+                .filter(|entry| entry.name == "CENTAUR_JWT_SIGNING_SECRET")
+                .map(|entry| entry.value.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(secrets, vec![""]);
+            assert_eq!(
+                spec.labels.get("centaur.ai/component").map(String::as_str),
+                Some("workflow-run")
+            );
+        }
+        assert_eq!(
+            workflow_discovery_spec(&base)
+                .labels
+                .get(WORKFLOW_HOST_ROLE_LABEL)
+                .map(String::as_str),
+            Some(WORKFLOW_HOST_ROLE_DISCOVERY)
+        );
+        assert!(
+            !workflow_host_spec(&base)
+                .labels
+                .contains_key(WORKFLOW_HOST_ROLE_LABEL)
+        );
     }
 
     #[tokio::test]
@@ -5502,38 +5459,6 @@ mod tests {
             .await;
 
         assert!(registered.is_empty());
-    }
-
-    #[tokio::test]
-    async fn workflow_principal_requires_workflow_host_sandbox() {
-        let discovery = PythonWorkflowMetadata {
-            principals: BTreeMap::from([(
-                "nightly_report".to_owned(),
-                WorkflowPrincipalDeclaration::Managed,
-            )]),
-            workflow_names: BTreeSet::from(["nightly_report".to_owned()]),
-            ..PythonWorkflowMetadata::default()
-        };
-
-        let registrar = WorkflowPrincipalRegistrar::new(IronControlClient::new(
-            "http://127.0.0.1:1",
-            "test-key",
-        ));
-        let error = match prepare_workflow_host_sandbox(
-            None,
-            registrar,
-            &discovery,
-            &WorkflowEnablement::all(),
-        )
-        .await
-        {
-            Ok(_) => panic!("workflow principal should require workflow-host sandboxing"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(error, WorkflowRuntimeError::BadRequest(_)));
-        assert!(error.to_string().contains("WORKFLOW_HOST_SANDBOX"));
-        assert!(error.to_string().contains("nightly_report"));
     }
 
     #[test]
