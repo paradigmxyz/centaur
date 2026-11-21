@@ -49,13 +49,6 @@ pub const WORKFLOW_SCHEDULE_TASK: &str = "centaur.workflow.schedule_tick";
 const WORKFLOW_TOOL_API_URL_ENV: &str = "WORKFLOW_TOOL_API_URL";
 /// Upper bound on one discovery request.
 const WORKFLOW_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(150);
-/// The workflow-host env a discovery request carries, so discovery sees the
-/// same workflows, and the same enablement policy, as runs.
-const WORKFLOW_DISCOVERY_ENV: [&str; 3] = [
-    "WORKFLOW_DIRS",
-    "WORKFLOW_ENABLE_MODE",
-    "WORKFLOW_ALLOWED_NAMES",
-];
 const WORKFLOW_STARTUP_DISCOVERY_INITIAL_DELAY: Duration = Duration::from_secs(2);
 const WORKFLOW_STARTUP_DISCOVERY_MAX_DELAY: Duration = Duration::from_secs(30);
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS: u64 = 60_000;
@@ -283,14 +276,6 @@ impl WorkflowHostSandboxRuntime {
         }
     }
 
-    fn host_spec(&self) -> SandboxSpec {
-        workflow_host_spec(&self.spec)
-    }
-
-    fn discovery_env(&self) -> BTreeMap<String, String> {
-        workflow_discovery_env(&self.spec)
-    }
-
     fn update_workflow_principals(
         &self,
         registered: BTreeMap<String, String>,
@@ -306,10 +291,8 @@ impl WorkflowHostSandboxRuntime {
         };
     }
 
-    /// The sandbox that runs one workflow, bound to its scoped principal when it
-    /// declares one.
     fn spec_for_workflow(&self, workflow_name: &str) -> Result<SandboxSpec, WorkflowRuntimeError> {
-        let mut spec = self.host_spec();
+        let mut spec = self.spec.clone();
         let principal = {
             let assignments = self
                 .workflow_principals
@@ -324,51 +307,33 @@ impl WorkflowHostSandboxRuntime {
     }
 }
 
-/// The base workflow-host sandbox. Workflow code never sees the API's JWT
-/// signing secret, including through the local process backend, which would
-/// otherwise inherit it.
-fn workflow_host_spec(base: &SandboxSpec) -> SandboxSpec {
-    let mut spec = base.clone();
-    spec.env
-        .retain(|entry| entry.name != "CENTAUR_JWT_SIGNING_SECRET");
-    spec.env("CENTAUR_JWT_SIGNING_SECRET", "")
-}
-
-fn workflow_discovery_env(spec: &SandboxSpec) -> BTreeMap<String, String> {
-    spec.env
-        .iter()
-        .filter(|entry| WORKFLOW_DISCOVERY_ENV.contains(&entry.name.as_str()))
-        .map(|entry| (entry.name.clone(), entry.value.clone()))
-        .collect()
-}
-
 /// Client for the workflow discovery service (`workflow-host serve`).
 /// Discovery imports every enabled workflow module, which runs its top-level
 /// code, so it happens in that service and never in the API process.
 #[derive(Clone)]
 pub struct WorkflowDiscoveryClient {
     discover_url: String,
+    workflow_dirs: String,
     http: reqwest::Client,
 }
 
 impl WorkflowDiscoveryClient {
-    pub fn new(base_url: &str) -> Self {
+    /// `workflow_dirs` is the `WORKFLOW_DIRS` run sandboxes get, so discovery
+    /// sees the workflows runs load.
+    pub fn new(base_url: &str, workflow_dirs: &str) -> Self {
         Self {
             discover_url: format!("{}/discover", base_url.trim_end_matches('/')),
+            workflow_dirs: workflow_dirs.to_owned(),
             http: reqwest::Client::new(),
         }
     }
 
-    /// Discovers the workflows a host started with `env` would load.
-    async fn discover(
-        &self,
-        env: &BTreeMap<String, String>,
-    ) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError> {
+    async fn discover(&self) -> Result<PythonWorkflowMetadata, WorkflowRuntimeError> {
         let response = self
             .http
             .post(&self.discover_url)
             .timeout(WORKFLOW_DISCOVERY_TIMEOUT)
-            .json(&json!({ "env": env }))
+            .json(&json!({ "workflow_dirs": self.workflow_dirs }))
             .send()
             .await
             .map_err(|error| {
@@ -386,16 +351,9 @@ impl WorkflowDiscoveryClient {
         if !status.is_success() {
             let field = |name: &str| body.get(name).and_then(Value::as_str).unwrap_or("");
             return Err(WorkflowRuntimeError::Internal(format!(
-                "Python workflow discovery error (status {status}): {}\n{}{}",
+                "Python workflow discovery error (status {status}): {}\n{}",
                 field("error"),
                 field("traceback"),
-                field("stderr"),
-            )));
-        }
-        if body.get("type").and_then(Value::as_str) != Some("workflow.discovery") {
-            return Err(WorkflowRuntimeError::Internal(format!(
-                "workflow discovery returned a {:?} message instead of workflow.discovery",
-                body.get("type")
             )));
         }
         let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(body)?;
@@ -739,11 +697,7 @@ impl WorkflowRuntime {
             etl_backfill: etl_backfill_client.clone(),
         };
 
-        let discovery = discover_python_workflow_metadata_at_startup(
-            &workflow_discovery,
-            &workflow_host_sandbox,
-        )
-        .await;
+        let discovery = discover_python_workflow_metadata_at_startup(&workflow_discovery).await;
         let enablement = WorkflowEnablement::from_env()?;
         reconcile_workflow_principals(
             &workflow_host_sandbox,
@@ -1980,12 +1934,10 @@ async fn reconcile_workflow_principals(
 /// workflow as unrestricted by `WORKFLOW_STARTERS`.
 async fn discover_python_workflow_metadata_at_startup(
     discovery: &WorkflowDiscoveryClient,
-    workflow_host_sandbox: &WorkflowHostSandboxRuntime,
 ) -> PythonWorkflowMetadata {
-    let env = workflow_host_sandbox.discovery_env();
     let mut delay = WORKFLOW_STARTUP_DISCOVERY_INITIAL_DELAY;
     loop {
-        match discovery.discover(&env).await {
+        match discovery.discover().await {
             Ok(metadata) => return metadata,
             Err(error) => {
                 warn!(%error, retry_in_secs = delay.as_secs(), "workflow discovery failed at startup; retrying");
@@ -2050,8 +2002,6 @@ fn spawn_workflow_metadata_reconciler(
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
-        // A slow discovery pass should not trigger back-to-back catch-up passes.
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut reaper = RemovedWorkflowReaper::from_env();
         let mut queue_metrics = WorkflowQueueMetricsRecorder::default();
         // Startup discovery already ran; wait one full period before refreshing.
@@ -2113,9 +2063,7 @@ async fn reconcile_workflow_metadata_once(
     WorkflowRuntimeError,
 > {
     let enablement = WorkflowEnablement::from_env()?;
-    let discovery = workflow_discovery
-        .discover(&workflow_host_sandbox.discovery_env())
-        .await?;
+    let discovery = workflow_discovery.discover().await?;
     let next_webhooks = build_webhook_registry(&discovery, &enablement)?;
     let next_schedules = build_schedule_registry(&discovery, &enablement)?;
     reconcile_workflow_principals(
@@ -3017,8 +2965,12 @@ async fn run_python_workflow_host_in_sandbox(
     sandbox: WorkflowHostSandboxRuntime,
     workflow_clients: WorkflowQueueClients,
 ) -> Result<Value, WorkflowRuntimeError> {
-    let spec = sandbox
-        .spec_for_workflow(&input.workflow_name)?
+    let mut spec = sandbox.spec_for_workflow(&input.workflow_name)?;
+    spec.env
+        .retain(|entry| entry.name != "CENTAUR_JWT_SIGNING_SECRET");
+    spec = spec
+        // Also mask inheritance from the development-only local process backend.
+        .env("CENTAUR_JWT_SIGNING_SECRET", "")
         .env("WORKFLOW_RUN_ID", ctx.run_id())
         .env("WORKFLOW_TASK_ID", ctx.task_id())
         .env("WORKFLOW_NAME", input.workflow_name.clone());
@@ -4724,7 +4676,6 @@ mod tests {
         let (url, server) = serve_one_response(
             "200 OK",
             json!({
-                "type": "workflow.discovery",
                 "workflows": [{
                     "workflow_name": "nightly_report",
                     "source_path": "/opt/centaur/workflows/nightly_report.py",
@@ -4736,15 +4687,8 @@ mod tests {
             }),
         );
 
-        let env = workflow_discovery_env(
-            &SandboxSpec::new("centaur-agent:latest")
-                .env("WORKFLOW_DIRS", "/opt/centaur/workflows")
-                .env("WORKFLOW_ENABLE_MODE", "all")
-                .env("DATABASE_URL", "postgres://real-secret")
-                .env("CENTAUR_API_URL", "http://api"),
-        );
-        let metadata = WorkflowDiscoveryClient::new(&format!("{url}/"))
-            .discover(&env)
+        let metadata = WorkflowDiscoveryClient::new(&format!("{url}/"), "/opt/centaur/workflows")
+            .discover()
             .await
             .unwrap();
 
@@ -4756,7 +4700,7 @@ mod tests {
         let (_, body) = request.split_once("\r\n\r\n").unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(body).unwrap(),
-            json!({"env": {"WORKFLOW_DIRS": "/opt/centaur/workflows", "WORKFLOW_ENABLE_MODE": "all"}})
+            json!({"workflow_dirs": "/opt/centaur/workflows"})
         );
         assert_eq!(
             metadata.workflow_names,
@@ -4765,22 +4709,6 @@ mod tests {
         assert_eq!(
             metadata.starters.get("nightly_report"),
             Some(&BTreeSet::from(["user".to_owned()]))
-        );
-    }
-
-    #[tokio::test]
-    async fn discovery_rejects_a_response_that_is_not_a_discovery_message() {
-        let (url, server) = serve_one_response("200 OK", json!({"workflows": []}));
-
-        let error = WorkflowDiscoveryClient::new(&url)
-            .discover(&BTreeMap::new())
-            .await
-            .unwrap_err();
-        server.join().unwrap();
-
-        assert!(
-            error.to_string().contains("instead of workflow.discovery"),
-            "{error}"
         );
     }
 
@@ -4794,8 +4722,8 @@ mod tests {
             }),
         );
 
-        let error = WorkflowDiscoveryClient::new(&url)
-            .discover(&BTreeMap::new())
+        let error = WorkflowDiscoveryClient::new(&url, "/opt/centaur/workflows")
+            .discover()
             .await
             .unwrap_err();
         server.join().unwrap();
@@ -4804,27 +4732,6 @@ mod tests {
         assert!(message.contains("500"), "{message}");
         assert!(message.contains("duplicate workflow name"), "{message}");
         assert!(message.contains("exact-line"), "{message}");
-    }
-
-    #[test]
-    fn workflow_host_sandboxes_never_carry_the_jwt_signing_secret() {
-        let base = SandboxSpec::new("centaur-agent:latest")
-            .label("centaur.ai/component", "workflow-run")
-            .env("CENTAUR_JWT_SIGNING_SECRET", "real-secret")
-            .env("WORKFLOW_DIRS", "/opt/centaur/workflows");
-
-        let spec = workflow_host_spec(&base);
-        let secrets = spec
-            .env
-            .iter()
-            .filter(|entry| entry.name == "CENTAUR_JWT_SIGNING_SECRET")
-            .map(|entry| entry.value.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(secrets, vec![""]);
-        assert_eq!(
-            spec.labels.get("centaur.ai/component").map(String::as_str),
-            Some("workflow-run")
-        );
     }
 
     #[tokio::test]

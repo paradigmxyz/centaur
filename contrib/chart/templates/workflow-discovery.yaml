@@ -40,15 +40,13 @@ spec:
           imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
           command: ["python3", "/usr/local/bin/workflow-host", "serve"]
           env:
-            - name: WORKFLOW_DISCOVERY_PORT
-              value: {{ $discovery.port | quote }}
             - name: PYTHONPATH
               value: /opt/centaur
             - name: HOME
               value: /tmp
           ports:
             - name: http
-              containerPort: {{ $discovery.port }}
+              containerPort: 8090
           readinessProbe:
             httpGet:
               path: /healthz
@@ -96,7 +94,7 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 4 }}
   ports:
     - name: http
-      port: {{ $discovery.port }}
+      port: 8090
       targetPort: http
 {{- if .Values.networkPolicy.enabled }}
 ---
@@ -119,7 +117,7 @@ spec:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ $discovery.port }}
+          port: 8090
   egress: []
 {{- end }}
 {{- end }}

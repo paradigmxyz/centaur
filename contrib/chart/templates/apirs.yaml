@@ -262,7 +262,7 @@ spec:
               value: {{ join ":" $publicToolDirs | quote }}
 {{- end }}
             - name: WORKFLOW_DISCOVERY_URL
-              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "workflow-discovery")) .Values.workflowDiscovery.port | quote }}
+              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "workflow-discovery")) 8090 | quote }}
 {{- if not (hasKey .Values.apiRs.extraEnv "KUBERNETES_WORKFLOW_DIRS") }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}

@@ -6,11 +6,10 @@ Centaur workflow modules, runs ``handler(input, ctx)``, and delegates durable
 context operations back to api-rs.
 
 ``workflow-host serve`` instead runs the workflow discovery service: a small
-HTTP server whose ``POST /discover`` imports the workflows and returns their
-metadata. api-rs calls it so that importing workflow modules, which runs their
-top-level code, never happens in api-rs. The request body carries the env
-api-rs gives workflow-host sandboxes (``{"env": {"WORKFLOW_DIRS": ...}}``), so
-the service needs no configuration of its own.
+HTTP server whose ``POST /discover {"workflow_dirs": "a:b"}`` imports the
+workflows in those directories and returns their metadata. api-rs calls it so
+that importing workflow modules, which runs their top-level code, never happens
+in api-rs.
 """
 
 from __future__ import annotations
@@ -35,14 +34,7 @@ from api.workflow_engine import WorkflowContext
 DATABASE_CONNECT_ATTEMPTS = 5
 DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
 DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
-DISCOVERY_PORT_ENV = "WORKFLOW_DISCOVERY_PORT"
-DEFAULT_DISCOVERY_PORT = 8090
-MAX_DISCOVERY_REQUEST_BYTES = 64 * 1024
-# The host env a discovery request may set: where workflows live and which are
-# enabled. Anything else stays the service's own environment.
-DISCOVERY_REQUEST_ENV = frozenset(
-    {"WORKFLOW_DIRS", "WORKFLOW_ENABLE_MODE", "WORKFLOW_ALLOWED_NAMES"}
-)
+DISCOVERY_PORT = 8090
 
 
 class ProtocolError(RuntimeError):
@@ -105,9 +97,10 @@ class RegisteredWorkflow:
     agent_defaults: dict[str, Any] | None = None
 
 
-def workflow_dirs() -> list[Path]:
+def workflow_dirs(raw: str | None = None) -> list[Path]:
     dirs = []
-    raw = os.getenv("WORKFLOW_DIRS", "")
+    if raw is None:
+        raw = os.getenv("WORKFLOW_DIRS", "")
     for entry in raw.split(":"):
         entry = entry.strip()
         if entry:
@@ -214,8 +207,8 @@ def workflow_name_from_source(path: Path) -> str | None:
     return name
 
 
-def discover_workflows() -> dict[str, RegisteredWorkflow]:
-    dirs = workflow_dirs()
+def discover_workflows(raw_dirs: str | None = None) -> dict[str, RegisteredWorkflow]:
+    dirs = workflow_dirs(raw_dirs)
     configure_workflow_import_paths(dirs)
     discovered: dict[str, RegisteredWorkflow] = {}
     for directory in dirs:
@@ -441,10 +434,19 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
             await pool.close()
 
 
-def discovery_payload() -> dict[str, Any]:
-    workflows = discover_workflows()
+def discovery_payload(raw_dirs: str) -> dict[str, Any]:
+    """Import the workflows in ``raw_dirs`` and describe them.
+
+    Workflow files are re-executed on every pass; helper modules they import
+    from those directories are evicted first so edits to them land too.
+    """
+    roots = tuple(str(path) + os.sep for path in workflow_dirs(raw_dirs))
+    for name, module in list(sys.modules.items()):
+        source = getattr(module, "__file__", None) or ""
+        if name.startswith("_centaur_workflow_host.") or (roots and source.startswith(roots)):
+            del sys.modules[name]
+    workflows = discover_workflows(raw_dirs)
     return {
-        "type": "workflow.discovery",
         "workflows": [
             {
                 "workflow_name": workflow.workflow_name,
@@ -585,71 +587,29 @@ async def main() -> int:
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
-def discovery_request_env(body: Any) -> dict[str, str]:
-    """Validate a discovery request body and return the env it sets."""
-    if not isinstance(body, dict) or set(body) - {"env"}:
-        raise ValueError('discovery request must be {"env": {...}}')
-    env = body.get("env", {})
-    if not isinstance(env, dict) or not all(
-        isinstance(name, str) and isinstance(value, str) for name, value in env.items()
-    ):
-        raise ValueError("discovery request env must map names to strings")
-    unknown = sorted(set(env) - DISCOVERY_REQUEST_ENV)
-    if unknown:
-        raise ValueError(f"discovery request may not set {', '.join(unknown)}")
-    return env
-
-
-def discover_with_env(env: dict[str, str]) -> dict[str, Any]:
-    """Discover workflows as a host started with ``env`` would.
-
-    Workflow files are re-executed on every pass; helper modules they import
-    from the workflow directories are evicted first so edits to them land too.
-    """
-    previous = {name: os.environ.get(name) for name in DISCOVERY_REQUEST_ENV}
-    for name in DISCOVERY_REQUEST_ENV:
-        os.environ.pop(name, None)
-    os.environ.update(env)
-    try:
-        roots = [str(path) + os.sep for path in workflow_dirs()]
-        for name, module in list(sys.modules.items()):
-            source = getattr(module, "__file__", None) or ""
-            if name.startswith("_centaur_workflow_host.") or any(
-                source.startswith(root) for root in roots
-            ):
-                del sys.modules[name]
-        return discovery_payload()
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 class DiscoveryRequestHandler(BaseHTTPRequestHandler):
     server_version = "centaur-workflow-discovery"
 
-    def do_GET(self) -> None:  # noqa: N802 - http.server naming
+    def do_GET(self) -> None:
         if self.path == "/healthz":
             self._send_json(200, {"ok": True})
             return
         self._send_json(404, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802 - http.server naming
+    def do_POST(self) -> None:
         if self.path != "/discover":
             self._send_json(404, {"error": "not found"})
             return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_DISCOVERY_REQUEST_BYTES:
-                raise ValueError("discovery request is too large")
-            env = discovery_request_env(json.loads(self.rfile.read(length) or b"{}"))
-        except ValueError as exc:
-            self._send_json(400, {"error": str(exc)})
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+            raw_dirs = body["workflow_dirs"]
+            if not isinstance(raw_dirs, str):
+                raise TypeError("workflow_dirs must be a string")
+        except (ValueError, KeyError, TypeError) as exc:
+            self._send_json(400, {"error": f'expected {{"workflow_dirs": "..."}}: {exc}'})
             return
         try:
-            payload = discover_with_env(env)
+            payload = discovery_payload(raw_dirs)
         except Exception as exc:
             print(f"workflow_discovery_failed error={exc}", file=sys.stderr)
             self._send_json(500, {"error": str(exc), "traceback": traceback.format_exc()})
@@ -664,7 +624,7 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - http.server signature
+    def log_message(self, format: str, *args: Any) -> None:
         if self.path != "/healthz":
             print(f"workflow_discovery_request {format % args}", file=sys.stderr)
 
@@ -672,9 +632,8 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
 def serve_discovery() -> int:
     """Serve discovery one request at a time. A hung import blocks /healthz
     too, so the liveness probe restarts the pod."""
-    port = int(os.getenv(DISCOVERY_PORT_ENV, str(DEFAULT_DISCOVERY_PORT)))
-    server = HTTPServer(("0.0.0.0", port), DiscoveryRequestHandler)
-    print(f"workflow_discovery_listening port={port}", file=sys.stderr)
+    server = HTTPServer(("0.0.0.0", DISCOVERY_PORT), DiscoveryRequestHandler)
+    print(f"workflow_discovery_listening port={DISCOVERY_PORT}", file=sys.stderr)
     try:
         server.serve_forever()
     finally:

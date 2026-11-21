@@ -1145,7 +1145,6 @@ httpRoutes: []
 # Rendered with api-rs; it uses sandbox.image and the same workflow sources as
 # workflow-host sandboxes.
 workflowDiscovery:
-  port: 8090
   resources:
     requests:
       cpu: 50m

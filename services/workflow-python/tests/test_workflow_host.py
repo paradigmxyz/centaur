@@ -6,12 +6,11 @@ import importlib.util
 import json
 import os
 import select
-import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import types
-import time
 import unittest
 import urllib.error
 import urllib.request
@@ -1282,12 +1281,6 @@ async def handler(inp, ctx):
             self.assertEqual(proc.stderr.read(), "")
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 def http_json(method: str, url: str, body: dict | None = None) -> tuple[int, dict]:
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=data, method=method)
@@ -1298,40 +1291,23 @@ def http_json(method: str, url: str, body: dict | None = None) -> tuple[int, dic
         return error.code, json.loads(error.read())
 
 
-def discover(base: str, workflow_dir: str, **env: str) -> tuple[int, dict]:
-    return http_json("POST", f"{base}/discover", {"env": {"WORKFLOW_DIRS": workflow_dir, **env}})
+def discover(base: str, workflow_dir: str) -> tuple[int, dict]:
+    return http_json("POST", f"{base}/discover", {"workflow_dirs": workflow_dir})
 
 
 class DiscoveryServerTests(unittest.TestCase):
     @contextlib.contextmanager
     def discovery_server(self) -> Iterator[str]:
-        host_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
-        port = free_port()
-        proc = subprocess.Popen(
-            [sys.executable, str(host_path), "serve"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ, "WORKFLOW_DISCOVERY_PORT": str(port)},
-        )
-        base = f"http://127.0.0.1:{port}"
+        host = load_workflow_host()
+        server = host.HTTPServer(("127.0.0.1", 0), host.DiscoveryRequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
         try:
-            deadline = time.monotonic() + 10
-            while True:
-                try:
-                    if http_json("GET", f"{base}/healthz")[0] == 200:
-                        break
-                except OSError:
-                    pass
-                if time.monotonic() > deadline or proc.poll() is not None:
-                    self.fail("discovery server did not become healthy")
-                time.sleep(0.05)
-            yield base
+            yield f"http://127.0.0.1:{server.server_address[1]}"
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
-            assert proc.stdout is not None and proc.stderr is not None
-            proc.stdout.close()
-            proc.stderr.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
 
     def test_each_discovery_imports_the_current_workflow_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1341,7 +1317,6 @@ class DiscoveryServerTests(unittest.TestCase):
             with self.discovery_server() as base:
                 status, body = discover(base, tmp)
                 self.assertEqual(status, 200)
-                self.assertEqual(body["type"], "workflow.discovery")
                 self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["first"])
 
                 (Path(tmp) / "second.py").write_text(
@@ -1406,35 +1381,12 @@ class DiscoveryServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 120)
 
-    def test_the_request_sets_the_enablement_policy(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            for name in ("kept", "skipped"):
-                (Path(tmp) / f"{name}.py").write_text(
-                    f'WORKFLOW_NAME = "{name}"\n\nasync def handler(inp, ctx):\n    return inp\n'
-                )
-            with self.discovery_server() as base:
-                status, body = discover(
-                    base, tmp, WORKFLOW_ENABLE_MODE="allowlist", WORKFLOW_ALLOWED_NAMES="kept"
-                )
-                self.assertEqual(status, 200)
-                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["kept"])
-
-    def test_requests_may_only_set_the_discovery_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.discovery_server() as base:
-                status, body = discover(base, tmp, PYTHONPATH="/tmp")
-                self.assertEqual(status, 400)
-                self.assertIn("PYTHONPATH", body["error"])
-                status, _ = http_json("POST", f"{base}/discover", {"env": {"WORKFLOW_DIRS": 1}})
-                self.assertEqual(status, 400)
-                status, _ = http_json("POST", f"{base}/discover", {"other": {}})
-                self.assertEqual(status, 400)
-
     def test_unknown_paths_are_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.discovery_server() as base:
                 self.assertEqual(http_json("GET", f"{base}/discover")[0], 404)
                 self.assertEqual(http_json("POST", f"{base}/run")[0], 404)
+                self.assertEqual(http_json("POST", f"{base}/discover", {"dirs": tmp})[0], 400)
 
 
 if __name__ == "__main__":
