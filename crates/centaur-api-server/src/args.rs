@@ -2535,6 +2535,10 @@ impl IronProxyHarnessArgs {
         if let Some(fragment) = harness_auth_fragment("meta-ai", "api_key")? {
             fragments.push(fragment);
         }
+        // Pi's `google` provider (Gemini through the Generative Language API).
+        if let Some(fragment) = harness_auth_fragment("google", "api_key")? {
+            fragments.push(fragment);
+        }
         if let Ok(raw) = env::var("CODEX_CUSTOM_PROVIDERS") {
             fragments.extend(custom_provider_auth_fragments(&raw)?);
         }
