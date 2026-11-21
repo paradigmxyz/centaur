@@ -1297,9 +1297,14 @@ def discover(base: str, workflow_dir: str, **env: str) -> tuple[int, dict]:
 
 class DiscoveryServerTests(unittest.TestCase):
     @contextlib.contextmanager
-    def discovery_server(self) -> Iterator[str]:
+    def discovery_server(self, timeout_seconds: float = 30) -> Iterator[str]:
         host = load_workflow_host()
-        server = host.HTTPServer(("127.0.0.1", 0), host.DiscoveryRequestHandler)
+        handler = type(
+            "TestDiscoveryHandler",
+            (host.DiscoveryRequestHandler,),
+            {"timeout_seconds": timeout_seconds, "discovery_lock": threading.Lock()},
+        )
+        server = host.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -1398,6 +1403,66 @@ class DiscoveryServerTests(unittest.TestCase):
                 status, body = discover(base, tmp)
                 self.assertTrue(body["workflows"][0]["schedule"]["enabled"])
                 self.assertNotIn("ENABLE_WEEKLY_WORKFLOW", os.environ)
+
+    def test_an_exiting_module_fails_the_pass_without_stopping_the_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "exits.py").write_text(
+                'import sys\nWORKFLOW_NAME = "exits"\nsys.exit(3)\n'
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 500)
+                self.assertIn("SystemExit", body["traceback"])
+                self.assertEqual(http_json("GET", f"{base}/healthz")[0], 200)
+
+                (Path(tmp) / "exits.py").unlink()
+                self.assertEqual(discover(base, tmp), (200, {"workflows": []}))
+
+    def test_a_hung_import_times_out_while_health_stays_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "hangs.py").write_text(
+                'import time\nWORKFLOW_NAME = "hangs"\ntime.sleep(60)\n'
+            )
+            with self.discovery_server(timeout_seconds=1) as base:
+                results: list[tuple[int, dict]] = []
+                request = threading.Thread(target=lambda: results.append(discover(base, tmp)))
+                request.start()
+                self.assertEqual(http_json("GET", f"{base}/healthz")[0], 200)
+                request.join(timeout=10)
+                self.assertEqual(results[0][0], 504)
+
+    def test_passes_do_not_share_env_and_see_workflow_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "envy.py").write_text(
+                "import os\n"
+                'SEEN = os.environ.get("LEAKED", "unset")\n'
+                'os.environ["LEAKED"] = "set-by-module"\n'
+                'WORKFLOW_NAME = "envy"\n'
+                'SCHEDULE = {"schedule_id": "envy", "interval_seconds": 60,\n'
+                '            "input": {"seen": SEEN, "dirs": os.environ.get("WORKFLOW_DIRS")}}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                for _ in range(2):
+                    status, body = discover(base, tmp)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(
+                        body["workflows"][0]["schedule"]["input"], {"seen": "unset", "dirs": tmp}
+                    )
+                self.assertNotIn("LEAKED", os.environ)
+
+    def test_disabled_workflows_are_not_imported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "kept.py").write_text(
+                'WORKFLOW_NAME = "kept"\n\nasync def handler(inp, ctx):\n    return inp\n'
+            )
+            (Path(tmp) / "disabled.py").write_text('WORKFLOW_NAME = "disabled"\nraise SystemExit(1)\n')
+            with self.discovery_server() as base:
+                status, body = discover(
+                    base, tmp, WORKFLOW_ENABLE_MODE="allowlist", WORKFLOW_ALLOWED_NAMES="kept"
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["kept"])
 
     def test_unknown_paths_are_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

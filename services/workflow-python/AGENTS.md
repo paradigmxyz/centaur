@@ -11,9 +11,10 @@ The host never runs in the `api-rs` process. `api-rs` starts a workflow-host
 sandbox for each run and talks to the host over its stdio. Discovery runs in the
 chart's `workflow-discovery` Deployment: `workflow-host serve` answers each
 `POST /discover {"workflow_dirs": ..., "env": {...}}` by importing those
-workflows in-process with `env` applied for the pass, and returning
-`{"workflows": [...]}`. `api-rs` sends the `WORKFLOW_DIRS` and passthrough env
-run sandboxes get, and filters disabled workflows from the result.
+workflows in a forked child with `env` applied, and returning
+`{"workflows": [...]}`. The child is discarded after each pass, so nothing a
+module does at import reaches the server or the next pass. `api-rs` sends the
+`WORKFLOW_DIRS`, passthrough env, and enablement policy run sandboxes get.
 Keep that server small, stateless, and unauthenticated; its NetworkPolicy is the
 trust boundary.
 

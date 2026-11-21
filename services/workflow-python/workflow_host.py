@@ -7,26 +7,30 @@ context operations back to api-rs.
 
 ``workflow-host serve`` instead runs the workflow discovery service: a small
 HTTP server whose ``POST /discover {"workflow_dirs": "a:b", "env": {...}}``
-imports the workflows in those directories, with ``env`` (the passthrough env
-workflow-host sandboxes get) applied, and returns their metadata. api-rs calls
-it so that importing workflow modules, which runs their top-level code, never
-happens in api-rs.
+imports the workflows in those directories, with ``env`` (the env workflow-host
+sandboxes get) applied, and returns their metadata. Each request runs in a
+forked child, so imports, env changes, and exits stay out of the server. api-rs
+calls it so that importing workflow modules, which runs their top-level code,
+never happens in api-rs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ast
-import contextlib
 import dataclasses
 import importlib.util
 import inspect
 import json
 import os
+import select
+import signal
 import sys
+import threading
+import time
 import traceback
 import typing
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +41,7 @@ DATABASE_CONNECT_ATTEMPTS = 5
 DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
 DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
 DISCOVERY_PORT = 8090
+DISCOVERY_TIMEOUT_SECONDS = 120.0
 
 
 class ProtocolError(RuntimeError):
@@ -436,31 +441,8 @@ async def run_workflow(message: dict[str, Any], rpc: RpcClient) -> dict[str, Any
             await pool.close()
 
 
-@contextlib.contextmanager
-def temporary_env(env: dict[str, str]) -> typing.Iterator[None]:
-    previous = {name: os.environ.get(name) for name in env}
-    os.environ.update(env)
-    try:
-        yield
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 def discovery_payload(raw_dirs: str) -> dict[str, Any]:
-    """Import the workflows in ``raw_dirs`` and describe them.
-
-    Workflow files are re-executed on every pass; helper modules they import
-    from those directories are evicted first so edits to them land too.
-    """
-    roots = tuple(str(path) + os.sep for path in workflow_dirs(raw_dirs))
-    for name, module in list(sys.modules.items()):
-        source = getattr(module, "__file__", None) or ""
-        if name.startswith("_centaur_workflow_host.") or (roots and source.startswith(roots)):
-            del sys.modules[name]
+    """Import the workflows in ``raw_dirs`` and describe them."""
     workflows = discover_workflows(raw_dirs)
     return {
         "workflows": [
@@ -603,8 +585,61 @@ async def main() -> int:
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
+def discover_in_child(
+    raw_dirs: str, env: dict[str, str], timeout_seconds: float = DISCOVERY_TIMEOUT_SECONDS
+) -> tuple[int, dict[str, Any]]:
+    """Run one discovery pass in a forked child and return (HTTP status, body).
+
+    The child starts from the server's clean state, so every pass imports the
+    current workflow files, and nothing a module does at import (env changes,
+    cached modules, ``sys.exit``) reaches the server or the next pass.
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            try:
+                os.environ.update(env)
+                os.environ["WORKFLOW_DIRS"] = raw_dirs
+                result: dict[str, Any] = {"status": 200, "body": discovery_payload(raw_dirs)}
+            except BaseException as exc:  # noqa: BLE001 - report anything workflow code raises
+                result = {
+                    "status": 500,
+                    "body": {"error": str(exc) or type(exc).__name__, "traceback": traceback.format_exc()},
+                }
+            with os.fdopen(write_fd, "wb") as out:
+                out.write(json.dumps(result, default=str).encode("utf-8"))
+        finally:
+            # Never return into the server's request loop from the child.
+            os._exit(0)
+
+    os.close(write_fd)
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout_seconds
+    with os.fdopen(read_fd, "rb", buffering=0) as result_pipe:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([result_pipe], [], [], remaining)[0]:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                return 504, {"error": f"workflow discovery did not finish within {timeout_seconds:g}s"}
+            chunk = result_pipe.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    _, status = os.waitpid(pid, 0)
+    if not chunks:
+        return 500, {"error": f"workflow discovery process exited ({status}) without a result"}
+    result = json.loads(b"".join(chunks))
+    return result["status"], result["body"]
+
+
 class DiscoveryRequestHandler(BaseHTTPRequestHandler):
     server_version = "centaur-workflow-discovery"
+    # One pass at a time; /healthz is served on other threads meanwhile.
+    discovery_lock = threading.Lock()
+    timeout_seconds = DISCOVERY_TIMEOUT_SECONDS
 
     def do_GET(self) -> None:
         if self.path == "/healthz":
@@ -627,14 +662,11 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             self._send_json(400, {"error": f'expected {{"workflow_dirs": "...", "env": {{...}}}}: {exc}'})
             return
-        try:
-            with temporary_env(env):
-                payload = discovery_payload(raw_dirs)
-        except Exception as exc:
-            print(f"workflow_discovery_failed error={exc}", file=sys.stderr)
-            self._send_json(500, {"error": str(exc), "traceback": traceback.format_exc()})
-            return
-        self._send_json(200, payload)
+        with self.discovery_lock:
+            status, payload = discover_in_child(raw_dirs, env, self.timeout_seconds)
+        if status != 200:
+            print(f"workflow_discovery_failed status={status} error={payload.get('error')}", file=sys.stderr)
+        self._send_json(status, payload)
 
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         payload = json.dumps(body, separators=(",", ":"), default=str).encode("utf-8")
@@ -650,9 +682,7 @@ class DiscoveryRequestHandler(BaseHTTPRequestHandler):
 
 
 def serve_discovery() -> int:
-    """Serve discovery one request at a time. A hung import blocks /healthz
-    too, so the liveness probe restarts the pod."""
-    server = HTTPServer(("0.0.0.0", DISCOVERY_PORT), DiscoveryRequestHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", DISCOVERY_PORT), DiscoveryRequestHandler)
     print(f"workflow_discovery_listening port={DISCOVERY_PORT}", file=sys.stderr)
     try:
         server.serve_forever()

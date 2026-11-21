@@ -173,7 +173,7 @@ impl Args {
         Ok(WorkflowDiscoveryClient::new(
             &url,
             &self.sandbox.agent_k8s_workflow_dirs(),
-            self.sandbox.passthrough_env(),
+            self.sandbox.discovery_env(),
         ))
     }
 
@@ -1633,6 +1633,19 @@ impl SandboxArgs {
         self.passthrough_env_names()
             .filter_map(|name| env::var(name).ok().map(|value| (name.to_owned(), value)))
             .collect()
+    }
+
+    /// The env a discovery pass imports workflows with: the passthrough env,
+    /// plus the enablement policy so the host skips disabled modules before
+    /// importing them, as it does in api-rs's own filtering.
+    fn discovery_env(&self) -> BTreeMap<String, String> {
+        let mut discovery_env = self.passthrough_env();
+        for name in ["WORKFLOW_ENABLE_MODE", "WORKFLOW_ALLOWED_NAMES"] {
+            if let Some(value) = clean_optional_value(env::var(name).ok().as_deref()) {
+                discovery_env.insert(name.to_owned(), value);
+            }
+        }
+        discovery_env
     }
 
     fn passthrough_env_names(&self) -> impl Iterator<Item = &str> {
@@ -3397,7 +3410,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_gets_the_passthrough_env_workflow_hosts_get() {
+    fn discovery_gets_the_passthrough_env_and_enablement_policy() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _env = EnvGuard::set(&[
             (
@@ -3406,6 +3419,8 @@ mod tests {
             ),
             ("ENABLE_FOO_WORKFLOW", "false"),
             ("SLACK_BOT_TOKEN", "xoxb-real"),
+            ("WORKFLOW_ENABLE_MODE", "allowlist"),
+            ("WORKFLOW_ALLOWED_NAMES", "foo"),
         ]);
         let args = Args::try_parse_from([
             "centaur-api-server",
@@ -3415,8 +3430,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            args.sandbox.passthrough_env(),
-            BTreeMap::from([("ENABLE_FOO_WORKFLOW".to_owned(), "false".to_owned())])
+            args.sandbox.discovery_env(),
+            BTreeMap::from([
+                ("ENABLE_FOO_WORKFLOW".to_owned(), "false".to_owned()),
+                ("WORKFLOW_ALLOWED_NAMES".to_owned(), "foo".to_owned()),
+                ("WORKFLOW_ENABLE_MODE".to_owned(), "allowlist".to_owned()),
+            ])
         );
         let spec = args.sandbox.workflow_host_spec("prn_test").unwrap();
         assert!(
