@@ -1,3 +1,4 @@
+import type { GitHubAdapter } from "@chat-adapter/github";
 import type { GithubbotOptions } from "./types";
 
 /**
@@ -59,4 +60,22 @@ export function isCommentAuthorAllowed(
   const association = authorAssociationFromRaw(raw);
   if (!association) return false;
   return allowed.includes(association.toUpperCase());
+}
+
+/**
+ * Whether a repository is private. The chain of thought carries tool commands
+ * and their output, so it is posted only where every reader already has access.
+ * Fails closed: an unreadable repository counts as public.
+ */
+export async function isPrivateRepository(
+  octokit: GitHubAdapter["octokit"],
+  owner: string,
+  repo: string,
+): Promise<boolean> {
+  try {
+    const { data } = await octokit.rest.repos.get({ owner, repo });
+    return data.private === true;
+  } catch {
+    return false;
+  }
 }

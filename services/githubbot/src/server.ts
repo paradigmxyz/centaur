@@ -137,7 +137,13 @@ const options: GithubbotOptions = {
 };
 
 const { app, chat } = createGithubbot(options);
-const server = Bun.serve({ port, fetch: app.fetch });
+// GitHub caps webhook payloads at 25 MB. Bun would buffer up to 128 MB, and the
+// webhook handler reads the body before it can check the signature.
+const server = Bun.serve({
+  port,
+  fetch: app.fetch,
+  maxRequestBodySize: 25 * 1024 * 1024,
+});
 
 log("info", "githubbot_started", {
   port: server.port,
