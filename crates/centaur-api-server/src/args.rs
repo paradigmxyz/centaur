@@ -1168,7 +1168,6 @@ impl SandboxArgs {
         &self,
         bootstrap_iron_control_principal: &str,
     ) -> Result<WorkflowHostSandboxRuntime, ServerError> {
-        reject_removed_local_workflow_host()?;
         let spec = self.workflow_host_spec(bootstrap_iron_control_principal)?;
         let runtime = SandboxRuntime::backend(
             Arc::new(AgentSandboxBackend::new(
@@ -2570,25 +2569,6 @@ const DEFAULT_SANDBOX_IMAGE: &str = "centaur-agent:latest";
 const DEFAULT_CODEMODE_IMAGE: &str = "centaur-codemode:latest";
 /// Where the sandbox image installs the Python workflow host.
 const WORKFLOW_HOST_PATH: &str = "/usr/local/bin/workflow-host";
-const REMOVED_WORKFLOW_HOST_SANDBOX_ENV: &str = "WORKFLOW_HOST_SANDBOX";
-
-/// Workflow hosts always run in sandboxes. Refuse a deployment that still asks
-/// for the removed in-process host rather than silently changing where its
-/// workflows run.
-fn reject_removed_local_workflow_host() -> Result<(), ServerError> {
-    check_removed_local_workflow_host(env::var(REMOVED_WORKFLOW_HOST_SANDBOX_ENV).ok().as_deref())
-}
-
-fn check_removed_local_workflow_host(value: Option<&str>) -> Result<(), ServerError> {
-    match value.map(|value| value.trim().to_ascii_lowercase()) {
-        Some(value) if matches!(value.as_str(), "false" | "0" | "no" | "off") => {
-            Err(ServerError::UnsupportedConfig(format!(
-                "{REMOVED_WORKFLOW_HOST_SANDBOX_ENV}={value} is no longer supported: workflow hosts always run in sandboxes; unset it"
-            )))
-        }
-        _ => Ok(()),
-    }
-}
 
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
     match engine {
@@ -3437,23 +3417,6 @@ mod tests {
             value("WORKFLOW_ALLOWED_NAMES").as_deref(),
             Some("nightly_report, weekly_digest")
         );
-    }
-
-    #[test]
-    fn removed_local_workflow_host_setting_is_rejected() {
-        for value in ["false", "0", " FALSE ", "off", "no"] {
-            let error = check_removed_local_workflow_host(Some(value)).unwrap_err();
-            assert!(
-                error.to_string().contains("WORKFLOW_HOST_SANDBOX"),
-                "{value}: {error}"
-            );
-        }
-        for value in [None, Some("true"), Some("1"), Some("")] {
-            assert!(
-                check_removed_local_workflow_host(value).is_ok(),
-                "{value:?}"
-            );
-        }
     }
 
     #[test]
