@@ -97,13 +97,13 @@ you are debugging:
 | Runtime | Mount | Used for |
 |---------|-------|----------|
 | API | `/var/lib/centaur/repos/<owner>/<repo>` | Tool-secret discovery. |
-| Sandbox | `/home/agent/github/<owner>/<repo>` | Workflow discovery and execution, skills, persona files, prompt fragments, and runtime files available to agents. |
+| Sandbox and workflow discovery | `/home/agent/github/<owner>/<repo>` | Workflow discovery and execution, skills, persona files, prompt fragments, and runtime files available to agents. |
 
 Do not use the sandbox path when debugging API tool discovery. If a tool is
 missing from API discovery, inspect `/var/lib/centaur/repos/...` in the API
 container. If a workflow, skill, or workflow-host import is missing, inspect
-`/home/agent/github/...` in the sandbox; workflow code never runs in the API
-container.
+`/home/agent/github/...` in the sandbox or the `workflow-discovery` pod;
+workflow code never runs in the API container.
 
 Both mounts are served by repo-cache, so overlays require `repoCache.enabled:
 true` (the default). If the cluster disallows writable hostPath volumes, set
@@ -117,7 +117,7 @@ The chart renders API tool discovery paths from the ordered overlay list:
 TOOL_DIRS=/var/lib/centaur/repos/paradigmxyz/centaur/tools:/var/lib/centaur/repos/your-org/centaur-overlay/tools
 ```
 
-Workflow-host sandboxes, which discover and run workflows, receive the ordered
+The workflow discovery service and workflow-host sandboxes receive the ordered
 workflow list under the sandbox mount:
 
 ```text
@@ -217,10 +217,10 @@ kubectl exec -n centaur <agent-sandbox-pod> -- sh -lc '
 '
 ```
 
-Verify a workflow-host sandbox sees the sandbox-translated workflow list:
+Verify the workflow discovery service sees the sandbox-translated workflow list:
 
 ```bash
-kubectl exec -n centaur <workflow-host-pod> -- sh -lc '
+kubectl exec -n centaur deploy/centaur-centaur-workflow-discovery -- sh -lc '
   echo "$WORKFLOW_DIRS"
   for d in ${WORKFLOW_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
 '

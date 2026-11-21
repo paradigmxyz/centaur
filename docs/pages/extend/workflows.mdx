@@ -22,21 +22,25 @@ configuration.
 Migrating existing workflows to the api-rs Absurd runtime? See
 [Workflows v2 Migration](/extend/workflows-v2).
 
-Workflow code never runs in the API process. api-rs discovers workflows and
-runs each one in a workflow-host sandbox, which loads them from `WORKFLOW_DIRS`.
-Without overlays that is the agent image's `/opt/centaur/workflows`. In an
-overlay deployment, workflow files must exist under the source's
-`workflowsSubdir` — by default `workflows/` — in its repo-cache checkout, which
-the sandbox mounts at `/home/agent/github/...`, for example
-`/home/agent/github/your-org/centaur-overlay/workflows`. Files in those
+Workflow code never runs in the API process. The workflow discovery service
+finds workflows, and api-rs runs each one in a workflow-host sandbox. Both load
+them from `WORKFLOW_DIRS`. Without overlays that is the agent image's
+`/opt/centaur/workflows`. In an overlay deployment, workflow files must exist
+under the source's `workflowsSubdir` — by default `workflows/` — in its
+repo-cache checkout, which both mount read-only at `/home/agent/github/...`, for
+example `/home/agent/github/your-org/centaur-overlay/workflows`. Files in those
 directories are loaded the same way as built-in workflows; sources without the
-directory are skipped.
+directory are skipped. A workflow merged to an overlay's configured ref is
+picked up once repo-cache syncs it (`repoCache.syncIntervalSeconds`) and the
+next discovery pass runs, with no restart.
 
 Discovery imports every enabled workflow module, which runs its top-level code.
-It happens at startup and every `WORKFLOW_RECONCILE_INTERVAL_SECS` (default 60)
-in a short-lived workflow-host sandbox, with the same environment and the
-bootstrap workflow-host principal, so keep module top level cheap and free of
-side effects.
+api-rs asks for it at startup and every `WORKFLOW_RECONCILE_INTERVAL_SECS`
+(default 60). The `workflow-discovery` Deployment answers each request in a
+fresh Python process from the agent image, with no credentials, no database,
+and, under `networkPolicy.enabled`, no outbound network. Keep module top level
+cheap and free of side effects: code that needs a credential or the network at
+import time fails discovery.
 
 ## Define a workflow
 

@@ -340,6 +340,14 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
+    # The workflow discovery service, which imports workflow modules for api-rs.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "workflow-discovery") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.workflowDiscovery.port }}
     # Code Mode sandboxes (centaur.ai/workload=codemode, created by api-rs) serve
     # the connector HTTP API on a fixed port. api-rs calls them directly: their
     # outbound traffic goes through their own paired iron-proxy, not this one.

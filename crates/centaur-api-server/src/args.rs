@@ -37,7 +37,9 @@ use centaur_session_runtime::{
     SessionPrincipalAdmission, SessionSandboxCleanupConfig, WarmPoolTarget,
 };
 use centaur_session_sqlx::TextSearchBackend;
-use centaur_workflows::{WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar};
+use centaur_workflows::{
+    WorkflowDiscoveryClient, WorkflowHostSandboxRuntime, WorkflowPrincipalRegistrar,
+};
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use sqlx::{
     PgPool,
@@ -155,6 +157,20 @@ impl Args {
         self.sandbox
             .workflow_host_sandbox_runtime(bootstrap_iron_control_principal)
             .await
+    }
+
+    /// The workflow discovery service (`workflow-host serve`). Discovery never
+    /// runs in this process, so a deployment without the service cannot start.
+    pub(crate) fn workflow_discovery_client(&self) -> Result<WorkflowDiscoveryClient, ServerError> {
+        let url = clean_optional_value(self.sandbox.workflow_discovery_url.as_deref()).ok_or_else(
+            || {
+                ServerError::UnsupportedConfig(
+                    "WORKFLOW_DISCOVERY_URL must point at the workflow discovery service"
+                        .to_owned(),
+                )
+            },
+        )?;
+        Ok(WorkflowDiscoveryClient::new(&url))
     }
 
     pub(crate) fn activity_summary_config(&self) -> Option<ActivitySummaryConfig> {
@@ -1041,6 +1057,10 @@ struct SandboxArgs {
         action = clap::ArgAction::Set
     )]
     iron_control_sync_infra_secrets: bool,
+    /// Base URL of the workflow discovery service, which imports workflow
+    /// modules on api-rs's behalf.
+    #[arg(long = "workflow-discovery-url", env = "WORKFLOW_DISCOVERY_URL")]
+    workflow_discovery_url: Option<String>,
     #[arg(long = "workflow-host-image", env = "WORKFLOW_HOST_IMAGE")]
     workflow_host_image: Option<String>,
     #[arg(long = "workflow-host-command", env = "WORKFLOW_HOST_COMMAND")]

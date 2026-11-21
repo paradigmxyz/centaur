@@ -368,8 +368,9 @@ export const workflows = {
   },
   /**
    * Deploys a workflow file the way an operator updates a workflow repo: into
-   * the node directory every workflow-host sandbox mounts. The rename makes
-   * the file appear whole to a discovery pass that is reading the directory.
+   * the node directory the workflow discovery service and every workflow-host
+   * sandbox mount. The rename makes the file appear whole to a discovery pass
+   * that is reading the directory.
    */
   async install(name: string, source: string): Promise<void> {
     const path = `${workflowDir}/${name}.py`

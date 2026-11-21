@@ -1140,6 +1140,22 @@ ingress:
 
 httpRoutes: []
 
+# Workflow discovery service (`workflow-host serve` from the agent image). api-rs
+# calls it to discover workflows, so workflow module code never runs in api-rs.
+# Rendered with api-rs; it uses sandbox.image and the same workflow sources as
+# workflow-host sandboxes.
+workflowDiscovery:
+  port: 8090
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 networkPolicy:
   enabled: true
   ingressSourceNamespaces: []

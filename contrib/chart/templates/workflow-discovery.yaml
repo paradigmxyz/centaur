@@ -1,0 +1,162 @@
+{{- /*
+Workflow discovery service. Discovery imports every enabled workflow module,
+which runs its top-level code, so api-rs never does it in its own process: it
+calls this service, which runs `workflow-host serve` from the agent image and
+answers each POST /discover with a fresh host process. The pod gets no
+deployment env beyond where workflows live and which are enabled, holds no
+secrets, mounts workflow sources read-only, and under networkPolicy accepts
+traffic only from api-rs and makes no outbound connections.
+*/ -}}
+{{- if .Values.apiRs.enabled }}
+{{- $component := "workflow-discovery" -}}
+{{- $name := include "centaur.componentName" (dict "root" . "component" $component) -}}
+{{- $discovery := .Values.workflowDiscovery -}}
+{{- $extraEnv := .Values.apiRs.extraEnv -}}
+{{- $repoCacheUsePvc := eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim" -}}
+{{- $reposPath := .Values.sandbox.reposPath -}}
+{{- if and .Values.repoCache.enabled (not $reposPath) -}}
+{{- $reposPath = .Values.repoCache.hostPath -}}
+{{- end -}}
+{{- /* The same workflow directories and import roots workflow-host sandboxes get. */ -}}
+{{- $workflowDirList := list -}}
+{{- $pythonPath := list "/opt/centaur" -}}
+{{- range $source := include "centaur.overlaySources" . | fromJsonArray -}}
+{{- $repo := get $source "repo" | default "" -}}
+{{- if and $repo $.Values.repoCache.enabled -}}
+{{- with (get $source "workflowsSubdir") -}}
+{{- $workflowDirList = append $workflowDirList (printf "/home/agent/github/%s/%s" $repo .) -}}
+{{- end -}}
+{{- with (get $source "toolsSubdir") -}}
+{{- $pythonPath = append $pythonPath (dir (printf "/home/agent/github/%s/%s" $repo .)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $workflowDirs := "/opt/centaur/workflows" -}}
+{{- if gt (len $workflowDirList) 0 -}}
+{{- $workflowDirs = join ":" $workflowDirList -}}
+{{- end -}}
+{{- with (get $extraEnv "KUBERNETES_WORKFLOW_DIRS") -}}
+{{- $workflowDirs = . -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+{{- include "centaur.podScheduling" (dict "values" $discovery "indent" 6) }}
+      containers:
+        - name: workflow-discovery
+          image: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
+          imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
+          command: ["python3", "/usr/local/bin/workflow-host", "serve"]
+          env:
+            - name: WORKFLOW_DISCOVERY_PORT
+              value: {{ $discovery.port | quote }}
+            - name: WORKFLOW_DIRS
+              value: {{ $workflowDirs | quote }}
+            - name: PYTHONPATH
+              value: {{ join ":" (uniq $pythonPath) | quote }}
+            - name: HOME
+              value: /tmp
+            - name: WORKFLOW_ENABLE_MODE
+              value: {{ get $extraEnv "WORKFLOW_ENABLE_MODE" | default .Values.apiRs.workflowEnableMode | quote }}
+            - name: WORKFLOW_ALLOWED_NAMES
+              value: {{ get $extraEnv "WORKFLOW_ALLOWED_NAMES" | default .Values.apiRs.workflowAllowedNames | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $discovery.port }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml $discovery.resources | nindent 12 }}
+          securityContext:
+{{ toYaml (merge (dict "readOnlyRootFilesystem" true) .Values.containerSecurityContext) | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+{{- if $reposPath }}
+            - name: repos
+              mountPath: /home/agent/github
+              readOnly: true
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if $reposPath }}
+        - name: repos
+{{- if and .Values.repoCache.enabled $repoCacheUsePvc }}
+          persistentVolumeClaim:
+            claimName: {{ include "centaur.repoCachePvcName" . | quote }}
+            readOnly: true
+{{- else }}
+          hostPath:
+            path: {{ $reposPath | quote }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $discovery.port }}
+      targetPort: http
+{{- if .Values.networkPolicy.enabled }}
+---
+# This policy is the service's trust boundary: its API is unauthenticated. Only
+# api-rs may call it, and it makes no outbound connections (DNS aside), so
+# workflow module top-level code cannot reach anything during discovery.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $discovery.port }}
+  egress: []
+{{- end }}
+{{- end }}

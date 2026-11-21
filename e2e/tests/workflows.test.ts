@@ -1,9 +1,10 @@
 // Durable workflows on the real control plane: discovery of workflow files,
 // run idempotency and identity, cancellation when a workflow disappears, the
 // Python host's durable context methods, including an agent turn on a real
-// harness, and Slack buttons a workflow posts, clicked in Slack. Discovery and
-// every run happen in workflow-host sandboxes, never in api-rs: tests install
-// workflow files in the node directory those sandboxes mount.
+// harness, and Slack buttons a workflow posts, clicked in Slack. Workflow code
+// never runs in api-rs: the workflow discovery service finds workflows and each
+// run happens in a workflow-host sandbox. Tests install workflow files in the
+// node directory both mount.
 import { randomUUID } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import {
@@ -21,8 +22,7 @@ import {
 
 releaseSandboxesAfterAll()
 
-// A discovery pass starts a sandbox, so a change can take a few passes to land.
-const DISCOVERY_TIMEOUT_MS = 120_000
+const DISCOVERY_TIMEOUT_MS = 60_000
 // Each run, and each resumption after a durable wait, starts a sandbox.
 const RUN_TIMEOUT_MS = 180_000
 

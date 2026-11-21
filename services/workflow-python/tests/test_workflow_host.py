@@ -6,11 +6,15 @@ import importlib.util
 import json
 import os
 import select
+import socket
 import subprocess
 import sys
 import tempfile
 import types
+import time
 import unittest
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -1276,6 +1280,101 @@ async def handler(inp, ctx):
             self.assertEqual(proc.returncode, 0)
             assert proc.stderr is not None
             self.assertEqual(proc.stderr.read(), "")
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def http_json(method: str, url: str) -> tuple[int, dict]:
+    request = urllib.request.Request(url, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+class DiscoveryServerTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def discovery_server(self, workflow_dir: str) -> Iterator[str]:
+        host_path = Path(__file__).resolve().parents[1] / "workflow_host.py"
+        port = free_port()
+        proc = subprocess.Popen(
+            [sys.executable, str(host_path), "serve"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={
+                **os.environ,
+                "WORKFLOW_DIRS": workflow_dir,
+                "WORKFLOW_DISCOVERY_PORT": str(port),
+            },
+        )
+        base = f"http://127.0.0.1:{port}"
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    if http_json("GET", f"{base}/healthz")[0] == 200:
+                        break
+                except OSError:
+                    pass
+                if time.monotonic() > deadline or proc.poll() is not None:
+                    self.fail("discovery server did not become healthy")
+                time.sleep(0.05)
+            yield base
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            assert proc.stdout is not None and proc.stderr is not None
+            proc.stdout.close()
+            proc.stderr.close()
+
+    def test_each_discovery_imports_the_current_workflow_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "first.py").write_text(
+                'WORKFLOW_NAME = "first"\n\nasync def handler(inp, ctx):\n    return inp\n'
+            )
+            with self.discovery_server(tmp) as base:
+                status, body = http_json("POST", f"{base}/discover")
+                self.assertEqual(status, 200)
+                self.assertEqual(body["type"], "workflow.discovery")
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["first"])
+
+                (Path(tmp) / "second.py").write_text(
+                    'WORKFLOW_NAME = "second"\n'
+                    'SCHEDULE = {"schedule_id": "second", "interval_seconds": 60}\n\n'
+                    "async def handler(inp, ctx):\n    return inp\n"
+                )
+                status, body = http_json("POST", f"{base}/discover")
+                self.assertEqual(status, 200)
+                workflows = {w["workflow_name"]: w for w in body["workflows"]}
+                self.assertEqual(sorted(workflows), ["first", "second"])
+                self.assertEqual(workflows["second"]["schedule"]["interval_seconds"], 60)
+
+    def test_a_failed_discovery_is_an_error_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in ("one.py", "two.py"):
+                (Path(tmp) / filename).write_text(
+                    'WORKFLOW_NAME = "same"\n\nasync def handler(inp, ctx):\n    return inp\n'
+                )
+            with self.discovery_server(tmp) as base:
+                status, body = http_json("POST", f"{base}/discover")
+                self.assertEqual(status, 500)
+                self.assertIn("duplicate workflow name", body["error"])
+
+                (Path(tmp) / "two.py").unlink()
+                status, body = http_json("POST", f"{base}/discover")
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["same"])
+
+    def test_unknown_paths_are_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.discovery_server(tmp) as base:
+                self.assertEqual(http_json("GET", f"{base}/discover")[0], 404)
+                self.assertEqual(http_json("POST", f"{base}/run")[0], 404)
 
 
 if __name__ == "__main__":

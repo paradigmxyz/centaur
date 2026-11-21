@@ -4,6 +4,11 @@
 The host speaks newline-delimited JSON over stdin/stdout. It imports existing
 Centaur workflow modules, runs ``handler(input, ctx)``, and delegates durable
 context operations back to api-rs.
+
+``workflow-host serve`` instead runs the workflow discovery service: a small
+HTTP server whose ``POST /discover`` runs discovery in a fresh host process and
+returns its ``workflow.discovery`` message. api-rs calls it so that importing
+workflow modules, which runs their top-level code, never happens in api-rs.
 """
 
 from __future__ import annotations
@@ -15,9 +20,12 @@ import importlib.util
 import inspect
 import json
 import os
+import subprocess
 import sys
+import threading
 import traceback
 import typing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +35,11 @@ from api.workflow_engine import WorkflowContext
 DATABASE_CONNECT_ATTEMPTS = 5
 DATABASE_CONNECT_BACKOFF_SECONDS = 0.25
 DATABASE_CONNECT_BACKOFF_MAX_SECONDS = 2.0
+DISCOVERY_PORT_ENV = "WORKFLOW_DISCOVERY_PORT"
+DEFAULT_DISCOVERY_PORT = 8090
+DISCOVERY_TIMEOUT_ENV = "WORKFLOW_DISCOVERY_TIMEOUT_SECONDS"
+DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 120.0
+STDERR_TAIL_BYTES = 8 * 1024
 
 
 class ProtocolError(RuntimeError):
@@ -572,5 +585,113 @@ async def main() -> int:
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
+def run_discovery_process(timeout_seconds: float) -> tuple[int, dict[str, Any]]:
+    """Discover workflows in a fresh host process and return (HTTP status, body).
+
+    A new process per pass imports current workflow files instead of modules
+    cached by an earlier pass, and keeps a misbehaving module from affecting
+    the server or later passes.
+    """
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve())],
+            input=b'{"type":"workflow.discover"}\n',
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return 504, {
+            "error": f"workflow discovery did not finish within {timeout_seconds:g}s",
+            "stderr": _stderr_tail(exc.stderr),
+        }
+    message: dict[str, Any] | None = None
+    for line in reversed(completed.stdout.decode("utf-8", "replace").splitlines()):
+        if line.strip():
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                break
+            if isinstance(parsed, dict):
+                message = parsed
+            break
+    if message is not None and message.get("type") == "workflow.discovery":
+        return 200, message
+    if message is not None and message.get("type") in ("host.error", "workflow.error"):
+        return 500, {
+            "error": str(message.get("message") or "workflow discovery failed"),
+            "traceback": message.get("traceback"),
+            "stderr": _stderr_tail(completed.stderr),
+        }
+    return 500, {
+        "error": f"workflow host exited with status {completed.returncode} before workflow.discovery",
+        "stderr": _stderr_tail(completed.stderr),
+    }
+
+
+def _stderr_tail(stderr: bytes | None) -> str:
+    return (stderr or b"")[-STDERR_TAIL_BYTES:].decode("utf-8", "replace")
+
+
+class DiscoveryRequestHandler(BaseHTTPRequestHandler):
+    server_version = "centaur-workflow-discovery"
+    # One pass at a time: concurrent requests would each import every module.
+    discovery_lock = threading.Lock()
+    timeout_seconds = DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server naming
+        if self.path == "/healthz":
+            self._send_json(200, {"ok": True})
+            return
+        self._send_json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server naming
+        if self.path != "/discover":
+            self._send_json(404, {"error": "not found"})
+            return
+        with self.discovery_lock:
+            status, body = run_discovery_process(self.timeout_seconds)
+        if status != 200:
+            print(f"workflow_discovery_failed status={status} error={body.get('error')}", file=sys.stderr)
+        self._send_json(status, body)
+
+    def _send_json(self, status: int, body: dict[str, Any]) -> None:
+        payload = json.dumps(body, separators=(",", ":"), default=str).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - http.server signature
+        if self.path != "/healthz":
+            print(f"workflow_discovery_request {format % args}", file=sys.stderr)
+
+
+def discovery_server(port: int, timeout_seconds: float) -> ThreadingHTTPServer:
+    handler = type(
+        "ConfiguredDiscoveryRequestHandler",
+        (DiscoveryRequestHandler,),
+        {"timeout_seconds": timeout_seconds, "discovery_lock": threading.Lock()},
+    )
+    return ThreadingHTTPServer(("0.0.0.0", port), handler)
+
+
+def serve_discovery() -> int:
+    port = int(os.getenv(DISCOVERY_PORT_ENV, str(DEFAULT_DISCOVERY_PORT)))
+    timeout_seconds = float(
+        os.getenv(DISCOVERY_TIMEOUT_ENV, str(DEFAULT_DISCOVERY_TIMEOUT_SECONDS))
+    )
+    server = discovery_server(port, timeout_seconds)
+    print(f"workflow_discovery_listening port={port}", file=sys.stderr)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["serve"]:
+        raise SystemExit(serve_discovery())
     raise SystemExit(asyncio.run(main()))
