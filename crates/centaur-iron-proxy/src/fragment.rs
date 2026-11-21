@@ -487,7 +487,7 @@ transforms:
   - name: secrets
     config:
       secrets:
-        - id: GEMINI_API_KEY_GOOG_API_KEY
+        - id: GEMINI_API_KEY
           replace:
             proxy_value: GEMINI_API_KEY
             match_headers: ["X-Goog-Api-Key"]
