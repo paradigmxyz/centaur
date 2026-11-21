@@ -632,27 +632,35 @@ def run_discovery_process(
             "error": f"workflow discovery did not finish within {timeout_seconds:g}s",
             "stderr": _stderr_tail(exc.stderr),
         }
-    message: dict[str, Any] | None = None
-    for line in reversed(completed.stdout.decode("utf-8", "replace").splitlines()):
-        if line.strip():
-            try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError:
-                break
-            if isinstance(parsed, dict):
-                message = parsed
-            break
-    if message is not None and message.get("type") == "workflow.discovery":
-        return 200, message
+    stderr = _stderr_tail(completed.stderr)
+    # Runs parse every stdout line as protocol JSON, so discovery holds modules
+    # to the same contract: exactly one JSON message and a clean exit. A module
+    # that prints at import fails here instead of breaking every run.
+    lines = [line for line in completed.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    messages: list[Any] = []
+    for line in lines:
+        try:
+            messages.append(json.loads(line))
+        except json.JSONDecodeError:
+            return 500, {
+                "error": f"workflow code wrote non-protocol output to stdout: {line[:200]!r}",
+                "stderr": stderr,
+            }
+    message = messages[0] if len(messages) == 1 and isinstance(messages[0], dict) else None
     if message is not None and message.get("type") in ("host.error", "workflow.error"):
         return 500, {
             "error": str(message.get("message") or "workflow discovery failed"),
             "traceback": message.get("traceback"),
-            "stderr": _stderr_tail(completed.stderr),
+            "stderr": stderr,
         }
+    if message is not None and message.get("type") == "workflow.discovery" and completed.returncode == 0:
+        return 200, message
     return 500, {
-        "error": f"workflow host exited with status {completed.returncode} before workflow.discovery",
-        "stderr": _stderr_tail(completed.stderr),
+        "error": (
+            f"workflow host exited with status {completed.returncode} after writing "
+            f"{len(messages)} protocol messages instead of one workflow.discovery"
+        ),
+        "stderr": stderr,
     }
 
 

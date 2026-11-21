@@ -60,7 +60,9 @@ connectors, so later sources come later in the list. */ -}}
 {{- $publicToolDirs = append $publicToolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath (get $source "repo") (get $source "subdir")) -}}
 {{- end -}}
 {{- end -}}
-{{- $sandboxWorkflowDirs := "" -}}
+{{- /* Always explicit: api-rs's own fallback guesses <repo>/workflows from
+tool sources, which would import workflows from a tools-only overlay. */ -}}
+{{- $sandboxWorkflowDirs := "/opt/centaur/workflows" -}}
 {{- if and .Values.repoCache.enabled (gt (len $sandboxWorkflowDirList) 0) -}}
 {{- $sandboxWorkflowDirs = join ":" $sandboxWorkflowDirList -}}
 {{- end -}}
@@ -261,7 +263,7 @@ spec:
 {{- end }}
             - name: WORKFLOW_DISCOVERY_URL
               value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "workflow-discovery")) .Values.workflowDiscovery.port | quote }}
-{{- if $sandboxWorkflowDirs }}
+{{- if not (hasKey .Values.apiRs.extraEnv "KUBERNETES_WORKFLOW_DIRS") }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
 {{- end }}

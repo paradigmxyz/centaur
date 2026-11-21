@@ -74,7 +74,8 @@ spec:
           emptyDir: {}
 {{- if $reposPath }}
         - name: repos
-{{- if and .Values.repoCache.enabled (eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim") }}
+{{- /* Same choice api-rs makes for sandboxes (REPOS_PVC), so both see the same files. */}}
+{{- if eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim" }}
           persistentVolumeClaim:
             claimName: {{ include "centaur.repoCachePvcName" . | quote }}
             readOnly: true

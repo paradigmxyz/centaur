@@ -393,6 +393,12 @@ impl WorkflowDiscoveryClient {
                 field("stderr"),
             )));
         }
+        if body.get("type").and_then(Value::as_str) != Some("workflow.discovery") {
+            return Err(WorkflowRuntimeError::Internal(format!(
+                "workflow discovery returned a {:?} message instead of workflow.discovery",
+                body.get("type")
+            )));
+        }
         let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(body)?;
         let mut metadata = metadata_from_discovery_payload(payload);
         WorkflowEnablement::from_env()?.filter_metadata(&mut metadata);
@@ -4760,6 +4766,22 @@ mod tests {
         assert_eq!(
             metadata.starters.get("nightly_report"),
             Some(&BTreeSet::from(["user".to_owned()]))
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_a_response_that_is_not_a_discovery_message() {
+        let (url, server) = serve_one_response("200 OK", json!({"workflows": []}));
+
+        let error = WorkflowDiscoveryClient::new(&url)
+            .discover(&BTreeMap::new())
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+
+        assert!(
+            error.to_string().contains("instead of workflow.discovery"),
+            "{error}"
         );
     }
 

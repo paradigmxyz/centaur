@@ -20,7 +20,7 @@ files can assume about their runtime.
 | Runtime owner | Python API service | `api-rs` |
 | Durable state | Python workflow engine tables | Absurd queue/checkpoint tables |
 | Python execution | In-process with the API | Separate workflow-host sandbox |
-| Workflow discovery | Python imports all workflow files | `api-rs` asks the Python host, in a workflow-host sandbox, to discover workflow metadata |
+| Workflow discovery | Python imports all workflow files | `api-rs` asks the `workflow-discovery` service, which runs the Python host, for workflow metadata |
 | Agent turns | Python control plane helpers | `ctx.agent_turn(...)` delegates to the `api-rs` session runtime |
 | Webhooks | Python workflow router | `api-rs` `/api/webhooks/{slug}` |
 | Schedules | Python workflow scheduler | Absurd schedule tasks |

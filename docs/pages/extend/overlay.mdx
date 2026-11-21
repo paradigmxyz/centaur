@@ -217,12 +217,14 @@ kubectl exec -n centaur <agent-sandbox-pod> -- sh -lc '
 '
 ```
 
-Verify the workflow discovery service sees the sandbox-translated workflow list:
+api-rs sends the sandbox-translated workflow list with each discovery request.
+Check the list it uses, then that the discovery service sees those files:
 
 ```bash
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- sh -lc 'echo "$KUBERNETES_WORKFLOW_DIRS"'
 kubectl exec -n centaur deploy/centaur-centaur-workflow-discovery -- sh -lc '
-  echo "$WORKFLOW_DIRS"
-  for d in ${WORKFLOW_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
+  dirs=/home/agent/github/your-org/centaur-overlay/workflows  # from the line above
+  for d in ${dirs//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
 '
 ```
 

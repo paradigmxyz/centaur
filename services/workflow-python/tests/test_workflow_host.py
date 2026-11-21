@@ -1371,6 +1371,18 @@ class DiscoveryServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["same"])
 
+    def test_stdout_written_at_import_fails_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "noisy.py").write_text(
+                'print("loading noisy")\nWORKFLOW_NAME = "noisy"\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 500)
+                self.assertIn("non-protocol output", body["error"])
+                self.assertIn("loading noisy", body["error"])
+
     def test_the_request_sets_the_enablement_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for name in ("kept", "skipped"):
