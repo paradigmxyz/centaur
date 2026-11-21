@@ -56,7 +56,7 @@ Tools: `websearch`, `googlenews`, `newsapi`, `eventregistry`, `coindesk`, `thebl
 
 ## Social Tools
 
-Tools: `twitter`, `social-monitor`
+Tools: `twitter`, `slack`, `social-monitor`
 
 | Method pattern | Test input |
 |---------------|------------|

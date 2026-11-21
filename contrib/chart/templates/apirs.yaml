@@ -556,7 +556,7 @@ copies in source order (later roots shadow earlier ones). */}}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_CODEMODE_CONNECTORS" "value" (join ":" $codemodeSandboxConnectorRoots)) }}
 {{- end }}
 {{- if and $companyContext.enabled (not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL")) }}
-{{- /* The company_context Code Mode connector calls this query API through the proxy. */}}
+{{- /* The company_context Code Mode connector and `slack search` call this query API through the proxy. */}}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_API_URL" "value" (printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) $companyContext.port)) }}
 {{- end }}
 {{- if .Values.codex.customProviders }}
