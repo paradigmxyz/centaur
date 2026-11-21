@@ -45,6 +45,10 @@ pub const SLACK_FILE_EXTRACT_TASK: &str = "slack.file.extract";
 pub const SLACK_FILE_EMBED_TASK: &str = "slack.file.embed";
 // Keep the original task name so projection runs queued by older versions remain runnable.
 pub const CUSTOM_PROJECT_TASK: &str = "imported.project";
+/// Unfinished work on a Slack file, Slack channel day, or Drive document is
+/// enqueued again once its last request is this old, so a lost or exhausted
+/// task cannot leave it unfinished.
+pub const TASK_RETRY_INTERVAL: &str = "1 hour";
 /// Document ID prefixes, which identify each published document's type.
 pub const GOOGLE_DRIVE_DOCUMENT_ID_PREFIX: &str = "google-drive:";
 pub const SLACK_DOCUMENT_ID_PREFIX: &str = "slack:";

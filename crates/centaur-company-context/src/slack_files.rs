@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::{
         Config, PDF_MIME_TYPE, SLACK_FILE_DOCUMENT_ID_PREFIX, SLACK_FILE_EMBED_TASK,
-        SLACK_FILE_EXTRACT_TASK,
+        SLACK_FILE_EXTRACT_TASK, TASK_RETRY_INTERVAL,
     },
     embeddings::EmbeddingsClient,
     errors::{is_denied, is_rejected, rejected},
@@ -320,10 +320,6 @@ pub(crate) async fn record_shares(
     .await?;
     Ok(())
 }
-
-/// Unfinished work on a file is enqueued again once its last request is this
-/// old, so a lost or exhausted task cannot leave the file unfinished.
-const TASK_RETRY_INTERVAL: &str = "1 hour";
 
 /// The next task a file with unfinished work needs.
 #[derive(Debug, PartialEq)]
