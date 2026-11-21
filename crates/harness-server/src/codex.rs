@@ -19,6 +19,7 @@ use crate::server::{
     BlocksCommand, BlocksState, parse_blocks_line_with_state, usage_span_input_value,
     write_blocks_error,
 };
+use crate::util::write_value;
 use crate::{AppServerRuntime, HarnessServerError, Result};
 
 mod citations;
@@ -223,6 +224,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                 model,
                 provider,
                 reasoning,
+                harness_thread_id,
                 trace_context,
             }) => {
                 crate::session_prompt::run_session_prompt_hooks(Some(&trace_context), "codex");
@@ -328,6 +330,7 @@ pub(crate) fn run_codex_blocks_server(config: CodexHarnessServer) -> Result<()> 
                         client_user_message_id,
                         (model, model_provider),
                         reasoning,
+                        harness_thread_id.as_deref(),
                         &active_turn_rx,
                         traceparent.as_deref(),
                         &mut telemetry,
@@ -430,19 +433,20 @@ fn run_codex_user_turn<W: Write>(
     client_user_message_id: Option<String>,
     model_and_provider: (Option<String>, String),
     reasoning: Option<String>,
+    recorded_thread_id: Option<&str>,
     active_turn_rx: &Receiver<CodexActiveTurnRequest>,
     traceparent: Option<&str>,
     telemetry: &mut TurnTelemetry,
 ) -> Result<()> {
     let (model, model_provider) = model_and_provider;
     if thread_id.is_none() {
-        let thread = start_or_resume_thread(
+        let thread = open_initial_thread(
             codex,
             stdout,
             request_id,
             model.as_deref(),
             &model_provider,
-            OpenThread::New,
+            recorded_thread_id,
             traceparent,
         )?;
         *thread_id = Some(thread.id);
@@ -541,12 +545,79 @@ struct StartedCodexThread {
 /// How to open the Codex thread a turn runs on.
 #[derive(Clone, Copy)]
 enum OpenThread<'a> {
-    /// Start a thread, or resume `CODEX_CONTINUE_THREAD_ID` when set.
+    /// Start a thread.
     New,
     /// Resume a thread on its saved provider.
     Resume(&'a str),
     /// Fork a thread's history onto a different provider.
     Fork(&'a str),
+}
+
+/// Opens the thread for an app-server that has none yet: the thread the
+/// control plane recorded for the session, else the configured one, else a new
+/// thread. The harness process does not outlive a sandbox pause, so the
+/// recorded id is the only link back to the conversation. Its rollout is gone
+/// once the sandbox state is, and the turn then runs on a new thread.
+fn open_initial_thread<W: Write>(
+    codex: &mut CodexJsonRpcChild,
+    stdout: &mut W,
+    request_id: &mut i64,
+    model: Option<&str>,
+    model_provider: &str,
+    recorded_thread_id: Option<&str>,
+    traceparent: Option<&str>,
+) -> Result<StartedCodexThread> {
+    let configured = env::var("CODEX_CONTINUE_THREAD_ID")
+        .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
+        .unwrap_or_default();
+    let resume = recorded_thread_id.unwrap_or(&configured).trim();
+    if !resume.is_empty() {
+        match start_or_resume_thread(
+            codex,
+            stdout,
+            request_id,
+            model,
+            model_provider,
+            OpenThread::Resume(resume),
+            traceparent,
+        ) {
+            // The app-server answered and refused; a dead one fails the turn.
+            Err(HarnessServerError::Protocol(error)) => {
+                eprintln!("Codex thread {resume} was not resumed; starting a new thread: {error}");
+                write_value(stdout, &thread_resume_fallback_notification(resume, &error))?;
+            }
+            result => return result,
+        }
+    }
+    start_or_resume_thread(
+        codex,
+        stdout,
+        request_id,
+        model,
+        model_provider,
+        OpenThread::New,
+        traceparent,
+    )
+}
+
+/// A non-terminal `error` notification (`willRetry`), so the fallback is
+/// recorded with the turn's output without failing the turn.
+fn thread_resume_fallback_notification(thread_id: &str, error: &str) -> Value {
+    json!({
+        "method": "error",
+        "params": {
+            "error": {
+                "message": format!(
+                    "Codex thread {thread_id} was not resumed; starting a new thread: {error}"
+                ),
+                "codexErrorInfo": null,
+                "additionalDetails": null,
+            },
+            "willRetry": true,
+            "threadId": thread_id,
+            "turnId": "thread-resume",
+        },
+    })
 }
 
 fn start_or_resume_thread<W: Write>(
@@ -559,15 +630,6 @@ fn start_or_resume_thread<W: Write>(
     traceparent: Option<&str>,
 ) -> Result<StartedCodexThread> {
     let cwd = env::current_dir()?.display().to_string();
-    let initial_resume = env::var("CODEX_CONTINUE_THREAD_ID")
-        .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
-        .unwrap_or_default();
-    let open = match open {
-        OpenThread::New if !initial_resume.trim().is_empty() => {
-            OpenThread::Resume(initial_resume.trim())
-        }
-        open => open,
-    };
     let (method, mut params) = match open {
         OpenThread::New => (
             "thread/start",

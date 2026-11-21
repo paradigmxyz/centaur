@@ -92,6 +92,7 @@ pub fn run_hermes_blocks_server() -> Result<()> {
                 model,
                 provider: _,
                 reasoning,
+                harness_thread_id: _,
                 trace_context,
             }) => {
                 turn += 1;
