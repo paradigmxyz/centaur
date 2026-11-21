@@ -526,9 +526,12 @@ same trigger key maps to an existing run.
 
 ## Verify
 
-After deploying an overlay, check API logs for workflow load events and create a
-small run with `eager_start: true`. If the workflow is missing, inspect
-`WORKFLOW_DIRS` in a workflow-host sandbox, the configured repo/ref in
-repo-cache, and whether the file exports `WORKFLOW_NAME`. For webhooks, also check for
+After deploying an overlay, check the `workflow-discovery` pod's logs for
+`workflow_load_error` lines, which name modules that failed to import, and create
+a small run with `eager_start: true`. If the workflow is missing, compare
+api-rs's `KUBERNETES_WORKFLOW_DIRS` with the files the discovery pod sees, and
+check the configured repo/ref in repo-cache and that the file exports
+`WORKFLOW_NAME`. api-rs logs failed discovery passes with the error and
+traceback. For webhooks, also check for
 `workflow_webhook_registered` in the API logs and send a signed request to the
 public `/api/webhooks/{slug}` URL.

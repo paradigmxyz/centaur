@@ -332,10 +332,14 @@ Start with an import and discovery check in the same image that production will
 run:
 
 ```bash
-WORKFLOW_DIRS=/opt/centaur/workflows python3 /usr/local/bin/workflow-host <<'EOF'
-{"type":"discover"}
-EOF
+python3 /usr/local/bin/workflow-host serve &
+curl -sS -X POST localhost:8090/discover \
+  -d '{"workflow_dirs": "/opt/centaur/workflows", "env": {}}'
 ```
+
+A `200` lists each discovered workflow with its schedule, webhooks, principal,
+and starters. Module load errors appear on the server's stderr as
+`workflow_load_error`; a failed pass returns `500` with the error and traceback.
 
 Then create a real run:
 

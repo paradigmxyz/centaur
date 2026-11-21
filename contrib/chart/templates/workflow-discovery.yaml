@@ -9,7 +9,14 @@ service account, which exists to grant credentials.
 {{- if .Values.apiRs.enabled }}
 {{- $component := "workflow-discovery" -}}
 {{- $name := include "centaur.componentName" (dict "root" . "component" $component) -}}
-{{- $sandbox := .Values.sandbox -}}
+{{- $sandbox := include "centaur.sandboxPodSettings" . | fromJson -}}
+{{- /* Chart defaults, then the sandbox's keys (an explicit false wins), then a
+read-only root filesystem, which discovery always keeps. */ -}}
+{{- $securityContext := deepCopy (.Values.containerSecurityContext | default dict) -}}
+{{- range $key, $value := $sandbox.containerSecurityContext -}}
+{{- $_ := set $securityContext $key $value -}}
+{{- end -}}
+{{- $_ := set $securityContext "readOnlyRootFilesystem" true -}}
 {{- $reposPath := include "centaur.reposPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -83,7 +90,7 @@ spec:
           resources:
 {{ toYaml .Values.workflowDiscovery.resources | nindent 12 }}
           securityContext:
-{{ toYaml (merge (dict "readOnlyRootFilesystem" true) (deepCopy ($sandbox.containerSecurityContext | default dict)) (deepCopy .Values.containerSecurityContext)) | nindent 12 }}
+{{ toYaml $securityContext | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
