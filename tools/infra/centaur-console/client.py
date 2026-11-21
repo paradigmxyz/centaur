@@ -17,11 +17,13 @@ SANDBOX_ADMIN_GRANTS_PATH = "/api/v1/sandbox/admin/grants"
 SANDBOX_ADMIN_SECRETS_PATH = "/api/v1/sandbox/admin/secrets"
 SANDBOX_ADMIN_STATIC_SECRETS_PATH = "/api/v1/sandbox/admin/static_secrets"
 SANDBOX_ADMIN_PG_DSN_SECRETS_PATH = "/api/v1/sandbox/admin/pg_dsn_secrets"
+SANDBOX_ADMIN_GCP_AUTH_SECRETS_PATH = "/api/v1/sandbox/admin/gcp_auth_secrets"
 SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH = "/api/v1/sandbox/admin/gcp_id_token_secrets"
 # Secret kinds an admin can create and edit from a sandbox, by kind and grant key.
 ADMIN_WRITABLE_SECRET_PATHS = {
     "static": SANDBOX_ADMIN_STATIC_SECRETS_PATH,
     "pg_dsn": SANDBOX_ADMIN_PG_DSN_SECRETS_PATH,
+    "gcp_auth": SANDBOX_ADMIN_GCP_AUTH_SECRETS_PATH,
     "gcp_id_token": SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH,
 }
 SANDBOX_ADMIN_SLACK_EXTERNAL_TEAMS_PATH = "/api/v1/sandbox/admin/slack_external_teams"
@@ -293,19 +295,19 @@ class ConsoleClient:
         return self._admin_list(SANDBOX_ADMIN_SECRETS_PATH, {"q": query} if query else None)
 
     def admin_secret_document(self, secret: str) -> dict[str, Any]:
-        """Read a static, pg_dsn, or gcp_id_token secret's document (never its value) by OID, foreign ID, or name."""
+        """Read a static, pg_dsn, gcp_auth, or gcp_id_token secret's document (never its value) by OID, foreign ID, or name."""
         return self._admin_object(self._admin_writable_secret_path(secret))
 
     def admin_create_secret(self, kind: str, data: dict[str, Any]) -> dict[str, Any]:
-        """Create a static, pg_dsn, or gcp_id_token secret from a Console API document."""
+        """Create a static, pg_dsn, gcp_auth, or gcp_id_token secret from a Console API document."""
         if kind not in ADMIN_WRITABLE_SECRET_PATHS:
-            raise ValueError("kind must be static, pg_dsn, or gcp_id_token")
+            raise ValueError("kind must be static, pg_dsn, gcp_auth, or gcp_id_token")
         return self._admin_object(
             ADMIN_WRITABLE_SECRET_PATHS[kind], method="POST", json={"data": data}
         )
 
     def admin_update_secret(self, secret: str, data: dict[str, Any]) -> dict[str, Any]:
-        """Update the given fields of a static, pg_dsn, or gcp_id_token secret; omitted fields are kept."""
+        """Update the given fields of a static, pg_dsn, gcp_auth, or gcp_id_token secret; omitted fields are kept."""
         return self._admin_object(
             self._admin_writable_secret_path(secret), method="PATCH", json={"data": data}
         )

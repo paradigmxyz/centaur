@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 from client import (
+    SANDBOX_ADMIN_GCP_AUTH_SECRETS_PATH,
     SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH,
     SANDBOX_ADMIN_GRANTS_PATH,
     SANDBOX_ADMIN_PG_DSN_SECRETS_PATH,
@@ -493,3 +494,20 @@ def test_admin_create_secret_posts_gcp_id_token_documents_to_their_kind_path():
     assert make_client(handler).admin_create_secret("gcp_id_token", data) == {"id": "gid_1"}
 
     assert requests == [("POST", SANDBOX_ADMIN_GCP_ID_TOKEN_SECRETS_PATH, {"data": data})]
+
+
+def test_admin_create_secret_posts_gcp_auth_documents_to_their_kind_path():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, json.loads(request.content)))
+        return json_response({"data": {"id": "gas_1"}}, 201)
+
+    data = {
+        "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+        "keyfile": {"source_type": "env"},
+        "rules": [{"host": "storage.googleapis.com"}],
+    }
+    assert make_client(handler).admin_create_secret("gcp_auth", data) == {"id": "gas_1"}
+
+    assert requests == [("POST", SANDBOX_ADMIN_GCP_AUTH_SECRETS_PATH, {"data": data})]

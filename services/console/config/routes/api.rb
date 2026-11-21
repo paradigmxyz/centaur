@@ -143,6 +143,7 @@ namespace :api do
         resources :secrets, only: %i[index]
         resources :static_secrets, only: %i[show create update]
         resources :pg_dsn_secrets, only: %i[show create update]
+        resources :gcp_auth_secrets, only: %i[show create update]
         resources :gcp_id_token_secrets, only: %i[show create update]
         resources :slack_external_teams, only: %i[index create destroy]
         resources :roles, only: %i[index show] do
