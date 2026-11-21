@@ -459,9 +459,11 @@ async fn principals_grant(
         let translation =
             translate::translate_for_tool(&role.foreign_id, &tool_labels, &secrets, &policy);
         let granted = grant_inputs_to_role(client, &role_id, translation.inputs).await?;
+        let pruned =
+            prune_undeclared_tool_grants(client, &role_id, &role.foreign_id, &granted).await?;
         assign_role_idempotent(client, &principal_id, &role_id).await?;
         println!(
-            "  tool {} (from {}): role {} ({role_id}) — {} secret(s) registered, role assigned",
+            "  tool {} (from {}): role {} ({role_id}) — {} secret(s) registered, {pruned} no longer declared revoked, role assigned",
             manifest.name,
             manifest.dir.display(),
             role.foreign_id,
@@ -924,6 +926,59 @@ async fn grant_secrets(
         println!("  secret {oid}: granted ({})", grant.id);
     }
     Ok(())
+}
+
+/// Whether a grant on a tool's canonical role is for a secret the tool no
+/// longer declares: not one of the grants this registration just made
+/// (`keep`), and registered for that role (translate.rs keys every secret it
+/// creates for a tool as `{role}-…`). Grants of any other secret, such as one
+/// an operator granted by hand, are not.
+pub(crate) fn is_undeclared_tool_grant(
+    grant_id: &str,
+    secret_foreign_id: Option<&str>,
+    role_fid: &str,
+    keep: &[String],
+) -> bool {
+    if keep.iter().any(|k| k == grant_id) {
+        return false;
+    }
+    secret_foreign_id
+        .and_then(|fid| fid.strip_prefix(role_fid))
+        .is_some_and(|rest| rest.starts_with('-'))
+}
+
+/// Revoke the grants on a tool's canonical role for secrets the tool no longer
+/// declares (see [`is_undeclared_tool_grant`]), so re-registering a tool after
+/// it drops a secret (e.g. the Slack tool's `SLACK_BOT_TOKEN` in #1927) removes
+/// the old grant instead of leaving it to be revoked by hand. Returns how many
+/// grants were revoked.
+async fn prune_undeclared_tool_grants(
+    client: &IronControlClient,
+    role_id: &str,
+    role_fid: &str,
+    keep: &[String],
+) -> Result<usize> {
+    let mut revoked = 0;
+    for grant in client.list_role_grants(role_id).await? {
+        if keep.iter().any(|k| k == &grant.id) {
+            continue;
+        }
+        let Some((_, collection, oid)) = grant.secret_target() else {
+            continue;
+        };
+        let secret = client.get_secret(collection, oid).await?;
+        if !is_undeclared_tool_grant(&grant.id, secret.foreign_id.as_deref(), role_fid, keep) {
+            continue;
+        }
+        client.delete_grant(&grant.id).await?;
+        println!(
+            "  secret {} ({oid}): no longer declared by the tool, grant {} revoked",
+            secret.foreign_id.as_deref().unwrap_or("-"),
+            grant.id
+        );
+        revoked += 1;
+    }
+    Ok(revoked)
 }
 
 /// Revoke each secret OID from `grants` (the grantee's current grants),
