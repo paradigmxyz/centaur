@@ -120,12 +120,14 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
   });
 
   let chatInitialized = false;
+  let chatInitializationFailed = false;
   const ensureChatInitialized = async (): Promise<void> => {
     if (chatInitialized) return;
     try {
       await chat.initialize();
       chatInitialized = true;
     } catch (error) {
+      chatInitializationFailed = true;
       logger.warn("githubbot_chat_initialize_failed", {
         error: errorMessage(error),
       });
@@ -140,7 +142,18 @@ export function createGithubbot(options: GithubbotOptions): Githubbot {
   };
 
   const app = new Hono();
-  app.get("/health", (c) => c.json({ ok: true, service: "githubbot" }));
+  // Chat SDK 4.31.0 retains a rejected initialization promise. If startup
+  // fails, the liveness probe restarts the process so it can initialize again.
+  app.get("/health", (c) =>
+    chatInitializationFailed
+      ? c.json({ ok: false, service: "githubbot" }, 503)
+      : c.json({ ok: true, service: "githubbot" }),
+  );
+  app.get("/ready", (c) =>
+    chatInitialized
+      ? c.json({ ok: true, service: "githubbot" })
+      : c.json({ ok: false, service: "githubbot" }, 503),
+  );
 
   const handleGithubWebhook = async (c: Context) => {
     const eventType = c.req.header("x-github-event") ?? "";
