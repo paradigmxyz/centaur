@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
@@ -17,6 +19,18 @@ use crate::{
 
 /// Effort levels Claude Code accepts for its `effortLevel` setting.
 const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Claude Code drops `OTEL_*` variables from the shells its Bash tool runs, so
+/// programs the agent runs there (such as `centaur-codemode exec`) never see
+/// the OTLP exporter settings harness-server was given, and export nothing.
+/// Claude Code sources `CLAUDE_ENV_FILE` in each of those shells after that
+/// filtering, so the settings are re-exported from that file.
+const CLAUDE_ENV_FILE_ENV: &str = "CLAUDE_ENV_FILE";
+/// Relative to `$HOME`. Holds the OTLP headers (the collector's API key), so
+/// it is written owner-only and kept outside the workspace.
+const DEFAULT_OTEL_ENV_FILE: &str = ".centaur/claude-otel-env.sh";
+/// Set on every sandbox api-rs creates.
+const API_URL_ENV: &str = "CENTAUR_API_URL";
 
 /// Defers agent text until the owning message's fate is known, so agentMessage
 /// items can be emitted with an authoritative stop reason. Claude's per-block
@@ -424,6 +438,9 @@ impl HarnessServer for ClaudeCodeHarness {
         } else {
             command.args(["--session-id", &state.id]);
         }
+        if let Some(path) = write_otel_env_file() {
+            command.env(CLAUDE_ENV_FILE_ENV, path);
+        }
         command
     }
 
@@ -527,6 +544,74 @@ impl HarnessServer for ClaudeCodeHarness {
     }
 }
 
+/// Writes the `OTEL_*` exports for Claude Code's Bash shells and returns the
+/// file to point `CLAUDE_ENV_FILE` at. Like the turn trace file, only
+/// API-created sandboxes write to `$HOME`, and an operator-set
+/// `CLAUDE_ENV_FILE` is left alone. Failures are logged and never fail the turn.
+fn write_otel_env_file() -> Option<PathBuf> {
+    let non_empty =
+        |name: &str| env::var_os(name).filter(|value| !value.to_string_lossy().trim().is_empty());
+    if env::var_os(CLAUDE_ENV_FILE_ENV).is_some() {
+        return None;
+    }
+    non_empty(API_URL_ENV)?;
+    let path = PathBuf::from(non_empty("HOME")?).join(DEFAULT_OTEL_ENV_FILE);
+    let vars = env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)));
+    let contents = otel_env_file_contents(vars)?;
+    match write_private_atomically(&path, &contents) {
+        Ok(()) => Some(path),
+        Err(error) => {
+            eprintln!("claude otel env file: writing {}: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// `export` lines for the OTLP exporter settings, or `None` when there are
+/// none. `OTEL_SERVICE_NAME` names the harness itself, so it stays out of the
+/// agent's shell.
+fn otel_env_file_contents(vars: impl IntoIterator<Item = (String, String)>) -> Option<String> {
+    let mut lines: Vec<String> = vars
+        .into_iter()
+        .filter(|(name, _)| {
+            name.starts_with("OTEL_")
+                && name != "OTEL_SERVICE_NAME"
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(name, value)| format!("export {name}={}\n", shell_quote(&value)))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort();
+    Some(lines.concat())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+fn write_private_atomically(path: &Path, contents: &str) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".claude-otel-env.{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temp)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -537,7 +622,9 @@ mod tests {
         anthropic::AnthropicStreamEvent,
     };
 
-    use super::{ClaudeCodeHarness, ClaudeEventNormalizer};
+    use super::{
+        ClaudeCodeHarness, ClaudeEventNormalizer, otel_env_file_contents, write_private_atomically,
+    };
 
     fn normalize(normalizer: &mut ClaudeEventNormalizer, event: Value) -> Vec<NormalizedEvent> {
         normalizer.normalize(serde_json::from_value(event).unwrap())
@@ -1170,5 +1257,62 @@ mod tests {
                 json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": level}})
             );
         }
+    }
+
+    #[test]
+    fn otel_env_file_exports_otlp_settings_quoted() {
+        let vars = [
+            ("OTEL_SERVICE_NAME", "claude"),
+            (
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "http://collector:8000/v1/traces",
+            ),
+            ("PATH", "/usr/bin"),
+            ("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer it's"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        assert_eq!(
+            otel_env_file_contents(vars).as_deref(),
+            Some(
+                "export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer it'\\''s'\n\
+                 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='http://collector:8000/v1/traces'\n"
+            )
+        );
+        assert_eq!(
+            otel_env_file_contents([("PATH".to_owned(), "/usr/bin".to_owned())]),
+            None
+        );
+    }
+
+    #[test]
+    fn otel_env_file_is_owner_only_and_sourceable() {
+        let dir =
+            std::env::temp_dir().join(format!("claude-otel-{}", uuid::Uuid::new_v4().simple()));
+        let path = dir.join("env.sh");
+        let contents = otel_env_file_contents([(
+            "OTEL_EXPORTER_OTLP_HEADERS".to_owned(),
+            "authorization=Bearer it's".to_owned(),
+        )])
+        .unwrap();
+        write_private_atomically(&path, &contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                ". '{}' && printf %s \"$OTEL_EXPORTER_OTLP_HEADERS\"",
+                path.display()
+            ))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "authorization=Bearer it's"
+        );
     }
 }
