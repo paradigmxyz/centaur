@@ -96,13 +96,14 @@ you are debugging:
 
 | Runtime | Mount | Used for |
 |---------|-------|----------|
-| API | `/var/lib/centaur/repos/<owner>/<repo>` | Tool-secret discovery and workflow discovery. |
-| Sandbox | `/home/agent/github/<owner>/<repo>` | Workflow-host execution, skills, persona files, prompt fragments, and runtime files available to agents. |
+| API | `/var/lib/centaur/repos/<owner>/<repo>` | Tool-secret discovery. |
+| Sandbox and workflow discovery | `/home/agent/github/<owner>/<repo>` | Workflow discovery and execution, skills, persona files, prompt fragments, and runtime files available to agents. |
 
-Do not use the sandbox path when debugging API discovery. If a tool or workflow
-is missing from API discovery, inspect `/var/lib/centaur/repos/...` in the API
-container. If a skill or workflow-host import is missing, inspect
-`/home/agent/github/...` in the sandbox.
+Do not use the sandbox path when debugging API tool discovery. If a tool is
+missing from API discovery, inspect `/var/lib/centaur/repos/...` in the API
+container. If a workflow, skill, or workflow-host import is missing, inspect
+`/home/agent/github/...` in the sandbox or the `workflow-discovery` pod;
+workflow code never runs in the API container.
 
 Both mounts are served by repo-cache, so overlays require `repoCache.enabled:
 true` (the default). If the cluster disallows writable hostPath volumes, set
@@ -110,14 +111,14 @@ true` (the default). If the cluster disallows writable hostPath volumes, set
 
 ## Discovery paths
 
-The chart renders API discovery paths from the ordered overlay list:
+The chart renders API tool discovery paths from the ordered overlay list:
 
 ```text
 TOOL_DIRS=/var/lib/centaur/repos/paradigmxyz/centaur/tools:/var/lib/centaur/repos/your-org/centaur-overlay/tools
-WORKFLOW_DIRS=/var/lib/centaur/repos/paradigmxyz/centaur/workflows:/var/lib/centaur/repos/your-org/centaur-overlay/workflows
 ```
 
-The same ordered workflow list is translated for workflow-host sandboxes:
+The workflow discovery service and workflow-host sandboxes receive the ordered
+workflow list under the sandbox mount:
 
 ```text
 WORKFLOW_DIRS=/home/agent/github/paradigmxyz/centaur/workflows:/home/agent/github/your-org/centaur-overlay/workflows
@@ -196,14 +197,12 @@ hook latency on the first reply can be measured per overlay.
 
 ## Verify the overlay
 
-Verify the API pod sees the ordered API-side paths:
+Verify the API pod sees the ordered API-side tool paths:
 
 ```bash
 kubectl exec -n centaur deploy/centaur-centaur-api-rs -- sh -lc '
   echo "$TOOL_DIRS"
-  echo "$WORKFLOW_DIRS"
   for d in ${TOOL_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -mindepth 1 -type d | sort; done
-  for d in ${WORKFLOW_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
 '
 ```
 
@@ -218,12 +217,14 @@ kubectl exec -n centaur <agent-sandbox-pod> -- sh -lc '
 '
 ```
 
-Verify a workflow-host sandbox sees the sandbox-translated workflow list:
+api-rs sends the sandbox-translated workflow list with each discovery request.
+Check the list it uses, then that the discovery service sees those files:
 
 ```bash
-kubectl exec -n centaur <workflow-host-pod> -- sh -lc '
-  echo "$WORKFLOW_DIRS"
-  for d in ${WORKFLOW_DIRS//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
+kubectl exec -n centaur deploy/centaur-centaur-api-rs -- sh -lc 'echo "$KUBERNETES_WORKFLOW_DIRS"'
+kubectl exec -n centaur deploy/centaur-centaur-workflow-discovery -- sh -lc '
+  dirs=/home/agent/github/your-org/centaur-overlay/workflows  # from the line above
+  for d in ${dirs//:/ }; do test -d "$d" && find "$d" -maxdepth 1 -name "*.py" | sort; done
 '
 ```
 

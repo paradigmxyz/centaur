@@ -1,0 +1,155 @@
+{{- /*
+Workflow discovery: imports workflow modules for api-rs so their code never runs
+there. api-rs sends the workflow env with each request. No secrets, read-only
+sources, and (under networkPolicy) reachable only from api-rs with no egress.
+It runs workflow code, so it is placed and isolated like a sandbox pod: it
+follows the sandbox.* values (not apiRs.extraEnv SESSION_SANDBOX_* overrides),
+minus the sandbox service account, which exists to grant credentials.
+*/ -}}
+{{- if .Values.apiRs.enabled }}
+{{- $component := "workflow-discovery" -}}
+{{- $name := include "centaur.componentName" (dict "root" . "component" $component) -}}
+{{- $sandbox := .Values.sandbox -}}
+{{- /* Chart defaults, then the sandbox's keys (an explicit false wins), then a
+read-only root filesystem, which discovery always keeps. */ -}}
+{{- $securityContext := deepCopy (.Values.containerSecurityContext | default dict) -}}
+{{- range $key, $value := ($sandbox.containerSecurityContext | default dict) -}}
+{{- $_ := set $securityContext $key $value -}}
+{{- end -}}
+{{- $_ := set $securityContext "readOnlyRootFilesystem" true -}}
+{{- $reposPath := .Values.sandbox.reposPath | default (ternary .Values.repoCache.hostPath "" .Values.repoCache.enabled) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 8 }}
+      {{- with $sandbox.podAnnotations }}
+      annotations:
+        {{- range $key, $value := . }}
+        {{ $key }}: {{ $value | toString | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $sandbox.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $sandbox.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- if kindIs "bool" $sandbox.hostUsers }}
+      hostUsers: {{ $sandbox.hostUsers }}
+      {{- end }}
+      {{- with $sandbox.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sandbox.tolerations }}
+      tolerations:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+      containers:
+        - name: workflow-discovery
+          image: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
+          imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
+          command: ["python3", "/usr/local/bin/workflow-host", "serve"]
+          env:
+            - name: PYTHONPATH
+              value: /opt/centaur
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: http
+              containerPort: 8090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml .Values.workflowDiscovery.resources | nindent 12 }}
+          securityContext:
+{{ toYaml $securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+{{- if $reposPath }}
+            - name: repos
+              mountPath: /home/agent/github
+              readOnly: true
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if $reposPath }}
+        - name: repos
+{{- /* Same choice api-rs makes for sandboxes (REPOS_PVC), so both see the same files. */}}
+{{- if eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim" }}
+          persistentVolumeClaim:
+            claimName: {{ include "centaur.repoCachePvcName" . | quote }}
+            readOnly: true
+{{- else }}
+          hostPath:
+            path: {{ $reposPath | quote }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+{{- if .Values.networkPolicy.enabled }}
+---
+# The service is unauthenticated; this policy is its trust boundary.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8090
+  egress: []
+{{- end }}
+{{- end }}

@@ -90,7 +90,9 @@ and deployment-specific APIs. Tool code should read credentials with
 `secret("NAME")` so the same code works locally and in production.
 
 Workflows are Python handlers run by `services/workflow-python` under the
-api-rs Absurd workflow runtime. When a worker restarts, the handler runs again,
+api-rs Absurd workflow runtime. Workflow code never runs in the api-rs process:
+a workflow discovery service imports workflow modules to find them, and each run
+happens in a workflow-host sandbox. When a worker restarts, the handler runs again,
 but `ctx.step(...)` returns cached results for completed work. Workflow
 `ctx.call_tool(...)` remains available through the generated `centaur-tools`
 compatibility bridge.

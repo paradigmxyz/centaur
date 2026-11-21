@@ -22,13 +22,35 @@ configuration.
 Migrating existing workflows to the api-rs Absurd runtime? See
 [Workflows v2 Migration](/extend/workflows-v2).
 
-Workflows are loaded from `WORKFLOW_DIRS`. In an overlay deployment, workflow
-files must exist under the source's `workflowsSubdir` — by default
-`workflows/` — in its repo-cache checkout, for example
-`/var/lib/centaur/repos/your-org/centaur-overlay/workflows` in the API
-container. Workflow-host sandboxes receive the same ordered list translated to
-`/home/agent/github/...`. Files in those directories are loaded the same way as
-built-in workflows; sources without the directory are skipped.
+Workflow code never runs in the API process. The workflow discovery service
+finds workflows, and api-rs runs each one in a workflow-host sandbox. Both load
+them from `WORKFLOW_DIRS`. Without overlays that is the agent image's
+`/opt/centaur/workflows`. In an overlay deployment, workflow files must exist
+under the source's `workflowsSubdir` — by default `workflows/` — in its
+repo-cache checkout, which both mount read-only at `/home/agent/github/...`, for
+example `/home/agent/github/your-org/centaur-overlay/workflows`. Files in those
+directories are loaded the same way as built-in workflows; sources without the
+directory are skipped. A workflow merged to an overlay's configured ref is
+picked up once repo-cache syncs it (`repoCache.syncIntervalSeconds`) and the
+next discovery pass runs, with no restart.
+
+Discovery imports every enabled workflow module, which runs its top-level code.
+api-rs asks for it at startup and every `WORKFLOW_RECONCILE_INTERVAL_SECS`
+(default 60), sending the `WORKFLOW_DIRS` and passthrough env run sandboxes get,
+plus the enablement policy so disabled modules are not imported during
+discovery. (Run sandboxes import every module, as before.) The
+`workflow-discovery` Deployment, running the agent
+image, imports the workflow files afresh in a forked process for each request,
+with no credentials, no database, and, under `networkPolicy.enabled`, no
+outbound network. A pass that takes longer than 120 seconds is stopped and
+reported as failed.
+
+Module-level code that reads deployment config, such as a `SCHEDULE` whose
+`enabled` comes from `os.environ.get("ENABLE_FOO_WORKFLOW")`, sees only the
+names listed in `apiRs.extraEnv.SESSION_SANDBOX_PASSTHROUGH_ENV`, the same env
+its runs get. A flag set only in `apiRs.extraEnv` without being listed there
+falls back to its default. Keep module top level cheap and free of side effects:
+code that needs a credential or the network at import time fails discovery.
 
 ## Define a workflow
 
@@ -71,10 +93,7 @@ Set it to `True` to have the API derive and register the
 principal foreign ID, such as `WORKFLOW_PRINCIPAL = "finance-automation"`, or
 to a `prn_`-prefixed OID to run the workflow-host sandbox under that principal
 instead. An unknown principal reference fails startup. Grant the required tool
-roles or secrets to the selected principal. Any `WORKFLOW_PRINCIPAL` value
-requires `apiRs.workflowHostSandbox=true`, which renders
-`WORKFLOW_HOST_SANDBOX=true`; startup fails if workflow-host sandboxing is
-disabled.
+roles or secrets to the selected principal.
 
 `WORKFLOW_STARTERS` is optional. Set it to the API caller classes allowed to
 start the workflow through `POST /api/workflows/runs`, such as
@@ -510,9 +529,12 @@ same trigger key maps to an existing run.
 
 ## Verify
 
-After deploying an overlay, check API logs for workflow load events and create a
-small run with `eager_start: true`. If the workflow is missing, inspect
-`WORKFLOW_DIRS`, the configured repo/ref in repo-cache, and whether the file exports
-`WORKFLOW_NAME`. For webhooks, also check for
+After deploying an overlay, check the `workflow-discovery` pod's logs for
+`workflow_load_error` lines, which name modules that failed to import, and create
+a small run with `eager_start: true`. If the workflow is missing, compare
+api-rs's `KUBERNETES_WORKFLOW_DIRS` with the files the discovery pod sees, and
+check the configured repo/ref in repo-cache and that the file exports
+`WORKFLOW_NAME`. api-rs logs failed discovery passes with the error and
+traceback. For webhooks, also check for
 `workflow_webhook_registered` in the API logs and send a signed request to the
 public `/api/webhooks/{slug}` URL.

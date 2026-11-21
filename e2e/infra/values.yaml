@@ -21,6 +21,10 @@ sandbox:
   extraEnv:
     TOOLS_PATH: /opt/centaur/tools
     TOOL_ALLOWLIST: ssh,demo
+  # Sandboxes and the workflow discovery service mount this node directory
+  # read-only at /home/agent/github. e2e/stack.sh creates it, and tests install
+  # workflow files under centaur-e2e/workflows (see `workflows.install` in e2e/lib).
+  reposPath: /var/lib/centaur-e2e/repos
 repoCache:
   enabled: false
 
@@ -38,8 +42,10 @@ apiRs:
     # Paired iron-proxies get an SSH listener; e2e/stack.sh puts
     # CENTAUR_SSH_SEED in centaur-infra-env. e2e/tests/ssh.test.ts uses it.
     KUBERNETES_IRON_PROXY_SSH_ENABLED: "true"
+    # Workflow discovery and workflow-host sandboxes load the image's workflows
+    # and the ones tests install in the mounted node directory (sandbox.reposPath).
+    KUBERNETES_WORKFLOW_DIRS: /opt/centaur/workflows:/home/agent/github/centaur-e2e/workflows
   sandboxWarmPoolSize: 0
-  workflowHostSandbox: false
 
 proxySync:
   replicaCount: 1

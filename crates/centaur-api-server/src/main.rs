@@ -168,6 +168,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         store,
         runtime.clone(),
         workflow_host_sandbox,
+        args.workflow_discovery_client()?,
         iron_control.workflow_principal_registrar,
     )
     .await?;
