@@ -44,7 +44,26 @@ const MODELS: &[(&str, &str)] = &[
     ("anthropic", "claude-sonnet-4-6"),
     ("anthropic", "claude-sonnet-5"),
     ("anthropic", "claude-sonnet-5-5"),
+    ("google", "gemini-2.5-flash"),
+    ("google", "gemini-2.5-flash-lite"),
+    ("google", "gemini-2.5-pro"),
+    ("google", "gemini-3-flash-preview"),
+    ("google", "gemini-3.1-flash-lite"),
+    ("google", "gemini-3.1-flash-lite-preview"),
+    ("google", "gemini-3.1-pro-preview"),
+    ("google", "gemini-3.1-pro-preview-customtools"),
+    ("google", "gemini-3.5-flash"),
+    ("google", "gemini-3.5-flash-lite"),
+    ("google", "gemini-3.6-flash"),
+    ("google", "gemini-3.7-flash"),
+    ("google", "gemini-3.8-flash"),
+    ("google", "gemini-4-argon"),
+    ("google", "gemini-4-carbon"),
+    ("google", "gemini-4-hydrogen"),
     ("google", "gemini-4-neon"),
+    ("google", "gemini-flash-latest"),
+    ("google", "gemini-flash-lite-latest"),
+    ("google", "gemini-pro-latest"),
     ("openai", "gpt-5.4"),
     ("openai", "gpt-5.4-mini"),
     ("openai", "gpt-5.4-nano"),
@@ -399,6 +418,9 @@ mod tests {
             "gpt-6.1-terra",
             "google/gemini-4-neon",
             "gemini-4-neon",
+            "google/gemini-4-carbon",
+            "google/gemini-3.1-pro-preview",
+            "gemini-pro-latest",
         ] {
             assert_eq!(check_model(model), Ok(()), "{model}");
         }
@@ -409,6 +431,8 @@ mod tests {
             "openai/gpt-5.5:high",
             "openai/gemini-4-neon",
             "google/gemini-4",
+            "google/gemini-2.5-flash-image",
+            "google/gemini-embedding-001",
         ] {
             assert!(check_model(model).is_err(), "{model}");
         }

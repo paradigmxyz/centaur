@@ -72,6 +72,28 @@ cat > "$HOME_DIR/.pi/agent/models.json" <<'EOF'
     "google": {
       "models": [
         {
+          "id": "gemini-4-carbon",
+          "name": "Gemini 4 Carbon",
+          "api": "google-generative-ai",
+          "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+          "reasoning": true,
+          "thinkingLevelMap": {"off": null, "minimal": null, "low": "low", "medium": "medium", "high": "high", "xhigh": null, "max": null},
+          "input": ["text", "image"],
+          "contextWindow": 1048576,
+          "maxTokens": 32768
+        },
+        {
+          "id": "gemini-4-hydrogen",
+          "name": "Gemini 4 Hydrogen",
+          "api": "google-generative-ai",
+          "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+          "reasoning": true,
+          "thinkingLevelMap": {"off": null, "minimal": null, "low": "low", "medium": "medium", "high": "high", "xhigh": null, "max": null},
+          "input": ["text", "image"],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
           "id": "gemini-4-neon",
           "name": "Gemini 4 Neon",
           "api": "google-generative-ai",
