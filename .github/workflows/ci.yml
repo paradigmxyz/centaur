@@ -550,7 +550,7 @@ jobs:
       - name: Workflow definition tests
         run: >-
           uv run --project services/workflow-python --with pytest
-          python -m pytest workflows/tests workflows/slack/tests
+          python -m pytest workflows/tests
 
   tool-tests:
     name: Tool tests

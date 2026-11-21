@@ -22,41 +22,6 @@ class CentaurApiClient
     @api = HttpClient.new(http: http, open_timeout: timeout, read_timeout: read_timeout)
   end
 
-  def list_slack_dm_sync_checkpoints(broker_credential_id:, home_team_id: nil)
-    get(
-      "/api/admin/slack/dm-sync/checkpoints",
-      broker_credential_id: broker_credential_id,
-      home_team_id: home_team_id
-    )
-  end
-
-  def ingest_slack_dm_sync_batch(payload)
-    post("/api/admin/slack/dm-sync/batch", payload)
-  end
-
-  def get_google_docs_sync_checkpoint(broker_credential_id:)
-    get(
-      "/api/admin/google/docs-sync/checkpoint",
-      broker_credential_id: broker_credential_id
-    )
-  end
-
-  def ingest_google_docs_sync_batch(payload)
-    post("/api/admin/google/docs-sync/batch", payload)
-  end
-
-  def get_google_docs_content_status(files:)
-    post("/api/admin/google/docs-sync/content-status", { files: files })
-  end
-
-  def get_granola_sync_checkpoint(scope_id:)
-    get("/api/admin/granola/sync/checkpoint", scope_id: scope_id)
-  end
-
-  def ingest_granola_sync_batch(payload)
-    post("/api/admin/granola/sync/batch", payload)
-  end
-
   def slack_external_team_ids
     Array(get("/api/slack/external-team-ids")["slack_external_team_ids"])
   end

@@ -30,13 +30,12 @@ pub(crate) enum Capability {
     WorkflowsWrite,
     WorkflowsEvents,
     WorkflowsActions,
-    AdminSync,
     SlackExternalTeamsRead,
     SlackExternalTeamsWrite,
 }
 
 impl Capability {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::SessionsRead,
         Self::SessionsWrite,
         Self::SandboxesDrain,
@@ -44,7 +43,6 @@ impl Capability {
         Self::WorkflowsWrite,
         Self::WorkflowsEvents,
         Self::WorkflowsActions,
-        Self::AdminSync,
         Self::SlackExternalTeamsRead,
         Self::SlackExternalTeamsWrite,
     ];
@@ -566,7 +564,7 @@ mod tests {
 
         let caller = auth.authenticate(&headers).unwrap();
         assert_eq!(caller.class(), CallerClass::Console);
-        assert!(caller.has_capability(Capability::AdminSync));
+        assert!(caller.has_capability(Capability::WorkflowsWrite));
     }
 
     #[test]

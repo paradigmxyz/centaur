@@ -61,7 +61,7 @@
 |`centaur-codemode` is Centaur's connector runtime. It is unrelated to any built-in `codemode` tool a harness may offer, which only scripts that harness's own tools.
 
 [Tools]
-|Many services also have a legacy shell CLI (`websearch`, `company_context`, `slack`, `vlogs`, ...). Do not use a CLI for work a connector function covers, even when an older note, thread message, or habit names the CLI; find the matching function with `centaur-codemode search` instead.
+|Many services also have a legacy shell CLI (`websearch`, `slack`, `vlogs`, ...). Do not use a CLI for work a connector function covers, even when an older note, thread message, or habit names the CLI; find the matching function with `centaur-codemode search` instead.
 |Use a shell CLI only when no connector function covers the task (a skill may say so), or for `git-branch`. Run `centaur-tools list` to see installed CLIs and `<tool> --help` before using an unfamiliar one. Never guess command or function names.
 |For tool smoke tests use `<tool> health` (or the `tool-health-smoke` skill), not ad hoc probes.
 |Run independent lookups together: `Promise.all` in one cell, or parallel tool calls in one turn. Serialize only when one result builds the next query.

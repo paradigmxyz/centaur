@@ -85,7 +85,7 @@ Supported workflow-host modules are `api.workflow_engine`,
 
 Do not import unrelated API-service internals or another workflow domain's local
 helpers. Domain-specific helpers should live next to the workflows that own
-them, for example `workflows/slack/metrics.py`.
+them, for example `workflows/<domain>/helpers.py`.
 
 If a workflow needs a helper, move it into the workflow file, a shared overlay
 module, or a supported workflow-host API module.

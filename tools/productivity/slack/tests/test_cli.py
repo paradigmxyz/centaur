@@ -661,14 +661,19 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             calls.append(kwargs)
             return {
                 "status": "ok",
+                "query": "database migration",
                 "results": [
                     {
-                        "channel": "eng-infra",
-                        "user": "alice",
+                        "document_id": "slack:C123:2026-09-17:0",
+                        "type": "slack_message",
+                        "title": "#eng-infra 2026-09-17",
+                        "url": "https://example.slack.com/archives/C123/p123",
                         "text": "database migration completed",
-                        "permalink": "https://example.slack.com/archives/C123/p123",
+                        "occurred_at": "2026-09-17T12:00:00Z",
+                        "metadata": {"conversation_id": "C123", "channel_name": "eng-infra"},
                     }
                 ],
+                "next_cursor": None,
             }
 
     monkeypatch.setitem(
@@ -684,8 +689,10 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             "database migration",
             "--channels",
             "eng-infra,C1234567890",
-            "--from",
-            "alice",
+            "--after",
+            "2026-09-01",
+            "--sort",
+            "timestamp",
             "--limit",
             "5",
         ],
@@ -698,9 +705,63 @@ def test_search_uses_indexed_slack_client(monkeypatch) -> None:
             "query": "database migration",
             "limit": 5,
             "channels": ["eng-infra", "C1234567890"],
-            "from_user": "alice",
+            "after": "2026-09-01",
+            "before": None,
+            "sort": "timestamp",
+            "cursor": None,
         }
     ]
+
+
+def test_search_renders_indexed_results_as_table(monkeypatch) -> None:
+    class FakeIndexedSlackClient:
+        def search_messages(self, **kwargs):
+            return {
+                "status": "ok",
+                "query": "deploy",
+                "results": [
+                    {
+                        "document_id": "slack:C123:2026-09-17:0",
+                        "type": "slack_message",
+                        "title": "#eng-infra 2026-09-17",
+                        "url": None,
+                        "text": "alice: deploy completed",
+                        "occurred_at": "2026-09-17T12:00:00Z",
+                        "metadata": {"conversation_id": "C123", "channel_name": "eng-infra"},
+                    }
+                ],
+                "next_cursor": "next",
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "slack.client",
+        types.SimpleNamespace(IndexedSlackClient=FakeIndexedSlackClient),
+    )
+
+    result = CliRunner().invoke(app, ["search", "deploy", "--no-json"])
+
+    assert result.exit_code == 0
+    assert "#eng-infra" in result.output
+    assert "2026-09-17" in result.output
+    assert "deploy completed" in result.output
+    assert "next cursor: next" in result.output
+
+
+def test_search_reports_indexed_errors(monkeypatch) -> None:
+    class FakeIndexedSlackClient:
+        def search_messages(self, **kwargs):
+            return {"status": "error", "error": "HTTP 403: no access"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "slack.client",
+        types.SimpleNamespace(IndexedSlackClient=FakeIndexedSlackClient),
+    )
+
+    result = CliRunner().invoke(app, ["search", "deploy"])
+
+    assert result.exit_code == 1
 
 
 def test_search_direct_calls_native_search_client(monkeypatch) -> None:

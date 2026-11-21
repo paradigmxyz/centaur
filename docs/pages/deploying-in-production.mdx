@@ -566,14 +566,13 @@ The deployment uses these databases on the server:
 
 | Database | Used by | Connection |
 | --- | --- | --- |
-| Any name, for example `centaur` | api-rs, Slackbot, and ETL workflows | `DATABASE_URL`, including the database name. |
+| Any name, for example `centaur` | api-rs, Slackbot, workflows, and the company-context service | `DATABASE_URL`, including the database name. |
 | `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
 through iron-proxy with a DSN from your secret source; point those at the
-external server too. For `company_context`, that secret is
-`CENTAUR_POSTGRES_DSN`.
+external server too.
 
 Then set the chart values:
 

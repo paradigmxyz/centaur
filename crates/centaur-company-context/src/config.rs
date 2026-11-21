@@ -107,7 +107,6 @@ pub struct Config {
     )]
     pub granola_oauth_app_slug: String,
     /// Rails Console OAuth app whose per-user Slack credentials are synchronized.
-    /// Keep it aligned with the app the Console Slack DM sync uses.
     #[arg(
         long,
         env = "COMPANY_CONTEXT_SLACK_OAUTH_APP_SLUG",

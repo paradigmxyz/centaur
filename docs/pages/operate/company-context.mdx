@@ -6,20 +6,19 @@ description: Choose and enable the company-context ingestion that indexes Slack,
 # Company Context
 
 Company context indexes internal content such as Slack conversations, Google
-Docs, Calendar events, and Granola notes so agents can search it. A default
-install ingests nothing: both the company-context service and the legacy v1
-sync jobs are off until Helm values enable them.
+Docs, Calendar events, and Granola notes so agents can search it. Ingestion is
+done by the standalone `company-context` service, which is off by default, so a
+default install ingests nothing.
 
 | Values key | Default | What it runs |
 |------------|---------|--------------|
-| `companyContext.enabled` | `false` | The standalone `company-context` service. Recommended for new deployments. |
-| `legacyCompanyContext.enabled` | `false` | Deprecated v1 Console Slack DM, Google Docs, and Granola sync jobs, and the master switch for the v1 Slack channel ETL. |
+| `companyContext.enabled` | `false` | The standalone `company-context` service. |
 
-Turning either off stops new ingestion but keeps data already synced.
+Turning it off stops new ingestion but keeps data already synced.
 
-These keys were previously named `experimentalCompanyContext` and
-`companyContextV1`. The old names are still accepted as aliases; when a key is
-set under both, the old name wins, so remove it once you migrate.
+This key was previously named `experimentalCompanyContext`. The old name is
+still accepted as an alias; when a key is set under both, the old name wins, so
+remove it once you migrate.
 
 ## Enable the company-context service
 
@@ -89,48 +88,21 @@ kubectl --context <context> -n <namespace> get pods -l app.kubernetes.io/compone
 ```
 
 When the service is enabled, the chart also gives sandboxes
-`COMPANY_CONTEXT_API_URL` so the `company_context v2` commands can query it.
+`COMPANY_CONTEXT_API_URL` so the `company_context` Code Mode connector and the
+`slack search` command can query it.
 
-## Enable the legacy v1 sync
+## Legacy v1 ingestion has been removed
 
-:::warning[Deprecated]
-Legacy v1 company context is deprecated and will be removed in a future
-release. Do not enable it on new deployments. Existing deployments should move
-to the company-context service described above.
-:::
-
-Use v1 only for an existing deployment that depends on it. Setting
-`legacyCompanyContext.enabled: true` turns on the Console's Slack DM and Granola
-sync for connected users, and allows the other v1 sources to run when their own
-switches are on:
-
-```yaml
-legacyCompanyContext:
-  enabled: true
-apiRs:
-  etl:
-    slack:
-      enabled: true   # Slack channel ETL
-console:
-  googleDocsSync:
-    enabled: true     # Console Google Docs sync
-```
-
-The Slack channel ETL reads with a Slack user token stored as `SLACK_ETL_TOKEN`
-in the same secret source used by tools; iron-proxy injects it on requests to
-`slack.com` and `files.slack.com`. The token must be able to call
-`conversations.list`, `conversations.history`, `conversations.replies`, and
-`users.list`, and to download files. The ETL syncs public channels visible to
-that token, and private channels too when `apiRs.etl.slack.indexPrivateChannels`
-is `true`. Its schedules, lookback windows, and retention settings are listed
-under the Slack ETL workflows in [Configuration](/reference/configuration).
-
-## Upgrading from a release where v1 was on by default
-
-`legacyCompanyContext.enabled`, previously `companyContextV1.enabled`, used to
-default to `true`. After upgrading, the Console Slack DM and Granola sync jobs,
-and the Slack ETL and retention schedules, stop unless your values set it. Data
-already synced stays searchable through the v1 commands. To keep the previous
-behavior until you migrate, set `legacyCompanyContext.enabled: true`
-explicitly. The supported path forward is the company-context service
+The v1 ingestion paths have been removed: the api-rs Slack, Google Drive,
+Google Calendar, Linear, and Attio ETL workflows, the company-context document
+and embedding workflows, and the Console Slack DM, Google Docs, and Granola sync
+jobs. The `legacyCompanyContext` (formerly `companyContextV1`),
+`apiRs.etl.slack`, `apiRs.etl.linear`, `apiRs.etl.googleDrive`,
+`apiRs.etl.googleCalendar`, `apiRs.etl.companyContextDocuments`, and
+`console.googleDocsSync` values no longer have any effect, and neither do
+`apiRs.etl.companyContextEmbeddings` and the other `apiRs.etl` values, now that
+the `company_context` shell CLI that searched the v1 tables has also been
+removed. Running `company_context` in a sandbox now fails with directions to the
+`company_context` Code Mode connector. Data those paths already synced is kept
+in the database but is no longer updated. Use the company-context service
 described above.

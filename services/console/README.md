@@ -159,22 +159,6 @@ All three providers request the `openid`, `email`, and `profile` scopes. Client 
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 
-## Google Docs Sync
-
-Google Docs metadata and document-content ETL is disabled by default. Set
-`CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED=true` to enable the recurring poller
-and queued Google Docs sync jobs. This switch does not affect Google OAuth,
-credential refresh, or previously indexed content.
-
-## Company Context v1 Sync
-
-`CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED=false` stops the Slack DM, Google
-Docs, and Granola sync jobs, including jobs already queued, without deleting
-synced data. When unset the Console treats it as enabled, but the Helm chart
-always sets it from `legacyCompanyContext.enabled` (or its deprecated alias
-`companyContextV1.enabled`), which defaults to `false`.
-Google Docs sync also still requires `CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED`.
-
 ## Broker Credential Refresh
 
 [`centaur-token-broker`](../token-broker/README.md) refreshes broker

@@ -205,28 +205,76 @@ def _print_message_search_results(
     console.print(table)
 
 
+def _print_indexed_search_results(query: str, results: list[dict], *, full: bool) -> None:
+    if not results:
+        console.print("[yellow]No messages found.[/]")
+        return
+
+    if full:
+        for i, doc in enumerate(results, 1):
+            metadata = doc.get("metadata") or {}
+            console.print(f"\n[bold cyan]#{metadata.get('channel_name') or ''}[/] | {doc.get('title') or ''}")
+            console.print(doc.get("text") or "")
+            if doc.get("url"):
+                console.print(f"[dim]{doc['url']}[/]")
+            if i < len(results):
+                console.print("---")
+        return
+
+    table = Table(title=f"Slack: '{query}' ({len(results)} results)")
+    table.add_column("Channel", style="cyan", max_width=20)
+    table.add_column("Date", style="green", max_width=10)
+    table.add_column("Text", style="white", max_width=80)
+
+    for doc in results:
+        metadata = doc.get("metadata") or {}
+        text = (doc.get("text") or "")
+        snippet = text[:80].replace("\n", " ")
+        if len(text) > 80:
+            snippet += "..."
+        table.add_row(
+            f"#{metadata.get('channel_name') or ''}",
+            str(doc.get("occurred_at") or "")[:10],
+            snippet,
+        )
+
+    console.print(table)
+
+
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Text to search for (supports multiple terms)"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
-    full: bool = typer.Option(False, "--full", "-f", help="Output full indexed result metadata"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max results (at most 50)"),
+    full: bool = typer.Option(False, "--full", "-f", help="Print each result's full text"),
     channels: str = typer.Option(
-        None, "--channels", "-c", help="Comma-separated channel names or IDs to target"
+        None, "--channels", "-c", help="Comma-separated conversation IDs or channel names"
     ),
-    from_user: str = typer.Option(None, "--from", help="Target messages by this username"),
+    after: str = typer.Option(
+        None, "--after", help="Inclusive lower bound: RFC 3339 time or YYYY-MM-DD (UTC)"
+    ),
+    before: str = typer.Option(
+        None, "--before", help="Exclusive upper bound: RFC 3339 time or YYYY-MM-DD (UTC)"
+    ),
+    sort: str = typer.Option(
+        "score",
+        "--sort",
+        help="score: ranked by relevance. timestamp: every match, newest first, paged with --cursor",
+    ),
+    cursor: str = typer.Option(None, "--cursor", help="next_cursor from a timestamp-sorted page"),
     json_output: bool = typer.Option(True, "--json/--no-json", help="Output as JSON (default)"),
 ):
-    """Search indexed Slack history through company context.
+    """Search indexed Slack history through company context v2.
 
-    This command searches normalized, access-scoped Slack rows rather than
-    downloading channel history. Channel and author options are exact filters.
-    Use search-direct for native Slack modifiers when a linked user credential
-    is available.
+    Results are channel-day transcript chunks from the conversations you can
+    see, each with a document_id, title, url, text, occurred_at, and metadata
+    (conversation_id, channel_name, ...). Slack search modifiers are not parsed:
+    filter with --channels, --after, and --before. Use search-direct for native
+    Slack search syntax when a linked user credential is available.
 
     Examples:
         slack search "deploy"
-        slack search "kubernetes error" --channels eng-infra,eng-ai
-        slack search "database migration" --from alice
+        slack search "kubernetes error" --channels eng-infra,C1234567890
+        slack search "database migration" --after 2026-01-01 --sort timestamp
     """
     channel_list = [channel.strip() for channel in channels.split(",")] if channels else None
 
@@ -236,7 +284,10 @@ def search(
         query=query,
         limit=limit,
         channels=channel_list,
-        from_user=from_user,
+        after=after,
+        before=before,
+        sort=sort,
+        cursor=cursor,
     )
     if result.get("status") == "error":
         stderr_console.print(f"[red]Error: {result.get('error', 'unknown error')}[/]")
@@ -246,12 +297,9 @@ def search(
         _print_json(result)
         return
 
-    _print_message_search_results(
-        query,
-        result.get("results") or [],
-        full=full,
-        json_output=False,
-    )
+    _print_indexed_search_results(query, result.get("results") or [], full=full)
+    if result.get("next_cursor"):
+        console.print(f"[dim]next cursor: {result['next_cursor']}[/]")
 
 
 @app.command("search-direct")

@@ -23,7 +23,6 @@ Use these as the main extension points:
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
 | `companyContext.*` | Company-context ingestion service, default off. Formerly `experimentalCompanyContext.*`, still accepted as an alias. Requires `OPENAI_API_KEY`, `SLACK_BOT_TOKEN`, and `CENTAUR_JWT_SIGNING_SECRET`. See [Company Context](/operate/company-context). |
-| `legacyCompanyContext.enabled` | Deprecated v1 company-context sync jobs and Slack ETL master switch, default `false`; will be removed in a future release. Formerly `companyContextV1.enabled`, still accepted as an alias. See [Company Context](/operate/company-context). |
 | `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, skills, and Code Mode connectors; subdirs default to `tools`, `workflows`, `.agents/skills`, and `connectors`. |
@@ -284,7 +283,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `CENTAUR_CODEMODE_CONNECTORS` | Chart-rendered from `overlays.sources[*].connectorsSubdir` (default `connectors`) through `SESSION_SANDBOX_EXTRA_ENV`, appended to the image's `/opt/centaur/connectors` in source order. | Ordered connector roots for the Code Mode sandbox process; a later root shadows earlier ones, and missing roots are skipped. |
-| `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `companyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API the `company_context v2` commands call through the sandbox proxy, which injects the principal API JWT. Unset disables those commands. |
+| `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `companyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API that the `company_context` Code Mode connector and the `slack search` command call through the sandbox proxy, which injects the principal API JWT. Unset disables both. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |
@@ -314,52 +313,11 @@ Sandbox entrypoint and wrappers:
 | `MY_THREAD_KEY`, `<WORKFLOW_NAME>_THREAD_KEY`, `<WORKFLOW_NAME>_SLACK_CHANNEL` | Workflow-specific env. | Fallback thread/channel targets for workflow agent steps. |
 | `<WEBHOOK_SECRET_REF>` | API env or Secret named by a workflow `WebhookSpec`. | Signing secret or bearer token for public workflow webhooks, for example `GITHUB_WEBHOOK_SECRET` or a Standard Webhooks `whsec_...` value. |
 
-Slack ETL workflows:
+Company-context search:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `SLACK_ETL_ENABLED` | `apiRs.etl.slack.enabled`; forced off unless `legacyCompanyContext.enabled=true` (default `false`). | Master switch for Slack sync/backfill/context schedules. |
-| `SLACK_SYNC_INTERVAL_SECONDS`, `SLACK_BACKFILL_INTERVAL_SECONDS`, `COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS` | `apiRs.etl.slack.syncIntervalSeconds`, `apiRs.etl.slack.backfill.intervalSeconds`, `apiRs.etl.companyContextDocuments.intervalSeconds`. | Slack ETL schedule intervals. |
-| `SLACK_SYNC_BACKFILL_LOOKBACK_DAYS`, `SLACK_SYNC_THREAD_LOOKBACK_DAYS` | `apiRs.etl.slack.syncBackfillLookbackDays`, `apiRs.etl.slack.syncThreadLookbackDays`. | Slack history/thread lookback windows. |
-| `SLACK_SYNC_INDEX_PRIVATE_CHANNELS` | `apiRs.etl.slack.indexPrivateChannels`. | Includes private channels visible to the ETL token. |
-| `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `apiRs.etl.slack.excludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
-| `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `apiRs.etl.slack.backfill.*`. | Backfill enablement and batch sizing. |
-| `SLACK_RETENTION_ENABLED`, `SLACK_RETENTION_INTERVAL_MINUTES`, `SLACK_ETL_RETENTION_DAYS`, `SLACK_DM_RETENTION_DAYS` | `apiRs.etl.slack.retention.*`; retention is forced off unless `legacyCompanyContext.enabled=true` (default `false`). | Slack retention enablement, cadence, and separate public ETL/DM TTLs. |
 | `DATABASE_TEXT_SEARCH` | `externalDatabase.textSearch`, default `postgres`; always `paradedb` with the bundled PostgreSQL, where setting `externalDatabase.textSearch` fails rendering. | Company-context keyword search backend that api-rs and the company-context service migrate and query with: `postgres` (built-in full-text search) or `paradedb` (BM25, requires `pg_search`). The chart gives the service the same value as api-rs, including an `apiRs.extraEnv` override. Fixed per database once migrated. |
-| `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `apiRs.etl.companyContextDocuments.enabled`. | Enables company-context projection when any ETL is on. |
-| `COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS` | `apiRs.etl.companyContextDocuments.maxWindowSeconds`. | Maximum source `updated_at` window projected by one company-context documents run. |
-| `COMPANY_CONTEXT_EMBEDDINGS_ENABLED` | `apiRs.etl.companyContextEmbeddings.enabled`, default `false`. | Enables scheduled document embedding and hybrid company-context search in agent sandboxes. |
-| `COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS` | `apiRs.etl.companyContextEmbeddings.intervalSeconds`, default `300`. | Delay between scans for missing or stale document embeddings. |
-| `COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE` | `apiRs.etl.companyContextEmbeddings.batchSize`, default `250`. | Maximum documents claimed by one embedding workflow run. |
-| `COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS` | `apiRs.etl.companyContextEmbeddings.maxInputChars`, default `8192`. | Maximum characters embedded from each document. Values cannot exceed `8192`. |
-| `COMPANY_CONTEXT_EMBEDDINGS_MODEL` | `apiRs.etl.companyContextEmbeddings.model`, default `text-embedding-3-small`. | Embedding model shared by document generation and hybrid queries. |
-| `COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS` | `apiRs.etl.companyContextEmbeddings.dimensions`, default `1536`. | Vector width requested by document generation and hybrid queries. It must match the database column width. |
-
-The bundled PostgreSQL image provides pgvector. External PostgreSQL deployments
-must make the `vector` extension available before migrations run; see
-[Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). The workflow
-uses the shared Python workflow-host database connection, OpenAI credential,
-and `OPENAI_BASE_URL`. No workflow-specific PostgreSQL role or DSN is required.
-The database migration creates the embedding column as `vector(1536)`. Before
-using another dimension, migrate that column and rebuild its HNSW index, then
-re-embed the stored documents. Changing the chart value does not alter the
-database schema.
-
-Google Workspace ETL workflows:
-
-| Env var | Set from | Controls |
-| --- | --- | --- |
-| `GOOGLE_DRIVE_ETL_ENABLED` | `apiRs.etl.googleDrive.enabled`. | Enables Google Drive Docs sync. |
-| `GOOGLE_DRIVE_SYNC_INTERVAL_SECONDS` | `apiRs.etl.googleDrive.syncIntervalSeconds`. | Google Drive Docs sync schedule interval. |
-| `GOOGLE_CALENDAR_ETL_ENABLED` | `apiRs.etl.googleCalendar.enabled`. | Enables Google Calendar sync. |
-| `GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS` | `apiRs.etl.googleCalendar.syncIntervalSeconds`. | Google Calendar sync schedule interval. |
-
-Linear ETL workflows:
-
-| Env var | Set from | Controls |
-| --- | --- | --- |
-| `LINEAR_ETL_ENABLED` | `apiRs.etl.linear.enabled`. | Enables Linear project/issue/comment sync. |
-| `LINEAR_SYNC_INTERVAL_SECONDS` | `apiRs.etl.linear.syncIntervalSeconds`. | Linear sync schedule interval. |
 
 ## Observability and Retention
 

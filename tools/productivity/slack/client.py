@@ -1,6 +1,5 @@
 """Slack API client for bot-token Slack tool operations."""
 
-import asyncio
 import base64
 import binascii
 import json
@@ -17,12 +16,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
 
-import asyncpg
 import structlog
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from centaur_sdk.tool_sdk import COMPANY_CONTEXT_DSN_ENV, company_context_database_url, secret
+from centaur_sdk.tool_sdk import secret
 
 # structlog so these lines render as JSON through the tool-server's
 # configure_structlog() pipeline, like the rest of the service's logs.
@@ -107,142 +105,162 @@ class SlackRateLimitError(RuntimeError):
 
 
 class IndexedSlackClient:
-    """Search RLS-scoped Slack messages stored by the Slack sync."""
+    """Search indexed Slack history through the company-context v2 query API.
 
+    In sandboxes, iron-proxy injects the principal's API JWT into requests to the
+    service, which limits results to the Slack conversations that principal can
+    see. Results are channel-day transcript chunks, passed through as the API
+    sends them.
+    """
+
+    API_URL_ENV = "COMPANY_CONTEXT_API_URL"
+    DOCUMENT_TYPE = "slack_message"
+    TIMEOUT_SECONDS = 30
     _DEFAULT_LIMIT = 20
     _MAX_LIMIT = 50
+    _MAX_CHANNELS = 100
+    _CONVERSATION_ID_RE = re.compile(r"^[CGD][A-Z0-9]{2,}$")
 
-    def __init__(self, database_url: str | None = None):
-        value = company_context_database_url(database_url)
-        if not value:
-            raise RuntimeError(f"{COMPANY_CONTEXT_DSN_ENV} is not configured")
-        self.database_url = value
-
-    async def _search_messages(
+    def __init__(
         self,
-        *,
-        query: str,
-        limit: int,
-        channels: list[str] | None,
-        from_user: str | None,
-    ) -> dict[str, Any]:
-        conn = await asyncpg.connect(self.database_url)
-        try:
-            rows = await conn.fetch(
-                """
-                SELECT
-                    messages.channel_id,
-                    channels.channel_name,
-                    messages.message_ts,
-                    messages.occurred_at,
-                    messages.thread_ts,
-                    messages.user_id,
-                    messages.bot_id,
-                    messages.text,
-                    messages.permalink,
-                    messages.reply_count,
-                    COALESCE(
-                        NULLIF(users.display_name, ''),
-                        NULLIF(users.real_name, ''),
-                        NULLIF(users.user_name, ''),
-                        NULLIF(messages.user_id, ''),
-                        messages.bot_id
-                    ) AS author_name,
-                    ts_rank_cd(
-                        to_tsvector('english', COALESCE(messages.text, '')),
-                        websearch_to_tsquery('english', $1)
-                    ) AS score
-                FROM company_context_slack_messages messages
-                JOIN slack_sync_channels channels
-                  ON channels.channel_id = messages.channel_id
-                LEFT JOIN company_context_slack_users users
-                  ON users.user_id = messages.user_id
-                WHERE to_tsvector('english', COALESCE(messages.text, ''))
-                      @@ websearch_to_tsquery('english', $1)
-                  AND (
-                      $2::text[] IS NULL
-                      OR LOWER(messages.channel_id) = ANY($2::text[])
-                      OR LOWER(channels.channel_name) = ANY($2::text[])
-                  )
-                  AND (
-                      $3::text IS NULL
-                      OR LOWER(messages.user_id) = $3
-                      OR LOWER(users.user_name) = $3
-                      OR LOWER(users.real_name) = $3
-                      OR LOWER(users.display_name) = $3
-                  )
-                ORDER BY score DESC, messages.occurred_at DESC NULLS LAST
-                LIMIT $4
-                """,
-                query,
-                channels,
-                from_user,
-                limit,
-            )
-            return {
-                "status": "ok",
-                "query": query,
-                "results": [
-                    {
-                        "channel": str(row.get("channel_name") or ""),
-                        "channel_id": str(row.get("channel_id") or ""),
-                        "user": str(row.get("author_name") or ""),
-                        "user_id": str(row.get("user_id") or ""),
-                        "bot_id": str(row.get("bot_id") or ""),
-                        "text": str(row.get("text") or ""),
-                        "timestamp": str(row.get("message_ts") or ""),
-                        "occurred_at": self._isoformat(row.get("occurred_at")),
-                        "permalink": str(row.get("permalink") or ""),
-                        "thread_ts": str(row.get("thread_ts") or "") or None,
-                        "reply_count": int(row.get("reply_count") or 0),
-                        "score": float(row.get("score") or 0.0),
-                    }
-                    for row in rows
-                ],
-            }
-        finally:
-            await conn.close()
+        base_url: str | None = None,
+        channel_resolver: Callable[[str], str] | None = None,
+    ):
+        self._base_url = base_url
+        self._channel_resolver = channel_resolver
 
-    @staticmethod
-    def _isoformat(value: Any) -> str | None:
-        if value is None:
-            return None
-        if hasattr(value, "isoformat"):
-            return value.isoformat()
-        return str(value)
+    def _api_url(self) -> str:
+        base_url = self._base_url or os.getenv(self.API_URL_ENV, "")  # noqa: TID251 - non-secret
+        return base_url.strip().rstrip("/")
+
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict:
+        base_url = self._api_url()
+        if not base_url:
+            return {
+                "status": "error",
+                "error": (
+                    f"{self.API_URL_ENV} is not configured; the company-context API is not "
+                    "deployed. Use search-direct with a linked Slack user credential instead."
+                ),
+            }
+        if not re.match(r"^https?://", base_url):
+            base_url = f"http://{base_url}"
+        headers = {"Accept": "application/json"}
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode()
+        request = urllib.request.Request(
+            f"{base_url}{path}", data=data, headers=headers, method=method
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.TIMEOUT_SECONDS) as response:
+                payload = response.read()
+                return {"status": "ok", **(json.loads(payload) if payload else {})}
+        except urllib.error.HTTPError as exc:
+            # The API reports failures as {"error": "..."}.
+            try:
+                message = json.loads(exc.read())["error"]
+            except (ValueError, KeyError, TypeError):
+                message = exc.reason
+            return {"status": "error", "error": f"HTTP {exc.code}: {message}"}
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            return {"status": "error", "error": str(exc)}
+
+    def _resolve_channel_id(self, channel: str) -> str:
+        normalized = str(channel).strip()
+        if normalized.startswith("<#") and normalized.endswith(">"):
+            normalized = normalized[2:-1].split("|", 1)[0]
+        normalized = normalized.lstrip("#").strip()
+        if not normalized:
+            return ""
+        if self._CONVERSATION_ID_RE.match(normalized):
+            return normalized
+        resolver = self._channel_resolver or _resolve_bot_channel_id
+        return resolver(normalized.lower())
 
     def search_messages(
         self,
         query: str,
         limit: int = _DEFAULT_LIMIT,
         channels: list[str] | None = None,
-        from_user: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        sort: str = "score",
+        cursor: str | None = None,
     ) -> dict[str, Any]:
+        """Search indexed Slack messages visible to the caller.
+
+        ``channels`` takes conversation IDs or channel names; names resolve
+        through the channels the bot is a member of. ``after`` (inclusive) and
+        ``before`` (exclusive) take RFC 3339 times or ``YYYY-MM-DD`` dates in
+        UTC. ``sort="timestamp"`` returns every chunk containing all query terms,
+        newest first; pass a response's ``next_cursor`` as ``cursor`` for the
+        next page.
+        """
         normalized_query = query.strip()
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
+        if sort not in {"score", "timestamp"}:
+            return {"status": "error", "error": "sort must be 'score' or 'timestamp'"}
 
-        normalized_channels = []
-        for channel in channels or []:
-            normalized = str(channel).strip()
-            if normalized.startswith("<#") and normalized.endswith(">"):
-                normalized = normalized[2:-1].split("|", 1)[0]
-            normalized = normalized.lstrip("#").strip().lower()
-            if normalized and normalized not in normalized_channels:
-                normalized_channels.append(normalized)
-
-        normalized_from_user = from_user.strip().lstrip("@").lower() if from_user else None
+        channel_ids: list[str] = []
         try:
-            return asyncio.run(
-                self._search_messages(
-                    query=normalized_query,
-                    limit=max(1, min(int(limit), self._MAX_LIMIT)),
-                    channels=normalized_channels or None,
-                    from_user=normalized_from_user or None,
-                )
-            )
-        except Exception as exc:
+            for channel in channels or []:
+                channel_id = self._resolve_channel_id(channel)
+                if channel_id and channel_id not in channel_ids:
+                    channel_ids.append(channel_id)
+        except (RuntimeError, ValueError) as exc:
             return {"status": "error", "error": str(exc)}
+        if len(channel_ids) > self._MAX_CHANNELS:
+            return {
+                "status": "error",
+                "error": f"at most {self._MAX_CHANNELS} channels can be searched at once",
+            }
+
+        filters: dict[str, Any] = {"types": [self.DOCUMENT_TYPE]}
+        if channel_ids:
+            filters["channel_ids"] = channel_ids
+        if after:
+            filters["occurred_after"] = _rfc3339(after)
+        if before:
+            filters["occurred_before"] = _rfc3339(before)
+        body: dict[str, Any] = {
+            "query": normalized_query,
+            "filters": filters,
+            "limit": max(1, min(int(limit), self._MAX_LIMIT)),
+        }
+        if sort == "timestamp":
+            body["mode"] = "keyword"
+        if cursor:
+            body["cursor"] = cursor
+
+        result = self._request("POST", "/query", body)
+        if result.get("status") != "ok":
+            return result
+        return {
+            "status": "ok",
+            "query": normalized_query,
+            "results": result.get("results") or [],
+            "next_cursor": result.get("next_cursor"),
+        }
+
+
+def _rfc3339(value: str) -> str:
+    """Expand a ``YYYY-MM-DD`` date to midnight UTC; pass other values through."""
+    value = value.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return f"{value}T00:00:00Z"
+    return value
+
+
+def _resolve_bot_channel_id(name: str) -> str:
+    for channel in _client().list_bot_channels():
+        if channel.get("name") == name:
+            return channel["id"]
+    raise RuntimeError(
+        f"Channel '{name}' not found among the bot's channels; pass its conversation ID instead"
+    )
 
 
 class SlackClient:

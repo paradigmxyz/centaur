@@ -13,8 +13,8 @@ except ImportError:  # pragma: no cover - supports file-based plugin loading
 class LinearClient(LinearReadonlyClient):
     """Tool-facing Linear client.
 
-    Read-only GraphQL methods live in ``workflows.linear.readonly`` so workflows
-    can reuse them. Tool-only mutations stay here.
+    Read-only GraphQL methods live in ``readonly``. Tool-only mutations stay
+    here.
     """
 
     def me(self) -> dict[str, Any]:

@@ -335,28 +335,6 @@ mod tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"event_name":"test.event","payload":{}}"#))
                 .unwrap(),
-            Request::builder()
-                .uri("/api/admin/slack/dm-sync/checkpoints")
-                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .uri("/api/admin/google/docs-sync/checkpoint")
-                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                .body(Body::empty())
-                .unwrap(),
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/admin/google/docs-sync/content-status")
-                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"files":[]}"#))
-                .unwrap(),
-            Request::builder()
-                .uri("/api/admin/granola/sync/checkpoint")
-                .header(header::AUTHORIZATION, format!("Bearer {}", console_token()))
-                .body(Body::empty())
-                .unwrap(),
         ] {
             let response = build_router_with_app_state(AppState::unready(test_auth()))
                 .oneshot(request)

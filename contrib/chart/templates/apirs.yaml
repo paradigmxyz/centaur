@@ -78,63 +78,25 @@ connectors, so later sources come later in the list. */ -}}
 {{- $apiRsMetricsAnnotations = dict "prometheus.io/scrape" "true" "prometheus.io/path" .Values.apiRs.metrics.path "prometheus.io/port" (printf "%v" .Values.apiRs.port) -}}
 {{- $apiRsMetricsAnnotations = mergeOverwrite $apiRsMetricsAnnotations (.Values.apiRs.metrics.annotations | default dict) -}}
 {{- end -}}
-{{- $apiRsEtl := .Values.apiRs.etl | default dict -}}
-{{- $legacyCompanyContextEnabled := eq (include "centaur.legacyCompanyContextEnabled" .) "true" -}}
-{{- $companyContextEmbeddingsEnabled := dig "companyContextEmbeddings" "enabled" false $apiRsEtl -}}
-{{- $companyContextEmbeddingsModel := dig "companyContextEmbeddings" "model" "text-embedding-3-small" $apiRsEtl -}}
-{{- $companyContextEmbeddingsDimensions := dig "companyContextEmbeddings" "dimensions" 1536 $apiRsEtl -}}
-{{- $apiRsEtlEnv := list
-  (dict "name" "SLACK_ETL_ENABLED" "value" (and $legacyCompanyContextEnabled (dig "slack" "enabled" false $apiRsEtl)))
-  (dict "name" "SLACK_SYNC_INTERVAL_SECONDS" "value" (dig "slack" "syncIntervalSeconds" 3600 $apiRsEtl))
-  (dict "name" "SLACK_SYNC_BACKFILL_LOOKBACK_DAYS" "value" (dig "slack" "syncBackfillLookbackDays" 30 $apiRsEtl))
-  (dict "name" "SLACK_SYNC_THREAD_LOOKBACK_DAYS" "value" (dig "slack" "syncThreadLookbackDays" 3 $apiRsEtl))
-  (dict "name" "SLACK_SYNC_INDEX_PRIVATE_CHANNELS" "value" (dig "slack" "indexPrivateChannels" false $apiRsEtl))
-  (dict "name" "SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS" "value" (dig "slack" "excludedChannelPatterns" "" $apiRsEtl))
-  (dict "name" "SLACK_ETL_ATTACHMENTS_ENABLED" "value" (dig "slack" "attachments" "enabled" true $apiRsEtl))
-  (dict "name" "SLACK_ETL_ATTACHMENT_MAX_BYTES" "value" (dig "slack" "attachments" "maxBytes" 10485760 $apiRsEtl))
-  (dict "name" "SLACK_BACKFILL_ENABLED" "value" (dig "slack" "backfill" "enabled" true $apiRsEtl))
-  (dict "name" "SLACK_BACKFILL_INTERVAL_SECONDS" "value" (dig "slack" "backfill" "intervalSeconds" 600 $apiRsEtl))
-  (dict "name" "SLACK_BACKFILL_CHANNEL_BATCH_LIMIT" "value" (dig "slack" "backfill" "channelBatchLimit" 50 $apiRsEtl))
-  (dict "name" "SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB" "value" (dig "slack" "backfill" "channelPagesPerJob" 5 $apiRsEtl))
-  (dict "name" "SLACK_RETENTION_ENABLED" "value" (and $legacyCompanyContextEnabled (dig "slack" "retention" "enabled" true $apiRsEtl)))
-  (dict "name" "SLACK_RETENTION_INTERVAL_MINUTES" "value" (dig "slack" "retention" "intervalMinutes" 60 $apiRsEtl))
-  (dict "name" "SLACK_ETL_RETENTION_DAYS" "value" (dig "slack" "retention" "etlDays" 0 $apiRsEtl))
-  (dict "name" "SLACK_DM_RETENTION_DAYS" "value" (dig "slack" "retention" "dmDays" 0 $apiRsEtl))
-  (dict "name" "LINEAR_ETL_ENABLED" "value" (dig "linear" "enabled" false $apiRsEtl))
-  (dict "name" "LINEAR_SYNC_INTERVAL_SECONDS" "value" (dig "linear" "syncIntervalSeconds" 14400 $apiRsEtl))
-  (dict "name" "GOOGLE_DRIVE_ETL_ENABLED" "value" (dig "googleDrive" "enabled" false $apiRsEtl))
-  (dict "name" "GOOGLE_DRIVE_SYNC_INTERVAL_SECONDS" "value" (dig "googleDrive" "syncIntervalSeconds" 14400 $apiRsEtl))
-  (dict "name" "GOOGLE_CALENDAR_ETL_ENABLED" "value" (dig "googleCalendar" "enabled" false $apiRsEtl))
-  (dict "name" "GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS" "value" (dig "googleCalendar" "syncIntervalSeconds" 14400 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_ENABLED" "value" (dig "companyContextDocuments" "enabled" true $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_INTERVAL_SECONDS" "value" (dig "companyContextDocuments" "intervalSeconds" 14400 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_MAX_WINDOW_SECONDS" "value" (dig "companyContextDocuments" "maxWindowSeconds" 21600 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_DOCUMENTS_BATCH_SIZE" "value" (dig "companyContextDocuments" "batchSize" 50 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" $companyContextEmbeddingsEnabled)
-  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_INTERVAL_SECONDS" "value" (dig "companyContextEmbeddings" "intervalSeconds" 300 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_BATCH_SIZE" "value" (dig "companyContextEmbeddings" "batchSize" 250 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MAX_INPUT_CHARS" "value" (dig "companyContextEmbeddings" "maxInputChars" 8192 $apiRsEtl))
-  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel)
-  (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" $companyContextEmbeddingsDimensions)
--}}
+{{- $workflowHostEnv := list -}}
 {{- if $companyContext.enabled -}}
 {{- /* Workflows that write custom documents (e.g. overlay ingest workflows) need the company-context API URL. */ -}}
 {{- $companyContextApiUrl := get .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL" | default (printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) $companyContext.port) -}}
-{{- $apiRsEtlEnv = append $apiRsEtlEnv (dict "name" "COMPANY_CONTEXT_API_URL" "value" $companyContextApiUrl) -}}
+{{- $workflowHostEnv = append $workflowHostEnv (dict "name" "COMPANY_CONTEXT_API_URL" "value" $companyContextApiUrl) -}}
 {{- end -}}
-{{- $apiRsEtlPassthroughNames := list -}}
-{{- range $env := $apiRsEtlEnv -}}
-{{- $apiRsEtlPassthroughNames = append $apiRsEtlPassthroughNames $env.name -}}
+{{- $workflowHostPassthroughNames := list -}}
+{{- range $env := $workflowHostEnv -}}
+{{- $workflowHostPassthroughNames = append $workflowHostPassthroughNames $env.name -}}
 {{- end -}}
 {{- with (get .Values.apiRs.extraEnv "SESSION_SANDBOX_PASSTHROUGH_ENV") -}}
 {{- range $name := splitList "," (toString .) -}}
 {{- $trimmedName := trim $name -}}
 {{- if $trimmedName -}}
-{{- $apiRsEtlPassthroughNames = append $apiRsEtlPassthroughNames $trimmedName -}}
+{{- $workflowHostPassthroughNames = append $workflowHostPassthroughNames $trimmedName -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- $apiRsEtlPassthroughNames = uniq $apiRsEtlPassthroughNames -}}
+{{- $workflowHostPassthroughNames = uniq $workflowHostPassthroughNames -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -328,17 +290,17 @@ spec:
             - name: WORKFLOW_HOST_RESOURCES
               value: {{ toJson .Values.apiRs.workflowHostResources | quote }}
 {{- end }}
-{{- range $env := $apiRsEtlEnv }}
+{{- range $env := $workflowHostEnv }}
 {{- if not (hasKey $.Values.apiRs.extraEnv $env.name) }}
             - name: {{ $env.name }}
               value: {{ $env.value | toString | quote }}
 {{- end }}
 {{- end }}
-            # Forward the chart-rendered ETL workflow config into workflow-host
-            # sandboxes. Operators should set apiRs.etl.* values, not maintain
-            # SESSION_SANDBOX_PASSTHROUGH_ENV by hand.
+            # Forward the chart-rendered workflow config into workflow-host
+            # sandboxes, plus any names listed in
+            # apiRs.extraEnv.SESSION_SANDBOX_PASSTHROUGH_ENV.
             - name: SESSION_SANDBOX_PASSTHROUGH_ENV
-              value: {{ join "," $apiRsEtlPassthroughNames | quote }}
+              value: {{ join "," $workflowHostPassthroughNames | quote }}
 {{- if .Values.overlay.systemPrompt }}
             - name: CENTAUR_OVERLAY_DIR
               value: {{ .Values.overlay.mountPath | quote }}
@@ -593,17 +555,8 @@ copies in source order (later roots shadow earlier ones). */}}
 {{- end }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_CODEMODE_CONNECTORS" "value" (join ":" $codemodeSandboxConnectorRoots)) }}
 {{- end }}
-{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_ENABLED") }}
-{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_ENABLED" "value" ($companyContextEmbeddingsEnabled | toString)) }}
-{{- end }}
-{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_MODEL") }}
-{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_MODEL" "value" $companyContextEmbeddingsModel) }}
-{{- end }}
-{{- if not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS") }}
-{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_EMBEDDINGS_DIMENSIONS" "value" ($companyContextEmbeddingsDimensions | toString)) }}
-{{- end }}
 {{- if and $companyContext.enabled (not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL")) }}
-{{- /* The company_context tool's v2 commands call this query API through the proxy. */}}
+{{- /* The company_context Code Mode connector and `slack search` call this query API through the proxy. */}}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "COMPANY_CONTEXT_API_URL" "value" (printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) $companyContext.port)) }}
 {{- end }}
 {{- if .Values.codex.customProviders }}
