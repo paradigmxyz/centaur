@@ -706,6 +706,9 @@ class RetiredToolShimTest(unittest.TestCase):
     def test_company_context_is_retired_to_its_connector(self) -> None:
         self.assertEqual(install_tool_shims.RETIRED_TOOLS["company_context"], "company_context")
 
+    def test_centaur_console_is_retired_to_its_connector(self) -> None:
+        self.assertEqual(install_tool_shims.RETIRED_TOOLS["centaur-console"], "centaur_console")
+
 
 if __name__ == "__main__":
     unittest.main()

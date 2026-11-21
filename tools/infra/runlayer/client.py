@@ -79,7 +79,7 @@ class RunlayerClient:
     def _connection(self) -> None:
         if self.url:
             return
-        # Non-secret service address, as in the centaur-console tool.
+        # Non-secret service address, as in the centaur_console connector.
         console = os.getenv("CENTAUR_CONSOLE_URL", "http://centaur-console:3000").rstrip("/")  # noqa: TID251
         try:
             response = self.http.get(f"{console}/api/v1/sandbox/oauth_apps")
