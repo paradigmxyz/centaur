@@ -157,7 +157,7 @@ console:
   # must exist or the console pods CreateContainerConfigError. This is the
   # Sign-in-with-Slack OIDC app (scopes openid/email/profile, redirect URL
   # <publicUrl>/auth/slack/callback) — not the DB-managed Slack OAuth app the
-  # bot and DM sync use.
+  # bot and company-context service use.
   slackOauth:
     enabled: false
   # Okta as an OIDC identity provider for console sign-in. Set issuer to the
@@ -171,19 +171,11 @@ console:
     issuer: ""
     # Must match token_endpoint_auth_method on the Okta client application.
     tokenEndpointAuthMethod: client_secret_basic
-  # OAuth app slug whose user-level Slack credentials are used by the DM sync
-  # worker. Keep this aligned with the Console OAuth app users authorize.
+  # OAuth app slug whose user-level Slack credentials the company-context
+  # service indexes. Keep this aligned with the Console OAuth app users
+  # authorize.
   slackDmSync:
     oauthAppSlug: slack
-  # Google Docs metadata and document-content ETL. Enable this to run the
-  # recurring poller and queued Google Docs sync jobs. Disabled jobs exit
-  # without work.
-  # This does not disable Google OAuth or remove previously indexed content.
-  googleDocsSync:
-    enabled: false
-    # Index credentials from this OAuth app. A dedicated app can limit ingestion
-    # to one shared account without syncing other connected users.
-    oauthAppSlug: google
   service:
     httpPort: 3000
   # Optional Ingress for the console. Bring your own controller — Tailscale
@@ -526,21 +518,6 @@ tokenBroker:
     annotations: {}
   resources: {}
 
-# Legacy (v1) company-context ingestion: the api-rs Slack workflows (slack_sync,
-# slack_backfill, slack_retention) and the Console Slack DM, Google Docs, and
-# Granola sync jobs. Deprecated and off by default; it will be removed in a
-# future release. New deployments should use companyContext instead. Setting
-# true runs the Console Slack DM and Granola sync for connected users and allows
-# the Slack ETL (apiRs.etl.slack.enabled) and Google Docs sync
-# (console.googleDocsSync.enabled) to run. While false, already-synced data is kept and Slack retention does not
-# run. See docs/pages/operate/company-context.mdx.
-#
-# Backwards compatibility: this block used to be named `companyContextV1`. That
-# key is still honored as a deprecated alias and wins when set (see the
-# `centaur.legacyCompanyContextEnabled` helper).
-legacyCompanyContext:
-  enabled: false
-
 # API clients: machine callers, such as eval runners, that exchange a client
 # secret for a session API token at api-rs /oauth/token. Off hides them in the
 # Console, removes the token endpoint, and rejects their existing tokens.
@@ -730,60 +707,6 @@ apiRs:
   workflowAllowedNames: ""
   # Requests/limits for the workflow-host sandbox pod (k8s resources map).
   workflowHostResources: {}
-  # Scheduled ETL workflow configuration. The chart renders these into api-rs
-  # env so workflow discovery sees the right schedules, then derives the
-  # workflow-host passthrough list from the same non-secret config.
-  etl:
-    slack:
-      enabled: false
-      syncIntervalSeconds: 3600
-      syncBackfillLookbackDays: 30
-      syncThreadLookbackDays: 3
-      indexPrivateChannels: false
-      excludedChannelPatterns: ""
-      attachments:
-        enabled: true
-        maxBytes: 10485760
-      backfill:
-        enabled: true
-        intervalSeconds: 600
-        channelBatchLimit: 50
-        channelPagesPerJob: 5
-      retention:
-        enabled: true
-        intervalMinutes: 60
-        etlDays: 0
-        dmDays: 0
-    linear:
-      enabled: false
-      syncIntervalSeconds: 14400
-    googleDrive:
-      enabled: false
-      syncIntervalSeconds: 14400
-    googleCalendar:
-      enabled: false
-      syncIntervalSeconds: 14400
-    companyContextDocuments:
-      enabled: true
-      intervalSeconds: 14400
-      maxWindowSeconds: 21600
-      batchSize: 50
-    companyContextEmbeddings:
-      # Enables the embedding workflow and hybrid search in agent sandboxes.
-      enabled: false
-      # Delay between scheduled scans for missing or stale embeddings.
-      intervalSeconds: 300
-      # Maximum documents claimed by each workflow run.
-      batchSize: 250
-      # Maximum characters sent per document. Inputs are capped at 8192.
-      maxInputChars: 8192
-      # Shared by the embedding workflow and company-context searches in agent sandboxes.
-      model: text-embedding-3-small
-      # Vector width requested from the model by both the write and query sides.
-      # This must match the database column width. Changing it requires a schema
-      # migration, index rebuild, and re-embedding existing rows. pgvector will
-      # not build an HNSW or IVFFlat index above 2000.
-      dimensions: 1536
   # Reaper: stop sandboxes older than the max lifetime, whether running or
   # suspended. Warm-pool sandboxes age from when a session claims them, and a
   # sandbox with a queued or running turn waits for a later sweep unless that

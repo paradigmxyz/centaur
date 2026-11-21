@@ -7,10 +7,6 @@ default: &default
       threads: 3
       processes: <%= ConsoleEnv.fetch("JOB_CONCURRENCY", 1) %>
       polling_interval: 0.1
-    - queues: google_docs
-      threads: 1
-      processes: 1
-      polling_interval: 0.1
 
 development:
   <<: *default

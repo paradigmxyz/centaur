@@ -41,10 +41,10 @@ test('allowlisted tools mount as CLIs the harness can call, and others do not', 
       `centaur-tools call demo echo '{"msg": "wrong"}' 2> /tmp/bad-call; echo "bad_call_exit=$?"`,
       `echo "bad_call_usage=$(grep -c 'invalid arguments for echo' /tmp/bad-call)"`,
       // Baked into the image under TOOLS_PATH, but not allowlisted.
-      `echo "slack_in_image=$(test -f /opt/centaur/tools/productivity/slack/pyproject.toml && echo yes || echo no)"`,
-      `command -v slack > /dev/null; echo "slack_shim_exit=$?"`,
-      `centaur-tools run slack --help 2> /tmp/slack-run; echo "slack_run_exit=$?"`,
-      `echo "slack_run_error=$(cat /tmp/slack-run)"`
+      `echo "vlogs_in_image=$(test -f /opt/centaur/tools/infra/vlogs/pyproject.toml && echo yes || echo no)"`,
+      `command -v vlogs > /dev/null; echo "vlogs_shim_exit=$?"`,
+      `centaur-tools run vlogs --help 2> /tmp/vlogs-run; echo "vlogs_run_exit=$?"`,
+      `echo "vlogs_run_error=$(cat /tmp/vlogs-run)"`
     ].join('\n'),
     'Tools checked.'
   )
@@ -65,10 +65,10 @@ test('allowlisted tools mount as CLIs the harness can call, and others do not', 
     call: JSON.stringify({ echo: marker }),
     bad_call_exit: '2',
     bad_call_usage: '1',
-    slack_in_image: 'yes',
-    slack_shim_exit: '1',
-    slack_run_exit: '1',
-    slack_run_error: 'unknown tool: slack'
+    vlogs_in_image: 'yes',
+    vlogs_shim_exit: '1',
+    vlogs_run_exit: '1',
+    vlogs_run_error: 'unknown tool: vlogs'
   })
   // Shims live in the agent's bin dir and dispatch through the catalog.
   expect(output.demo_shim).toBe('/home/agent/.local/bin/demo')

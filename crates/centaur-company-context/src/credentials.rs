@@ -399,9 +399,8 @@ impl ConsoleCredentials {
         })
     }
 
-    /// Lists the bot token, then the credentials the Console Slack DM sync
-    /// selects, narrowed to those whose scopes cover an ingested conversation
-    /// type.
+    /// Lists the bot token, then the configured Slack OAuth app's credentials,
+    /// narrowed to those whose scopes cover an ingested conversation type.
     pub async fn slack_credential_ids(&self) -> Result<Vec<i64>> {
         let rows = sqlx::query(
             r#"

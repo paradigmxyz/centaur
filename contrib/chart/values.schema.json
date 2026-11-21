@@ -74,13 +74,6 @@
             "oauthAppSlug": { "type": "string" }
           }
         },
-        "googleDocsSync": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "oauthAppSlug": { "type": "string" }
-          }
-        },
         "service": {
           "type": "object",
           "properties": {
@@ -177,19 +170,6 @@
             "required": ["repo"]
           }
         }
-      }
-    },
-    "legacyCompanyContext": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
-    "companyContextV1": {
-      "description": "Deprecated alias for legacyCompanyContext.",
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" }
       }
     },
     "console": { "$ref": "#/definitions/consoleConfig" },
@@ -504,92 +484,6 @@
         "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
         "workflowHostSandbox": { "type": "boolean" },
         "workflowHostResources": { "type": "object" },
-        "etl": {
-          "type": "object",
-          "properties": {
-            "slack": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" },
-                "syncBackfillLookbackDays": { "type": "integer" },
-                "syncThreadLookbackDays": { "type": "integer" },
-                "indexPrivateChannels": { "type": "boolean" },
-                "excludedChannelPatterns": { "type": "string" },
-                "attachments": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "maxBytes": { "type": "integer" }
-                  }
-                },
-                "backfill": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "intervalSeconds": { "type": "integer" },
-                    "channelBatchLimit": { "type": "integer" },
-                    "channelPagesPerJob": { "type": "integer" }
-                  }
-                },
-                "retention": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "intervalMinutes": { "type": "integer" },
-                    "etlDays": { "type": "integer" },
-                    "dmDays": { "type": "integer" }
-                  }
-                }
-              }
-            },
-            "linear": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" }
-              }
-            },
-            "googleDrive": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" }
-              }
-            },
-            "googleCalendar": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" }
-              }
-            },
-            "companyContextDocuments": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "intervalSeconds": { "type": "integer" },
-                "maxWindowSeconds": { "type": "integer" },
-                "batchSize": { "type": "integer", "minimum": 1 }
-              }
-            },
-            "companyContextEmbeddings": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "intervalSeconds": { "type": "integer", "minimum": 1 },
-                "batchSize": { "type": "integer", "minimum": 1 },
-                "maxInputChars": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 8192
-                },
-                "model": { "type": "string", "minLength": 1 },
-                "dimensions": { "type": "integer", "minimum": 1, "maximum": 2000 }
-              }
-            }
-          }
-        },
         "metrics": {
           "type": "object",
           "properties": {

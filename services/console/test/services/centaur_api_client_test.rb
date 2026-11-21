@@ -38,39 +38,6 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     assert_nil error.status
   end
 
-  test "lists Slack DM sync checkpoints for a broker credential" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { checkpoints: [] }.to_json) do |request|
-      assert_equal :get, request[:method]
-      assert_equal(
-        "http://api.internal:8080/api/admin/slack/dm-sync/checkpoints?broker_credential_id=bcr_123&home_team_id=T123",
-        request[:url]
-      )
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    client.list_slack_dm_sync_checkpoints(
-      broker_credential_id: "bcr_123",
-      home_team_id: "T123"
-    )
-
-    http.verify
-  end
-
-  test "posts Slack DM sync batches" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { ok: true }.to_json) do |request|
-      assert_equal :post, request[:method]
-      assert_equal "http://api.internal:8080/api/admin/slack/dm-sync/batch", request[:url]
-      assert_equal({ "run" => { "run_id" => "sdms_1" }, "messages" => [] }, JSON.parse(request[:body]))
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    client.ingest_slack_dm_sync_batch(run: { run_id: "sdms_1" }, messages: [])
-
-    http.verify
-  end
-
   test "replaces Slack external team ids" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { slack_external_team_ids: [ "T0PARTNER" ] }.to_json) do |request|
@@ -84,7 +51,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
     http.verify
   end
 
-  test "supports a longer read timeout for sync batches" do
+  test "supports a longer read timeout" do
     http = Minitest::Mock.new
     expect_request(http, status: 200, body: { ok: true }.to_json) do |request|
       assert_equal 120, request[:timeout]
@@ -95,56 +62,7 @@ class CentaurApiClientTest < ActiveSupport::TestCase
       read_timeout: 120
     )
 
-    client.ingest_slack_dm_sync_batch(messages: [])
-
-    http.verify
-  end
-
-  test "gets Google Docs sync checkpoint for a broker credential" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { checkpoint: nil }.to_json) do |request|
-      assert_equal :get, request[:method]
-      assert_equal(
-        "http://api.internal:8080/api/admin/google/docs-sync/checkpoint?broker_credential_id=bcr_123",
-        request[:url]
-      )
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    client.get_google_docs_sync_checkpoint(broker_credential_id: "bcr_123")
-
-    http.verify
-  end
-
-  test "posts Google Docs sync batches" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { ok: true }.to_json) do |request|
-      assert_equal :post, request[:method]
-      assert_equal "http://api.internal:8080/api/admin/google/docs-sync/batch", request[:url]
-      assert_equal({ "run" => { "run_id" => "gdocs_1" }, "files" => [] }, JSON.parse(request[:body]))
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    client.ingest_google_docs_sync_batch(run: { run_id: "gdocs_1" }, files: [])
-
-    http.verify
-  end
-
-  test "gets Google Docs content status" do
-    http = Minitest::Mock.new
-    expect_request(http, status: 200, body: { missing: [] }.to_json) do |request|
-      assert_equal :post, request[:method]
-      assert_equal "http://api.internal:8080/api/admin/google/docs-sync/content-status", request[:url]
-      assert_equal(
-        { "files" => [ { "file_id" => "doc-123", "source_version" => "7" } ] },
-        JSON.parse(request[:body])
-      )
-    end
-    client = api_client(base_url: "http://api.internal:8080", http: http)
-
-    client.get_google_docs_content_status(
-      files: [ { file_id: "doc-123", source_version: "7" } ]
-    )
+    client.list_workflow_schedules
 
     http.verify
   end
