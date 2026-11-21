@@ -2,11 +2,14 @@
 Workflow discovery: imports workflow modules for api-rs so their code never runs
 there. api-rs sends the workflow env with each request. No secrets, read-only
 sources, and (under networkPolicy) reachable only from api-rs with no egress.
+It runs workflow code, so it is placed and isolated like a sandbox pod (the
+sandbox.* values api-rs applies to the pods it creates), minus the sandbox
+service account, which exists to grant credentials.
 */ -}}
 {{- if .Values.apiRs.enabled }}
 {{- $component := "workflow-discovery" -}}
 {{- $name := include "centaur.componentName" (dict "root" . "component" $component) -}}
-{{- $discovery := .Values.workflowDiscovery -}}
+{{- $sandbox := .Values.sandbox -}}
 {{- $reposPath := include "centaur.reposPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -23,8 +26,31 @@ spec:
     metadata:
       labels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 8 }}
+      {{- with $sandbox.podAnnotations }}
+      annotations:
+        {{- range $key, $value := . }}
+        {{ $key }}: {{ $value | toString | quote }}
+        {{- end }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- with $sandbox.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $sandbox.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- if kindIs "bool" $sandbox.hostUsers }}
+      hostUsers: {{ $sandbox.hostUsers }}
+      {{- end }}
+      {{- with $sandbox.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sandbox.tolerations }}
+      tolerations:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml . | nindent 8 }}
@@ -33,7 +59,6 @@ spec:
         runAsNonRoot: true
         runAsUser: 1001
         runAsGroup: 1001
-{{- include "centaur.podScheduling" (dict "values" $discovery "indent" 6) }}
       containers:
         - name: workflow-discovery
           image: {{ printf "%s:%s" .Values.sandbox.image.repository .Values.sandbox.image.tag | quote }}
@@ -56,9 +81,9 @@ spec:
               path: /healthz
               port: http
           resources:
-{{ toYaml $discovery.resources | nindent 12 }}
+{{ toYaml .Values.workflowDiscovery.resources | nindent 12 }}
           securityContext:
-{{ toYaml (merge (dict "readOnlyRootFilesystem" true) .Values.containerSecurityContext) | nindent 12 }}
+{{ toYaml (merge (dict "readOnlyRootFilesystem" true) (deepCopy ($sandbox.containerSecurityContext | default dict)) (deepCopy .Values.containerSecurityContext)) | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

@@ -1142,8 +1142,10 @@ httpRoutes: []
 
 # Workflow discovery service (`workflow-host serve` from the agent image). api-rs
 # calls it to discover workflows, so workflow module code never runs in api-rs.
-# Rendered with api-rs; it uses sandbox.image and the same workflow sources as
-# workflow-host sandboxes.
+# Rendered with api-rs. It uses sandbox.image, the same workflow sources, and the
+# same placement and isolation (sandbox.nodeSelector, tolerations,
+# runtimeClassName, priorityClassName, hostUsers, podAnnotations, and
+# containerSecurityContext) as sandbox pods.
 workflowDiscovery:
   resources:
     requests:
@@ -1151,9 +1153,6 @@ workflowDiscovery:
       memory: 256Mi
     limits:
       memory: 1Gi
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
 
 networkPolicy:
   enabled: true

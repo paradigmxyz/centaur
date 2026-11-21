@@ -617,7 +617,6 @@
       }
     },
     "workflowDiscovery": {
-      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "resources": { "type": "object" }
