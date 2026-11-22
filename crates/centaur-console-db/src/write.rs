@@ -28,8 +28,6 @@
 //! [`update_where_sql`] is the same update addressed by a column other than the
 //! primary key.
 
-use crate::timestamp;
-
 /// `INSERT INTO <table> (<columns>, created_at, updated_at) VALUES ($1, ...,
 /// now(), now())`. Binds are positional in `columns` order.
 pub fn insert_sql(table: &str, columns: &[&str]) -> String {
@@ -112,11 +110,6 @@ pub fn update_where_sql(table: &str, columns: &[&str], from_where: &str) -> Stri
 /// `UPDATE <table> SET updated_at = now() WHERE id = $1`, Rails' `touch`.
 pub fn touch_sql(table: &str) -> String {
     format!("UPDATE {table} SET updated_at = now() WHERE id = $1")
-}
-
-/// [`timestamp::now`], re-exported so a write module needs one import.
-pub fn now() -> time::PrimitiveDateTime {
-    timestamp::now()
 }
 
 #[cfg(test)]

@@ -118,23 +118,17 @@ impl From<WriteError> for ConsoleError {
     }
 }
 
-/// The principals area's failures. Its `Internal`/`Database`/`Encryption`
-/// messages are rendered as they always were.
+/// The principals area's failures. Internal/database/encryption details are
+/// logged, never echoed in the 500 body.
 impl From<PrincipalError> for ConsoleError {
     fn from(error: PrincipalError) -> Self {
         match error {
             PrincipalError::NotFound(message) => Self::not_found(message),
             PrincipalError::BadRequest(message) => Self::bad_request(message),
             PrincipalError::Validation(errors) => Self::validation_failed(errors.into_value()),
-            PrincipalError::Internal(message) => {
-                Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
-            }
-            PrincipalError::Database(error) => {
-                Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            }
-            PrincipalError::Encryption(error) => {
-                Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            }
+            PrincipalError::Internal(error) => Self::internal(error),
+            PrincipalError::Database(error) => Self::internal(error),
+            PrincipalError::Encryption(error) => Self::internal(error),
         }
     }
 }
@@ -216,23 +210,18 @@ impl Pagination {
     }
 
     pub(crate) fn meta(self, total: i64) -> Value {
-        page_meta(self.page, self.limit, total)
+        let total_pages = if total == 0 {
+            0
+        } else {
+            total.saturating_add(self.limit - 1) / self.limit
+        };
+        json!({
+            "page": self.page,
+            "limit": self.limit,
+            "total": total,
+            "total_pages": total_pages,
+        })
     }
-}
-
-/// Rails' pagination `meta` for total rows, in the same field order.
-pub(crate) fn page_meta(page: i64, limit: i64, total: i64) -> Value {
-    let total_pages = if total == 0 {
-        0
-    } else {
-        total.saturating_add(limit - 1) / limit
-    };
-    json!({
-        "page": page,
-        "limit": limit,
-        "total": total,
-        "total_pages": total_pages,
-    })
 }
 
 /// The query parameters of one paginated label search.
@@ -309,8 +298,8 @@ pub(crate) fn labels_value(labels: &BTreeMap<String, String>) -> Map<String, Val
 /// `filters` is the number of parameters `from_where` already binds ($1..=$n).
 pub(crate) struct ListSource {
     select: Cow<'static, str>,
-    from_where: Cow<'static, str>,
-    order_by: Cow<'static, str>,
+    from_where: &'static str,
+    order_by: &'static str,
     filters: usize,
 }
 
@@ -323,8 +312,8 @@ impl ListSource {
     ) -> Self {
         Self {
             select: Cow::Borrowed(select),
-            from_where: Cow::Borrowed(from_where),
-            order_by: Cow::Borrowed(order_by),
+            from_where,
+            order_by,
             filters,
         }
     }
@@ -339,8 +328,8 @@ impl ListSource {
     ) -> Self {
         Self {
             select: Cow::Owned(select),
-            from_where: Cow::Borrowed(from_where),
-            order_by: Cow::Borrowed(order_by),
+            from_where,
+            order_by,
             filters,
         }
     }
@@ -489,11 +478,10 @@ pub(crate) fn no_content() -> Response {
 /// Rails' `request.origin`: the `Origin` header only, with no `Referer`
 /// fallback. Every unsafe console request, JSON or form, must carry exactly
 /// the configured public origin; a missing or `null` Origin is refused.
-pub(crate) fn request_origin(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn request_origin(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -571,9 +559,6 @@ mod tests {
         );
         assert_eq!(request_origin(&headers), None);
         headers.insert(header::ORIGIN, "https://other.example".parse().unwrap());
-        assert_eq!(
-            request_origin(&headers).as_deref(),
-            Some("https://other.example")
-        );
+        assert_eq!(request_origin(&headers), Some("https://other.example"));
     }
 }

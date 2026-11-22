@@ -255,7 +255,7 @@ async fn authorize(State(guard): State<RouteGuard>, request: Request, next: Next
     }
 
     record_outcome("unknown", "unauthorized");
-    unauthenticated(surface, false)
+    unauthenticated(surface)
 }
 
 /// Browsers never bring an `Authorization` header; everything here is a
@@ -575,16 +575,9 @@ fn authorization_failure(surface: Surface, failure: AuthorizationFailure) -> Res
     }
 }
 
-fn unauthenticated(surface: Surface, authorization_present: bool) -> Response {
+fn unauthenticated(surface: Surface) -> Response {
     match surface {
         Surface::ApiRs => ApiError::Unauthorized("missing bearer token".to_owned()).into_response(),
-        Surface::Console if authorization_present => ConsoleError::new(
-            StatusCode::FORBIDDEN,
-            "the console API requires a console session; API keys are not accepted \
-             (the bearer API is /api/v1 outside /api/v1/console)",
-        )
-        .with_reason("session_required")
-        .into_response(),
         Surface::Console => ConsoleError::new(StatusCode::UNAUTHORIZED, "console session required")
             .with_reason("session_required")
             .into_response(),
@@ -659,7 +652,7 @@ fn authorization_present(headers: &HeaderMap) -> bool {
 }
 
 fn origin_matches(headers: &HeaderMap, config: &ConsoleSessionConfig) -> bool {
-    request_origin(headers).as_deref() == Some(config.public_origin())
+    request_origin(headers) == Some(config.public_origin())
 }
 
 fn matched_route<B>(request: &Request<B>) -> String {

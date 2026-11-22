@@ -96,12 +96,6 @@ impl FieldErrors {
         self.entries.is_empty()
     }
 
-    pub fn contains(&self, attribute: &str) -> bool {
-        self.entries
-            .iter()
-            .any(|(existing, _)| existing == attribute)
-    }
-
     /// The attributes and their messages, in append order.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
         self.entries
@@ -178,7 +172,6 @@ mod tests {
         assert_eq!(keys, ["name", "base", "labels"]);
         assert_eq!(errors["name"], ["can't be blank", "is too long"]);
         assert_eq!(errors["missing"], [] as [String; 0]);
-        assert!(errors.contains("base"));
         assert!(!errors.is_empty());
         assert!(FieldErrors::new().is_empty());
     }
@@ -214,6 +207,6 @@ mod tests {
         errors.rename("content", "name");
         assert_eq!(errors["name"], ["is reserved", "is too long"]);
         errors.rename("missing", "other");
-        assert!(!errors.contains("other"));
+        assert_eq!(errors["other"], [] as [String; 0]);
     }
 }

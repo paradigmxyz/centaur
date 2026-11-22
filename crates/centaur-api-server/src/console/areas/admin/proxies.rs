@@ -20,18 +20,17 @@ use centaur_console_db::model::{ConsoleModel, Principal as PrincipalModel, Proxy
 use centaur_console_db::validation::{ValidateFields, rules};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::types::Json;
 use time::PrimitiveDateTime;
 
-use super::common::{self, AdminError, json_created, json_ok, no_content, nullable_field};
+use super::common::{self, json_ok, nullable_field};
 use crate::{
     AppState,
     console::{
         guard::{BearerUser, GuardedRoutes},
         http::{
-            ConsoleError, ListParams, ListSource, Pagination, bind, label_filters, labels_value,
-            list,
+            ConsoleError, ListParams, ListSource, Pagination, bind, created_data, json_data,
+            label_filters, labels_value, list, no_content,
         },
         request::ConsoleData,
     },
@@ -142,11 +141,6 @@ struct ProxyPayload {
     token: Option<String>,
 }
 
-#[derive(Serialize)]
-struct ProxyPayloadEnvelope {
-    data: ProxyPayload,
-}
-
 pub(super) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     routes
         .operator("/proxies", get(index).post(create))
@@ -157,7 +151,7 @@ async fn index(
     State(state): State<AppState>,
     _user: BearerUser,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     // Console reads `principal_id`, then `labels`, then pagination, so each
     // error wins in that order.
     let pool = common::pool(&state)?;
@@ -192,19 +186,17 @@ async fn show(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: BearerUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let proxy = load(&pool, &id).await?;
-    Ok(json_ok(ProxyPayloadEnvelope {
-        data: payload(&proxy),
-    }))
+    Ok(json_data(payload(&proxy)))
 }
 
 async fn create(
     State(state): State<AppState>,
     _user: BearerUser,
     ConsoleData(data): ConsoleData<CreateProxy>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let principal_id = match principal_reference(data.principal_id.as_deref()) {
         Some(reference) => Some(resolve_principal(&pool, reference).await?),
@@ -219,12 +211,12 @@ async fn create(
         .labels
         .map(Labels::into_value)
         .unwrap_or_else(|| json!({}));
-    let token = issue_token();
+    let token = common::issue_token(TOKEN_PREFIX);
     let proxy = create_proxy(
         &pool,
         data.name.as_deref().unwrap_or_default(),
         &labels,
-        &token_digest(&token),
+        &common::token_digest(&token),
         principal_id,
         requester_principal_id,
     )
@@ -232,7 +224,7 @@ async fn create(
     // The freshly minted token is the only field the listing never renders.
     let mut data = payload(&proxy);
     data.token = Some(token);
-    Ok(json_created(ProxyPayloadEnvelope { data }))
+    Ok(created_data(data))
 }
 
 async fn update(
@@ -240,7 +232,7 @@ async fn update(
     Path(id): Path<String>,
     _user: BearerUser,
     ConsoleData(data): ConsoleData<UpdateProxy>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let proxy = load(&pool, &id).await?;
     let mut change = ProxyChange::default();
@@ -270,36 +262,34 @@ async fn update(
     let proxy = update_proxy(&pool, proxy.id, &change)
         .await?
         .ok_or_else(|| ConsoleError::internal("proxy vanished after its update"))?;
-    Ok(json_ok(ProxyPayloadEnvelope {
-        data: payload(&proxy),
-    }))
+    Ok(json_data(payload(&proxy)))
 }
 
 async fn destroy(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: BearerUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let proxy = load(&pool, &id).await?;
     delete_proxy(&pool, proxy.id).await?;
     Ok(no_content())
 }
 
-async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<ProxyRow, AdminError> {
-    let id = ProxyModel::decode_oid(oid).ok_or_else(ProxyModel::not_found)?;
-    Ok(admin_proxy(pool, id)
+async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<ProxyRow, ConsoleError> {
+    Ok(admin_proxy(pool, common::oid::<ProxyModel>(oid)?)
         .await?
         .ok_or_else(ProxyModel::not_found)?)
 }
 
 /// `Principal.find_by_oid!`: an unknown or malformed reference is a 404.
-async fn resolve_principal(pool: &sqlx::PgPool, reference: &str) -> Result<i64, AdminError> {
-    let id = PrincipalModel::decode_oid(reference).ok_or_else(PrincipalModel::not_found)?;
-    Ok(find_principal(pool, id)
-        .await?
-        .map(|principal| principal.id)
-        .ok_or_else(PrincipalModel::not_found)?)
+async fn resolve_principal(pool: &sqlx::PgPool, reference: &str) -> Result<i64, ConsoleError> {
+    Ok(
+        find_principal(pool, common::oid::<PrincipalModel>(reference)?)
+            .await?
+            .map(|principal| principal.id)
+            .ok_or_else(PrincipalModel::not_found)?,
+    )
 }
 
 /// `attrs[:principal_id].present?`: only a non-blank reference names a
@@ -328,58 +318,24 @@ fn payload(proxy: &ProxyRow) -> ProxyPayload {
     }
 }
 
-fn issue_token() -> String {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("operating system randomness");
-    format!("{TOKEN_PREFIX}{}", hex::encode(bytes))
-}
-
-fn token_digest(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn issued_tokens_have_the_console_shape() {
-        let token = issue_token();
-        assert!(token.starts_with("iprx_"));
-        assert_eq!(token.len(), 5 + 64);
-        assert!(
-            token[5..]
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
-        );
+    fn issued_tokens_use_the_proxy_prefix() {
+        assert_eq!(TOKEN_PREFIX, "iprx_");
+        assert!(common::issue_token(TOKEN_PREFIX).starts_with(TOKEN_PREFIX));
     }
 
     /// The `details` keys a create request is rejected under, or `None` when it
     /// passes.
     fn create_rejections(body: Value) -> Option<Vec<String>> {
-        let create: CreateProxy = serde_json::from_value(body).expect("a typed request");
-        create
-            .validate_fields()
-            .err()
-            .map(|errors| rejected_keys(&errors))
+        common::detail_keys::<CreateProxy>(body)
     }
 
     fn update_rejections(body: Value) -> Option<Vec<String>> {
-        let update: UpdateProxy = serde_json::from_value(body).expect("a typed request");
-        update
-            .validate_fields()
-            .err()
-            .map(|errors| rejected_keys(&errors))
-    }
-
-    /// The failing attributes, sorted so a test does not pin report order.
-    fn rejected_keys(errors: &centaur_console_db::FieldErrors) -> Vec<String> {
-        let mut keys: Vec<String> = errors
-            .entries()
-            .map(|(attribute, _)| attribute.to_owned())
-            .collect();
-        keys.sort();
-        keys
+        common::detail_keys::<UpdateProxy>(body)
     }
 
     #[test]

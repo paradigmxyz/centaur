@@ -53,11 +53,10 @@ COPY crates/ crates/
 # Embedded by centaur-sandbox-agent-k8s, which installs them from a chart hook.
 COPY contrib/chart/charts/agent-sandbox/crds/ contrib/chart/charts/agent-sandbox/crds/
 # Embedded with include_bytes!/include_str! by the Rust Console: the
-# server-rendered pages' stylesheet/font/logo and the PWA manifest and service
-# worker. The built SPA assets and shell are copied from the web stage below.
+# server-rendered pages' stylesheet/font/logo. The built SPA assets and shell are
+# copied from the web stage below.
 COPY services/console/public/assets/oauth-page/ services/console/public/assets/oauth-page/
 COPY services/console/public/icon.svg services/console/public/icon.svg
-COPY services/console/config/pwa/ services/console/config/pwa/
 ARG RUST_BUILD_PROFILE=release
 RUN --mount=type=cache,id=api-rs-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=api-rs-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
@@ -82,18 +81,14 @@ WORKDIR /app
 COPY tools/ /app/tools/
 # No Python runs here: the workflow discovery service and workflow-host
 # sandboxes run workflow code from the agent image.
-# The built Console web app and the root public files its shell, manifest, and
-# service worker fetch. Source maps are removed in the web stage; the shell is
-# copied out of public/ so only the Console shell route serves it, with the CSP.
+# The built Console web app and the root public files its shell fetches. Source
+# maps are removed in the web stage; the shell is copied out of public/ so only
+# the Console shell route serves it, with the CSP.
 COPY --from=web /repo/services/console/spa-shell/ /app/services/console/spa-shell/
 COPY --from=web /repo/services/console/public/spa/assets/ /app/services/console/public/spa/assets/
 COPY services/console/public/icon-dark.svg \
      services/console/public/icon-light.svg \
      services/console/public/icon.svg \
-     services/console/public/pwa-icon.svg \
-     services/console/public/pwa-icon-192.png \
-     services/console/public/pwa-icon-512.png \
-     services/console/public/offline.html \
      services/console/public/robots.txt \
      /app/services/console/public/
 # The Console static paths default to a checkout; the image points them at the

@@ -18,10 +18,8 @@
 //! // A principal write changed a sync-relevant column.
 //! invalidate::invalidate(&mut tx, Scope::Principal(principal.id)).await?;
 //!
-//! // A secret write replaced its nested records: Rails counts the parent (when
-//! // it changed) plus every destroyed and inserted source and rule.
-//! let changes = invalidate::SecretChanges::replaced(true, 1, 1, 0, 2);
-//! invalidate::invalidate(&mut tx, Scope::secret_write(kind, id, changes)).await?;
+//! // A secret changed: every principal its grants reach is bumped once.
+//! invalidate::invalidate(&mut tx, Scope::Secret { kind, id }).await?;
 //!
 //! // A grant was destroyed: bump every principal it reached, directly or
 //! // through its role.
@@ -52,89 +50,11 @@ pub enum Scope<'a> {
         principal_id: Option<i64>,
         role_id: Option<i64>,
     },
-    /// A secret changed: every principal its grants reach, `times` increments.
-    Secret {
-        kind: SecretKind,
-        id: i64,
-        times: i32,
-    },
+    /// A secret changed: every principal its grants reach is bumped once.
+    Secret { kind: SecretKind, id: i64 },
     /// A broker credential was refreshed or revived: every principal granted a
     /// secret whose `token_broker` source delivers this credential.
     BrokerCredential(i64),
-}
-
-/// Rails counts one sync-cache bump per saved or destroyed record associated
-/// with a secret: the parent (when it changed), every destroyed and inserted
-/// source, and every destroyed and inserted rule. `ssh_key_secrets` does not
-/// invalidate through the parent, only through its source.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SecretChanges {
-    parent_changed: bool,
-    old_sources: usize,
-    new_sources: usize,
-    old_rules: usize,
-    new_rules: usize,
-}
-
-impl SecretChanges {
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    /// A new secret: its parent is new and every source and rule is inserted.
-    pub fn created(sources: usize, rules: usize) -> Self {
-        Self {
-            parent_changed: true,
-            old_sources: 0,
-            new_sources: sources,
-            old_rules: 0,
-            new_rules: rules,
-        }
-    }
-
-    /// A replacement write. `old_*` are the nested rows that were destroyed,
-    /// `new_*` the ones that were inserted.
-    pub fn replaced(
-        parent_changed: bool,
-        old_sources: usize,
-        new_sources: usize,
-        old_rules: usize,
-        new_rules: usize,
-    ) -> Self {
-        Self {
-            parent_changed,
-            old_sources,
-            new_sources,
-            old_rules,
-            new_rules,
-        }
-    }
-
-    /// The number of increments the write produced for `kind`.
-    pub fn count(self, kind: SecretKind) -> i32 {
-        let parent = usize::from(self.parent_changed && kind != SecretKind::SshKey);
-        i32::try_from(
-            parent + self.old_sources + self.new_sources + self.old_rules + self.new_rules,
-        )
-        .unwrap_or(i32::MAX)
-    }
-}
-
-impl<'a> Scope<'a> {
-    /// The invalidation a secret write performs.
-    pub fn secret_write(kind: SecretKind, id: i64, changes: SecretChanges) -> Self {
-        Self::Secret {
-            kind,
-            id,
-            times: changes.count(kind),
-        }
-    }
-
-    /// The invalidation a secret delete performs while its grants still exist:
-    /// the destroyed parent reaches every grantee once.
-    pub fn secret_delete(kind: SecretKind, id: i64) -> Self {
-        Self::Secret { kind, id, times: 1 }
-    }
 }
 
 /// Bumps `sync_config_cache_version` for the principals `scope` reaches.
@@ -150,7 +70,7 @@ pub async fn invalidate(connection: &mut PgConnection, scope: Scope<'_>) -> Resu
             principal_id,
             role_id,
         } => bump_grantee(connection, principal_id, role_id).await,
-        Scope::Secret { kind, id, times } => bump_secret(connection, kind, id, times).await,
+        Scope::Secret { kind, id } => bump_secret(connection, kind, id).await,
         Scope::BrokerCredential(id) => bump_broker_credential(connection, id).await,
     }
 }
@@ -210,23 +130,18 @@ async fn bump_secret(
     connection: &mut PgConnection,
     kind: SecretKind,
     secret_id: i64,
-    times: i32,
 ) -> Result<()> {
-    if times <= 0 {
-        return Ok(());
-    }
     sqlx::query(&format!(
-        "UPDATE principals SET sync_config_cache_version = sync_config_cache_version + $1 \
+        "UPDATE principals SET sync_config_cache_version = sync_config_cache_version + 1 \
          WHERE id IN ( \
-           SELECT principal_id FROM grants WHERE {} = $2 AND principal_id IS NOT NULL \
+           SELECT principal_id FROM grants WHERE {} = $1 AND principal_id IS NOT NULL \
            UNION \
            SELECT pr.principal_id FROM principal_roles pr \
-           WHERE pr.role_id IN (SELECT role_id FROM grants WHERE {} = $2 AND role_id IS NOT NULL) \
+           WHERE pr.role_id IN (SELECT role_id FROM grants WHERE {} = $1 AND role_id IS NOT NULL) \
          )",
         kind.grant_column(),
         kind.grant_column()
     ))
-    .bind(times)
     .bind(secret_id)
     .execute(connection)
     .await?;
@@ -262,45 +177,4 @@ async fn bump_broker_credential(connection: &mut PgConnection, credential_id: i6
     .execute(connection)
     .await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn secret_changes_count_every_saved_and_destroyed_record() {
-        assert_eq!(SecretChanges::created(1, 2).count(SecretKind::Static), 4);
-        assert_eq!(
-            SecretChanges::replaced(true, 1, 1, 0, 2).count(SecretKind::Static),
-            5
-        );
-        // ssh_key_secrets invalidate through the source, never the parent.
-        assert_eq!(SecretChanges::created(1, 0).count(SecretKind::SshKey), 1);
-        assert_eq!(SecretChanges::none().count(SecretKind::Static), 0);
-    }
-
-    #[test]
-    fn scopes_carry_the_same_increment() {
-        assert_eq!(
-            Scope::secret_write(
-                SecretKind::Static,
-                7,
-                SecretChanges::replaced(false, 1, 1, 0, 0)
-            ),
-            Scope::Secret {
-                kind: SecretKind::Static,
-                id: 7,
-                times: 2,
-            }
-        );
-        assert_eq!(
-            Scope::secret_delete(SecretKind::SshKey, 7),
-            Scope::Secret {
-                kind: SecretKind::SshKey,
-                id: 7,
-                times: 1,
-            }
-        );
-    }
 }

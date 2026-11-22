@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{Path, Query, RawQuery, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -19,7 +19,7 @@ use centaur_console_db::{
     ConsoleUser,
     areas::principals::{
         AssignRole, ConsolePrincipalPayload, EffectiveGrantPayload, GRANT_COLUMNS, GrantPayload,
-        GrantWrite, PRINCIPAL_COLUMNS, PermissionOwner, PermissionSetWrite, PermissionWrite,
+        GrantWrite, Grantee, PRINCIPAL_COLUMNS, PermissionSetWrite, PermissionWrite,
         PrincipalPayload, PrincipalRow, PrincipalView, PrincipalWrite, ROLE_COLUMNS, RolePayload,
         RoleRow, RoleView, RoleWrite, SlackChannelOptionPayload, assign_role,
         console_grant_payload, console_principal_payload,
@@ -34,20 +34,17 @@ use centaur_console_db::{
     },
     effective_config,
     model::{self, ConsoleModel},
-    validation::plain_message,
 };
-use garde::Validate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::{
     AppState,
     console::{
         guard::{BearerUser, GuardedRoutes},
         http::{
-            ConsoleError, DataPayload, ListParams, ListSource, Pagination, bind, created_data,
-            json_data, labels_value, list_response, list_rows, no_content,
+            ConsoleError, ListParams, ListSource, Pagination, bind, created_data, json_data,
+            labels_value, list_response, list_rows, no_content,
         },
         request::{ConsoleData, ConsoleQuery},
     },
@@ -71,28 +68,14 @@ const GRANT_LIST_ORDER: &str = "ORDER BY created_at ASC, id ASC";
 
 /// The endpoint-specific scalar query parameters of the console principal list.
 /// Pagination and `labels[key]` filters stay on `ListParams`.
-#[derive(Debug, Default, Deserialize, garde::Validate)]
+#[derive(Debug, Default, Deserialize)]
 struct PrincipalListQuery {
+    /// The row order: absent or `name`.
     #[serde(default)]
-    #[garde(custom(sort_order))]
     sort: Option<String>,
     /// A free-text search filter, not a rule of the record.
     #[serde(default)]
-    #[garde(skip)]
     q: Option<String>,
-}
-
-/// `sort` is a closed set. Rails answers an unknown order with
-/// `ActionController::BadRequest`, so this gate is a plain 400, not the 422 field
-/// envelope.
-fn sort_order(value: &Option<String>, _: &()) -> garde::Result {
-    match value.as_deref().map(str::trim) {
-        // A blank `sort` is no sort at all, as `params[:sort].present?` is.
-        Some(sort) if !sort.is_empty() && sort != "name" => {
-            Err(garde::Error::new("sort must be name"))
-        }
-        _ => Ok(()),
-    }
 }
 
 /// The endpoint-specific scalar query parameters of the console role list.
@@ -106,30 +89,14 @@ struct RoleListQuery {
 
 /// The scalar query parameters of the Slack channel picker. `ids[]` is a Rack
 /// array parameter, so it stays on the raw query string.
-#[derive(Debug, Default, Deserialize, garde::Validate)]
+#[derive(Debug, Default, Deserialize)]
 struct SlackChannelsQuery {
     /// A free-text search filter, not a rule of the record.
     #[serde(default)]
-    #[garde(skip)]
     q: Option<String>,
+    /// `principal:<oid>` or `role:<oid>`; see [`exclude_owner`].
     #[serde(default)]
-    #[garde(custom(owner_selector))]
     exclude_owner: Option<String>,
-}
-
-/// `exclude_owner`'s shape: `principal:<oid>` or `role:<oid>`. Rails raises
-/// `ActionController::BadRequest` for anything else, so this gate is a plain 400;
-/// whether the oid resolves is a database question the handler still answers.
-fn owner_selector(value: &Option<String>, _: &()) -> garde::Result {
-    let Some(selector) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(());
-    };
-    match selector.split_once(':') {
-        Some(("principal" | "role", _)) => Ok(()),
-        _ => Err(garde::Error::new(
-            "exclude_owner must be principal:<oid> or role:<oid>",
-        )),
-    }
 }
 
 /// The Slack channel picker's body, whose `meta` carries the catalog state.
@@ -152,6 +119,22 @@ struct EffectiveConfigPayload {
     postgres: Vec<Value>,
 }
 
+/// Which half of a grantee a route addresses, before the oid is resolved.
+#[derive(Clone, Copy)]
+enum GranteeKind {
+    Principal,
+    Role,
+}
+
+impl GranteeKind {
+    fn with(self, id: i64) -> Grantee {
+        match self {
+            Self::Principal => Grantee::Principal(id),
+            Self::Role => Grantee::Role(id),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct EffectiveGrantsPayload {
     data: Vec<EffectiveGrantPayload>,
@@ -166,18 +149,6 @@ struct EffectiveGrantsMeta {
     limit: i64,
     total: i64,
     total_pages: i64,
-}
-
-#[derive(Clone, Copy)]
-enum SubjectKind {
-    Principal,
-    Role,
-}
-
-#[derive(Clone, Copy)]
-enum OwnerKind {
-    Principal,
-    Role,
 }
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
@@ -297,11 +268,6 @@ pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
         )
 }
 
-/// Server-rendered pages and other top-level routes (absolute paths).
-pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
-    router
-}
-
 // --- shared plumbing -------------------------------------------------------
 
 fn pool(state: &AppState) -> Result<sqlx::PgPool, ConsoleError> {
@@ -348,10 +314,10 @@ fn role_list_source() -> ListSource {
     )
 }
 
-fn grant_list_source(grantee: SubjectKind) -> ListSource {
+fn grant_list_source(grantee: GranteeKind) -> ListSource {
     let from_where = match grantee {
-        SubjectKind::Principal => "FROM grants WHERE principal_id = $1",
-        SubjectKind::Role => "FROM grants WHERE role_id = $1",
+        GranteeKind::Principal => "FROM grants WHERE principal_id = $1",
+        GranteeKind::Role => "FROM grants WHERE role_id = $1",
     };
     ListSource::owned(
         format!("SELECT {GRANT_COLUMNS}"),
@@ -393,11 +359,18 @@ async fn console_list_principals(
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
     let params = ListParams::from_query(&raw)?;
-    if let Err(report) = query.validate() {
-        let message = plain_message(&report).expect("a failed sort gate carries a message");
-        return Err(ConsoleError::bad_request(message));
+    // A blank `sort` is no sort at all, as `params[:sort].present?` is.
+    let sort = query
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|sort| !sort.is_empty());
+    if let Some(sort) = sort
+        && sort != "name"
+    {
+        return Err(ConsoleError::bad_request("sort must be name"));
     }
-    let order_by_name = query.sort.as_deref().map(str::trim) == Some("name");
+    let order_by_name = sort.is_some();
     let labels = label_binding(&params);
     let q = query
         .q
@@ -445,14 +418,7 @@ async fn console_update_principal(
     user: ConsoleUser,
     ConsoleData(write): ConsoleData<PrincipalWrite>,
 ) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let (view, was_new) = upsert_principal(&pool, &id, &write, user.id).await?;
-    let payload = principal_payload(&view);
-    Ok(if was_new {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    update_principal_response(&state, &id, user.id, &write).await
 }
 
 async fn console_delete_principal(
@@ -463,32 +429,6 @@ async fn console_delete_principal(
     let view = principal_view(&pool, &id).await?;
     delete_principal(&pool, &view).await?;
     Ok(no_content())
-}
-
-async fn console_principal_roles(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let view = principal_view(&pool, &id).await?;
-    let payload = principal_roles_payload(&pool, view.row.id).await?;
-    Ok(json_data(payload))
-}
-
-async fn console_assign_role(
-    State(state): State<AppState>,
-    Path(principal_id): Path<String>,
-    ConsoleData(write): ConsoleData<AssignRole>,
-) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let principal = principal_view(&pool, &principal_id).await?;
-    let (role, inserted) = assign_role(&pool, principal.row.id, &write.role_id).await?;
-    let payload = role_payload(&role);
-    Ok(if inserted {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
 }
 
 async fn console_remove_role(
@@ -516,7 +456,7 @@ async fn console_principal_grants(
     Path(id): Path<String>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
-    grantee_grants(&state, SubjectKind::Principal, &id, &raw, true).await
+    grantee_grants(&state, GranteeKind::Principal, &id, &raw, true).await
 }
 
 async fn console_effective_grants(
@@ -532,14 +472,14 @@ async fn console_replace_principal_permissions(
     Path(id): Path<String>,
     ConsoleData(write): ConsoleData<PermissionSetWrite>,
 ) -> Result<Response, ConsoleError> {
-    replace_permissions_response(&state, OwnerKind::Principal, &id, &write).await
+    replace_permissions_response(&state, GranteeKind::Principal, &id, &write).await
 }
 
 async fn console_destroy_principal_permission(
     State(state): State<AppState>,
     Path((id, channel_id)): Path<(String, String)>,
 ) -> Result<Response, ConsoleError> {
-    destroy_permission_response(&state, OwnerKind::Principal, &id, &channel_id).await
+    destroy_permission_response(&state, GranteeKind::Principal, &id, &channel_id).await
 }
 
 // --- console roles ---------------------------------------------------------
@@ -550,13 +490,6 @@ async fn console_list_roles(
     ConsoleQuery(query): ConsoleQuery<RoleListQuery>,
 ) -> Result<Response, ConsoleError> {
     role_list_response(&state, &raw, &query).await
-}
-
-async fn console_show_role(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ConsoleError> {
-    role_show_response(&state, &id).await
 }
 
 async fn console_create_role(
@@ -575,24 +508,43 @@ async fn console_update_role(
     user: ConsoleUser,
     ConsoleData(write): ConsoleData<RoleWrite>,
 ) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let (view, was_new) = upsert_role(&pool, &id, &write, user.id).await?;
-    let payload = role_payload(&view);
-    Ok(if was_new {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    update_role_response(&state, &id, user.id, &write).await
+}
+
+async fn console_show_role(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ConsoleError> {
+    role_show_response(&state, &id).await
 }
 
 async fn console_delete_role(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let view = role_view(&pool, &id).await?;
-    delete_role(&pool, &view).await?;
-    Ok(no_content())
+    role_delete_response(&state, &id).await
+}
+
+async fn console_principal_roles(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ConsoleError> {
+    principal_roles_response(&state, &id).await
+}
+
+async fn console_assign_role(
+    State(state): State<AppState>,
+    Path(principal_id): Path<String>,
+    ConsoleData(write): ConsoleData<AssignRole>,
+) -> Result<Response, ConsoleError> {
+    assign_role_response(&state, &principal_id, &write).await
+}
+
+async fn console_destroy_grant(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ConsoleError> {
+    destroy_grant_response(&state, &id).await
 }
 
 async fn console_role_grants(
@@ -600,7 +552,7 @@ async fn console_role_grants(
     Path(id): Path<String>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
-    grantee_grants(&state, SubjectKind::Role, &id, &raw, true).await
+    grantee_grants(&state, GranteeKind::Role, &id, &raw, true).await
 }
 
 async fn console_replace_role_permissions(
@@ -608,14 +560,14 @@ async fn console_replace_role_permissions(
     Path(id): Path<String>,
     ConsoleData(write): ConsoleData<PermissionSetWrite>,
 ) -> Result<Response, ConsoleError> {
-    replace_permissions_response(&state, OwnerKind::Role, &id, &write).await
+    replace_permissions_response(&state, GranteeKind::Role, &id, &write).await
 }
 
 async fn console_destroy_role_permission(
     State(state): State<AppState>,
     Path((id, channel_id)): Path<(String, String)>,
 ) -> Result<Response, ConsoleError> {
-    destroy_permission_response(&state, OwnerKind::Role, &id, &channel_id).await
+    destroy_permission_response(&state, GranteeKind::Role, &id, &channel_id).await
 }
 
 // --- console grants and Slack catalog -------------------------------------
@@ -625,14 +577,7 @@ async fn console_create_grant(
     user: ConsoleUser,
     ConsoleData(write): ConsoleData<GrantWrite>,
 ) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let (row, inserted) = create_grant(&pool, &write, user.id).await?;
-    let payload = console_grant_payload(&pool, &row).await?;
-    Ok(if inserted {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    create_grant_response(&state, user.id, &write, true).await
 }
 
 async fn console_show_grant(
@@ -644,46 +589,21 @@ async fn console_show_grant(
     Ok(json_data(payload))
 }
 
-async fn console_destroy_grant(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    destroy_grant(&pool, &id).await?;
-    Ok(no_content())
-}
-
 async fn console_slack_channels(
     State(state): State<AppState>,
     ConsoleQuery(query): ConsoleQuery<SlackChannelsQuery>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
-    if let Err(report) = query.validate() {
-        let message = plain_message(&report).expect("a failed owner gate carries a message");
-        return Err(ConsoleError::bad_request(message));
-    }
     // `ids[]` is Rack's array form, which a flat typed struct cannot express.
     let ids: Vec<String> =
         url::form_urlencoded::parse(raw.as_deref().unwrap_or_default().as_bytes())
             .filter(|(key, _)| key == "ids[]")
             .map(|(_, value)| value.into_owned())
             .collect();
-    let owner = match query
-        .exclude_owner
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        None => None,
-        Some(value) => Some(parse_permission_owner(&pool, value).await?),
-    };
     let mut exclude = Vec::new();
-    if let Some(owner) = owner {
-        exclude = match owner {
-            PermissionOwner::Principal(id) => permission_channel_ids(&pool, Some(id), None).await?,
-            PermissionOwner::Role(id) => permission_channel_ids(&pool, None, Some(id)).await?,
-        };
+    if let Some(owner) = exclude_owner(&pool, query.exclude_owner.as_deref()).await? {
+        exclude = permission_channel_ids(&pool, owner.principal_id(), owner.role_id()).await?;
     }
     let rows = slack_channels(&pool, &ids, query.q.as_deref(), &exclude).await?;
     let catalog_error = slack_catalog_error(&pool).await?;
@@ -698,21 +618,29 @@ async fn console_slack_channels(
     Ok(response)
 }
 
-/// The selector's shape is a query gate ([`owner_selector`]), so this only
-/// resolves the reference it names.
-async fn parse_permission_owner(
+/// The `exclude_owner` selector: `principal:<oid>` or `role:<oid>`. Rails
+/// answers another shape with `ActionController::BadRequest` (a plain 400);
+/// whether the oid resolves is a database question this still answers.
+async fn exclude_owner(
     pool: &sqlx::PgPool,
-    raw: &str,
-) -> Result<PermissionOwner, ConsoleError> {
-    let (kind, oid) = raw
-        .split_once(':')
-        .expect("a validated exclude_owner carries a kind and an oid");
-    if kind == "role" {
-        let view = find_role_by_oid(pool, oid).await?;
-        return Ok(PermissionOwner::Role(view.row.id));
+    raw: Option<&str>,
+) -> Result<Option<Grantee>, ConsoleError> {
+    let Some(selector) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match selector.split_once(':') {
+        Some(("role", oid)) => {
+            let view = find_role_by_oid(pool, oid).await?;
+            Ok(Some(Grantee::Role(view.row.id)))
+        }
+        Some(("principal", oid)) => {
+            let view = find_principal_by_oid(pool, oid).await?;
+            Ok(Some(Grantee::Principal(view.row.id)))
+        }
+        _ => Err(ConsoleError::bad_request(
+            "exclude_owner must be principal:<oid> or role:<oid>",
+        )),
     }
-    let view = find_principal_by_oid(pool, oid).await?;
-    Ok(PermissionOwner::Principal(view.row.id))
 }
 
 // --- bearer principals and roles ------------------------------------------
@@ -721,7 +649,7 @@ async fn bearer_list_principals(
     State(state): State<AppState>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
-    principal_list_response(&state, &raw, false).await
+    principal_list_response(&state, &raw).await
 }
 
 async fn bearer_create_principal(
@@ -756,14 +684,7 @@ async fn bearer_update_principal(
     user: BearerUser,
     ConsoleData(write): ConsoleData<PrincipalWrite>,
 ) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let (view, was_new) = upsert_principal(&pool, &id, &write, user.0.id).await?;
-    let payload = principal_payload(&view);
-    Ok(if was_new {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    update_principal_response(&state, &id, user.0.id, &write).await
 }
 
 async fn bearer_effective_config(
@@ -799,25 +720,12 @@ async fn effective_config_response(
     let config = effective_config(&pool, view.row.id)
         .await?
         .ok_or_else(|| ConsoleError::not_found("principal not found"))?;
-    let payload = DataPayload {
-        data: EffectiveConfigPayload {
-            id: model::Principal::oid(view.row.id),
-            secrets: config.secrets,
-            transforms: config.transforms,
-            postgres: config.postgres,
-        },
-    };
-    let body = serde_json::to_string(&payload).map_err(ConsoleError::internal)?;
-    let etag = format!("\"{}\"", hex::encode(Sha256::digest(body.as_bytes())));
-    let mut response = body.into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
-    response.headers_mut().insert(
-        header::ETAG,
-        HeaderValue::from_str(&etag).map_err(ConsoleError::internal)?,
-    );
+    let mut response = json_data(EffectiveConfigPayload {
+        id: model::Principal::oid(view.row.id),
+        secrets: config.secrets,
+        transforms: config.transforms,
+        postgres: config.postgres,
+    });
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -829,7 +737,7 @@ async fn bearer_upsert_principal_permission(
     Path(id): Path<String>,
     ConsoleData(write): ConsoleData<PermissionWrite>,
 ) -> Result<Response, ConsoleError> {
-    upsert_permission_response(&state, OwnerKind::Principal, &id, &write).await
+    upsert_permission_response(&state, GranteeKind::Principal, &id, &write).await
 }
 
 async fn bearer_principal_roles(
@@ -859,7 +767,7 @@ async fn bearer_principal_grants(
     Path(principal_id): Path<String>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
-    grantee_grants(&state, SubjectKind::Principal, &principal_id, &raw, false).await
+    grantee_grants(&state, GranteeKind::Principal, &principal_id, &raw, false).await
 }
 
 async fn bearer_list_roles(
@@ -901,14 +809,7 @@ async fn bearer_update_role(
     user: BearerUser,
     ConsoleData(write): ConsoleData<RoleWrite>,
 ) -> Result<Response, ConsoleError> {
-    let pool = pool(&state)?;
-    let (view, was_new) = upsert_role(&pool, &id, &write, user.0.id).await?;
-    let payload = role_payload(&view);
-    Ok(if was_new {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    update_role_response(&state, &id, user.0.id, &write).await
 }
 
 async fn bearer_delete_role(
@@ -923,7 +824,7 @@ async fn bearer_upsert_role_permission(
     Path(id): Path<String>,
     ConsoleData(write): ConsoleData<PermissionWrite>,
 ) -> Result<Response, ConsoleError> {
-    upsert_permission_response(&state, OwnerKind::Role, &id, &write).await
+    upsert_permission_response(&state, GranteeKind::Role, &id, &write).await
 }
 
 async fn bearer_role_grants(
@@ -931,7 +832,7 @@ async fn bearer_role_grants(
     Path(role_id): Path<String>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
-    grantee_grants(&state, SubjectKind::Role, &role_id, &raw, false).await
+    grantee_grants(&state, GranteeKind::Role, &role_id, &raw, false).await
 }
 
 async fn bearer_create_grant(
@@ -939,7 +840,7 @@ async fn bearer_create_grant(
     user: BearerUser,
     ConsoleData(write): ConsoleData<GrantWrite>,
 ) -> Result<Response, ConsoleError> {
-    create_grant_response(&state, user.0.id, &write).await
+    create_grant_response(&state, user.0.id, &write, false).await
 }
 
 async fn bearer_show_grant(
@@ -961,7 +862,6 @@ async fn bearer_destroy_grant(
 async fn principal_list_response(
     state: &AppState,
     raw: &HashMap<String, String>,
-    console: bool,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(state)?;
     let params = ListParams::from_query(raw)?;
@@ -973,14 +873,8 @@ async fn principal_list_response(
         })
         .await?;
     let views = principal_views(&pool, &rows).await?;
-    if console {
-        let data: Vec<ConsolePrincipalPayload> =
-            views.iter().map(console_principal_payload).collect();
-        Ok(Json(list_response(params.pagination, &data, total)).into_response())
-    } else {
-        let data: Vec<PrincipalPayload> = views.iter().map(principal_payload).collect();
-        Ok(Json(list_response(params.pagination, &data, total)).into_response())
-    }
+    let data: Vec<PrincipalPayload> = views.iter().map(principal_payload).collect();
+    Ok(Json(list_response(params.pagination, &data, total)).into_response())
 }
 
 async fn principal_show_response(state: &AppState, id: &str) -> Result<Response, ConsoleError> {
@@ -999,6 +893,17 @@ async fn principal_roles_response(
     Ok(json_data(payload))
 }
 
+async fn update_principal_response(
+    state: &AppState,
+    id: &str,
+    created_by: i64,
+    write: &PrincipalWrite,
+) -> Result<Response, ConsoleError> {
+    let pool = pool(state)?;
+    let (view, was_new) = upsert_principal(&pool, id, write, created_by).await?;
+    Ok(document_response(principal_payload(&view), was_new))
+}
+
 async fn assign_role_response(
     state: &AppState,
     principal_id: &str,
@@ -1007,12 +912,7 @@ async fn assign_role_response(
     let pool = pool(state)?;
     let principal = principal_view(&pool, principal_id).await?;
     let (role, inserted) = assign_role(&pool, principal.row.id, &write.role_id).await?;
-    let payload = role_payload(&role);
-    Ok(if inserted {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    Ok(document_response(role_payload(&role), inserted))
 }
 
 async fn role_list_response(
@@ -1067,6 +967,17 @@ async fn bearer_role_list_response(
     Ok(Json(list_response(params.pagination, &data, total)).into_response())
 }
 
+async fn update_role_response(
+    state: &AppState,
+    id: &str,
+    created_by: i64,
+    write: &RoleWrite,
+) -> Result<Response, ConsoleError> {
+    let pool = pool(state)?;
+    let (view, was_new) = upsert_role(&pool, id, write, created_by).await?;
+    Ok(document_response(role_payload(&view), was_new))
+}
+
 async fn role_show_response(state: &AppState, id: &str) -> Result<Response, ConsoleError> {
     let pool = pool(state)?;
     let view = role_view(&pool, id).await?;
@@ -1082,7 +993,7 @@ async fn role_delete_response(state: &AppState, id: &str) -> Result<Response, Co
 
 async fn grantee_grants(
     state: &AppState,
-    grantee: SubjectKind,
+    grantee: GranteeKind,
     id: &str,
     raw: &HashMap<String, String>,
     console: bool,
@@ -1093,21 +1004,15 @@ async fn grantee_grants(
         pagination,
         labels: BTreeMap::new(),
     };
-    let (grantee_id, source) = match grantee {
-        SubjectKind::Principal => {
-            let view = find_principal_by_oid(&pool, id).await?;
-            (view.row.id, grant_list_source(SubjectKind::Principal))
-        }
-        SubjectKind::Role => {
-            let view = find_role_by_oid(&pool, id).await?;
-            (view.row.id, grant_list_source(SubjectKind::Role))
-        }
-    };
+    let resolved = grantee.with(match grantee {
+        GranteeKind::Principal => find_principal_by_oid(&pool, id).await?.row.id,
+        GranteeKind::Role => find_role_by_oid(&pool, id).await?.row.id,
+    });
     let (rows, total) = list_rows::<centaur_console_db::areas::principals::GrantRow, _>(
         &pool,
         &params,
-        source,
-        |arguments| bind(arguments, grantee_id),
+        grant_list_source(grantee),
+        |arguments| bind(arguments, resolved.id()),
     )
     .await?;
     let mut data: Vec<GrantPayload> = Vec::with_capacity(rows.len());
@@ -1152,20 +1057,18 @@ async fn effective_grants_response(
 
 async fn permission_owner(
     pool: &sqlx::PgPool,
-    owner: OwnerKind,
+    owner: GranteeKind,
     id: &str,
-) -> Result<PermissionOwner, ConsoleError> {
-    Ok(match owner {
-        OwnerKind::Principal => {
-            PermissionOwner::Principal(find_principal_by_oid(pool, id).await?.row.id)
-        }
-        OwnerKind::Role => PermissionOwner::Role(find_role_by_oid(pool, id).await?.row.id),
-    })
+) -> Result<Grantee, ConsoleError> {
+    Ok(owner.with(match owner {
+        GranteeKind::Principal => find_principal_by_oid(pool, id).await?.row.id,
+        GranteeKind::Role => find_role_by_oid(pool, id).await?.row.id,
+    }))
 }
 
 async fn replace_permissions_response(
     state: &AppState,
-    owner: OwnerKind,
+    owner: GranteeKind,
     id: &str,
     write: &PermissionSetWrite,
 ) -> Result<Response, ConsoleError> {
@@ -1177,23 +1080,19 @@ async fn replace_permissions_response(
 
 async fn upsert_permission_response(
     state: &AppState,
-    owner: OwnerKind,
+    owner: GranteeKind,
     id: &str,
     write: &PermissionWrite,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(state)?;
     let owner = permission_owner(&pool, owner, id).await?;
     let (payload, inserted) = upsert_slack_channel_permission(&pool, owner, write).await?;
-    Ok(if inserted {
-        created_data(payload)
-    } else {
-        json_data(payload)
-    })
+    Ok(document_response(payload, inserted))
 }
 
 async fn destroy_permission_response(
     state: &AppState,
-    owner: OwnerKind,
+    owner: GranteeKind,
     id: &str,
     channel_id: &str,
 ) -> Result<Response, ConsoleError> {
@@ -1207,15 +1106,25 @@ async fn create_grant_response(
     state: &AppState,
     created_by: i64,
     write: &GrantWrite,
+    with_grantable: bool,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(state)?;
     let (row, inserted) = create_grant(&pool, write, created_by).await?;
-    let payload = grant_payload(&row)?;
-    Ok(if inserted {
+    let payload = if with_grantable {
+        console_grant_payload(&pool, &row).await?
+    } else {
+        grant_payload(&row)?
+    };
+    Ok(document_response(payload, inserted))
+}
+
+/// `201 Created` for a new record and `200 OK` for an existing one.
+fn document_response<T: Serialize>(payload: T, created: bool) -> Response {
+    if created {
         created_data(payload)
     } else {
         json_data(payload)
-    })
+    }
 }
 
 async fn show_grant_response(state: &AppState, id: &str) -> Result<Response, ConsoleError> {
@@ -1228,44 +1137,4 @@ async fn destroy_grant_response(state: &AppState, id: &str) -> Result<Response, 
     let pool = pool(state)?;
     destroy_grant(&pool, id).await?;
     Ok(no_content())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_sort_gate_accepts_only_the_name_order() {
-        let sort = |body: &str| {
-            let query: PrincipalListQuery = serde_json::from_str(body).expect("a typed query");
-            query
-                .validate()
-                .ok()
-                .map(|()| query.sort.as_deref().map(str::trim) == Some("name"))
-        };
-        assert_eq!(sort(r#"{}"#), Some(false));
-        assert_eq!(sort(r#"{"sort": ""}"#), Some(false));
-        assert_eq!(sort(r#"{"sort": "  "}"#), Some(false));
-        assert_eq!(sort(r#"{"sort": "name"}"#), Some(true));
-        // Rails strips the parameter before matching it.
-        assert_eq!(sort(r#"{"sort": " name "}"#), Some(true));
-        assert_eq!(sort(r#"{"sort": "bogus"}"#), None);
-    }
-
-    #[test]
-    fn the_exclude_owner_gate_accepts_only_the_two_selectors() {
-        let gate = |body: &str| {
-            let query: SlackChannelsQuery = serde_json::from_str(body).expect("a typed query");
-            query.validate().is_ok()
-        };
-        assert!(gate(r#"{}"#));
-        assert!(gate(r#"{"exclude_owner": ""}"#));
-        assert!(gate(r#"{"exclude_owner": "  "}"#));
-        assert!(gate(r#"{"exclude_owner": "principal:prn_abc"}"#));
-        assert!(gate(r#"{"exclude_owner": " role:role_abc "}"#));
-        // A known kind with an empty oid is a reference the database answers.
-        assert!(gate(r#"{"exclude_owner": "principal:"}"#));
-        assert!(!gate(r#"{"exclude_owner": "bogus"}"#));
-        assert!(!gate(r#"{"exclude_owner": "user:prn_abc"}"#));
-    }
 }

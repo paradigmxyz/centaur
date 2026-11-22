@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::models::{Credential, CredentialData};
 
 /// Withholds every credential that a strictly higher-priority credential
@@ -10,21 +8,24 @@ pub(crate) fn suppress(credentials: &mut Vec<Credential>) {
     // Equal priorities never withhold each other, so their order is irrelevant.
     let mut indexes: Vec<usize> = (0..credentials.len()).collect();
     indexes.sort_by_key(|&index| std::cmp::Reverse(credentials[index].priority));
-    let mut claimed: HashMap<String, Claimed> = HashMap::new();
+    let mut claimed: Vec<(Scope, String, i32)> = Vec::new();
     let mut suppressed = vec![false; credentials.len()];
     for index in indexes {
         let priority = credentials[index].priority;
         let claims = claims(&credentials[index]);
-        if claims.iter().any(|(scope, target)| {
-            claimed
-                .get(target)
-                .is_some_and(|claimed| claimed.stronger(scope, priority))
-        }) {
+        let stronger = claims.iter().any(|(scope, target)| {
+            claimed.iter().any(|(other, other_target, claimed)| {
+                other_target == target && *claimed > priority && overlaps(scope, other)
+            })
+        });
+        if stronger {
             suppressed[index] = true;
         } else {
-            for (scope, target) in claims {
-                claimed.entry(target).or_default().insert(scope, priority);
-            }
+            claimed.extend(
+                claims
+                    .into_iter()
+                    .map(|(scope, target)| (scope, target, priority)),
+            );
         }
     }
     let mut index = 0;
@@ -41,52 +42,6 @@ enum Scope {
     Cidr(String),
 }
 
-/// The claims accepted for one target. Exact hosts and CIDRs are looked up by
-/// value; wildcard hosts, which are rare, are scanned. Claims arrive strongest
-/// first, so the first priority recorded for a scope is its highest.
-#[derive(Default)]
-struct Claimed {
-    exact: HashMap<Scope, i32>,
-    wildcards: Vec<(String, i32)>,
-}
-
-impl Claimed {
-    fn stronger(&self, scope: &Scope, priority: i32) -> bool {
-        let above = |claimed: &i32| *claimed > priority;
-        let overlapping_wildcard = |host: &str| {
-            self.wildcards
-                .iter()
-                .any(|(pattern, claimed)| above(claimed) && hosts_overlap(pattern, host))
-        };
-        match scope {
-            Scope::Host(host) if is_wildcard(host) => {
-                overlapping_wildcard(host)
-                    || self.exact.iter().any(|(other, claimed)| {
-                        above(claimed)
-                            && matches!(other, Scope::Host(exact) if hosts_overlap(host, exact))
-                    })
-            }
-            Scope::Host(host) => {
-                self.exact.get(scope).is_some_and(above) || overlapping_wildcard(host)
-            }
-            Scope::Cidr(_) => self.exact.get(scope).is_some_and(above),
-        }
-    }
-
-    fn insert(&mut self, scope: Scope, priority: i32) {
-        match scope {
-            Scope::Host(host) if is_wildcard(&host) => self.wildcards.push((host, priority)),
-            scope => {
-                self.exact.entry(scope).or_insert(priority);
-            }
-        }
-    }
-}
-
-fn is_wildcard(host: &str) -> bool {
-    host.split('.').any(|label| label == "*")
-}
-
 fn label_count(host: &str) -> usize {
     host.split('.').count()
 }
@@ -101,6 +56,17 @@ fn hosts_overlap(a: &str, b: &str) -> bool {
         && a.split('.')
             .zip(b.split('.'))
             .all(|(x, y)| x == "*" || y == "*" || x == y)
+}
+
+/// Two claims on the same target conflict when their scopes overlap: host
+/// patterns by [`hosts_overlap`], CIDRs only when identical, and never across
+/// kinds.
+fn overlaps(a: &Scope, b: &Scope) -> bool {
+    match (a, b) {
+        (Scope::Host(a), Scope::Host(b)) => hosts_overlap(a, b),
+        (Scope::Cidr(a), Scope::Cidr(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The (scope, target) pairs a credential writes: each host or CIDR its rules
@@ -191,7 +157,6 @@ fn present(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use rand::{RngExt, SeedableRng, rngs::StdRng};
     use serde_json::{Value, json};
 
     use super::suppress;
@@ -528,108 +493,6 @@ mod tests {
             suppress(&mut credentials);
             let served: Vec<i64> = credentials.iter().map(|credential| credential.id).collect();
             assert_eq!(served, expected, "{name}");
-        }
-    }
-
-    /// The straightforward quadratic resolver `suppress` replaced: compare each
-    /// claim with every stronger claim on the same target.
-    fn suppress_by_scan(credentials: &[Credential]) -> Vec<i64> {
-        let mut indexes: Vec<usize> = (0..credentials.len()).collect();
-        indexes.sort_by_key(|&index| (-credentials[index].priority, -credentials[index].id));
-        let mut claimed: Vec<(super::Scope, String, i32)> = Vec::new();
-        let mut kept = Vec::new();
-        for index in indexes {
-            let credential = &credentials[index];
-            let claims = super::claims(credential);
-            let stronger = claims.iter().any(|(scope, target)| {
-                claimed.iter().any(|(other, other_target, priority)| {
-                    other_target == target
-                        && *priority > credential.priority
-                        && match (scope, other) {
-                            (super::Scope::Host(a), super::Scope::Host(b)) => {
-                                super::hosts_overlap(a, b)
-                            }
-                            (super::Scope::Cidr(a), super::Scope::Cidr(b)) => a == b,
-                            _ => false,
-                        }
-                })
-            });
-            if !stronger {
-                claimed.extend(
-                    claims
-                        .into_iter()
-                        .map(|(scope, target)| (scope, target, credential.priority)),
-                );
-                kept.push(credential.id);
-            }
-        }
-        kept.sort();
-        kept
-    }
-
-    #[test]
-    fn indexed_resolution_matches_a_full_scan() {
-        const HOSTS: &[&str] = &[
-            "api.example.com",
-            "API.example.com.",
-            "other.example.com",
-            "example.com",
-            "*.example.com",
-            "*",
-            "a.b.example.com",
-            "*.b.example.com",
-            "a.*.example.com",
-            "*.*.com",
-        ];
-        const HEADERS: &[&str] = &["Authorization", "X-Api-Token", "x-api-token", "X-Signature"];
-        // A fixed seed keeps failures reproducible.
-        let mut rng = StdRng::seed_from_u64(0x5eed);
-        let mut next = |bound: usize| rng.random_range(0..bound);
-        for round in 0..500 {
-            let credentials: Vec<Credential> = (0..1 + next(30))
-                .map(|id| {
-                    let header = HEADERS[next(HEADERS.len())];
-                    let mut credential = match next(5) {
-                        0 => inject(id as i64, 0, header, &[]),
-                        1 => static_with(
-                            id as i64,
-                            0,
-                            None,
-                            Some(json!({ "proxy_value": "P", "match_headers": [header] })),
-                            &[],
-                        ),
-                        2 => gcp(id as i64, 0, &[]),
-                        3 => oauth(id as i64, 0, Some(header), &[]),
-                        _ => static_with(
-                            id as i64,
-                            0,
-                            Some(json!({ "query_param": "key" })),
-                            None,
-                            &[],
-                        ),
-                    };
-                    credential.priority = [0, 0, 50, 100, 900][next(5)];
-                    credential.rules = (0..next(3))
-                        .map(|_| {
-                            let cidr = next(6) == 0;
-                            RequestRule {
-                                host: (!cidr).then(|| HOSTS[next(HOSTS.len())].to_owned()),
-                                cidr: cidr
-                                    .then(|| ["10.0.0.0/8", "10.1.0.0/16"][next(2)].to_owned()),
-                                http_methods: vec![],
-                                paths: vec![],
-                            }
-                        })
-                        .collect();
-                    credential
-                })
-                .collect();
-            let expected = suppress_by_scan(&credentials);
-            let mut actual = credentials;
-            suppress(&mut actual);
-            let mut actual: Vec<i64> = actual.iter().map(|credential| credential.id).collect();
-            actual.sort();
-            assert_eq!(actual, expected, "round {round}");
         }
     }
 }

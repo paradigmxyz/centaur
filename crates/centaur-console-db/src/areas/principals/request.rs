@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use super::rules;
 use super::{PRINCIPAL_RESERVED_PREFIX, ROLE_RESERVED_PREFIX};
+use crate::areas::secrets::SecretKind;
 
 /// Deserializes a present key as `Some(value)`, with `null` becoming
 /// `Some(None)`, so an omitted key stays `None`.
@@ -172,24 +173,35 @@ pub struct GrantWrite {
 }
 
 impl GrantWrite {
-    /// The non-blank value of one grant param, as Rails' `attrs[k].present?`.
-    pub fn get(&self, param: &str) -> Option<&str> {
-        let value = match param {
-            "principal_id" => &self.principal_id,
-            "role_id" => &self.role_id,
-            "static_secret_id" => &self.static_secret_id,
-            "gcp_auth_secret_id" => &self.gcp_auth_secret_id,
-            "gcp_id_token_secret_id" => &self.gcp_id_token_secret_id,
-            "aws_auth_secret_id" => &self.aws_auth_secret_id,
-            "oauth_token_secret_id" => &self.oauth_token_secret_id,
-            "pg_dsn_secret_id" => &self.pg_dsn_secret_id,
-            "hmac_secret_id" => &self.hmac_secret_id,
-            "ssh_key_secret_id" => &self.ssh_key_secret_id,
-            _ => return None,
-        };
+    /// Rails' `attrs[k].present?`: a trimmed, non-blank value.
+    fn present(value: &Option<String>) -> Option<&str> {
         value
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    /// The grantee reference: its `grants` column and the oid it names.
+    /// Principals are resolved before roles, as Rails resolves the grantee
+    /// before the grantable.
+    pub fn grantee(&self) -> Option<(&'static str, &str)> {
+        if let Some(oid) = Self::present(&self.principal_id) {
+            return Some(("principal_id", oid));
+        }
+        Self::present(&self.role_id).map(|oid| ("role_id", oid))
+    }
+
+    /// The non-blank reference of one grantable kind.
+    pub fn grantable(&self, kind: SecretKind) -> Option<&str> {
+        Self::present(match kind {
+            SecretKind::Static => &self.static_secret_id,
+            SecretKind::GcpAuth => &self.gcp_auth_secret_id,
+            SecretKind::GcpIdToken => &self.gcp_id_token_secret_id,
+            SecretKind::AwsAuth => &self.aws_auth_secret_id,
+            SecretKind::OauthToken => &self.oauth_token_secret_id,
+            SecretKind::PgDsn => &self.pg_dsn_secret_id,
+            SecretKind::Hmac => &self.hmac_secret_id,
+            SecretKind::SshKey => &self.ssh_key_secret_id,
+        })
     }
 }

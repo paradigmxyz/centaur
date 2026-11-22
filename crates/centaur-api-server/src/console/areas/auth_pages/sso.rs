@@ -7,13 +7,9 @@
 
 use std::time::Duration;
 
-use aes_gcm::{
-    Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit, Payload},
-};
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, HeaderValue, header::COOKIE},
+    http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -21,7 +17,7 @@ use centaur_console_db::{
     ConsoleUserStatus,
     areas::auth_pages::{SsoIdentity, link_or_provision_user},
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -30,12 +26,15 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 use super::{
-    APP_CSP, callback_url, console_config, console_env, console_unavailable,
-    login_redirect_with_csp, public_base_url, redirect,
+    APP_CSP, callback_url, console_config, console_env, login_redirect_with_csp, public_base_url,
 };
 use crate::{
     AppState,
-    console::{pages::login_error, request::ConsoleQuery, session_cookie::ConsoleSession},
+    console::{
+        pages::{landing_path, login_error, redirect},
+        request::ConsoleQuery,
+        session_cookie::{self, ConsoleSession},
+    },
     console_session::ConsoleSessionConfig,
 };
 
@@ -101,53 +100,34 @@ impl Provider {
         !matches!(self.kind, ProviderKind::Slack)
     }
 
-    fn authorization_endpoint(&self) -> Option<String> {
+    async fn endpoints(&self) -> Result<(String, String), ()> {
         match &self.kind {
-            ProviderKind::Google => Some("https://accounts.google.com/o/oauth2/v2/auth".to_owned()),
-            ProviderKind::Slack => Some("https://slack.com/openid/connect/authorize".to_owned()),
-            ProviderKind::Okta { .. } => None,
-        }
-    }
-
-    fn token_endpoint(&self) -> Option<String> {
-        match &self.kind {
-            ProviderKind::Google => Some("https://oauth2.googleapis.com/token".to_owned()),
-            ProviderKind::Slack => Some("https://slack.com/api/openid.connect.token".to_owned()),
-            ProviderKind::Okta { .. } => None,
-        }
-    }
-
-    fn client_auth_method(&self) -> Result<&'static str, ()> {
-        match self.kind {
-            ProviderKind::Google | ProviderKind::Slack => Ok("client_secret_post"),
-            ProviderKind::Okta { .. } => {
-                let method = console_env("OKTA_TOKEN_ENDPOINT_AUTH_METHOD")
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "client_secret_basic".to_owned());
-                match method.as_str() {
-                    "client_secret_basic" | "client_secret_post" => {
-                        Ok(if method == "client_secret_basic" {
-                            "client_secret_basic"
-                        } else {
-                            "client_secret_post"
-                        })
-                    }
-                    _ => Err(()),
-                }
-            }
-        }
-    }
-
-    async fn resolved_endpoints(&self) -> Result<(String, String), ()> {
-        match &self.kind {
+            ProviderKind::Google => Ok((
+                "https://accounts.google.com/o/oauth2/v2/auth".to_owned(),
+                "https://oauth2.googleapis.com/token".to_owned(),
+            )),
+            ProviderKind::Slack => Ok((
+                "https://slack.com/openid/connect/authorize".to_owned(),
+                "https://slack.com/api/openid.connect.token".to_owned(),
+            )),
             ProviderKind::Okta { issuer } => {
                 let metadata = okta_metadata(issuer).await?;
                 Ok((metadata.authorization_endpoint, metadata.token_endpoint))
             }
-            _ => Ok((
-                self.authorization_endpoint().ok_or(())?,
-                self.token_endpoint().ok_or(())?,
-            )),
+        }
+    }
+
+    fn client_auth_method(&self) -> Option<&'static str> {
+        match self.kind {
+            ProviderKind::Google | ProviderKind::Slack => Some("client_secret_post"),
+            ProviderKind::Okta { .. } => match console_env("OKTA_TOKEN_ENDPOINT_AUTH_METHOD")
+                .filter(|value| !value.trim().is_empty())
+                .as_deref()
+            {
+                None | Some("client_secret_basic") => Some("client_secret_basic"),
+                Some("client_secret_post") => Some("client_secret_post"),
+                Some(_) => None,
+            },
         }
     }
 }
@@ -189,16 +169,14 @@ pub(super) async fn start(
     Path(provider_key): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(config) = console_config(&state).cloned() else {
-        return console_unavailable();
-    };
+    let config = console_config(&state).clone();
     let Some(provider) = Provider::load(&provider_key) else {
         return login_redirect_with_csp(&config, &headers, UNAVAILABLE_ALERT, Vec::new(), APP_CSP);
     };
 
     let nonce = random_token(32);
     let code_verifier = provider.pkce().then(|| random_token(64));
-    let state_value = match sign_state(&provider, &nonce) {
+    let state_value = match sign_state(&config, &provider, &nonce) {
         Some(value) => value,
         None => {
             return login_redirect_with_csp(
@@ -210,7 +188,7 @@ pub(super) async fn start(
             );
         }
     };
-    let (authorization_endpoint, _) = match provider.resolved_endpoints().await {
+    let (authorization_endpoint, _) = match provider.endpoints().await {
         Ok(endpoints) => endpoints,
         Err(()) => {
             return login_redirect_with_csp(
@@ -227,7 +205,7 @@ pub(super) async fn start(
         ("client_id", provider.client_id.clone()),
         (
             "redirect_uri",
-            callback_url(&public_base_url(&headers), &provider.key),
+            callback_url(&public_base_url(&config), &provider.key),
         ),
         ("response_type", "code".to_owned()),
         ("scope", provider.scopes().to_owned()),
@@ -251,7 +229,7 @@ pub(super) async fn start(
     ) {
         cookies.push(cookie);
     }
-    redirect(&location, cookies, Some(APP_CSP))
+    redirect(&location, &cookies, Some(APP_CSP))
 }
 
 /// GET /auth/:provider/callback
@@ -261,27 +239,23 @@ pub(super) async fn callback(
     headers: HeaderMap,
     ConsoleQuery(params): ConsoleQuery<CallbackQuery>,
 ) -> Response {
-    let Some(config) = console_config(&state).cloned() else {
-        return console_unavailable();
-    };
+    let config = console_config(&state).clone();
     let Some(provider) = Provider::load(&provider_key) else {
-        return login_redirect_with_csp(&config, &headers, UNAVAILABLE_ALERT, Vec::new(), APP_CSP);
+        return failed(&config, &headers, UNAVAILABLE_ALERT);
     };
 
-    let state_value = params.state.clone().unwrap_or_default();
-    let state_payload = verify_state(&state_value);
+    let state_payload = verify_state(&config, params.state.as_deref().unwrap_or_default());
     let Some(state_payload) = state_payload else {
-        return login_redirect_with_csp(&config, &headers, INVALID_FLOW_ALERT, Vec::new(), APP_CSP);
+        return failed(&config, &headers, INVALID_FLOW_ALERT);
     };
     if state_payload.provider != provider.key {
-        return login_redirect_with_csp(&config, &headers, INVALID_FLOW_ALERT, Vec::new(), APP_CSP);
+        return failed(&config, &headers, INVALID_FLOW_ALERT);
     }
-    let flow = read_flow_cookie(&headers);
-    let Some(flow) = flow else {
-        return invalid_flow(&config, &headers);
+    let Some(flow) = read_flow_cookie(&config, &headers) else {
+        return failed(&config, &headers, INVALID_FLOW_ALERT);
     };
     if state_payload.nonce.as_bytes() != flow.nonce.as_bytes() {
-        return invalid_flow(&config, &headers);
+        return failed(&config, &headers, INVALID_FLOW_ALERT);
     }
 
     if params
@@ -289,39 +263,16 @@ pub(super) async fn callback(
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty())
     {
-        return login_redirect_with_csp(
-            &config,
-            &headers,
-            CANCELED_ALERT,
-            vec![clear_flow_cookie(&config)],
-            APP_CSP,
-        );
+        return failed(&config, &headers, CANCELED_ALERT);
     }
     let code = params.code.clone().unwrap_or_default();
-    let redirect_uri = callback_url(&public_base_url(&headers), &provider.key);
-    let auth_method = match provider.client_auth_method() {
-        Ok(method) => method,
-        Err(()) => {
-            return login_redirect_with_csp(
-                &config,
-                &headers,
-                EXCHANGE_FAILED_ALERT,
-                vec![clear_flow_cookie(&config)],
-                APP_CSP,
-            );
-        }
+    let redirect_uri = callback_url(&public_base_url(&config), &provider.key);
+    let Some(auth_method) = provider.client_auth_method() else {
+        return failed(&config, &headers, EXCHANGE_FAILED_ALERT);
     };
-    let (_, token_endpoint) = match provider.resolved_endpoints().await {
+    let (_, token_endpoint) = match provider.endpoints().await {
         Ok(endpoints) => endpoints,
-        Err(()) => {
-            return login_redirect_with_csp(
-                &config,
-                &headers,
-                EXCHANGE_FAILED_ALERT,
-                vec![clear_flow_cookie(&config)],
-                APP_CSP,
-            );
-        }
+        Err(()) => return failed(&config, &headers, EXCHANGE_FAILED_ALERT),
     };
     let result = match exchange_code(
         &provider,
@@ -334,37 +285,15 @@ pub(super) async fn callback(
     .await
     {
         Ok(result) => result,
-        Err(()) => {
-            return login_redirect_with_csp(
-                &config,
-                &headers,
-                EXCHANGE_FAILED_ALERT,
-                vec![clear_flow_cookie(&config)],
-                APP_CSP,
-            );
-        }
+        Err(()) => return failed(&config, &headers, EXCHANGE_FAILED_ALERT),
     };
     let identity = match provider.identity(&result, &flow.nonce).await {
         Ok(identity) => identity,
-        Err(()) => {
-            return login_redirect_with_csp(
-                &config,
-                &headers,
-                EXCHANGE_FAILED_ALERT,
-                vec![clear_flow_cookie(&config)],
-                APP_CSP,
-            );
-        }
+        Err(()) => return failed(&config, &headers, EXCHANGE_FAILED_ALERT),
     };
 
     if !sso_email_allowed(identity.email.as_deref()) {
-        return login_redirect_with_csp(
-            &config,
-            &headers,
-            DOMAIN_ALERT,
-            vec![clear_flow_cookie(&config)],
-            APP_CSP,
-        );
+        return failed(&config, &headers, DOMAIN_ALERT);
     }
     let bootstrap =
         identity.email_verified && identity.email.as_deref().is_some_and(bootstrap_admin);
@@ -376,23 +305,11 @@ pub(super) async fn callback(
         Ok(user) => user,
         Err(error) => {
             tracing::error!("console login provisioning failed: {error}");
-            return login_redirect_with_csp(
-                &config,
-                &headers,
-                PROVISION_FAILED_ALERT,
-                vec![clear_flow_cookie(&config)],
-                APP_CSP,
-            );
+            return failed(&config, &headers, PROVISION_FAILED_ALERT);
         }
     };
     if user.status == ConsoleUserStatus::Disabled {
-        return login_redirect_with_csp(
-            &config,
-            &headers,
-            DISABLED_ALERT,
-            vec![clear_flow_cookie(&config)],
-            APP_CSP,
-        );
+        return failed(&config, &headers, DISABLED_ALERT);
     }
 
     let previous = config.session_from_headers(&headers);
@@ -413,25 +330,19 @@ pub(super) async fn callback(
     if let Some(cookie) = config.cookie().set_cookie_header(&session) {
         cookies.push(cookie);
     }
-    redirect(&location, cookies, Some(APP_CSP))
+    redirect(&location, &cookies, Some(APP_CSP))
 }
 
-fn invalid_flow(config: &ConsoleSessionConfig, headers: &HeaderMap) -> Response {
+/// A callback failure: the flow cookie is always cleared and the login page
+/// renders the alert.
+fn failed(config: &ConsoleSessionConfig, headers: &HeaderMap, alert: &str) -> Response {
     login_redirect_with_csp(
         config,
         headers,
-        INVALID_FLOW_ALERT,
+        alert,
         vec![clear_flow_cookie(config)],
         APP_CSP,
     )
-}
-
-fn landing_path(user: &centaur_console_db::ConsoleUser) -> String {
-    if user.admin {
-        "/console/principals".to_owned()
-    } else {
-        "/console/integrations".to_owned()
-    }
 }
 
 impl Provider {
@@ -464,48 +375,36 @@ impl Provider {
     }
 }
 
-fn session_secret() -> String {
-    std::env::var("CONSOLE_SESSION_SECRET").unwrap_or_default()
-}
-
 fn random_token(bytes: usize) -> String {
     let mut buffer = vec![0; bytes];
     getrandom::fill(&mut buffer).expect("operating system randomness");
     URL_SAFE_NO_PAD.encode(buffer)
 }
 
-fn state_key() -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(session_secret().as_bytes());
-    digest.update(b"\0console-login-state-v1");
-    digest.finalize().into()
-}
+const STATE_KEY_LABEL: &[u8] = b"console-login-state-v1";
+const FLOW_KEY_LABEL: &[u8] = b"console-login-flow-v1";
+const FLOW_AAD: &[u8] = b"console_login_flow:v1";
 
-fn flow_key() -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(session_secret().as_bytes());
-    digest.update(b"\0console-login-flow-v1");
-    digest.finalize().into()
-}
-
-fn sign_state(provider: &Provider, nonce: &str) -> Option<String> {
+fn sign_state(config: &ConsoleSessionConfig, provider: &Provider, nonce: &str) -> Option<String> {
     let payload = StatePayload {
         provider: provider.key.clone(),
         nonce: nonce.to_owned(),
         exp: time::OffsetDateTime::now_utc().unix_timestamp() + STATE_TTL_SECONDS,
     };
     let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).ok()?);
-    let mut mac = Hmac::<Sha256>::new_from_slice(&state_key()).ok()?;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(&config.cookie().derive_key(STATE_KEY_LABEL)).ok()?;
     mac.update(encoded.as_bytes());
     let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     Some(format!("v1.{encoded}.{signature}"))
 }
 
-fn verify_state(value: &str) -> Option<StatePayload> {
+fn verify_state(config: &ConsoleSessionConfig, value: &str) -> Option<StatePayload> {
     let rest = value.strip_prefix("v1.")?;
     let (encoded, signature) = rest.split_once('.')?;
     let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&state_key()).ok()?;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(&config.cookie().derive_key(STATE_KEY_LABEL)).ok()?;
     mac.update(encoded.as_bytes());
     let expected = mac.finalize().into_bytes();
     if signature.len() != expected.len()
@@ -523,23 +422,11 @@ fn verify_state(value: &str) -> Option<StatePayload> {
 
 fn flow_cookie(config: &ConsoleSessionConfig, payload: &FlowPayload) -> Option<HeaderValue> {
     let plaintext = serde_json::to_vec(payload).ok()?;
-    let cipher = Aes256Gcm::new_from_slice(&flow_key()).ok()?;
-    let mut nonce = [0; 12];
-    getrandom::fill(&mut nonce).ok()?;
-    let ciphertext = cipher
-        .encrypt(
-            &Nonce::from(nonce),
-            Payload {
-                msg: &plaintext,
-                aad: b"console_login_flow:v1",
-            },
-        )
-        .ok()?;
-    let value = format!(
-        "v1.{}.{}",
-        URL_SAFE_NO_PAD.encode(nonce),
-        URL_SAFE_NO_PAD.encode(ciphertext)
-    );
+    let value = session_cookie::seal(
+        &config.cookie().derive_key(FLOW_KEY_LABEL),
+        FLOW_AAD,
+        &plaintext,
+    )?;
     let secure = if config.public_origin().starts_with("https://") {
         "; Secure"
     } else {
@@ -551,30 +438,10 @@ fn flow_cookie(config: &ConsoleSessionConfig, payload: &FlowPayload) -> Option<H
     .ok()
 }
 
-fn read_flow_cookie(headers: &HeaderMap) -> Option<FlowPayload> {
-    let raw = headers
-        .get(COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').find_map(|part| {
-                let (name, value) = part.trim().split_once('=')?;
-                (name == FLOW_COOKIE).then_some(value)
-            })
-        })?;
-    let rest = raw.strip_prefix("v1.")?;
-    let (nonce, ciphertext) = rest.split_once('.')?;
-    let nonce: [u8; 12] = URL_SAFE_NO_PAD.decode(nonce).ok()?.try_into().ok()?;
-    let ciphertext = URL_SAFE_NO_PAD.decode(ciphertext).ok()?;
-    let cipher = Aes256Gcm::new_from_slice(&flow_key()).ok()?;
-    let plaintext = cipher
-        .decrypt(
-            &Nonce::from(nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: b"console_login_flow:v1",
-            },
-        )
-        .ok()?;
+fn read_flow_cookie(config: &ConsoleSessionConfig, headers: &HeaderMap) -> Option<FlowPayload> {
+    let raw = session_cookie::cookie_value(headers, FLOW_COOKIE)?;
+    let plaintext =
+        session_cookie::open(&config.cookie().derive_key(FLOW_KEY_LABEL), FLOW_AAD, raw)?;
     serde_json::from_slice(&plaintext).ok()
 }
 
@@ -760,12 +627,7 @@ fn decode_claims(id_token: &str) -> Result<Map<String, Value>, ()> {
 }
 
 fn sso_email_allowed(email: Option<&str>) -> bool {
-    let domains = console_env("SSO_EMAIL_DOMAINS").unwrap_or_default();
-    let domains: Vec<String> = domains
-        .split(|character: char| character == ',' || character.is_whitespace())
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect();
+    let domains = env_list("SSO_EMAIL_DOMAINS");
     if domains.is_empty() {
         return true;
     }
@@ -779,11 +641,28 @@ fn sso_email_allowed(email: Option<&str>) -> bool {
 }
 
 fn bootstrap_admin(email: &str) -> bool {
-    console_env("BOOTSTRAP_ADMINS")
+    let email = email.trim().to_ascii_lowercase();
+    env_list("BOOTSTRAP_ADMINS")
+        .iter()
+        .any(|value| value == &email)
+}
+
+/// A comma/whitespace-separated environment list, trimmed and lowercased.
+fn env_list(name: &str) -> Vec<String> {
+    console_env(name)
         .unwrap_or_default()
         .split(|character: char| character == ',' || character.is_whitespace())
         .map(|value| value.trim().to_ascii_lowercase())
-        .any(|value| !value.is_empty() && value == email.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+/// Configured SSO providers in Console's display order.
+pub(super) fn providers() -> Vec<&'static str> {
+    ["google", "slack", "okta"]
+        .into_iter()
+        .filter(|key| Provider::load(key).is_some())
+        .collect()
 }
 
 #[derive(Debug)]

@@ -747,6 +747,7 @@ dependencies = [
  "garde",
  "getrandom 0.3.4",
  "hex",
+ "percent-encoding",
  "rand 0.10.3",
  "regex",
  "serde",

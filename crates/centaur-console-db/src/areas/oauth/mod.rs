@@ -18,8 +18,8 @@ mod flow;
 pub use flow::{
     EnrichmentCredential, FlowCredential, FlowCredentialWrite, FlowUpsertError, NewFlowCredential,
     WrappingRule, WrappingSecretSpec, apply_enriched_identity, credential_expires_at,
-    credential_for_app_subject, default_foreign_id_subject, find_enrichment_credential,
-    first_credential_for_app, upsert_flow_credential, upsert_wrapping_secret,
+    credential_for_app_subject, find_enrichment_credential, first_credential_for_app,
+    upsert_flow_credential, upsert_wrapping_secret,
 };
 
 use std::collections::HashMap;
@@ -42,6 +42,12 @@ use crate::write;
 pub const REFRESH_FLOOR_SECONDS: i64 = 60;
 /// `BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS`.
 pub const DEFAULT_EXPIRES_IN_SECONDS: i64 = 5 * 60;
+/// `BrokerCredential::DEFAULT_EARLY_REFRESH_SLACK_SECONDS`.
+pub const DEFAULT_EARLY_REFRESH_SLACK_SECONDS: i32 = 300;
+/// `BrokerCredential::DEFAULT_EARLY_REFRESH_FRACTION`.
+pub const DEFAULT_EARLY_REFRESH_FRACTION: f64 = 0.2;
+/// `BrokerCredential::DEFAULT_MAX_REFRESH_INTERVAL_SECONDS`.
+pub const DEFAULT_MAX_REFRESH_INTERVAL_SECONDS: i32 = 86_400;
 /// `BrokerCredential::PREQIN_TOKEN_ENDPOINT`.
 pub const PREQIN_TOKEN_ENDPOINT: &str = "https://api.preqin.com/connect/token";
 /// `Oauth::Disconnect::DEAD_REASON`.
@@ -490,10 +496,12 @@ pub async fn connections_for_user(
     .await?)
 }
 
-/// A new `broker_credentials` row written by the CRUD handlers. Every
+/// A `broker_credentials` row written by the CRUD handlers. Every
 /// `encrypts`-backed field holds the encrypted envelope the handler built with
-/// [`OauthEncryption`], matching Active Record.
-pub struct NewBrokerCredential {
+/// [`OauthEncryption`], matching Active Record. `id` selects an update; an
+/// absent `id` inserts and uses `created_by_id`.
+pub struct BrokerCredentialWrite {
+    pub id: Option<i64>,
     pub foreign_id: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -520,7 +528,7 @@ pub struct NewBrokerCredential {
 
 pub async fn insert_broker_credential(
     pool: &PgPool,
-    credential: &NewBrokerCredential,
+    credential: &BrokerCredentialWrite,
 ) -> Result<i64> {
     let sql = write::insert_returning_sql(
         BrokerCredentialModel::TABLE,
@@ -577,30 +585,6 @@ pub async fn insert_broker_credential(
 /// The handler merges the existing row with the body (so omitted and explicit
 /// null values behave like Rails' strong parameters) and hands the complete
 /// result here; encrypted fields are already ciphertext.
-pub struct BrokerCredentialWrite {
-    pub foreign_id: Option<String>,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub labels: Map<String, Value>,
-    pub grant: String,
-    pub token_endpoint: String,
-    pub scopes: Vec<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub api_key: Option<String>,
-    pub token_endpoint_headers: Option<String>,
-    pub refresh_token: Option<String>,
-    pub early_refresh_fraction: f64,
-    pub early_refresh_slack_seconds: i32,
-    pub max_refresh_interval_seconds: i32,
-    pub refresh_timeout_seconds: i32,
-    /// A freshly supplied write-only value puts the credential back in the
-    /// "due now" state, exactly like `apply_initial_values`.
-    pub reset_refresh_state: bool,
-}
-
 pub async fn update_broker_credential(
     pool: &PgPool,
     id: i64,

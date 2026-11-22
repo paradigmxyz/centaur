@@ -90,34 +90,33 @@ pub(super) async fn enrich_after_connect(pool: &PgPool, credential_id: i64) -> R
 /// payload failure returns whatever was learned so far, like the job's rescue.
 async fn slack_profile(access_token: &str, subject: &str, scopes: &[String]) -> SlackProfile {
     let mut profile = SlackProfile::default();
-    if let Err(error) = lookup_slack_profile(access_token, subject, scopes, &mut profile).await {
-        tracing::debug!(error = %error, "slack oauth profile lookup failed");
-    }
-    profile
-}
-
-async fn lookup_slack_profile(
-    access_token: &str,
-    subject: &str,
-    scopes: &[String],
-    profile: &mut SlackProfile,
-) -> Result<(), reqwest::Error> {
-    profile.name = auth_test_user(access_token).await?;
+    profile.name = match auth_test_user(access_token).await {
+        Ok(name) => name,
+        Err(error) => {
+            tracing::debug!(error = %error, "slack oauth profile lookup failed");
+            return profile;
+        }
+    };
     if !scopes.iter().any(|scope| scope == "users:read") {
-        return Ok(());
+        return profile;
     }
 
-    let Some(info) = slack_api(
+    let info = match slack_api(
         USERS_INFO_PATH,
         access_token,
         Some(vec![("user".to_owned(), subject.to_owned())]),
     )
-    .await?
-    else {
-        return Ok(());
+    .await
+    {
+        Ok(Some(info)) => info,
+        Ok(None) => return profile,
+        Err(error) => {
+            tracing::debug!(error = %error, "slack oauth profile lookup failed");
+            return profile;
+        }
     };
     if info.get("ok") != Some(&Value::Bool(true)) {
-        return Ok(());
+        return profile;
     }
     let user = info.get("user").and_then(Value::as_object);
     let user_profile = user
@@ -131,7 +130,7 @@ async fn lookup_slack_profile(
     if scopes.iter().any(|scope| scope == "users:read.email") {
         profile.email = present_string(user_profile.and_then(|profile| profile.get("email")));
     }
-    Ok(())
+    profile
 }
 
 /// `auth_test_user`: Slack's `auth.test` username, or nil unless the call

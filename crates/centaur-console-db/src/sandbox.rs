@@ -1,9 +1,9 @@
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::{Result, decode_oid};
 
 /// The proxy fields sandbox entitlement JWTs are checked against.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct ConsoleProxy {
     pub id: i64,
     pub name: String,
@@ -23,19 +23,12 @@ pub async fn find_console_proxy(pool: &PgPool, oid: &str) -> Result<Option<Conso
     let Some(id) = decode_oid("prx", oid) else {
         return Ok(None);
     };
-    let row = sqlx::query("SELECT id, name, principal_id FROM proxies WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    row.as_ref()
-        .map(|row| {
-            Ok(ConsoleProxy {
-                id: row.try_get("id")?,
-                name: row.try_get("name")?,
-                principal_id: row.try_get("principal_id")?,
-            })
-        })
-        .transpose()
+    Ok(
+        sqlx::query_as("SELECT id, name, principal_id FROM proxies WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 /// Whether `team_id` belongs to a workspace the Slack bot itself is in. Used

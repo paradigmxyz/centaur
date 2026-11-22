@@ -10,14 +10,13 @@
 //!   changes: [`apply_for_credential`] (Rails: `BrokerCredential`, `StaticSecret`)
 //! - when validating a direct grant: [`connection_owner`] (Rails: `Grant`)
 
-use std::collections::HashMap;
-
 use serde_json::Value;
 use sqlx::PgConnection;
 use time::PrimitiveDateTime;
 
 use crate::Result;
 use crate::invalidate::{self, Scope};
+use crate::validation::rules::matches;
 
 const USER_KIND: &str = "user";
 const CONSOLE_USER_KIND: &str = "console_user";
@@ -42,12 +41,6 @@ const PROVIDERS: [&str; 10] = [
 
 const SLACK_USER_ID: &str = r"^(?:[UW][A-Z0-9]{8,}|USLACK)$";
 const SLACK_TEAM_ID: &str = r"^[TE][A-Z0-9]{8,}$";
-
-fn matches(pattern: &str, value: &str) -> bool {
-    regex::Regex::new(pattern)
-        .expect("static regex compiles")
-        .is_match(value)
-}
 
 fn normalize(value: Option<&str>) -> Option<String> {
     value
@@ -282,21 +275,16 @@ async fn owner_matches(
     Ok(owner_slack_identity(conn, owner_id).await?.as_ref() == Some(&identity))
 }
 
-async fn slack_team_matches(
-    conn: &mut PgConnection,
-    principal: &Principal,
-    credential: &Credential,
-) -> Result<bool> {
+fn slack_team_matches(principal: &Principal, credential: &Credential) -> bool {
     let principal_team = normalize(principal.slack_team_id.as_deref());
     let credential_team = credential.team();
     if principal.console_user() && principal_team.is_none() {
-        return Ok(true);
+        return true;
     }
     if principal_team.is_none() && credential_team.is_none() {
-        return Ok(true);
+        return true;
     }
-    let _ = conn;
-    Ok(principal_team.is_some() && principal_team == credential_team)
+    principal_team.is_some() && principal_team == credential_team
 }
 
 async fn matching_credential(
@@ -310,9 +298,7 @@ async fn matching_credential(
     if credential.owner_only {
         return connection_owner_for(conn, principal, credential).await;
     }
-    if credential.provider == SLACK_PROVIDER
-        && !slack_team_matches(conn, principal, credential).await?
-    {
+    if credential.provider == SLACK_PROVIDER && !slack_team_matches(principal, credential) {
         return Ok(false);
     }
     let emails = principal_emails(conn, principal).await?;
@@ -515,23 +501,13 @@ async fn credentials_for_principal(
         .await?;
 
         if principal.console_user() {
-            let mut candidates: Vec<Credential> = Vec::new();
-            if let Some(user_id) = principal.console_user_id {
-                candidates.extend(
-                    credentials
-                        .iter()
-                        .filter(|credential| credential.created_by_id == Some(user_id))
-                        .cloned(),
-                );
-            }
-            candidates.extend(credentials.iter().cloned());
             let mut selected = Vec::new();
-            for credential in candidates {
-                if matching_credential(conn, principal, &credential).await? {
-                    selected.push(credential);
+            for credential in &credentials {
+                if matching_credential(conn, principal, credential).await? {
+                    selected.push(credential.clone());
                 }
             }
-            matched.extend(dedupe(selected));
+            matched.extend(selected);
             continue;
         }
 
@@ -639,6 +615,3 @@ pub async fn connection_owner(
     };
     connection_owner_for(conn, &principal, &credential).await
 }
-
-#[allow(dead_code)]
-fn _unused(_: HashMap<i64, Option<(String, String)>>) {}

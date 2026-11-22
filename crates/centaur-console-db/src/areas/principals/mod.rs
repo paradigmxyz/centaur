@@ -17,24 +17,25 @@ mod request;
 mod rules;
 mod write;
 
+pub use crate::areas::secrets::Grantee;
 pub use grant::{
-    EffectiveGrantPayload, GrantPayload, GrantableKind, GrantableSummary, GrantableSummaryPayload,
-    GranteeRef, console_grant_payload, console_show_grant, create_grant, destroy_grant,
-    effective_grants, grant_payload, list_grants, show_grant,
+    EffectiveGrantPayload, GrantPayload, GrantableSummary, GrantableSummaryPayload,
+    console_grant_payload, console_show_grant, create_grant, destroy_grant, effective_grants,
+    grant_payload, list_grants, show_grant,
 };
 pub use read::{
     ConsolePrincipalPayload, PrincipalPayload, PrincipalView, RolePayload, RoleView,
     SlackChannelOption, SlackChannelOptionPayload, console_principal_payload,
     find_principal_by_foreign_id, find_principal_by_oid, find_role_by_foreign_id, find_role_by_oid,
-    list_principals_for_slack_channel, load_principal_view, load_role_view, permission_channel_ids,
-    principal_payload, principal_roles, role_payload, slack_catalog_error, slack_channel_option,
-    slack_channels,
+    load_principal_view, load_role_view, permission_channel_ids, principal_payload,
+    principal_roles, role_payload, slack_catalog_configured, slack_catalog_error,
+    slack_channel_option, slack_channels,
 };
 pub use request::{
     AssignRole, GrantWrite, PermissionSetWrite, PermissionWrite, PrincipalWrite, RoleWrite,
 };
 pub use write::{
-    PermissionOwner, assign_role, create_principal, create_role, delete_principal, delete_role,
+    assign_role, create_principal, create_role, delete_principal, delete_role,
     destroy_slack_channel_permission, principal_roles_payload, remove_role,
     replace_slack_channel_permissions, upsert_principal, upsert_role,
     upsert_slack_channel_permission,
@@ -47,6 +48,7 @@ use serde_json::Value;
 use time::PrimitiveDateTime;
 
 use crate::FieldErrors;
+use crate::areas::secrets::SecretKind;
 use crate::model::ConsoleModel;
 
 /// A failure in the principals area, carrying the HTTP meaning the Rails
@@ -203,84 +205,17 @@ pub struct GrantRow {
 
 impl GrantRow {
     /// The first non-null grantable column, in the model's association order.
-    pub fn grantable(&self) -> Option<(GrantableKind, i64)> {
-        GrantableKind::ALL
+    pub fn grantable(&self) -> Option<(SecretKind, i64)> {
+        SecretKind::ALL
             .into_iter()
             .find_map(|kind| kind.id_in(self).map(|id| (kind, id)))
     }
 
-    pub fn grantee(&self) -> Option<(&'static str, i64)> {
+    pub fn grantee(&self) -> Option<Grantee> {
         if let Some(id) = self.principal_id {
-            return Some(("principal_id", id));
+            return Some(Grantee::Principal(id));
         }
-        self.role_id.map(|id| ("role_id", id))
-    }
-}
-
-impl GrantableKind {
-    pub fn id_in(self, grant: &GrantRow) -> Option<i64> {
-        match self {
-            Self::Static => grant.static_secret_id,
-            Self::GcpAuth => grant.gcp_auth_secret_id,
-            Self::GcpIdToken => grant.gcp_id_token_secret_id,
-            Self::AwsAuth => grant.aws_auth_secret_id,
-            Self::OauthToken => grant.oauth_token_secret_id,
-            Self::PgDsn => grant.pg_dsn_secret_id,
-            Self::Hmac => grant.hmac_secret_id,
-            Self::SshKey => grant.ssh_key_secret_id,
-        }
-    }
-
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::Static => "static_secret_id",
-            Self::GcpAuth => "gcp_auth_secret_id",
-            Self::GcpIdToken => "gcp_id_token_secret_id",
-            Self::AwsAuth => "aws_auth_secret_id",
-            Self::OauthToken => "oauth_token_secret_id",
-            Self::PgDsn => "pg_dsn_secret_id",
-            Self::Hmac => "hmac_secret_id",
-            Self::SshKey => "ssh_key_secret_id",
-        }
-    }
-
-    pub fn table(self) -> &'static str {
-        self.model_table()
-    }
-
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::Static => "static",
-            Self::GcpAuth => "gcp_auth",
-            Self::GcpIdToken => "gcp_id_token",
-            Self::AwsAuth => "aws_auth",
-            Self::OauthToken => "oauth_token",
-            Self::PgDsn => "pg_dsn",
-            Self::Hmac => "hmac",
-            Self::SshKey => "ssh_key",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Static => "Static",
-            Self::GcpAuth => "GCP Auth",
-            Self::GcpIdToken => "GCP ID Token",
-            Self::AwsAuth => "AWS Auth",
-            Self::OauthToken => "OAuth Token",
-            Self::PgDsn => "Postgres DSN",
-            Self::Hmac => "HMAC",
-            Self::SshKey => "SSH key",
-        }
-    }
-
-    pub fn oid_prefix(self) -> &'static str {
-        self.model_oid_prefix()
-    }
-
-    /// The Rails model name a missing secret renders.
-    pub fn model_name(self) -> &'static str {
-        self.model_name_descriptor()
+        self.role_id.map(Grantee::Role)
     }
 }
 
@@ -436,59 +371,6 @@ pub fn like_pattern(query: &str) -> String {
     }
     pattern.push('%');
     pattern
-}
-
-impl GrantableKind {
-    fn model_table(self) -> &'static str {
-        use crate::model::{
-            AwsAuthSecret, ConsoleModel, GcpAuthSecret, GcpIdTokenSecret, HmacSecret,
-            OauthTokenSecret, PgDsnSecret, SshKeySecret, StaticSecret,
-        };
-        match self {
-            Self::Static => StaticSecret::TABLE,
-            Self::GcpAuth => GcpAuthSecret::TABLE,
-            Self::GcpIdToken => GcpIdTokenSecret::TABLE,
-            Self::AwsAuth => AwsAuthSecret::TABLE,
-            Self::OauthToken => OauthTokenSecret::TABLE,
-            Self::PgDsn => PgDsnSecret::TABLE,
-            Self::Hmac => HmacSecret::TABLE,
-            Self::SshKey => SshKeySecret::TABLE,
-        }
-    }
-
-    fn model_oid_prefix(self) -> &'static str {
-        use crate::model::{
-            AwsAuthSecret, ConsoleModel, GcpAuthSecret, GcpIdTokenSecret, HmacSecret,
-            OauthTokenSecret, PgDsnSecret, SshKeySecret, StaticSecret,
-        };
-        match self {
-            Self::Static => StaticSecret::OID_PREFIX,
-            Self::GcpAuth => GcpAuthSecret::OID_PREFIX,
-            Self::GcpIdToken => GcpIdTokenSecret::OID_PREFIX,
-            Self::AwsAuth => AwsAuthSecret::OID_PREFIX,
-            Self::OauthToken => OauthTokenSecret::OID_PREFIX,
-            Self::PgDsn => PgDsnSecret::OID_PREFIX,
-            Self::Hmac => HmacSecret::OID_PREFIX,
-            Self::SshKey => SshKeySecret::OID_PREFIX,
-        }
-    }
-
-    fn model_name_descriptor(self) -> &'static str {
-        use crate::model::{
-            AwsAuthSecret, ConsoleModel, GcpAuthSecret, GcpIdTokenSecret, HmacSecret,
-            OauthTokenSecret, PgDsnSecret, SshKeySecret, StaticSecret,
-        };
-        match self {
-            Self::Static => StaticSecret::NAME,
-            Self::GcpAuth => GcpAuthSecret::NAME,
-            Self::GcpIdToken => GcpIdTokenSecret::NAME,
-            Self::AwsAuth => AwsAuthSecret::NAME,
-            Self::OauthToken => OauthTokenSecret::NAME,
-            Self::PgDsn => PgDsnSecret::NAME,
-            Self::Hmac => HmacSecret::NAME,
-            Self::SshKey => SshKeySecret::NAME,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -11,9 +11,7 @@ mod proxies;
 mod system_settings;
 mod users;
 
-use axum::Router;
-
-use crate::{AppState, console::guard::GuardedRoutes};
+use crate::console::guard::GuardedRoutes;
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
 pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
@@ -26,9 +24,4 @@ pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
 pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = api_keys::bearer(routes);
     proxies::bearer(routes)
-}
-
-/// Server-rendered pages and other top-level routes (absolute paths).
-pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
-    router
 }

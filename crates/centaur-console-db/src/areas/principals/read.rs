@@ -6,8 +6,8 @@ use sqlx::PgPool;
 use time::PrimitiveDateTime;
 
 use super::{
-    PERMISSION_COLUMNS, PRINCIPAL_COLUMNS, PrincipalRow, ROLE_COLUMNS, Result, RoleRow,
-    like_pattern, merge_permissions, role_summary,
+    PERMISSION_COLUMNS, PrincipalRow, ROLE_COLUMNS, Result, RoleRow, like_pattern,
+    merge_permissions, role_summary,
 };
 use crate::model::{self, ConsoleModel};
 
@@ -322,18 +322,18 @@ pub async fn slack_channels(
         .fetch_all(pool)
         .await?
     } else {
+        // Each placeholder is the position of the value bound below, so the
+        // conditions and the binds stay in one order.
+        let excluded = !exclude_channel_ids.is_empty();
+        let search = q.map(str::trim).filter(|search| !search.is_empty());
         let mut conditions = vec!["active = true".to_owned(), "archived = false".to_owned()];
-        let mut bindings: Vec<String> = Vec::new();
-        if !exclude_channel_ids.is_empty() {
-            bindings.push("excluded".to_owned());
-            conditions.push(format!("channel_id <> ALL(${}::text[])", bindings.len()));
-            // Bind the array separately below; keep the placeholder position.
+        if excluded {
+            conditions.push("channel_id <> ALL($1::text[])".to_owned());
         }
-        if let Some(query) = q.map(str::trim).filter(|query| !query.is_empty()) {
-            bindings.push(like_pattern(query));
+        if search.is_some() {
+            let position = 1 + usize::from(excluded);
             conditions.push(format!(
-                "(name ILIKE ${0} OR channel_id ILIKE ${0})",
-                bindings.len()
+                "(name ILIKE ${position} OR channel_id ILIKE ${position})"
             ));
         }
         let query_sql = format!(
@@ -342,14 +342,11 @@ pub async fn slack_channels(
             conditions.join(" AND ")
         );
         let mut query = sqlx::query_as(&query_sql);
-        let mut exclusion_bound = false;
-        for binding in &bindings {
-            if binding == "excluded" && !exclusion_bound {
-                query = query.bind(exclude_channel_ids.to_vec());
-                exclusion_bound = true;
-            } else {
-                query = query.bind(binding);
-            }
+        if excluded {
+            query = query.bind(exclude_channel_ids.to_vec());
+        }
+        if let Some(search) = search {
+            query = query.bind(like_pattern(search));
         }
         query.fetch_all(pool).await?
     };
@@ -384,24 +381,4 @@ pub async fn permission_channel_ids(
         _ => Vec::new(),
     };
     Ok(rows)
-}
-
-/// Principals bound to one Slack channel, in id order (`Sandbox::Admin`'s
-/// `slack_channel_id` filter).
-pub async fn list_principals_for_slack_channel(
-    pool: &PgPool,
-    channel_id: &str,
-) -> Result<Vec<PrincipalView>> {
-    let rows: Vec<PrincipalRow> = sqlx::query_as(&format!(
-        "SELECT {PRINCIPAL_COLUMNS} FROM principals \
-         WHERE slack_channel_id = $1 ORDER BY id"
-    ))
-    .bind(channel_id)
-    .fetch_all(pool)
-    .await?;
-    let mut views = Vec::with_capacity(rows.len());
-    for row in rows {
-        views.push(principal_view_for(pool, row).await?);
-    }
-    Ok(views)
 }

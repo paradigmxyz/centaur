@@ -12,7 +12,7 @@ use time::PrimitiveDateTime;
 
 use super::{OauthApp, OauthEncryption};
 use crate::areas::secrets::SecretKind;
-use crate::invalidate::{self, Scope, SecretChanges};
+use crate::invalidate::{self, Scope};
 use crate::model::{
     BrokerCredential as BrokerCredentialModel, ConsoleModel, OauthApp as OauthAppModel,
     RequestRule as RequestRuleModel, SecretSource as SecretSourceModel,
@@ -38,9 +38,11 @@ type Result<T> = std::result::Result<T, FlowUpsertError>;
 
 impl From<sqlx::Error> for FlowUpsertError {
     fn from(error: sqlx::Error) -> Self {
-        match error.as_database_error().and_then(|error| error.code()) {
-            Some(code) if code == "23505" => Self::UniqueViolation,
-            _ => Self::Console(crate::Error::Database(error)),
+        let error = crate::Error::Database(error);
+        if error.is_unique_violation() {
+            Self::UniqueViolation
+        } else {
+            Self::Console(error)
         }
     }
 }
@@ -107,12 +109,6 @@ pub struct FlowCredential {
     #[sqlx(json)]
     pub labels: Map<String, Value>,
     pub token_endpoint: String,
-}
-
-impl FlowCredential {
-    pub fn oid(&self) -> String {
-        BrokerCredentialModel::oid(self.id)
-    }
 }
 
 /// The credential and wrapper secret `Oauth::EnrichCredentialIdentityJob`
@@ -200,11 +196,10 @@ pub async fn apply_enriched_identity(
                 // change bumps each grantee once.
                 invalidate::invalidate(
                     &mut tx,
-                    Scope::secret_write(
-                        SecretKind::Static,
-                        secret_id,
-                        SecretChanges::replaced(true, 0, 0, 0, 0),
-                    ),
+                    Scope::Secret {
+                        kind: SecretKind::Static,
+                        id: secret_id,
+                    },
                 )
                 .await?;
                 crate::areas::reconciliation::apply_for_credential(&mut tx, credential.id).await?;
@@ -523,13 +518,6 @@ pub fn credential_expires_at(
     })
 }
 
-/// Rails' `foreign_id_subject` default, before any provider-specific mapping:
-/// the subject lowercased. Non-URL-safe characters are left to the model's
-/// format validation, which rejects the consent.
-pub fn default_foreign_id_subject(subject: &str) -> String {
-    subject.to_lowercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,10 +535,5 @@ mod tests {
         );
         assert_eq!(credential_expires_at(Some(0), false, now), None);
         assert_eq!(credential_expires_at(None, false, now), None);
-    }
-
-    #[test]
-    fn foreign_id_subjects_are_lowercased() {
-        assert_eq!(default_foreign_id_subject("AB-12"), "ab-12");
     }
 }

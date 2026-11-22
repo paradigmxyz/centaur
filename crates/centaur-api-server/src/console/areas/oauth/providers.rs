@@ -6,7 +6,6 @@
 //! resolve a stable account identity after the exchange. Everything else
 //! (state signing, PKCE, the upsert) is provider-agnostic.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use centaur_console_db::areas::oauth::{OauthApp, WrappingRule};
@@ -21,28 +20,17 @@ use super::http::{self, HttpResponse};
 pub(crate) struct ExchangeError {
     pub(crate) stage: &'static str,
     pub(crate) code: Option<String>,
-    pub(crate) status: Option<u16>,
-    pub(crate) message: String,
 }
 
 impl ExchangeError {
-    pub(crate) fn new(message: impl Into<String>, stage: &'static str) -> Self {
-        Self {
-            stage,
-            code: None,
-            status: None,
-            message: message.into(),
-        }
+    pub(crate) fn new(stage: &'static str) -> Self {
+        Self { stage, code: None }
     }
 
-    pub(crate) fn with_code(
-        message: impl Into<String>,
-        stage: &'static str,
-        code: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn with_code(stage: &'static str, code: impl Into<String>) -> Self {
         Self {
             code: Some(code.into()),
-            ..Self::new(message, stage)
+            ..Self::new(stage)
         }
     }
 
@@ -124,6 +112,122 @@ pub(crate) const CUSTOM_OPTIONAL_CONFIG_KEYS: [&str; 2] =
 const MERCATOR_ORIGIN: &str = "https://mercator.sh";
 const MERCATOR_SCOPE: &str = "mercator:tools";
 
+struct ProviderSpec {
+    key: &'static str,
+    display_name: &'static str,
+    authorization_endpoint: Option<&'static str>,
+    token_endpoint: Option<&'static str>,
+    api_hosts: &'static [&'static str],
+    identity_scopes: &'static [&'static str],
+    required_scopes: &'static [&'static str],
+    separator: &'static str,
+}
+
+const PROVIDERS: [ProviderSpec; 10] = [
+    ProviderSpec {
+        key: "attio",
+        display_name: "Attio",
+        authorization_endpoint: Some("https://app.attio.com/authorize"),
+        token_endpoint: Some("https://app.attio.com/oauth/token"),
+        api_hosts: &["api.attio.com"],
+        identity_scopes: &[],
+        required_scopes: &[],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: CUSTOM_KEY,
+        display_name: "Custom",
+        authorization_endpoint: None,
+        token_endpoint: None,
+        api_hosts: &[],
+        identity_scopes: &[],
+        required_scopes: &[],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: "github",
+        display_name: "GitHub",
+        authorization_endpoint: Some("https://github.com/login/oauth/authorize"),
+        token_endpoint: Some("https://github.com/login/oauth/access_token"),
+        api_hosts: &[],
+        identity_scopes: &[],
+        required_scopes: &[],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: "google",
+        display_name: "Google",
+        authorization_endpoint: Some("https://accounts.google.com/o/oauth2/v2/auth"),
+        token_endpoint: Some("https://oauth2.googleapis.com/token"),
+        api_hosts: &["*.googleapis.com"],
+        identity_scopes: &["openid", "https://www.googleapis.com/auth/userinfo.email"],
+        required_scopes: &[],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: "granola",
+        display_name: "Granola",
+        authorization_endpoint: Some("https://mcp-auth.granola.ai/oauth2/authorize"),
+        token_endpoint: Some("https://mcp-auth.granola.ai/oauth2/token"),
+        api_hosts: &["mcp.granola.ai"],
+        identity_scopes: &["openid", "email", "profile", "offline_access"],
+        required_scopes: &[],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: "linear",
+        display_name: "Linear",
+        authorization_endpoint: Some("https://linear.app/oauth/authorize"),
+        token_endpoint: Some("https://api.linear.app/oauth/token"),
+        api_hosts: &["api.linear.app", "uploads.linear.app", "mcp.linear.app"],
+        identity_scopes: &[],
+        required_scopes: &[],
+        separator: ",",
+    },
+    ProviderSpec {
+        key: "mercator",
+        display_name: "Mercator",
+        authorization_endpoint: Some("https://mercator.sh/authorize"),
+        token_endpoint: Some("https://mercator.sh/oauth/token"),
+        api_hosts: &["mercator.sh"],
+        identity_scopes: &[],
+        required_scopes: &[MERCATOR_SCOPE],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: "microsoft",
+        display_name: "Microsoft",
+        authorization_endpoint: Some(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        ),
+        token_endpoint: Some("https://login.microsoftonline.com/common/oauth2/v2.0/token"),
+        api_hosts: &["graph.microsoft.com"],
+        identity_scopes: &["openid", "email", "profile", "offline_access"],
+        required_scopes: &[],
+        separator: " ",
+    },
+    ProviderSpec {
+        key: SLACK_KEY,
+        display_name: "Slack",
+        authorization_endpoint: Some("https://slack.com/oauth/v2/authorize"),
+        token_endpoint: None,
+        api_hosts: &["slack.com"],
+        identity_scopes: &[],
+        required_scopes: &["search:read"],
+        separator: ",",
+    },
+    ProviderSpec {
+        key: "zoom",
+        display_name: "Zoom",
+        authorization_endpoint: Some("https://zoom.us/oauth/authorize"),
+        token_endpoint: Some("https://zoom.us/oauth/token"),
+        api_hosts: &["api.zoom.us"],
+        identity_scopes: &[],
+        required_scopes: &["user:read:user"],
+        separator: " ",
+    },
+];
+
 /// A configured provider strategy. The custom provider carries the app's
 /// `provider_config`; every other strategy is stateless.
 #[derive(Clone, Debug)]
@@ -175,25 +279,22 @@ impl Provider {
         self.kind
     }
 
+    fn spec(&self) -> Option<&'static ProviderSpec> {
+        PROVIDERS.iter().find(|spec| spec.key == self.kind)
+    }
+
     pub(crate) fn display_name(&self) -> String {
-        match self.kind {
-            CUSTOM_KEY => self
+        if self.kind == CUSTOM_KEY {
+            return self
                 .custom
                 .as_ref()
                 .map(|custom| custom.slug.clone())
                 .filter(|slug| !slug.is_empty())
-                .unwrap_or_else(|| "Custom".to_owned()),
-            "attio" => "Attio".to_owned(),
-            "github" => "GitHub".to_owned(),
-            "google" => "Google".to_owned(),
-            "granola" => "Granola".to_owned(),
-            "linear" => "Linear".to_owned(),
-            "mercator" => "Mercator".to_owned(),
-            "microsoft" => "Microsoft".to_owned(),
-            "slack" => "Slack".to_owned(),
-            "zoom" => "Zoom".to_owned(),
-            _ => self.kind.to_owned(),
+                .unwrap_or_else(|| "Custom".to_owned());
         }
+        self.spec()
+            .map(|spec| spec.display_name.to_owned())
+            .unwrap_or_else(|| self.kind.to_owned())
     }
 
     fn config_str(&self, key: &str) -> Option<String> {
@@ -206,39 +307,24 @@ impl Provider {
     }
 
     pub(crate) fn authorization_endpoint(&self) -> Option<String> {
-        match self.kind {
-            "attio" => Some("https://app.attio.com/authorize".to_owned()),
-            "github" => Some("https://github.com/login/oauth/authorize".to_owned()),
-            "google" => Some("https://accounts.google.com/o/oauth2/v2/auth".to_owned()),
-            "granola" => Some("https://mcp-auth.granola.ai/oauth2/authorize".to_owned()),
-            "linear" => Some("https://linear.app/oauth/authorize".to_owned()),
-            "mercator" => Some(format!("{MERCATOR_ORIGIN}/authorize")),
-            "microsoft" => {
-                Some("https://login.microsoftonline.com/common/oauth2/v2.0/authorize".to_owned())
-            }
-            "slack" => Some("https://slack.com/oauth/v2/authorize".to_owned()),
-            "zoom" => Some("https://zoom.us/oauth/authorize".to_owned()),
-            CUSTOM_KEY => self.config_str("authorization_endpoint"),
-            _ => None,
+        if self.kind == CUSTOM_KEY {
+            return self.config_str("authorization_endpoint");
         }
+        self.spec()
+            .and_then(|spec| spec.authorization_endpoint)
+            .map(str::to_owned)
     }
 
     pub(crate) fn token_endpoint(&self) -> Option<String> {
-        match self.kind {
-            "attio" => Some("https://app.attio.com/oauth/token".to_owned()),
-            "github" => Some("https://github.com/login/oauth/access_token".to_owned()),
-            "google" => Some("https://oauth2.googleapis.com/token".to_owned()),
-            "granola" => Some("https://mcp-auth.granola.ai/oauth2/token".to_owned()),
-            "linear" => Some("https://api.linear.app/oauth/token".to_owned()),
-            "mercator" => Some(format!("{MERCATOR_ORIGIN}/oauth/token")),
-            "microsoft" => {
-                Some("https://login.microsoftonline.com/common/oauth2/v2.0/token".to_owned())
-            }
-            "slack" => Some(super::slack_api_endpoint("oauth.v2.access")),
-            "zoom" => Some("https://zoom.us/oauth/token".to_owned()),
-            CUSTOM_KEY => self.config_str("token_endpoint"),
-            _ => None,
+        if self.kind == CUSTOM_KEY {
+            return self.config_str("token_endpoint");
         }
+        if self.kind == SLACK_KEY {
+            return Some(super::slack_api_endpoint("oauth.v2.access"));
+        }
+        self.spec()
+            .and_then(|spec| spec.token_endpoint)
+            .map(str::to_owned)
     }
 
     pub(crate) fn revocation_endpoint(&self) -> Option<String> {
@@ -250,52 +336,36 @@ impl Provider {
     }
 
     pub(crate) fn identity_scopes(&self) -> Vec<String> {
-        match self.kind {
-            "google" => vec![
-                "openid".to_owned(),
-                "https://www.googleapis.com/auth/userinfo.email".to_owned(),
-            ],
-            "granola" => vec![
-                "openid".to_owned(),
-                "email".to_owned(),
-                "profile".to_owned(),
-                "offline_access".to_owned(),
-            ],
-            "microsoft" => vec![
-                "openid".to_owned(),
-                "email".to_owned(),
-                "profile".to_owned(),
-                "offline_access".to_owned(),
-            ],
-            _ => Vec::new(),
-        }
+        self.spec()
+            .map(|spec| {
+                spec.identity_scopes
+                    .iter()
+                    .map(|scope| (*scope).to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn required_scopes(&self) -> Vec<String> {
-        match self.kind {
-            "mercator" => vec![MERCATOR_SCOPE.to_owned()],
-            "slack" => vec!["search:read".to_owned()],
-            "zoom" => vec!["user:read:user".to_owned()],
-            _ => Vec::new(),
-        }
+        self.spec()
+            .map(|spec| {
+                spec.required_scopes
+                    .iter()
+                    .map(|scope| (*scope).to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn api_hosts(&self) -> Vec<String> {
-        match self.kind {
-            "attio" => vec!["api.attio.com".to_owned()],
-            "google" => vec!["*.googleapis.com".to_owned()],
-            "granola" => vec!["mcp.granola.ai".to_owned()],
-            "linear" => vec![
-                "api.linear.app".to_owned(),
-                "uploads.linear.app".to_owned(),
-                "mcp.linear.app".to_owned(),
-            ],
-            "microsoft" => vec!["graph.microsoft.com".to_owned()],
-            "slack" => vec!["slack.com".to_owned()],
-            "zoom" => vec!["api.zoom.us".to_owned()],
-            "mercator" => vec!["mercator.sh".to_owned()],
-            _ => Vec::new(),
-        }
+        self.spec()
+            .map(|spec| {
+                spec.api_hosts
+                    .iter()
+                    .map(|host| (*host).to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn authorization_scope_param(&self) -> &'static str {
@@ -307,10 +377,7 @@ impl Provider {
     }
 
     pub(crate) fn scope_separator(&self) -> &'static str {
-        match self.kind {
-            "linear" | "slack" => ",",
-            _ => " ",
-        }
+        self.spec().map_or(" ", |spec| spec.separator)
     }
 
     pub(crate) fn extra_authorization_params(&self) -> Vec<(String, String)> {
@@ -415,7 +482,16 @@ impl Provider {
     /// minted it. Only profile kinds (GitHub's `github_token`) bring their own
     /// configuration, which the flow applies.
     pub(crate) fn wrapping_secret_config(&self) -> (Option<Value>, Option<Value>) {
-        if self.wrapping_secret_kind() == "custom" {
+        if self.kind == GITHUB_KEY {
+            (
+                None,
+                Some(json!({
+                    "proxy_value": "GITHUB_TOKEN",
+                    "match_headers": ["Authorization"],
+                    "require": false
+                })),
+            )
+        } else if self.wrapping_secret_kind() == "custom" {
             (
                 Some(json!({"header": "Authorization", "formatter": "Bearer {{ .Value }}"})),
                 None,
@@ -427,6 +503,16 @@ impl Provider {
 
     pub(crate) fn credential_request_rules(&self) -> Option<Vec<WrappingRule>> {
         match self.kind {
+            "github" => Some(
+                ["api.github.com", "github.com", "api.githubcopilot.com"]
+                    .into_iter()
+                    .map(|host| WrappingRule {
+                        host: host.to_owned(),
+                        http_methods: Vec::new(),
+                        paths: Vec::new(),
+                    })
+                    .collect(),
+            ),
             "mercator" => Some(vec![WrappingRule {
                 host: "mercator.sh".to_owned(),
                 http_methods: vec!["POST".to_owned()],
@@ -461,11 +547,7 @@ impl Provider {
                 if scopes.iter().any(|scope| scope == MERCATOR_SCOPE) {
                     Ok(())
                 } else {
-                    Err(ExchangeError::with_code(
-                        "Mercator scope was not granted",
-                        "oauth",
-                        "missing_scope",
-                    ))
+                    Err(ExchangeError::with_code("oauth", "missing_scope"))
                 }
             }
             SLACK_KEY => {
@@ -476,11 +558,7 @@ impl Provider {
                     .is_empty()
                     && result.expires_in.is_some()
                 {
-                    Err(ExchangeError::with_code(
-                        "token endpoint returned expiring Slack token without refresh_token",
-                        "oauth",
-                        "missing_refresh_token",
-                    ))
+                    Err(ExchangeError::with_code("oauth", "missing_refresh_token"))
                 } else {
                     Ok(())
                 }
@@ -506,7 +584,6 @@ impl Provider {
             "zoom" => self.zoom_identity(result).await,
             CUSTOM_KEY => self.custom_identity(result).await,
             _ => Err(ExchangeError::with_code(
-                "unknown provider",
                 "parse",
                 "invalid_identity_response",
             )),
@@ -517,47 +594,19 @@ impl Provider {
         &self,
         response: Result<HttpResponse, reqwest::Error>,
     ) -> Result<Value, ExchangeError> {
-        let response = response.map_err(|error| {
-            ExchangeError::with_code(
-                format!(
-                    "{} identity endpoint request failed: {error}",
-                    self.display_name()
-                ),
-                "network",
-                "identity_lookup_failed",
-            )
-        })?;
+        let response =
+            response.map_err(|_| ExchangeError::with_code("network", "identity_lookup_failed"))?;
         if !response.success() {
             return Err(ExchangeError {
                 stage: "http",
                 code: Some("identity_lookup_failed".to_owned()),
-                status: Some(response.status),
-                message: format!(
-                    "{} identity endpoint http {}",
-                    self.display_name(),
-                    response.status
-                ),
             });
         }
         match response.json() {
             Some(Value::Object(map)) => Ok(Value::Object(map)),
-            Some(_) => Err(ExchangeError {
+            Some(_) | None => Err(ExchangeError {
                 stage: "parse",
                 code: Some("invalid_identity_response".to_owned()),
-                status: Some(response.status),
-                message: format!(
-                    "{} identity endpoint returned an invalid payload",
-                    self.display_name()
-                ),
-            }),
-            None => Err(ExchangeError {
-                stage: "parse",
-                code: Some("invalid_identity_response".to_owned()),
-                status: Some(response.status),
-                message: format!(
-                    "{} identity endpoint returned invalid JSON",
-                    self.display_name()
-                ),
             }),
         }
     }
@@ -566,14 +615,7 @@ impl Provider {
         match value {
             Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
             Some(Value::Number(value)) => Ok(value.to_string()),
-            _ => Err(ExchangeError::with_code(
-                format!(
-                    "{} identity endpoint returned no stable subject",
-                    self.display_name()
-                ),
-                "parse",
-                "missing_identity",
-            )),
+            _ => Err(ExchangeError::with_code("parse", "missing_identity")),
         }
     }
 
@@ -656,11 +698,7 @@ impl Provider {
             issuer,
             "https://accounts.google.com" | "accounts.google.com"
         ) {
-            return Err(ExchangeError::with_code(
-                "id_token iss was not a Google issuer",
-                "oauth",
-                "id_token_iss_invalid",
-            ));
+            return Err(ExchangeError::with_code("oauth", "id_token_iss_invalid"));
         }
         let subject = self.require_identity(claims.get("sub"))?;
         let mut identity = Identity::new(subject);
@@ -676,11 +714,7 @@ impl Provider {
         let claims = id_token_claims(result)?;
         require_audience(&claims, client_id)?;
         if claims.get("iss").and_then(Value::as_str) != Some("https://mcp-auth.granola.ai") {
-            return Err(ExchangeError::with_code(
-                "id_token iss was not a Granola issuer",
-                "oauth",
-                "id_token_iss_invalid",
-            ));
+            return Err(ExchangeError::with_code("oauth", "id_token_iss_invalid"));
         }
         let subject = self.require_identity(claims.get("sub"))?;
         let mut identity = Identity::new(subject);
@@ -701,11 +735,7 @@ impl Provider {
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         ) {
-            return Err(ExchangeError::with_code(
-                "id_token iss was not a Microsoft issuer",
-                "oauth",
-                "id_token_iss_invalid",
-            ));
+            return Err(ExchangeError::with_code("oauth", "id_token_iss_invalid"));
         }
         let subject = self.require_identity(claims.get("oid"))?;
         let mut identity = Identity::new(subject);
@@ -784,20 +814,12 @@ impl Provider {
         }
         let id_token = result.id_token.as_deref().filter(|value| !value.is_empty());
         let Some(id_token) = id_token else {
-            return Err(ExchangeError::with_code(
-                "token response carried no id_token",
-                "oauth",
-                "missing_id_token",
-            ));
+            return Err(ExchangeError::with_code("oauth", "missing_id_token"));
         };
         let claims = decode_id_token(id_token)?;
         require_audience(&claims, client_id)?;
         if claims.get("iss").and_then(Value::as_str) != Some("https://slack.com") {
-            return Err(ExchangeError::with_code(
-                "id_token iss was not a Slack issuer",
-                "oauth",
-                "id_token_iss_invalid",
-            ));
+            return Err(ExchangeError::with_code("oauth", "id_token_iss_invalid"));
         }
         let subject = self.require_identity(claims.get("sub"))?;
         let mut identity = Identity::new(subject);
@@ -831,13 +853,7 @@ impl Provider {
             .get("data")
             .and_then(|data| data.get("viewer"))
             .and_then(Value::as_object)
-            .ok_or_else(|| {
-                ExchangeError::with_code(
-                    "Linear identity endpoint returned no viewer",
-                    "parse",
-                    "missing_identity",
-                )
-            })?;
+            .ok_or_else(|| ExchangeError::with_code("parse", "missing_identity"))?;
         let subject = self.require_identity(viewer.get("id"))?;
         let mut identity = Identity::new(subject.clone());
         identity.email = nonempty_string(viewer.get("email"));
@@ -932,19 +948,12 @@ impl Provider {
             128 * 1024,
         )
         .await;
-        let response = response.map_err(|error| {
-            ExchangeError::with_code(
-                format!("Mercator identity endpoint request failed: {error}"),
-                "network",
-                "identity_lookup_failed",
-            )
-        })?;
+        let response =
+            response.map_err(|_| ExchangeError::with_code("network", "identity_lookup_failed"))?;
         if !response.success() {
             return Err(ExchangeError {
                 stage: "http",
                 code: Some("identity_lookup_failed".to_owned()),
-                status: Some(response.status),
-                message: format!("Mercator identity endpoint http {}", response.status),
             });
         }
         let body = if response
@@ -969,13 +978,8 @@ impl Provider {
         } else {
             response.body
         };
-        let payload: Value = serde_json::from_str(&body).map_err(|_| {
-            ExchangeError::with_code(
-                "Mercator identity endpoint returned invalid JSON",
-                "parse",
-                "invalid_identity_response",
-            )
-        })?;
+        let payload: Value = serde_json::from_str(&body)
+            .map_err(|_| ExchangeError::with_code("parse", "invalid_identity_response"))?;
         let status = payload
             .get("result")
             .filter(|result| {
@@ -991,11 +995,7 @@ impl Provider {
         if status.and_then(|status| status.get("oauthAuthenticated")) != Some(&Value::Bool(true))
             || address.is_none()
         {
-            return Err(ExchangeError::with_code(
-                "Mercator wallet identity unavailable",
-                "oauth",
-                "missing_wallet",
-            ));
+            return Err(ExchangeError::with_code("oauth", "missing_wallet"));
         }
         let address = address.expect("checked");
         let mut identity = Identity::new(address.to_lowercase());
@@ -1019,21 +1019,22 @@ impl Provider {
             128 * 1024,
         )
         .await;
+        let claimed = || json!({"claimed": null});
         let Some(response) = response.ok() else {
-            return json!({"claimed": null});
+            return claimed();
         };
         let body = response.json();
         let Some(Value::Object(body)) = body else {
-            return json!({"claimed": null});
+            return claimed();
         };
         let wallet = body.get("wallet_address").and_then(Value::as_str);
-        let claimed = body.get("claimed").and_then(Value::as_bool);
+        let claimed_value = body.get("claimed").and_then(Value::as_bool);
         if wallet.is_some_and(|wallet| wallet.eq_ignore_ascii_case(&credential.provider_subject))
-            && claimed.is_some()
+            && claimed_value.is_some()
         {
-            json!({"claimed": claimed})
+            json!({"claimed": claimed_value})
         } else {
-            json!({"claimed": null})
+            claimed()
         }
     }
 }
@@ -1046,11 +1047,7 @@ pub(crate) struct OauthAppCredential {
 }
 
 fn missing_access_token() -> ExchangeError {
-    ExchangeError::with_code(
-        "token response returned an empty access_token",
-        "parse",
-        "missing_access_token",
-    )
+    ExchangeError::with_code("parse", "missing_access_token")
 }
 
 fn split_scopes(raw: &str, comma: bool) -> Vec<String> {
@@ -1106,21 +1103,13 @@ fn require_audience(claims: &Map<String, Value>, client_id: &str) -> Result<(), 
     if matches {
         Ok(())
     } else {
-        Err(ExchangeError::with_code(
-            "id_token aud did not match client_id",
-            "oauth",
-            "id_token_aud_mismatch",
-        ))
+        Err(ExchangeError::with_code("oauth", "id_token_aud_mismatch"))
     }
 }
 
 fn id_token_claims(result: &CodeExchangeResult) -> Result<Map<String, Value>, ExchangeError> {
     let Some(id_token) = result.id_token.as_deref().filter(|value| !value.is_empty()) else {
-        return Err(ExchangeError::with_code(
-            "token response carried no id_token",
-            "oauth",
-            "missing_id_token",
-        ));
+        return Err(ExchangeError::with_code("oauth", "missing_id_token"));
     };
     decode_id_token(id_token)
 }
@@ -1130,24 +1119,16 @@ fn decode_id_token(id_token: &str) -> Result<Map<String, Value>, ExchangeError> 
     let segment = id_token.split('.').nth(1).unwrap_or_default();
     let decoded = base64::engine::general_purpose::URL_SAFE_PAD_INDIFFERENT
         .decode(segment)
-        .map_err(|_| ExchangeError::new("id_token payload did not decode", "parse"))?;
+        .map_err(|_| ExchangeError::new("parse"))?;
     match serde_json::from_slice::<Value>(&decoded) {
         Ok(Value::Object(map)) => Ok(map),
-        _ => Err(ExchangeError::new(
-            "id_token payload did not decode",
-            "parse",
-        )),
+        _ => Err(ExchangeError::new("parse")),
     }
 }
 
 fn access_token_claims(access_token: &str) -> Result<Map<String, Value>, ExchangeError> {
-    decode_id_token(access_token).map_err(|_| {
-        ExchangeError::with_code(
-            "access token is not a JWT and no userinfo endpoint is configured",
-            "parse",
-            "invalid_identity_response",
-        )
-    })
+    decode_id_token(access_token)
+        .map_err(|_| ExchangeError::with_code("parse", "invalid_identity_response"))
 }
 
 /// The custom provider's config keys as `OauthApp#provider_config_valid` sees
@@ -1421,7 +1402,7 @@ pub(crate) async fn register_client(
         128 * 1024,
     )
     .await
-    .map_err(|_| ExchangeError::new("Client registration unavailable", "network"))?;
+    .map_err(|_| ExchangeError::new("network"))?;
     let payload = response
         .success()
         .then(|| response.json())
@@ -1441,7 +1422,7 @@ pub(crate) async fn register_client(
         (Some(client_id), Some(client_secret)) => {
             Ok((client_id.to_owned(), client_secret.to_owned()))
         }
-        _ => Err(ExchangeError::new("Client registration failed", "parse")),
+        _ => Err(ExchangeError::new("parse")),
     }
 }
 
@@ -1459,25 +1440,6 @@ pub(crate) fn tool_label(app: &OauthApp) -> Map<String, Value> {
     }
     labels
 }
-
-/// The provider keys sorted the way `Presets.all` sorts preset keys.
-pub(crate) fn sorted_preset_keys() -> Vec<&'static str> {
-    let mut keys: Vec<&'static str> = Preset::all().iter().map(|preset| preset.key()).collect();
-    keys.sort_unstable();
-    keys
-}
-
-/// The provider registry as `{key => provider}` for validation.
-pub(crate) fn registry_map() -> BTreeMap<&'static str, Provider> {
-    PROVIDER_KEYS
-        .into_iter()
-        .filter_map(|key| Provider::registry(key).map(|provider| (key, provider)))
-        .collect()
-}
-
-/// A service-level (not provider-level) registration call for tests.
-pub(crate) type RegisterFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(String, String), ExchangeError>>>>;
 
 #[cfg(test)]
 mod tests {
@@ -1508,7 +1470,27 @@ mod tests {
             };
             if key == GITHUB_KEY {
                 assert_eq!(provider.wrapping_secret_kind(), "github_token");
-                assert_eq!(provider.wrapping_secret_config(), (None, None), "{key}");
+                assert_eq!(
+                    provider.wrapping_secret_config(),
+                    (
+                        None,
+                        Some(json!({
+                            "proxy_value": "GITHUB_TOKEN",
+                            "match_headers": ["Authorization"],
+                            "require": false
+                        }))
+                    ),
+                    "{key}"
+                );
+                assert_eq!(
+                    provider
+                        .credential_request_rules()
+                        .unwrap()
+                        .iter()
+                        .map(|rule| rule.host.as_str())
+                        .collect::<Vec<_>>(),
+                    ["api.github.com", "github.com", "api.githubcopilot.com"]
+                );
             } else {
                 assert_eq!(provider.wrapping_secret_kind(), "custom", "{key}");
                 assert_eq!(

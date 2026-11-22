@@ -41,6 +41,6 @@ pub use principals::{
 pub use sandbox::{ConsoleProxy, find_console_proxy, slack_bot_home_team};
 pub use ssh_keys::{SshKey, ssh_keys};
 pub use users::{
-    ConsoleUser, ConsoleUserStatus, find_console_api_key, find_console_api_key_owner,
-    find_console_password_user_by_email, find_console_user,
+    ConsoleUser, ConsoleUserStatus, find_console_api_key, find_console_password_user_by_email,
+    find_console_user,
 };

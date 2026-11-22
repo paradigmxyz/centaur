@@ -8,8 +8,15 @@
 
 use std::time::Duration;
 
+use axum::http::header::CONTENT_TYPE;
 use reqwest::Client;
 use serde_json::Value;
+
+static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+
+fn client() -> &'static Client {
+    CLIENT.get_or_init(Client::new)
+}
 
 /// One response, with the body read under a fixed cap.
 #[derive(Clone, Debug)]
@@ -45,17 +52,24 @@ pub(crate) async fn send(
     timeout: Duration,
     max_body_bytes: usize,
 ) -> Result<HttpResponse, reqwest::Error> {
-    let client = Client::builder().timeout(timeout).build()?;
-    let mut request = client.request(method, url);
+    let mut request = client().request(method, url).timeout(timeout);
     for (name, value) in headers {
         request = request.header(name, value);
     }
     if let Some(form) = form {
-        let pairs: std::collections::HashMap<&str, &str> = form
+        let body = form
             .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str()))
-            .collect();
-        request = request.form(&pairs);
+            .fold(
+                url::form_urlencoded::Serializer::new(String::new()),
+                |mut serializer, (key, value)| {
+                    serializer.append_pair(key, value);
+                    serializer
+                },
+            )
+            .finish();
+        request = request
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body);
     }
     if let Some(json) = json {
         request = request.json(json);

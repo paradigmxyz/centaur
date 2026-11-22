@@ -24,7 +24,7 @@ use tower::ServiceExt;
 use crate::{
     ApiAuthConfig, AppState, build_router_with_app_state,
     console::{
-        bearer::bearer_router,
+        bearer_router,
         guard::GuardedRoutes,
         sandbox::{SandboxJwtConfig, test_sandbox_routes},
     },
@@ -37,7 +37,9 @@ const CONSOLE_HOST: &str = "console.example.test";
 const JWT_SECRET: &str = "test-only-sandbox-jwt-secret";
 const PASSWORD: &str = "fake-test-password";
 
-async fn test_pool() -> Option<PgPool> {
+/// The shared Console database pool, or `None` when the test should skip.
+/// `areas/oauth/tests_db.rs` and the other Console `tests_db` modules use it.
+pub(crate) async fn test_pool() -> Option<PgPool> {
     let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
         assert!(
             env::var_os("CI").is_none(),
@@ -1767,4 +1769,119 @@ async fn console_session_db_workflow_force_start_uses_in_process_runtime() {
             }
         }
     }
+}
+
+/// Every list, role-grant, and sandbox-permission body carries exactly one
+/// `data` envelope. A helper that wraps an already-enveloped value produced
+/// `{"data":{"data":...}}`, which the SPA and the connector cannot read.
+#[tokio::test]
+async fn console_session_db_responses_have_exactly_one_data_envelope() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let secret_id: i64 = sqlx::query_scalar(
+        "INSERT INTO static_secrets (name, foreign_id, labels, created_by_id, created_at, updated_at) \
+         VALUES ($1, $2, '{}', $3, now(), now()) RETURNING id",
+    )
+    .bind(fixture.name("envelope-secret"))
+    .bind(fixture.name("envelope-secret-foreign"))
+    .bind(fixture.admin)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    let principal = fixture
+        .principal("slack_dm", Some("T-envelope"), fixture.admin)
+        .await;
+    let (proxy_id, sandbox_name) = fixture.proxy(principal).await;
+
+    let sandbox_jwt = SandboxJwtConfig::new(
+        JWT_SECRET,
+        crate::auth::SANDBOX_TOKEN_AUDIENCE,
+        crate::auth::SANDBOX_TOKEN_ISSUER,
+    )
+    .unwrap();
+    let state = AppState::unready(ApiAuthConfig::testing("test-secret"))
+        .with_console_db(fixture.pool.clone())
+        .with_console_write_db(fixture.pool.clone())
+        .with_console_session(
+            ConsoleSessionConfig::from_settings(
+                Some(SESSION_SECRET),
+                Some("https://console.example.test"),
+            )
+            .unwrap()
+            .unwrap()
+            .with_sandbox_jwt(sandbox_jwt),
+        );
+    let app = build_router_with_app_state(state);
+
+    let response = login(&app, &fixture.admin_email, PASSWORD).await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let session = cookie(&response).expect("admin signs in");
+    let get = |uri: String, auth: (&'static str, String)| {
+        let app = app.clone();
+        async move {
+            let response = send(
+                &app,
+                request(
+                    Method::GET,
+                    &uri,
+                    &[(auth.0, auth.1.as_str())],
+                    Body::empty(),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            json_body(response).await
+        }
+    };
+
+    let list = get(
+        "/api/v1/console/secrets?limit=200".to_owned(),
+        ("cookie", session.clone()),
+    )
+    .await;
+    assert!(list["data"].is_array(), "{list}");
+    assert!(list["meta"]["total"].is_i64(), "{list}");
+
+    let grants = get(
+        format!(
+            "/api/v1/console/secrets/static/{}/role_grants",
+            oid("ssr", secret_id)
+        ),
+        ("cookie", session.clone()),
+    )
+    .await;
+    assert!(grants["data"].is_array(), "{grants}");
+    assert!(grants["assignable_roles"].is_array(), "{grants}");
+
+    let token = format!("fake-api-key-envelope-{}", fixture.unique);
+    fixture.api_key(fixture.admin, &token, false).await;
+    let bearer = get(
+        "/api/v1/static_secrets?limit=200".to_owned(),
+        ("authorization", format!("Bearer {token}")),
+    )
+    .await;
+    assert!(bearer["data"].is_array(), "{bearer}");
+    assert!(bearer["meta"]["total"].is_i64(), "{bearer}");
+
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let sandbox = sandbox_token(
+        JWT_SECRET,
+        &sandbox_claims(
+            &oid("prx", proxy_id),
+            &sandbox_name,
+            &oid("prn", principal),
+            now,
+        ),
+    );
+    let permissions = get(
+        "/api/v1/sandbox/permissions".to_owned(),
+        ("authorization", format!("Bearer {sandbox}")),
+    )
+    .await;
+    assert_eq!(
+        permissions["data"]["sandbox_id"], sandbox_name,
+        "{permissions}"
+    );
+    assert!(permissions["data"].get("data").is_none(), "{permissions}");
 }

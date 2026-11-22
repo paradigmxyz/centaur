@@ -143,12 +143,6 @@ fn pem_public_key(key: &str) -> Result<String, String> {
         "RSA PRIVATE KEY" => rsa_public_key(&der),
         "EC PRIVATE KEY" => ec_public_key(&der, None),
         "PRIVATE KEY" => pkcs8_public_key(&der),
-        // OpenSSL parses a DSA key; net-ssh then reports `ssh-dss`, which
-        // `SshKey` rejects as an unsupported type.
-        "DSA PRIVATE KEY" => {
-            dsa_key(&der)?;
-            Err(UNSUPPORTED_TYPE_MESSAGE.to_owned())
-        }
         _ => Err(unreadable()),
     }
 }
@@ -264,28 +258,10 @@ fn pkcs8_public_key(der: &[u8]) -> Result<String, String> {
             };
             ec_public_key(private_key, curve)
         }
-        DSA_OID => {
-            // OpenSSL stores the PKCS#8 DSA private value as a bare INTEGER,
-            // not as the whole `DsaPrivateKey` sequence.
-            if !der_integer(private_key) {
-                dsa_key(private_key)?;
-            }
-            Err(UNSUPPORTED_TYPE_MESSAGE.to_owned())
-        }
         // Ed25519, X25519, and friends parse into a generic `OpenSSL::PKey`
         // with no `ssh_type`, which Rails reports as unreadable.
         _ => Err(unreadable()),
     }
-}
-
-/// `DSA PRIVATE KEY` and the inner key of a DSA PKCS#8 document: a sequence of
-/// six integers. Only its shape is checked; the type is then rejected.
-fn dsa_key(der: &[u8]) -> Result<(), String> {
-    let fields = der_sequence(der).ok_or_else(unreadable)?;
-    if fields.len() < 6 || !fields[..6].iter().all(|(tag, _)| *tag == 0x02) {
-        return Err(unreadable());
-    }
-    Ok(())
 }
 
 /// `<algorithm> <base64 key data>` for a parsed public key.
@@ -312,7 +288,6 @@ fn unreadable() -> String {
 const RSA_ENCRYPTION_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 const RSASSA_PSS_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
 const EC_PUBLIC_KEY_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
-const DSA_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x38, 0x04, 0x01];
 const PRIME256V1_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 const SECP384R1_OID: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
 const SECP521R1_OID: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x23];
@@ -373,12 +348,6 @@ fn children(value: &[u8]) -> Option<Vec<(u8, &[u8])>> {
         items.push(read_tlv(value, &mut position)?);
     }
     Some(items)
-}
-
-/// Whether the DER value is a single non-empty INTEGER.
-fn der_integer(der: &[u8]) -> bool {
-    let mut position = 0;
-    matches!(read_tlv(der, &mut position), Some((0x02, value)) if position == der.len() && !value.is_empty())
 }
 
 /// The OID inside an explicit `[0]` container.

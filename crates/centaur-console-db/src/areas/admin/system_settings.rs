@@ -24,8 +24,10 @@ const SETTING_VALUE_COLUMNS: [&str; 5] = [
     "default_sandbox_workflows_write_enabled",
 ];
 
-/// The values the System Settings page may change.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The values the System Settings page may change. This is also the row
+/// projection for those columns and the `data` of the settings payload, so the
+/// column list, the row, and the wire keys are declared once.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow, serde::Serialize)]
 pub struct SystemSettingValues {
     pub default_sandbox_repo_cache: String,
     pub default_sandbox_observability_enabled: bool,
@@ -34,6 +36,7 @@ pub struct SystemSettingValues {
     pub default_sandbox_workflows_write_enabled: bool,
 }
 
+/// The stored singleton: its id, its values, and when they last changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemSettingRow {
     pub id: i64,
@@ -41,32 +44,14 @@ pub struct SystemSettingRow {
     pub updated_at: PrimitiveDateTime,
 }
 
-/// The stored row, flattened so the database layer can read it with `query_as`.
-#[derive(sqlx::FromRow)]
-struct SettingRecord {
-    id: i64,
-    default_sandbox_repo_cache: String,
-    default_sandbox_observability_enabled: bool,
-    default_sandbox_sessions_read_enabled: bool,
-    default_sandbox_workflows_read_enabled: bool,
-    default_sandbox_workflows_write_enabled: bool,
-    updated_at: PrimitiveDateTime,
-}
-
-impl SettingRecord {
-    fn into_row(self) -> SystemSettingRow {
-        SystemSettingRow {
-            id: self.id,
-            values: SystemSettingValues {
-                default_sandbox_repo_cache: self.default_sandbox_repo_cache,
-                default_sandbox_observability_enabled: self.default_sandbox_observability_enabled,
-                default_sandbox_sessions_read_enabled: self.default_sandbox_sessions_read_enabled,
-                default_sandbox_workflows_read_enabled: self.default_sandbox_workflows_read_enabled,
-                default_sandbox_workflows_write_enabled: self
-                    .default_sandbox_workflows_write_enabled,
-            },
-            updated_at: self.updated_at,
-        }
+impl sqlx::FromRow<'_, sqlx::postgres::PgRow> for SystemSettingRow {
+    fn from_row(row: &sqlx::postgres::PgRow) -> std::result::Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            values: SystemSettingValues::from_row(row)?,
+            updated_at: row.try_get("updated_at")?,
+        })
     }
 }
 
@@ -88,9 +73,9 @@ pub async fn system_setting(pool: &PgPool) -> Result<SystemSettingRow> {
         "SELECT {SETTING_COLUMNS} FROM {} WHERE singleton ORDER BY id LIMIT 1",
         SystemSettingModel::TABLE
     );
-    let record: Option<SettingRecord> = sqlx::query_as(&query).fetch_optional(pool).await?;
+    let record: Option<SystemSettingRow> = sqlx::query_as(&query).fetch_optional(pool).await?;
     if let Some(record) = record {
-        return Ok(record.into_row());
+        return Ok(record);
     }
     // A concurrent request may win the insert; either way we then read it back.
     sqlx::query(&format!(
@@ -100,8 +85,8 @@ pub async fn system_setting(pool: &PgPool) -> Result<SystemSettingRow> {
     .bind(true)
     .execute(pool)
     .await?;
-    let record: Option<SettingRecord> = sqlx::query_as(&query).fetch_optional(pool).await?;
-    record.map(SettingRecord::into_row).ok_or_else(missing)
+    let record: Option<SystemSettingRow> = sqlx::query_as(&query).fetch_optional(pool).await?;
+    record.ok_or_else(missing)
 }
 
 /// `@system_setting.save!` followed by `Role.replace_default_assignments!` in
@@ -113,51 +98,34 @@ pub async fn write_system_settings(
     id: i64,
     values: &SystemSettingValues,
     replace_roles: Option<&[i64]>,
-) -> Result<SystemSettingRow> {
+) -> Result<()> {
     let mut transaction = pool.begin().await?;
-    let row = update_in(&mut transaction, id, values).await?;
+    update_in(&mut transaction, id, values).await?;
     if let Some(role_ids) = replace_roles {
         replace_roles_in(&mut transaction, role_ids).await?;
     }
     transaction.commit().await?;
-    Ok(row)
+    Ok(())
 }
 
 async fn update_in(
     connection: &mut PgConnection,
     id: i64,
     values: &SystemSettingValues,
-) -> Result<SystemSettingRow> {
-    let current: Option<SettingRecord> = sqlx::query_as(&format!(
-        "SELECT {SETTING_COLUMNS} FROM {} WHERE id = $1",
-        SystemSettingModel::TABLE
-    ))
-    .bind(id)
-    .fetch_optional(&mut *connection)
-    .await?;
-    let current = current.ok_or_else(missing)?.into_row();
-    if current.values == *values {
-        return Ok(current);
-    }
+) -> Result<()> {
     // The dirty guard makes the write a no-op when a concurrent request already
     // stored these values, so `updated_at` is not bumped needlessly.
-    let sql = format!(
-        "{} RETURNING {SETTING_COLUMNS}",
-        write::update_changed_sql(SystemSettingModel::TABLE, &SETTING_VALUE_COLUMNS)
-    );
-    let record: Option<SettingRecord> = sqlx::query_as(&sql)
+    let sql = write::update_changed_sql(SystemSettingModel::TABLE, &SETTING_VALUE_COLUMNS);
+    sqlx::query(&sql)
         .bind(&values.default_sandbox_repo_cache)
         .bind(values.default_sandbox_observability_enabled)
         .bind(values.default_sandbox_sessions_read_enabled)
         .bind(values.default_sandbox_workflows_read_enabled)
         .bind(values.default_sandbox_workflows_write_enabled)
         .bind(id)
-        .fetch_optional(&mut *connection)
+        .execute(&mut *connection)
         .await?;
-    match record {
-        Some(record) => Ok(record.into_row()),
-        None => Ok(current),
-    }
+    Ok(())
 }
 
 /// Every role, ordered as `Role.order(:name, :foreign_id, :id)`.

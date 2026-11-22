@@ -17,11 +17,14 @@ use centaur_session_sqlx::PgSessionStore;
 use serde::{Deserialize, Serialize};
 use time::PrimitiveDateTime;
 
-use super::common::{self, AdminError, json_ok, nullable_field};
+use super::common::{self, nullable_field};
 use crate::{
     AppState,
     console::guard::GuardedRoutes,
-    console::{http::ConsoleError, request::ConsoleData},
+    console::{
+        http::{ConsoleError, json_data},
+        request::ConsoleData,
+    },
     slack_external_teams::normalize_slack_external_team_ids,
 };
 
@@ -70,20 +73,12 @@ enum SlackTeamIdInput {
     Text(String),
 }
 
-/// The System Settings document: the stored defaults plus the default roles and
-/// every role's flag.
-#[derive(Serialize)]
-struct SettingsPayload {
-    data: SettingsData,
-}
-
+/// The System Settings document: the stored defaults, flattened from the row
+/// projection, plus the default roles and every role's flag.
 #[derive(Serialize)]
 struct SettingsData {
-    default_sandbox_repo_cache: String,
-    default_sandbox_observability_enabled: bool,
-    default_sandbox_sessions_read_enabled: bool,
-    default_sandbox_workflows_read_enabled: bool,
-    default_sandbox_workflows_write_enabled: bool,
+    #[serde(flatten)]
+    values: SystemSettingValues,
     default_role_ids: Vec<String>,
     roles: Vec<SettingsRole>,
     #[serde(with = "centaur_console_db::timestamp::primitive")]
@@ -109,12 +104,6 @@ impl From<&RoleRow> for SettingsRole {
     }
 }
 
-/// The console settings surface wraps the allowlist in `data`.
-#[derive(Serialize)]
-struct SettingsTeamsPayload {
-    data: SlackExternalTeamIds,
-}
-
 #[derive(Serialize)]
 struct SlackExternalTeamIds {
     slack_external_team_ids: Vec<String>,
@@ -129,16 +118,16 @@ pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
         )
 }
 
-async fn show(State(state): State<AppState>, _user: ConsoleUser) -> Result<Response, AdminError> {
+async fn show(State(state): State<AppState>, _user: ConsoleUser) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
-    Ok(json_ok(settings_payload(&pool).await?))
+    Ok(json_data(settings_payload(&pool).await?))
 }
 
 async fn update(
     State(state): State<AppState>,
     _user: ConsoleUser,
     ConsoleData(data): ConsoleData<UpdateSystemSettings>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let setting = system_setting(&pool).await?;
     // Console resolves the roles before it checks the settings, so an unknown
@@ -157,7 +146,7 @@ async fn update(
     let mut values = setting.values.clone();
     apply_settings(&mut values, &data);
     write_system_settings(&pool, setting.id, &values, replace_roles.as_deref()).await?;
-    Ok(json_ok(settings_payload(&pool).await?))
+    Ok(json_data(settings_payload(&pool).await?))
 }
 
 /// Copy the settings the request carries onto the stored values. Only fields
@@ -195,7 +184,7 @@ fn apply_settings(values: &mut SystemSettingValues, data: &UpdateSystemSettings)
 async fn resolve_default_role_ids(
     pool: &sqlx::PgPool,
     oids: &[String],
-) -> Result<Vec<i64>, AdminError> {
+) -> Result<Vec<i64>, ConsoleError> {
     let decoded = oids
         .iter()
         .map(|oid| RoleModel::decode_oid(oid))
@@ -229,59 +218,73 @@ fn default_role_oids(role_ids: Vec<String>) -> Vec<String> {
     oids
 }
 
-async fn settings_payload(pool: &sqlx::PgPool) -> Result<SettingsPayload, AdminError> {
+async fn settings_payload(pool: &sqlx::PgPool) -> Result<SettingsData, ConsoleError> {
     let setting = system_setting(pool).await?;
     let roles = roles(pool).await?;
-    let defaults = roles
-        .iter()
-        .filter(|role| role.assign_by_default)
-        .map(|role| RoleModel::oid(role.id))
-        .collect();
-    Ok(SettingsPayload {
-        data: SettingsData {
-            default_sandbox_repo_cache: setting.values.default_sandbox_repo_cache,
-            default_sandbox_observability_enabled: setting
-                .values
-                .default_sandbox_observability_enabled,
-            default_sandbox_sessions_read_enabled: setting
-                .values
-                .default_sandbox_sessions_read_enabled,
-            default_sandbox_workflows_read_enabled: setting
-                .values
-                .default_sandbox_workflows_read_enabled,
-            default_sandbox_workflows_write_enabled: setting
-                .values
-                .default_sandbox_workflows_write_enabled,
-            default_role_ids: defaults,
-            roles: roles.iter().map(SettingsRole::from).collect(),
-            updated_at: setting.updated_at,
-        },
+    Ok(SettingsData {
+        default_role_ids: roles
+            .iter()
+            .filter(|role| role.assign_by_default)
+            .map(|role| RoleModel::oid(role.id))
+            .collect(),
+        roles: roles.iter().map(SettingsRole::from).collect(),
+        values: setting.values,
+        updated_at: setting.updated_at,
     })
 }
 
 async fn slack_external_teams(
     State(state): State<AppState>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
-    let ids = allowed_team_ids(&state).await?;
-    Ok(json_ok(SettingsTeamsPayload {
-        data: SlackExternalTeamIds {
+) -> Result<Response, ConsoleError> {
+    let unavailable =
+        || ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, CONSOLE_LOAD_UNAVAILABLE);
+    let pool = session_db(&state).map_err(|()| unavailable())?;
+    match PgSessionStore::new(pool).slack_external_team_ids().await {
+        Ok(ids) => Ok(json_data(SlackExternalTeamIds {
             slack_external_team_ids: ids,
-        },
-    }))
+        })),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "console_slack_external_team_ids_load_failed"
+            );
+            Err(unavailable())
+        }
+    }
 }
 
 async fn replace_slack_external_teams(
     State(state): State<AppState>,
     _user: ConsoleUser,
     ConsoleData(data): ConsoleData<ReplaceSlackExternalTeams>,
-) -> Result<Response, AdminError> {
-    let ids =
-        replace_allowed_team_ids(&state, &requested_team_ids(data.slack_external_team_ids)).await?;
-    Ok(json_ok(SettingsTeamsPayload {
-        data: SlackExternalTeamIds {
-            slack_external_team_ids: ids,
-        },
+) -> Result<Response, ConsoleError> {
+    let unavailable =
+        || ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, CONSOLE_SAVE_UNAVAILABLE);
+    let pool = session_db(&state).map_err(|()| unavailable())?;
+    // api-rs rejects bad ids with a 400 whose message Console shows as a 422,
+    // and any other failure is the documented unavailable error.
+    let ids = match normalize_slack_external_team_ids(&requested_team_ids(
+        data.slack_external_team_ids,
+    )) {
+        Ok(ids) => ids,
+        Err(crate::ApiError::BadRequest(message)) => {
+            return Err(ConsoleError::unprocessable(message));
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "console_slack_external_team_ids_save_failed");
+            return Err(unavailable());
+        }
+    };
+    PgSessionStore::new(pool)
+        .replace_slack_external_team_ids(&ids)
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "console_slack_external_team_ids_save_failed");
+            unavailable()
+        })?;
+    Ok(json_data(SlackExternalTeamIds {
+        slack_external_team_ids: ids,
     }))
 }
 
@@ -301,35 +304,12 @@ fn requested_team_ids(input: Option<SlackTeamIdInput>) -> Vec<String> {
         .collect()
 }
 
-async fn allowed_team_ids(state: &AppState) -> Result<Vec<String>, AdminError> {
-    load_allowed_team_ids(state, CONSOLE_LOAD_UNAVAILABLE).await
-}
-
-async fn load_allowed_team_ids(
-    state: &AppState,
-    unavailable: &'static str,
-) -> Result<Vec<String>, AdminError> {
-    let pool = session_db(state, unavailable)?;
-    match PgSessionStore::new(pool).slack_external_team_ids().await {
-        Ok(ids) => Ok(ids),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "console_slack_external_team_ids_load_failed"
-            );
-            Err(ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, unavailable).into())
-        }
-    }
-}
-
 /// The allowlist lives in api-rs's own database (the session store), not in
 /// Console's: Rails reached it through the Centaur API, and api-rs serves it
 /// from `AppState::pool()` (see `crate::slack_external_teams`).
-#[allow(clippy::result_large_err)] // The error is the HTTP response this handler returns.
-fn session_db(state: &AppState, unavailable: &'static str) -> Result<sqlx::PgPool, AdminError> {
+fn session_db(state: &AppState) -> Result<sqlx::PgPool, ()> {
     state.pool().map_err(|error| {
         tracing::warn!(error = %error, "console_slack_external_team_ids_store_unavailable");
-        ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, unavailable).into()
     })
 }
 
@@ -337,41 +317,6 @@ const CONSOLE_LOAD_UNAVAILABLE: &str =
     "The allowed external workspaces could not be loaded from the Centaur API.";
 const CONSOLE_SAVE_UNAVAILABLE: &str =
     "Slack Connect workspaces could not be saved because the Centaur API is unavailable.";
-/// Replace the whole allowlist. api-rs rejects bad ids with a 400 whose message
-/// Console shows as a 422, and any other failure is the documented unavailable
-/// error.
-async fn replace_allowed_team_ids(
-    state: &AppState,
-    team_ids: &[String],
-) -> Result<Vec<String>, AdminError> {
-    write_allowed_team_ids(state, team_ids, CONSOLE_SAVE_UNAVAILABLE).await
-}
-
-async fn write_allowed_team_ids(
-    state: &AppState,
-    team_ids: &[String],
-    unavailable: &'static str,
-) -> Result<Vec<String>, AdminError> {
-    let pool = session_db(state, unavailable)?;
-    let ids = match normalize_slack_external_team_ids(team_ids) {
-        Ok(ids) => ids,
-        Err(crate::ApiError::BadRequest(message)) => {
-            return Err(ConsoleError::unprocessable(message).into());
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, "console_slack_external_team_ids_save_failed");
-            return Err(ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, unavailable).into());
-        }
-    };
-    PgSessionStore::new(pool)
-        .replace_slack_external_team_ids(&ids)
-        .await
-        .map_err(|error| {
-            tracing::warn!(error = %error, "console_slack_external_team_ids_save_failed");
-            ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, unavailable)
-        })?;
-    Ok(ids)
-}
 
 #[cfg(test)]
 mod tests {
@@ -379,17 +324,9 @@ mod tests {
     use serde_json::json;
 
     /// The `details` keys a settings write is rejected under, or `None` when it
-    /// passes, sorted so a test does not pin report order.
+    /// passes.
     fn rejected(body: serde_json::Value) -> Option<Vec<String>> {
-        let update: UpdateSystemSettings = serde_json::from_value(body).expect("a typed request");
-        update.validate_fields().err().map(|errors| {
-            let mut keys: Vec<String> = errors
-                .entries()
-                .map(|(attribute, _)| attribute.to_owned())
-                .collect();
-            keys.sort();
-            keys
-        })
+        common::detail_keys::<UpdateSystemSettings>(body)
     }
 
     #[test]

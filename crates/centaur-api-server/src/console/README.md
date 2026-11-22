@@ -19,19 +19,19 @@ When disabled, these paths fall through to the rest of api-rs exactly as before.
 | `host.rs` | Console-host vs internal-host path split (see "Host routing"). |
 | `guard.rs` | The single route builder and authorization layer (see "Authorization"). |
 | `session_cookie.rs` | AES-256-GCM stateless session cookie. |
-| `return_path.rs` | Port of `ConsoleReturnPath.safe` for post-login redirects. |
+| `return_path.rs` | Same-origin check for post-login redirects. |
 | `http.rs` | Error envelope, JSON 404, `{"data": ...}` envelopes, pagination, label filters, lists, origin. |
 | `request.rs` | Typed `data`/body/query/form extractors and their validation errors. |
 | `assets.rs` | Embedded `services/console/public/assets/oauth-page` files. |
-| `static_files.rs` | Static mount: the SPA shell, `/spa/assets/*`, root public files, PWA manifest and service worker. No session or DB access. |
+| `static_files.rs` | Static mount: the SPA shell, `/spa/assets/*`, and root public files. No session or DB access. |
 | `pages.rs` | Server-rendered `/login`, `/pending`, `/logout`. |
 | `tests_db.rs` | DB-backed integration tests for the shipped routers. |
 
 `console_session.rs` (one level up) owns `ConsoleSessionConfig` and the
-`/me`/`/session` shell endpoints. `bearer.rs`, `sandbox.rs`, and `guard.rs`
-share the single authorization model described below; `bearer.rs` is only the
-`/api/v1` mount point, and `sandbox.rs` owns the sandbox token verification and
-live binding checks.
+`/me`/`/session` shell endpoints. `mod.rs`, `sandbox.rs`, and `guard.rs` share
+the single authorization model described below; `mod.rs` mounts the bearer API
+at `/api/v1`, and `sandbox.rs` owns the sandbox token verification and live
+binding checks.
 
 ## Host routing
 
@@ -50,7 +50,7 @@ guard as on the public host.
 
 | Surface | Paths | Credential | Console host | Any other host |
 | --- | --- | --- | --- | --- |
-| SPA shell, PWA, root public files | `/`, `/console/*`, other browser navigations, `/manifest`, `/manifest.json`, `/service-worker`, `/service-worker.js`, `/icon.svg`, `/launch` | Console session cookie when signed in | yes | 404 |
+| SPA shell, root public files | `/`, `/console/*`, other browser navigations, `/icon.svg` | Console session cookie when signed in | yes | 404 |
 | Server-rendered pages | `/login`, `/logout`, `/pending`, `/auth/*`, `/oauth/:slug/{start,callback}`, `/mcp/oauth/*`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | form/session cookie | yes | 404 |
 | OAuth page assets | `/assets/oauth-page/*` | none | yes | 404 |
 | Console API | `/api/v1/console/*` | `console.*` capability: session cookie, delegated sandbox token, or another credential that holds it | yes | credential-bearing requests only; a cookie-only request is 404 |
@@ -242,9 +242,10 @@ same message text; `/api/v1/console/me` has no `flash` field, and the SPA shows
 only the results of actions it performs itself.
 
 `return_to` values must pass `return_path::safe`; never redirect to an
-unvalidated path. It allows `/`, `/console...`, the MCP authorize endpoint,
-`/oauth/<slug>/{start,callback}`, and `/launch`, preserving the query and
-rejecting dot segments and dangerous characters.
+unvalidated path. It resolves the value against the Console origin and keeps the
+path and query only when the origin is unchanged, so absolute URLs,
+protocol-relative values, backslashes, whitespace, and control characters are
+refused.
 
 ## Typed request parsing
 
@@ -279,20 +280,16 @@ Rules shared by all four:
 
 - Unknown fields are ignored. A nested form/query key such as `return_to[]` is
   simply an unknown field, so `return_to` is absent; there is no sentinel value.
-  If the absent field would select a **broader** default, reject the nested key
-  instead. `GET /oauth/:slug/start` does this for `scopes[...]` with its 400
-  result page; without it the handler would grant every app-allowed scope.
-  The helper is `request::has_nested_param`; apply it only to fields whose
-  absence widens the request, never to unrelated unknown keys.
 - Field types are strict: a JSON string, number, or `null` is not a boolean, and
-  there is no ActiveModel-style casting. A wrong type (or a missing required
-  field) is a 422 `{"error":{"message":"validation failed","details":
+  there is no ActiveModel-style casting. A wrong JSON field type (or a missing
+  required field in a `ConsoleData`/`ConsoleBody` struct) is a 422
+  `{"error":{"message":"validation failed","details":
   {"<field>":["<message>"]}}}`; the details key is the field path, so a handler
   can return the error unchanged. Declare intentionally optional fields as
   `Option<T>` or add `#[serde(default)]`.
-- `ConsoleData` requires a non-empty `data` object. Absent, `null`, `false`, or
-  empty `data` is a 400 with the plain `missing required "data" object`; a
-  non-object `data` is a 422 with `details: {"data":["must be an object"]}`.
+- `ConsoleData` requires a non-empty `data` object. A missing `data` and any
+  non-object `data` value (including `null`, `false`, `true`, numbers, strings,
+  and arrays) are a 400 with the plain `missing required "data" object`.
   `ConsoleBody` treats an empty body as `{}`. The same 400 message is used in
   every namespace; Rails' `ParameterMissing` wording is not ported.
 - A PATCH endpoint that must distinguish an absent field (keep the stored value)
@@ -300,12 +297,9 @@ Rules shared by all four:
   example with the existing `Patch` enum or with `Option<Option<T>>` plus
   `#[serde(default, deserialize_with = ...)]`; a plain `Option<T>` collapses
   both cases.
-- A repeated scalar query or form key is a 400
-  (`query parameter must not be repeated: <name>` /
-  `form parameter must not be repeated: <name>`), not Rack's last-wins. The
-  console router checks every query string; `ConsoleForm` checks form bodies.
-  Bracket-shaped keys (`ids[]=`, `labels[team]=`) are Rack's array/hash forms,
-  not scalars, and keep their existing handling. Query/form structs are flat;
+- `ConsoleQuery` and `ConsoleForm` deserialize the raw query/form string with
+  `serde_urlencoded`; a parse failure is a Console 400 envelope. Bracket-shaped
+  keys (`ids[]=`, `labels[team]=`) are ordinary unknown fields for a flat struct.
   `labels[key]=value` filters still use `Query<HashMap<String, String>>` with
   `ListParams`.
 
@@ -341,7 +335,10 @@ struct UpdateNote {
     owner: Option<String>,
 }
 
-async fn update(..., ConsoleData(data): ConsoleData<UpdateNote>) -> Result<Response, AdminError> {
+async fn update(
+    ...,
+    ConsoleData(data): ConsoleData<UpdateNote>,
+) -> Result<Response, ConsoleError> {
     data.validate_fields()?; // 422 with `details.title`, or nothing
     // ...
 }
@@ -465,25 +462,23 @@ the field keys.
   compatibility details; `validation_failed` matches Rails' `"validation
   failed"` plus `errors.as_json`.
 - `json_not_found` is the JSON 404 used by the Console-owned fallback
-  (`/console`, `/api/v1`, `/mcp/oauth`, `/oauth`, `/assets/oauth-page`,
-  `/launch`). Other unknown paths keep api-rs's empty 404.
+  (`/console`, `/api/v1`, `/mcp/oauth`, `/oauth`, `/assets/oauth-page`). Other
+  unknown paths keep api-rs's empty 404.
 - `DataPayload<T>` is Console's `{"data": ...}` envelope for a fixed-shape
   payload; `json_data` renders it as a 200, `created_data` as a 201, and
   `no_content` is the 204 every delete returns. Do not write the envelope as a
   `json!` map.
 - `Pagination` reads `page`/`limit` (plain integer, defaults 1/50, limit clamped
-  1..=200) and `ListParams` also reads `labels[key]=value` scalars. `page_meta`
+  1..=200) and `ListParams` also reads `labels[key]=value` scalars. Its `meta`
   emits `page`, `limit`, `total`, `total_pages`; `total_pages` is 0 for no rows.
 - `request_origin` is Rails' `request.origin`: the `Origin` header only, no
   `Referer` fallback. Every unsafe console request, JSON or form, requires it to
   equal `CENTAUR_CONSOLE_PUBLIC_URL`'s normalized origin; a missing or `null`
   Origin is rejected.
-- Every Console response carries a `Cache-Control`: Rails installs
-  `Rack::ETag, "no-cache"`, so the console router has one layer that fills in the
-  same default when a handler sets none (`max-age=0, private, must-revalidate`
-  for a 200/201 body, `no-cache` otherwise, including redirects and 204s).
-  Handlers that need stricter caching set `no-store` themselves; do not rely on
-  the absence of the header.
+- Handlers set their own `Cache-Control` only where it matters: the static
+  shell, hashed assets, `no-store` on `/me`, token responses, and sandbox
+  permissions. There is no default cache layer and no `ETag`: nothing in the
+  tree sends `If-None-Match`.
 
 ### Rails quirks intentionally not ported
 
@@ -494,9 +489,8 @@ Match Rails' contract, not its implementation accidents. Do not reintroduce:
   `error.details.reason` only.
 - Rails' framework 5xx body (`PublicExceptions`, `public/500.html`). The normal
   error envelope is used and the internal error is logged, never echoed.
-- Format-suffix route aliases (`/up.json`, `/manifest.html`, `/auth/:provider/
-  callback.html`, `/mcp/oauth/token.json`). Register the canonical path only;
-  `/manifest.json` and `/service-worker.js` stay because the SPA requests them.
+- Format-suffix route aliases (`/up.json`, `/auth/:provider/callback.html`,
+  `/mcp/oauth/token.json`). Register the canonical path only.
 - The Rails `/up` health page: api-rs serves `/healthz`.
 - `/lookup/default/:foreign_id` compatibility aliases; only the canonical
   `/lookup/:foreign_id` lookup remains.
@@ -624,7 +618,7 @@ hand; the old per-area helpers are now wrappers over this module.
 
 `centaur_console_db::model::ConsoleModel` describes one table: `TABLE`,
 `OID_PREFIX`, `NAME` (the Rails model name a 404 renders), `HAS_FOREIGN_ID`,
-`HAS_LABELS`, and `SOFT_DELETE_COLUMN`. The markers in that module
+and `SOFT_DELETE_COLUMN`. The markers in that module
 (`model::ApiKey`, `model::Principal`, …) implement it for every Console table
 the routes address. The generic lookups need the area's own `FromRow` row type:
 
@@ -784,9 +778,8 @@ once per statement; `bind` is the helper because sqlx's `PgArguments::add` is
 private. `http::list_rows` runs the same two statements but returns the rows and
 the total instead of rendering them, for a route whose payload needs state from
 the whole page (the OAuth console index batches its apps' credential counts, and
-a console grant list hydrates each row); pair it with `http::list_response`.
-Areas with a hand-written list may use `http::page_meta`/`http::list_response`
-instead, but a new list should not repeat the count/page pair.
+a console grant list hydrates each row); pair it with
+`http::list_response`.
 
 ## Pages, assets, and SSO
 
@@ -798,11 +791,11 @@ the hashed asset root (default `services/console/public/spa/assets`), and
 to `/app/services/console/...`; source maps are removed there.
 `static_files.rs` serves them with `tower_http`'s `ServeDir`/`ServeFile`: the
 shell for `/` and `/console/...` (`no-cache`, app CSP), `/spa/assets/*`
-(`public, max-age=31536000, immutable`, gzip/brotli), the root icons and
-offline page (public-file cache), and the embedded PWA manifest and service
-worker (`no-cache`). The shell is a plain file: a signed-out visitor is sent to
+(`public, max-age=31536000, immutable`, gzip/brotli), and the root icons
+(public-file cache). The shell is a plain file: a signed-out visitor is sent to
 `/login?return_to=<page>` by the SPA when its first API call returns 401.
-Other paths are not SPA routes and 404.
+Other paths are not SPA routes and 404. There are no `/manifest` or
+`/service-worker` aliases; the PWA is gone.
 
 `/login` (GET/POST), `/pending`, and `POST /logout` are server-rendered. Their
 HTML and the OAuth layout are ported from `app/views/sessions/*` and
@@ -828,10 +821,9 @@ HTML origin failures are 422, not the JSON API's 403 `csrf`. `require_login`
 runs before the origin check, so `/logout` without a signed-in user (or with a
 cookie for a deleted user) redirects to `/login` before checking the Origin.
 
-SSO start/callback is **not ported**. `pages.rs` renders provider buttons from
-environment settings only; credential-backed provider configuration stays in
-Rails until an SSO area port lands. Do not add SSO routes through an unguarded
-router.
+SSO start/callback is routed at `/auth/{provider}/{start,callback}`. The start
+page renders provider buttons from the same enabled-provider set the SSO routes
+use. Do not add SSO routes through an unguarded router.
 
 ## Tests
 
@@ -847,7 +839,7 @@ cargo test --locked -p centaur-api-server console_session
 ```
 
 The DB tests drive the real routers (`build_router_with_app_state`,
-`bearer_router`, `sandbox_router`) and cover login -> `/me` -> CSRF write ->
+`console::bearer_router`, `sandbox_router`) and cover login -> `/me` -> CSRF write ->
 logout, disabled/pending accounts, bearer owner states, the single sandbox
 token and its live proxy binding, the delegated Console credential, and the
 sandbox secret-write restriction. Unit tests in `host.rs`, `console::tests`,

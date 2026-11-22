@@ -2,7 +2,7 @@
 //! demote actions. Disabling also revokes the user's MCP OAuth refresh tokens,
 //! as `User#after_update` does.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 use time::PrimitiveDateTime;
@@ -190,9 +190,9 @@ struct ProviderRecord {
 }
 
 /// The `user_identities.provider` values per user, sorted and de-duplicated.
-async fn identity_providers(pool: &PgPool, user_ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+async fn identity_providers(pool: &PgPool, user_ids: &[i64]) -> Result<BTreeMap<i64, Vec<String>>> {
     if user_ids.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(BTreeMap::new());
     }
     let records: Vec<ProviderRecord> = sqlx::query_as(
         "SELECT user_id, provider FROM user_identities WHERE user_id = ANY($1) ORDER BY user_id, id",
@@ -200,18 +200,17 @@ async fn identity_providers(pool: &PgPool, user_ids: &[i64]) -> Result<HashMap<i
     .bind(user_ids)
     .fetch_all(pool)
     .await?;
-    let mut providers: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut providers: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
     for record in records {
-        let Some(provider) = record.provider else {
-            continue;
-        };
-        let providers = providers.entry(record.user_id).or_default();
-        if !providers.contains(&provider) {
-            providers.push(provider);
+        if let Some(provider) = record.provider {
+            providers
+                .entry(record.user_id)
+                .or_default()
+                .insert(provider);
         }
     }
-    for providers in providers.values_mut() {
-        providers.sort();
-    }
-    Ok(providers)
+    Ok(providers
+        .into_iter()
+        .map(|(user_id, providers)| (user_id, providers.into_iter().collect()))
+        .collect())
 }

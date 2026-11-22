@@ -263,11 +263,49 @@ impl From<SshKeyRequest> for WriteDocument {
     }
 }
 
-/// The grantee a console secret list can exclude (`exclude_grantee`).
+/// A grantee: a principal or a role, addressed by one column. Grants, Slack
+/// channel permissions, and the console's `exclude_grantee` filter all name
+/// their subject this way.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Grantee {
     Principal(i64),
     Role(i64),
+}
+
+impl Grantee {
+    /// The column naming this grantee's row.
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::Principal(_) => "principal_id",
+            Self::Role(_) => "role_id",
+        }
+    }
+
+    pub fn id(self) -> i64 {
+        match self {
+            Self::Principal(id) | Self::Role(id) => id,
+        }
+    }
+
+    pub fn principal_id(self) -> Option<i64> {
+        match self {
+            Self::Principal(id) => Some(id),
+            Self::Role(_) => None,
+        }
+    }
+
+    pub fn role_id(self) -> Option<i64> {
+        match self {
+            Self::Role(id) => Some(id),
+            Self::Principal(_) => None,
+        }
+    }
+
+    /// `<table> WHERE <owner column> = $1`: the prefix every owner-scoped query
+    /// shares, so the SQL stays one string per query.
+    pub fn owner_sql(self, table: &str) -> String {
+        format!("{table} WHERE {} = $1", self.column())
+    }
 }
 
 /// One stored source. `secret` is the ciphertext the `secret` column holds.
@@ -693,30 +731,6 @@ pub async fn list_kind_secrets(
         }
     }
     Ok(SecretPage { rows, total })
-}
-
-/// Every grantable secret matching `query`, grouped by kind in Console's order
-/// and ordered by primary key inside each kind.
-pub async fn list_grantables(pool: &PgPool, query: &str) -> Result<Vec<SecretRow>> {
-    let mut connection = pool.acquire().await?;
-    let mut rows = Vec::new();
-    for kind in SecretKind::ALL {
-        let mut sql = format!("SELECT id FROM {}", kind.table());
-        if !query.is_empty() {
-            sql.push_str(" WHERE name ILIKE $1 OR foreign_id ILIKE $1");
-        }
-        sql.push_str(" ORDER BY id ASC");
-        let mut ids = sqlx::query_scalar::<_, i64>(&sql);
-        if !query.is_empty() {
-            ids = ids.bind(like_pattern(query));
-        }
-        for id in ids.fetch_all(&mut *connection).await? {
-            if let Some(row) = load_secret(&mut connection, kind, id).await? {
-                rows.push(row);
-            }
-        }
-    }
-    Ok(rows)
 }
 
 /// The row a path segment names for `kind`: an opaque id, else a foreign id.

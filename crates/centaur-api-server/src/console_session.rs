@@ -91,11 +91,6 @@ impl ConsoleSessionConfig {
         &self.public_origin
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn cookie_name(&self) -> &str {
-        self.cookie.cookie_name()
-    }
-
     pub(crate) fn cookie(&self) -> &SessionCookieConfig {
         &self.cookie
     }
@@ -331,7 +326,6 @@ mod tests {
 
         let config = config();
         assert_eq!(config.public_origin(), "https://console.example.test");
-        assert_eq!(config.cookie_name(), "_centaur_console_session");
         assert!(!format!("{config:?}").contains(SECRET));
 
         for invalid in [
@@ -352,7 +346,7 @@ mod tests {
         let config = config();
         let mut headers = HeaderMap::new();
         headers.insert(ORIGIN, "https://console.example.test".parse().unwrap());
-        assert!(request_origin(&headers).as_deref() == Some(config.public_origin()));
+        assert!(request_origin(&headers) == Some(config.public_origin()));
         headers.remove(ORIGIN);
         headers.insert(
             axum::http::header::REFERER,
@@ -360,7 +354,7 @@ mod tests {
         );
         assert!(request_origin(&headers).is_none());
         headers.insert(ORIGIN, "null".parse().unwrap());
-        assert!(request_origin(&headers).as_deref() != Some(config.public_origin()));
+        assert!(request_origin(&headers) != Some(config.public_origin()));
     }
 
     #[test]

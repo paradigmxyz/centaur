@@ -14,8 +14,10 @@ use super::{
     grantee_principals, principal_defaults,
 };
 use crate::areas::reconciliation;
+use crate::areas::secrets::Grantee;
 use crate::invalidate::{self, Scope};
 use crate::model::{self, ConsoleModel};
+use crate::timestamp;
 use crate::validation::{ValidateFields, Validation};
 use crate::write;
 
@@ -313,70 +315,47 @@ async fn validate_principal(conn: &mut PgConnection, draft: &PrincipalDraft) -> 
     Ok(())
 }
 
-async fn insert_principal(conn: &mut PgConnection, draft: &PrincipalDraft) -> Result<PrincipalRow> {
-    let columns = [
-        "foreign_id",
-        "name",
-        "kind",
-        "labels",
-        "slack_user_id",
-        "slack_channel_id",
-        "slack_team_id",
-        "slack_email",
-        "console_user_id",
-        "sandbox_repo_cache",
-        "sandbox_api_server_enabled",
-        "sandbox_observability_enabled",
-        "sandbox_sessions_read_enabled",
-        "sandbox_workflows_read_enabled",
-        "sandbox_workflows_write_enabled",
-        "created_by_id",
-    ];
-    let sql = write::insert_returning_sql(model::Principal::TABLE, &columns, PRINCIPAL_COLUMNS);
-    Ok(sqlx::query_as(&sql)
-        .bind(&draft.foreign_id)
-        .bind(&draft.name)
-        .bind(&draft.kind)
-        .bind(&draft.labels)
-        .bind(&draft.slack_user_id)
-        .bind(&draft.slack_channel_id)
-        .bind(&draft.slack_team_id)
-        .bind(&draft.slack_email)
-        .bind(draft.console_user_id)
-        .bind(&draft.sandbox_repo_cache)
-        .bind(draft.sandbox_api_server_enabled)
-        .bind(draft.sandbox_observability_enabled)
-        .bind(draft.sandbox_sessions_read_enabled)
-        .bind(draft.sandbox_workflows_read_enabled)
-        .bind(draft.sandbox_workflows_write_enabled)
-        .bind(draft.created_by_id)
-        .fetch_one(&mut *conn)
-        .await?)
-}
+/// The principal columns a write binds, in bind order.
+const PRINCIPAL_WRITE_COLUMNS: [&str; 14] = [
+    "name",
+    "kind",
+    "labels",
+    "slack_user_id",
+    "slack_channel_id",
+    "slack_team_id",
+    "slack_email",
+    "console_user_id",
+    "sandbox_repo_cache",
+    "sandbox_api_server_enabled",
+    "sandbox_observability_enabled",
+    "sandbox_sessions_read_enabled",
+    "sandbox_workflows_read_enabled",
+    "sandbox_workflows_write_enabled",
+];
 
-async fn update_principal(conn: &mut PgConnection, draft: &PrincipalDraft) -> Result<PrincipalRow> {
-    let id = draft.id.expect("persisted principal");
-    let columns = [
-        "name",
-        "kind",
-        "labels",
-        "slack_user_id",
-        "slack_channel_id",
-        "slack_team_id",
-        "slack_email",
-        "console_user_id",
-        "sandbox_repo_cache",
-        "sandbox_api_server_enabled",
-        "sandbox_observability_enabled",
-        "sandbox_sessions_read_enabled",
-        "sandbox_workflows_read_enabled",
-        "sandbox_workflows_write_enabled",
-    ];
-    let sql = format!(
-        "{} RETURNING {PRINCIPAL_COLUMNS}",
-        write::update_sql(model::Principal::TABLE, &columns)
-    );
-    Ok(sqlx::query_as(&sql)
+/// Inserts a new principal or updates the stored one, from the same column
+/// list: an insert is those columns plus `foreign_id`/`created_by_id`.
+async fn persist_principal_row(
+    conn: &mut PgConnection,
+    draft: &PrincipalDraft,
+) -> Result<PrincipalRow> {
+    let new = draft.id.is_none();
+    let sql = if new {
+        let mut columns = vec!["foreign_id"];
+        columns.extend(PRINCIPAL_WRITE_COLUMNS);
+        columns.push("created_by_id");
+        write::insert_returning_sql(model::Principal::TABLE, &columns, PRINCIPAL_COLUMNS)
+    } else {
+        format!(
+            "{} RETURNING {PRINCIPAL_COLUMNS}",
+            write::update_sql(model::Principal::TABLE, &PRINCIPAL_WRITE_COLUMNS)
+        )
+    };
+    let mut query = sqlx::query_as(&sql);
+    if new {
+        query = query.bind(&draft.foreign_id);
+    }
+    query = query
         .bind(&draft.name)
         .bind(&draft.kind)
         .bind(&draft.labels)
@@ -391,9 +370,8 @@ async fn update_principal(conn: &mut PgConnection, draft: &PrincipalDraft) -> Re
         .bind(draft.sandbox_sessions_read_enabled)
         .bind(draft.sandbox_workflows_read_enabled)
         .bind(draft.sandbox_workflows_write_enabled)
-        .bind(id)
-        .fetch_one(&mut *conn)
-        .await?)
+        .bind(draft.id.unwrap_or(draft.created_by_id));
+    Ok(query.fetch_one(&mut *conn).await?)
 }
 
 async fn assign_default_roles(conn: &mut PgConnection, principal_id: i64) -> Result<()> {
@@ -402,10 +380,51 @@ async fn assign_default_roles(conn: &mut PgConnection, principal_id: i64) -> Res
          SELECT $1, id, $2, $2 FROM roles WHERE assign_by_default",
     )
     .bind(principal_id)
-    .bind(write::now())
+    .bind(timestamp::now())
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// Applies a merged principal draft and runs the callbacks a save fires:
+/// default roles on insert, a sync-config bump on a changed update, the
+/// submitted permission set, and credential reconciliation.
+async fn persist_principal(
+    conn: &mut PgConnection,
+    mut draft: PrincipalDraft,
+    write: &PrincipalWrite,
+    was_new: bool,
+) -> Result<PrincipalRow> {
+    draft.apply(write);
+    draft.apply_defaults(conn).await?;
+    if write.slack_email.is_some() {
+        draft.link_console_user(conn).await?;
+    }
+    draft.apply_sandbox_repo_cache_label();
+    validate_principal(conn, &draft).await?;
+    let row = if was_new {
+        let row = persist_principal_row(conn, &draft).await?;
+        assign_default_roles(conn, row.id).await?;
+        row
+    } else {
+        let changed = draft.sync_config_changed();
+        let row = persist_principal_row(conn, &draft).await?;
+        if changed {
+            invalidate::invalidate(conn, Scope::Principal(row.id)).await?;
+        }
+        row
+    };
+    if let Some(permissions) = &write.slack_channel_permissions {
+        replace_permissions_in_tx(
+            conn,
+            Grantee::Principal(row.id),
+            permissions.as_deref().unwrap_or_default(),
+            false,
+        )
+        .await?;
+    }
+    reconciliation::apply_for_principal(conn, row.id).await?;
+    Ok(row)
 }
 
 pub async fn create_principal(
@@ -413,27 +432,9 @@ pub async fn create_principal(
     write: &PrincipalWrite,
     created_by: i64,
 ) -> Result<super::PrincipalView> {
-    let mut draft = PrincipalDraft::new(write.foreign_id.clone(), created_by);
-    draft.apply(write);
+    let draft = PrincipalDraft::new(write.foreign_id.clone(), created_by);
     let mut tx = pool.begin().await?;
-    draft.apply_defaults(&mut tx).await?;
-    if write.slack_email.is_some() {
-        draft.link_console_user(&mut tx).await?;
-    }
-    draft.apply_sandbox_repo_cache_label();
-    validate_principal(&mut tx, &draft).await?;
-    let row = insert_principal(&mut tx, &draft).await?;
-    assign_default_roles(&mut tx, row.id).await?;
-    if let Some(permissions) = &write.slack_channel_permissions {
-        replace_permissions_in_tx(
-            &mut tx,
-            PermissionOwner::Principal(row.id),
-            permissions.as_deref().unwrap_or_default(),
-            false,
-        )
-        .await?;
-    }
-    reconciliation::apply_for_principal(&mut tx, row.id).await?;
+    let row = persist_principal(&mut tx, draft, write, true).await?;
     tx.commit().await?;
     load_principal_view(pool, row.id)
         .await?
@@ -460,7 +461,7 @@ async fn upsert_principal_once(
     created_by: i64,
 ) -> Result<(PrincipalRow, bool)> {
     let mut tx = pool.begin().await?;
-    let (mut draft, was_new) = if identifier.starts_with(PRINCIPAL_RESERVED_PREFIX) {
+    let (draft, was_new) = if identifier.starts_with(PRINCIPAL_RESERVED_PREFIX) {
         let row = model::find_by_oid::<model::Principal, PrincipalRow, _>(&mut *tx, identifier)
             .await?
             .ok_or_else(model::Principal::not_found)?;
@@ -478,37 +479,7 @@ async fn upsert_principal_once(
         }
     };
 
-    draft.apply(write);
-    draft.apply_defaults(&mut tx).await?;
-    if write.slack_email.is_some() {
-        draft.link_console_user(&mut tx).await?;
-    }
-    draft.apply_sandbox_repo_cache_label();
-    validate_principal(&mut tx, &draft).await?;
-
-    let row = if was_new {
-        insert_principal(&mut tx, &draft).await?
-    } else {
-        let changed = draft.sync_config_changed();
-        let row = update_principal(&mut tx, &draft).await?;
-        if changed {
-            invalidate::invalidate(&mut tx, Scope::Principal(row.id)).await?;
-        }
-        row
-    };
-    if was_new {
-        assign_default_roles(&mut tx, row.id).await?;
-    }
-    if let Some(permissions) = &write.slack_channel_permissions {
-        replace_permissions_in_tx(
-            &mut tx,
-            PermissionOwner::Principal(row.id),
-            permissions.as_deref().unwrap_or_default(),
-            false,
-        )
-        .await?;
-    }
-    reconciliation::apply_for_principal(&mut tx, row.id).await?;
+    let row = persist_principal(&mut tx, draft, write, was_new).await?;
     tx.commit().await?;
     Ok((row, was_new))
 }
@@ -650,25 +621,41 @@ async fn update_role(conn: &mut PgConnection, draft: &RoleDraft) -> Result<RoleR
         .await?)
 }
 
-pub async fn create_role(
-    pool: &PgPool,
+/// Applies a merged role draft, writes it, and stores the submitted permission
+/// set.
+async fn persist_role(
+    conn: &mut PgConnection,
+    mut draft: RoleDraft,
     write: &RoleWrite,
-    created_by: i64,
-) -> Result<super::RoleView> {
-    let mut draft = RoleDraft::new(write.foreign_id.clone(), created_by);
+    was_new: bool,
+) -> Result<RoleRow> {
     draft.apply(write);
-    let mut tx = pool.begin().await?;
-    validate_role(&mut tx, &draft).await?;
-    let row = insert_role(&mut tx, &draft).await?;
+    validate_role(conn, &draft).await?;
+    let row = if was_new {
+        insert_role(conn, &draft).await?
+    } else {
+        update_role(conn, &draft).await?
+    };
     if let Some(permissions) = &write.slack_channel_permissions {
         replace_permissions_in_tx(
-            &mut tx,
-            PermissionOwner::Role(row.id),
+            conn,
+            Grantee::Role(row.id),
             permissions.as_deref().unwrap_or_default(),
             false,
         )
         .await?;
     }
+    Ok(row)
+}
+
+pub async fn create_role(
+    pool: &PgPool,
+    write: &RoleWrite,
+    created_by: i64,
+) -> Result<super::RoleView> {
+    let draft = RoleDraft::new(write.foreign_id.clone(), created_by);
+    let mut tx = pool.begin().await?;
+    let row = persist_role(&mut tx, draft, write, true).await?;
     tx.commit().await?;
     load_role_view(pool, row.id)
         .await?
@@ -682,7 +669,7 @@ pub async fn upsert_role(
     created_by: i64,
 ) -> Result<(super::RoleView, bool)> {
     let mut tx = pool.begin().await?;
-    let (mut draft, was_new) = if identifier.starts_with(ROLE_RESERVED_PREFIX) {
+    let (draft, was_new) = if identifier.starts_with(ROLE_RESERVED_PREFIX) {
         let row = model::find_by_oid::<model::Role, RoleRow, _>(&mut *tx, identifier)
             .await?
             .ok_or_else(model::Role::not_found)?;
@@ -696,22 +683,7 @@ pub async fn upsert_role(
             ),
         }
     };
-    draft.apply(write);
-    validate_role(&mut tx, &draft).await?;
-    let row = if was_new {
-        insert_role(&mut tx, &draft).await?
-    } else {
-        update_role(&mut tx, &draft).await?
-    };
-    if let Some(permissions) = &write.slack_channel_permissions {
-        replace_permissions_in_tx(
-            &mut tx,
-            PermissionOwner::Role(row.id),
-            permissions.as_deref().unwrap_or_default(),
-            false,
-        )
-        .await?;
-    }
+    let row = persist_role(&mut tx, draft, write, was_new).await?;
     tx.commit().await?;
     let view = load_role_view(pool, row.id)
         .await?
@@ -767,7 +739,7 @@ pub async fn assign_role(
     )
     .bind(principal_id)
     .bind(role.row.id)
-    .bind(write::now())
+    .bind(timestamp::now())
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -799,55 +771,18 @@ pub async fn remove_role(pool: &PgPool, principal_id: i64, role_oid: &str) -> Re
 
 // --- Slack channel permissions --------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
-pub enum PermissionOwner {
-    Principal(i64),
-    Role(i64),
-}
-
-impl PermissionOwner {
-    fn principal_id(self) -> Option<i64> {
-        match self {
-            Self::Principal(id) => Some(id),
-            Self::Role(_) => None,
-        }
-    }
-
-    fn role_id(self) -> Option<i64> {
-        match self {
-            Self::Role(id) => Some(id),
-            Self::Principal(_) => None,
-        }
-    }
-}
-
 async fn owner_permissions(
     conn: &mut PgConnection,
-    owner: PermissionOwner,
+    owner: Grantee,
 ) -> Result<Vec<super::PermissionRow>> {
-    let rows: Vec<super::PermissionRow> = match owner {
-        PermissionOwner::Principal(id) => {
-            sqlx::query_as(&format!(
-                "SELECT {} FROM slack_channel_permissions WHERE principal_id = $1 \
-             ORDER BY channel_id, id",
-                super::PERMISSION_COLUMNS
-            ))
-            .bind(id)
-            .fetch_all(&mut *conn)
-            .await?
-        }
-        PermissionOwner::Role(id) => {
-            sqlx::query_as(&format!(
-                "SELECT {} FROM slack_channel_permissions WHERE role_id = $1 \
-             ORDER BY channel_id, id",
-                super::PERMISSION_COLUMNS
-            ))
-            .bind(id)
-            .fetch_all(&mut *conn)
-            .await?
-        }
-    };
-    Ok(rows)
+    Ok(sqlx::query_as(&format!(
+        "SELECT {} FROM {} ORDER BY channel_id, id",
+        super::PERMISSION_COLUMNS,
+        owner.owner_sql("slack_channel_permissions")
+    ))
+    .bind(owner.id())
+    .fetch_all(&mut *conn)
+    .await?)
 }
 
 /// `SlackChannelPermission.normalized_permission_rows`: one row per channel,
@@ -943,7 +878,7 @@ fn validate_permission_row(row: &PermissionDraft) -> std::result::Result<(), cra
 
 async fn replace_permissions_in_tx(
     conn: &mut PgConnection,
-    owner: PermissionOwner,
+    owner: Grantee,
     rows: &[PermissionWrite],
     keep_direct_messages: bool,
 ) -> Result<Vec<PermissionPayload>> {
@@ -977,20 +912,13 @@ async fn replace_permissions_in_tx(
     }
 
     let affected = grantee_principals(&mut *conn, owner.principal_id(), owner.role_id()).await?;
-    match owner {
-        PermissionOwner::Principal(id) => {
-            sqlx::query("DELETE FROM slack_channel_permissions WHERE principal_id = $1")
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
-        }
-        PermissionOwner::Role(id) => {
-            sqlx::query("DELETE FROM slack_channel_permissions WHERE role_id = $1")
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
+    sqlx::query(&format!(
+        "DELETE FROM {}",
+        owner.owner_sql("slack_channel_permissions")
+    ))
+    .bind(owner.id())
+    .execute(&mut *conn)
+    .await?;
     let sql = write::insert_sql(
         model::SlackChannelPermission::TABLE,
         &[
@@ -1019,10 +947,10 @@ async fn replace_permissions_in_tx(
 
 pub async fn replace_slack_channel_permissions(
     pool: &PgPool,
-    owner: PermissionOwner,
+    owner: Grantee,
     rows: &[PermissionWrite],
 ) -> Result<Vec<PermissionPayload>> {
-    let keep_direct_messages = matches!(owner, PermissionOwner::Principal(_));
+    let keep_direct_messages = matches!(owner, Grantee::Principal(_));
     let mut tx = pool.begin().await?;
     let payload = replace_permissions_in_tx(&mut tx, owner, rows, keep_direct_messages).await?;
     tx.commit().await?;
@@ -1031,24 +959,16 @@ pub async fn replace_slack_channel_permissions(
 
 async fn owner_permission(
     conn: &mut PgConnection,
-    owner: PermissionOwner,
+    owner: Grantee,
     channel_id: &str,
 ) -> Result<Option<super::PermissionRow>> {
-    let sql = match owner {
-        PermissionOwner::Principal(_) => format!(
-            "SELECT {} FROM slack_channel_permissions WHERE principal_id = $1 AND channel_id = $2",
-            super::PERMISSION_COLUMNS
-        ),
-        PermissionOwner::Role(_) => format!(
-            "SELECT {} FROM slack_channel_permissions WHERE role_id = $1 AND channel_id = $2",
-            super::PERMISSION_COLUMNS
-        ),
-    };
-    let id = match owner {
-        PermissionOwner::Principal(id) | PermissionOwner::Role(id) => id,
-    };
+    let sql = format!(
+        "SELECT {} FROM {} AND channel_id = $2",
+        super::PERMISSION_COLUMNS,
+        owner.owner_sql("slack_channel_permissions")
+    );
     Ok(sqlx::query_as(&sql)
-        .bind(id)
+        .bind(owner.id())
         .bind(channel_id)
         .fetch_optional(&mut *conn)
         .await?)
@@ -1056,7 +976,7 @@ async fn owner_permission(
 
 pub async fn upsert_slack_channel_permission(
     pool: &PgPool,
-    owner: PermissionOwner,
+    owner: Grantee,
     write: &PermissionWrite,
 ) -> Result<(PermissionPayload, bool)> {
     let channel_id = write.channel_id();
@@ -1144,7 +1064,7 @@ pub async fn upsert_slack_channel_permission(
 
 pub async fn destroy_slack_channel_permission(
     pool: &PgPool,
-    owner: PermissionOwner,
+    owner: Grantee,
     channel_id: &str,
 ) -> Result<()> {
     let channel_id = channel_id.trim().to_uppercase();

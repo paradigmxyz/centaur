@@ -24,16 +24,18 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use centaur_console_db::{
     ConsoleUser, ConsoleUserStatus,
     areas::oauth::{
-        FlowCredentialWrite, NewFlowCredential, OauthApp as DbOauthApp, OauthEncryption,
-        WrappingRule, WrappingSecretSpec, compute_next_attempt_at, credential_expires_at,
-        credential_for_app_subject, first_credential_for_app, lock_oauth_app_row,
-        upsert_flow_credential, upsert_wrapping_secret, url_safe,
+        DEFAULT_EARLY_REFRESH_FRACTION, DEFAULT_EARLY_REFRESH_SLACK_SECONDS,
+        DEFAULT_MAX_REFRESH_INTERVAL_SECONDS, FlowCredentialWrite, NewFlowCredential,
+        OauthApp as DbOauthApp, OauthEncryption, WrappingRule, WrappingSecretSpec,
+        compute_next_attempt_at, credential_expires_at, credential_for_app_subject,
+        first_credential_for_app, lock_oauth_app_row, upsert_flow_credential,
+        upsert_wrapping_secret, url_safe,
     },
     find_console_user,
     model::{ConsoleModel, OauthApp as OauthAppModel, User as UserModel},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use sha2::Digest;
 use url::Url;
 
@@ -45,8 +47,8 @@ use crate::{
     AppState,
     console::{
         LOGIN_PATH, PENDING_PATH,
-        pages::{login_error, server_page_csp},
-        request::{ConsoleQuery, has_nested_param},
+        pages::{escape_html, login_error, server_page_csp},
+        request::ConsoleQuery,
         return_path,
         session_cookie::ConsoleSession,
     },
@@ -55,18 +57,7 @@ use crate::{
 
 const FLOW_TTL_SECONDS: i64 = 10 * 60;
 const FLOW_COOKIE: &str = "oauth_flow";
-const PROVIDER_CONFIG_KEYS: [&str; 5] = [
-    "authorization_endpoint",
-    "token_endpoint",
-    "userinfo_endpoint",
-    "revocation_endpoint",
-    "resource",
-];
-
-/// `/oauth/:slug/start?scopes=`. The handler rejects a nested `scopes[...]` key
-/// instead of letting the typed struct treat it as unknown: doing that would
-/// fall back to every app-allowed scope, which is a widening the client did not
-/// ask for (Rails raised a 500 on the array parameter).
+/// `/oauth/:slug/start?scopes=`.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct StartQuery {
     #[serde(default)]
@@ -349,7 +340,7 @@ async fn exchange_code(
     client_secret: Option<&str>,
 ) -> Result<CodeExchangeResult, ExchangeError> {
     let Some(token_endpoint) = provider.token_endpoint() else {
-        return Err(ExchangeError::new("token endpoint is required", "parse"));
+        return Err(ExchangeError::new("parse"));
     };
     let mut form: Vec<(String, String)> = vec![
         ("grant_type".to_owned(), "authorization_code".to_owned()),
@@ -360,10 +351,7 @@ async fn exchange_code(
     match provider.token_endpoint_auth_method() {
         "client_secret_basic" => {
             let Some(secret) = client_secret.filter(|value| !value.is_empty()) else {
-                return Err(ExchangeError::new(
-                    "client_secret is required for client_secret_basic",
-                    "parse",
-                ));
+                return Err(ExchangeError::new("parse"));
             };
             let encode = |value: &str| {
                 url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
@@ -402,9 +390,7 @@ async fn exchange_code(
         64 * 1024,
     )
     .await
-    .map_err(|error| {
-        ExchangeError::new(format!("token endpoint request failed: {error}"), "network")
-    })?;
+    .map_err(|_| ExchangeError::new("network"))?;
     if !response.success() {
         let oauth_error = response.json().and_then(|value| {
             value
@@ -419,15 +405,11 @@ async fn exchange_code(
                 "http"
             },
             code: oauth_error,
-            status: Some(response.status),
-            message: format!("token endpoint http {}", response.status),
         });
     }
     let parsed: Value = serde_json::from_str(&response.body).map_err(|_| ExchangeError {
         stage: "parse",
         code: None,
-        status: Some(response.status),
-        message: "parsing token response failed".to_owned(),
     })?;
     let object = parsed.as_object().cloned().unwrap_or_default();
     if object.get("ok") == Some(&Value::Bool(false))
@@ -436,8 +418,6 @@ async fn exchange_code(
         return Err(ExchangeError {
             stage: "oauth",
             code: Some(error.to_owned()),
-            status: Some(response.status),
-            message: format!("token endpoint rejected code: {error}"),
         });
     }
     let token_payload = object
@@ -455,11 +435,9 @@ async fn exchange_code(
         .get("access_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| ExchangeError {
+        .ok_or(ExchangeError {
             stage: "parse",
             code: None,
-            status: Some(response.status),
-            message: "token endpoint returned an empty access_token".to_owned(),
         })?
         .to_owned();
     let refresh_token = token_payload
@@ -471,8 +449,6 @@ async fn exchange_code(
         return Err(ExchangeError {
             stage: "oauth",
             code: Some("missing_refresh_token".to_owned()),
-            status: Some(response.status),
-            message: "token endpoint returned no refresh_token".to_owned(),
         });
     }
     let expires_in = token_payload
@@ -513,7 +489,7 @@ enum UpsertFailure {
     AccountMismatch,
     Concurrent,
     SaveFailed,
-    Internal(centaur_console_db::Error),
+    Internal,
 }
 
 impl From<centaur_console_db::areas::oauth::FlowUpsertError> for UpsertFailure {
@@ -522,7 +498,7 @@ impl From<centaur_console_db::areas::oauth::FlowUpsertError> for UpsertFailure {
         match error {
             FlowUpsertError::AccountMismatch => Self::AccountMismatch,
             FlowUpsertError::UniqueViolation => Self::Concurrent,
-            FlowUpsertError::Console(error) => Self::Internal(error),
+            FlowUpsertError::Console(_) => Self::Internal,
         }
     }
 }
@@ -557,9 +533,9 @@ async fn upsert_credential(
         compute_next_attempt_at(
             expires_at,
             Some(now),
-            app_default_slack(),
-            app_default_fraction(),
-            app_default_interval(),
+            DEFAULT_EARLY_REFRESH_SLACK_SECONDS,
+            DEFAULT_EARLY_REFRESH_FRACTION,
+            DEFAULT_MAX_REFRESH_INTERVAL_SECONDS,
             now,
         )
     });
@@ -578,14 +554,11 @@ async fn upsert_credential(
     let name = format!("{} – {}", provider.display_name(), display);
     let external_user_key = random_token(16);
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| UpsertFailure::Internal(error.into()))?;
+    let mut tx = pool.begin().await.map_err(|_| UpsertFailure::Internal)?;
     if app.shared {
         lock_oauth_app_row(&mut tx, &app.slug)
             .await
-            .map_err(UpsertFailure::Internal)?;
+            .map_err(|_| UpsertFailure::Internal)?;
         if let Some(first) = first_credential_for_app(&mut tx, app.id).await?
             && first.provider_subject.as_deref() != Some(subject.as_str())
         {
@@ -638,7 +611,7 @@ async fn upsert_credential(
     };
     let credential = upsert_flow_credential(&mut tx, &encryption, app, &new, &write).await?;
     let (inject, replace) = provider.wrapping_secret_config();
-    let mut rules = provider.credential_request_rules().unwrap_or_else(|| {
+    let rules = provider.credential_request_rules().unwrap_or_else(|| {
         provider
             .api_hosts()
             .into_iter()
@@ -649,17 +622,10 @@ async fn upsert_credential(
             })
             .collect()
     });
-    let kind = provider.wrapping_secret_kind();
-    let (inject, replace) = if kind == "github_token" {
-        rules = github_rules();
-        (None, Some(github_replace_config()))
-    } else {
-        (inject, replace)
-    };
     let spec = WrappingSecretSpec {
         name: format!("{} token", credential.name.clone().unwrap_or_default()),
         labels: tool_label(app),
-        kind,
+        kind: provider.wrapping_secret_kind(),
         inject_config: inject,
         replace_config: replace,
         rules,
@@ -668,40 +634,9 @@ async fn upsert_credential(
     upsert_wrapping_secret(&mut tx, credential.id, &spec).await?;
     centaur_console_db::areas::reconciliation::apply_for_credential(&mut tx, credential.id)
         .await
-        .map_err(UpsertFailure::Internal)?;
-    tx.commit()
-        .await
-        .map_err(|error| UpsertFailure::Internal(error.into()))?;
+        .map_err(|_| UpsertFailure::Internal)?;
+    tx.commit().await.map_err(|_| UpsertFailure::Internal)?;
     Ok(credential.id)
-}
-
-fn app_default_slack() -> i32 {
-    300
-}
-fn app_default_fraction() -> f64 {
-    0.2
-}
-fn app_default_interval() -> i32 {
-    86_400
-}
-
-fn github_rules() -> Vec<WrappingRule> {
-    ["api.github.com", "github.com", "api.githubcopilot.com"]
-        .into_iter()
-        .map(|host| WrappingRule {
-            host: host.to_owned(),
-            http_methods: Vec::new(),
-            paths: Vec::new(),
-        })
-        .collect()
-}
-
-fn github_replace_config() -> Value {
-    json!({
-        "proxy_value": "GITHUB_TOKEN",
-        "match_headers": ["Authorization"],
-        "require": false
-    })
 }
 
 pub(super) async fn start(
@@ -715,17 +650,7 @@ pub(super) async fn start(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let nested_scopes = has_nested_param(uri.query(), "scopes");
-    match start_inner(
-        &state,
-        &context,
-        &slug,
-        query.scopes.as_deref(),
-        nested_scopes,
-        &headers,
-    )
-    .await
-    {
+    match start_inner(&state, &context, &slug, query.scopes.as_deref()).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -736,40 +661,11 @@ async fn start_inner(
     context: &PageContext,
     slug: &str,
     scopes: Option<&str>,
-    nested_scopes: bool,
-    headers: &HeaderMap,
 ) -> Result<Response, Response> {
     let pool = state
         .console_session_db()
         .map_err(|error| error.into_response())?;
-    let Some(app) = find_app(&pool, slug).await? else {
-        return Err(result_page(
-            &context.config,
-            &context.session,
-            None,
-            "error",
-            StatusCode::NOT_FOUND,
-            "Unknown integration.",
-        ));
-    };
-    let Some(provider) = Provider::from_app(&app) else {
-        return Err(result_page(
-            &context.config,
-            &context.session,
-            Some(&app),
-            "error",
-            StatusCode::NOT_FOUND,
-            "Unknown integration.",
-        ));
-    };
-    if app.shared && !context.user.admin {
-        return Err(redirect(
-            "/console/integrations",
-            &context.config,
-            &context.session,
-            None,
-        ));
-    }
+    let (app, provider) = load_app(&pool, context, slug).await?;
     if !app.enabled {
         return Err(result_page(
             &context.config,
@@ -778,16 +674,6 @@ async fn start_inner(
             "error",
             StatusCode::UNPROCESSABLE_ENTITY,
             "This integration is disabled.",
-        ));
-    }
-    if nested_scopes {
-        return Err(result_page(
-            &context.config,
-            &context.session,
-            Some(&app),
-            "error",
-            StatusCode::BAD_REQUEST,
-            "The requested scopes are invalid. Start again.",
         ));
     }
     let requested = parse_scopes(scopes).unwrap_or_else(|| app.allowed_scopes.clone());
@@ -820,7 +706,7 @@ async fn start_inner(
             crate::ApiError::Internal("cannot sign the OAuth state".to_owned()).into_response(),
         );
     };
-    let redirect_uri = super::oauth_callback_redirect_uri(headers, &app.slug);
+    let redirect_uri = super::oauth_callback_redirect_uri(&context.config, &app.slug);
     let Some(location) = authorization_url(
         &provider,
         &app,
@@ -883,34 +769,7 @@ async fn callback_inner(
     let pool = state
         .console_session_db()
         .map_err(|error| error.into_response())?;
-    let Some(app) = find_app(&pool, slug).await? else {
-        return Err(result_page(
-            &context.config,
-            &context.session,
-            None,
-            "error",
-            StatusCode::NOT_FOUND,
-            "Unknown integration.",
-        ));
-    };
-    let Some(provider) = Provider::from_app(&app) else {
-        return Err(result_page(
-            &context.config,
-            &context.session,
-            Some(&app),
-            "error",
-            StatusCode::NOT_FOUND,
-            "Unknown integration.",
-        ));
-    };
-    if app.shared && !context.user.admin {
-        return Err(redirect(
-            "/console/integrations",
-            &context.config,
-            &context.session,
-            None,
-        ));
-    }
+    let (app, provider) = load_app(&pool, context, slug).await?;
 
     let Some(state_payload) = query
         .state
@@ -985,7 +844,7 @@ async fn callback_inner(
     }
 
     let code = query.code.clone().unwrap_or_default();
-    let redirect_uri = super::oauth_callback_redirect_uri(headers, &app.slug);
+    let redirect_uri = super::oauth_callback_redirect_uri(&context.config, &app.slug);
     let client_secret = app.client_secret.as_deref().and_then(|ciphertext| {
         OauthEncryption::from_env().and_then(|encryption| encryption.decrypt(ciphertext).ok())
     });
@@ -1087,7 +946,7 @@ async fn callback_inner(
                 "Another consent for this account is in progress. Try again.",
             ));
         }
-        Err(UpsertFailure::SaveFailed | UpsertFailure::Internal(_)) => {
+        Err(UpsertFailure::SaveFailed | UpsertFailure::Internal) => {
             return Err(result_page(
                 &context.config,
                 &context.session,
@@ -1114,19 +973,40 @@ async fn find_app(pool: &sqlx::PgPool, slug: &str) -> Result<Option<DbOauthApp>,
         .map_err(|error| crate::ApiError::Internal(error.to_string()).into_response())
 }
 
-fn escape_html(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => output.push_str("&amp;"),
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '"' => output.push_str("&quot;"),
-            '\'' => output.push_str("&#39;"),
-            other => output.push(other),
-        }
+async fn load_app(
+    pool: &sqlx::PgPool,
+    context: &PageContext,
+    slug: &str,
+) -> Result<(DbOauthApp, Provider), Response> {
+    let Some(app) = find_app(pool, slug).await? else {
+        return Err(result_page(
+            &context.config,
+            &context.session,
+            None,
+            "error",
+            StatusCode::NOT_FOUND,
+            "Unknown integration.",
+        ));
+    };
+    let Some(provider) = Provider::from_app(&app) else {
+        return Err(result_page(
+            &context.config,
+            &context.session,
+            Some(&app),
+            "error",
+            StatusCode::NOT_FOUND,
+            "Unknown integration.",
+        ));
+    };
+    if app.shared && !context.user.admin {
+        return Err(redirect(
+            "/console/integrations",
+            &context.config,
+            &context.session,
+            None,
+        ));
     }
-    output
+    Ok((app, provider))
 }
 
 fn result_page(
@@ -1202,6 +1082,7 @@ fn redirect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn config() -> ConsoleSessionConfig {
         ConsoleSessionConfig::from_settings(
@@ -1274,13 +1155,5 @@ mod tests {
             provider_config_digest(&right)
         );
         assert_eq!(provider_config_digest(&left).len(), 64);
-    }
-
-    #[test]
-    fn html_escaping_covers_the_result_page() {
-        assert_eq!(
-            escape_html("<script>&\"'"),
-            "&lt;script&gt;&amp;&quot;&#39;"
-        );
     }
 }

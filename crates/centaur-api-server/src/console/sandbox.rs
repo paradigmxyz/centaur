@@ -78,16 +78,14 @@ impl SandboxJwtConfig {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn audience(&self) -> &str {
         &self.audience
     }
 
+    #[cfg(test)]
     pub(crate) fn issuer(&self) -> &str {
         &self.issuer
-    }
-
-    pub(crate) fn secret(&self) -> &str {
-        &self.secret
     }
 }
 

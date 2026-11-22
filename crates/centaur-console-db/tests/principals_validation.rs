@@ -10,20 +10,18 @@
 //! non-hash `labels`, and Rails' `will_save_change_to_*` conditions stay in the
 //! write path.
 
-use std::{env, str::FromStr};
-
 use centaur_console_db::{
     areas::principals::{
-        PermissionOwner, PermissionWrite, PrincipalError, PrincipalWrite, RoleWrite,
-        create_principal, create_role, replace_slack_channel_permissions, upsert_principal,
-        upsert_role,
+        Grantee, PermissionWrite, PrincipalError, PrincipalWrite, RoleWrite, create_principal,
+        create_role, replace_slack_channel_permissions, upsert_principal, upsert_role,
     },
     model::{ConsoleModel, Principal as PrincipalModel, Role as RoleModel},
 };
-use sqlx::{
-    PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::PgPool;
+
+mod common;
+
+use common::database;
 
 struct Fixture {
     pool: PgPool,
@@ -33,21 +31,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Option<Self> {
-        let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-            assert!(
-                env::var_os("CI").is_none(),
-                "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-            );
-            eprintln!(
-                "skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema"
-            );
-            return None;
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(PgConnectOptions::from_str(&url).unwrap())
-            .await
-            .unwrap();
+        let pool = database().await?;
         let unique = format!("{:016x}", rand::random::<u64>());
         let user_id: i64 = sqlx::query_scalar(
             "INSERT INTO users (email, name, admin, status, created_at, updated_at) \
@@ -475,7 +459,7 @@ async fn permission_rows_are_validated_after_normalization() {
     )
     .await
     .unwrap();
-    let owner = PermissionOwner::Principal(view.row.id);
+    let owner = Grantee::Principal(view.row.id);
 
     // A blank channel id and no enabled flag fail both rules.
     let errors = replace_slack_channel_permissions(

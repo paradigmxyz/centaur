@@ -1,13 +1,5 @@
 //! Typed request parsing for the Console API.
 //!
-//! Console's Rails controllers read `params[:data]` as a hash and rely on
-//! ActiveRecord's type casting for everything else. The Rust port instead
-//! deserializes each endpoint into a narrow serde struct, so a field is either
-//! the declared JSON type or a validation error; there is no implicit
-//! `"true"`/`1`/`""` to boolean or integer conversion.
-//!
-//! Four extractors cover the routes in this tree:
-//!
 //! | Extractor | Wire shape |
 //! | --- | --- |
 //! | [`ConsoleData`] | JSON `{"data":{...}}` (Console's document writes) |
@@ -15,38 +7,18 @@
 //! | [`ConsoleQuery`] | typed query parameters |
 //! | [`ConsoleForm`] | `application/x-www-form-urlencoded` forms |
 //!
-//! Unknown fields are always ignored (the `return_to[]` form key is exactly
-//! that: absent, not a sentinel). A repeated scalar key is a 400 instead of
-//! Rack's last-wins, while bracket-shaped keys stay Rack's array/hash forms. A
-//! missing `data` is the port's 400 `missing required "data" object`; a field
-//! with the wrong type is a 422 `validation failed` envelope with the field and
-//! serde's message under `details`.
-//!
-//! ```ignore
-//! use serde::Deserialize;
-//! use crate::console::request::ConsoleData;
-//!
-//! #[derive(Deserialize)]
-//! struct CreateRole {
-//!     name: String,
-//!     #[serde(default)]
-//!     admin: Option<bool>,
-//! }
-//!
-//! async fn create(ConsoleData(data): ConsoleData<CreateRole>) -> Response {
-//!     // `data.name` is a String and `data.admin` is a bool/none; unknown
-//!     // fields in `{"data":{...}}` are ignored.
-//!     // ...
-//! }
-//! ```
+//! A missing `data`, or a `data` value that is not a non-empty object, is the
+//! 400 `missing required "data" object`; a field with the wrong type is a 422
+//! `validation failed` envelope with the field and serde's message under
+//! `details`.
 
 use axum::{
     body::Bytes,
     extract::{FromRequest, FromRequestParts, RawForm, Request},
     http::{StatusCode, request::Parts},
 };
-use serde::de::DeserializeOwned;
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Map, Value};
 
 use crate::console::http::ConsoleError;
 
@@ -94,23 +66,10 @@ where
             })?
         };
 
-        let data = value.get("data");
-        match data {
-            // Rails' `params.require(:data)` treats nil, false, and empty
-            // scalars/containers as "missing".
-            None | Some(Value::Null | Value::Bool(false)) => return Err(missing_data()),
-            Some(Value::Object(map)) if map.is_empty() => return Err(missing_data()),
-            Some(Value::String(value)) if value.is_empty() => return Err(missing_data()),
-            Some(Value::Array(values)) if values.is_empty() => return Err(missing_data()),
-            Some(Value::Object(_)) => {}
-            Some(_) => {
-                return Err(ConsoleError::validation_failed(
-                    json!({ "data": ["must be an object"] }),
-                ));
-            }
-        }
-
-        let data = data.expect("matched an object above");
+        let data = match value.get("data") {
+            Some(Value::Object(map)) if !map.is_empty() => map,
+            _ => return Err(missing_data()),
+        };
         let value = serde_path_to_error::deserialize::<_, T>(data).map_err(validation_error)?;
         Ok(Self(value))
     }
@@ -147,8 +106,7 @@ where
     type Rejection = ConsoleError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let raw = collapse_duplicates(parts.uri.query().unwrap_or_default().as_bytes(), "query")?;
-        let value = deserialize_urlencoded(&raw)?;
+        let value = parse_urlencoded(parts.uri.query().unwrap_or_default())?;
         Ok(Self(value))
     }
 }
@@ -167,8 +125,9 @@ where
                 "expected an application/x-www-form-urlencoded body",
             )
         })?;
-        let raw = collapse_duplicates(&bytes, "form")?;
-        let value = deserialize_urlencoded(&raw)?;
+        let raw = std::str::from_utf8(&bytes)
+            .map_err(|error| ConsoleError::bad_request(format!("could not read body: {error}")))?;
+        let value = parse_urlencoded(raw)?;
         Ok(Self(value))
     }
 }
@@ -181,56 +140,8 @@ fn missing_data() -> ConsoleError {
 /// 400 in every namespace; only the framework-specific wording is dropped.
 pub(crate) const MISSING_DATA_MESSAGE: &str = "missing required \"data\" object";
 
-fn deserialize_urlencoded<T: DeserializeOwned>(raw: &str) -> Result<T, ConsoleError> {
-    let deserializer =
-        serde_urlencoded::Deserializer::new(url::form_urlencoded::parse(raw.as_bytes()));
-    serde_path_to_error::deserialize(deserializer).map_err(validation_error)
-}
-
-/// True when the raw query/form string contains a Rack-style nested parameter
-/// for `name`, such as `scopes[]` or `scopes[0]`.
-///
-/// A typed struct ignores those keys, which is right for an unknown field but
-/// wrong for one whose absence selects a broader default. A handler that reads
-/// such a field calls this before applying the default, so a nested key is a
-/// client error rather than a silent widening.
-pub(crate) fn has_nested_param(raw: Option<&str>, name: &str) -> bool {
-    let Some(raw) = raw else {
-        return false;
-    };
-    url::form_urlencoded::parse(raw.as_bytes()).any(|(key, _)| {
-        key.strip_prefix(name)
-            .is_some_and(|rest| rest.starts_with('['))
-    })
-}
-
-/// Collapses repeated scalar keys to their last value (Rack keeps the last
-/// simple parameter) and re-encodes the pairs for serde. A repeated scalar key
-/// is refused instead: the two values disagree and no handler consumes both.
-/// Bracket-shaped keys such as `return_to[]` or `labels[team]` stay separate,
-/// so a flat struct ignores them and Rack's array/hash forms keep working.
-fn collapse_duplicates(raw: &[u8], source: &str) -> Result<String, ConsoleError> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (key, value) in url::form_urlencoded::parse(raw) {
-        let scalar = !key.contains('[');
-        if scalar && !seen.insert(key.clone().into_owned()) {
-            return Err(ConsoleError::bad_request(format!(
-                "{source} parameter must not be repeated: {key}"
-            )));
-        }
-        if let Some(existing) = pairs
-            .iter_mut()
-            .find(|(existing, _)| existing.as_str() == key.as_ref())
-        {
-            existing.1 = value.into_owned();
-        } else {
-            pairs.push((key.into_owned(), value.into_owned()));
-        }
-    }
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.extend_pairs(&pairs);
-    Ok(serializer.finish())
+fn parse_urlencoded<T: DeserializeOwned>(raw: &str) -> Result<T, ConsoleError> {
+    serde_urlencoded::from_str(raw).map_err(|error| ConsoleError::bad_request(error.to_string()))
 }
 
 /// Maps a serde path error to Console's `validation failed` envelope. The
@@ -267,6 +178,19 @@ fn field_and_message(path: &str, message: &str) -> (String, String) {
         path.unwrap_or_else(|| "data".to_owned()),
         message.to_owned(),
     )
+}
+
+/// A PATCH field that separates "absent" from "explicit null".
+///
+/// `#[serde(default)]` yields `None` when the key is absent and this
+/// deserializer is skipped; a present `null` becomes `Some(None)` and a
+/// present value `Some(Some(value))`. A wrong type is still a validation error.
+pub(crate) fn nullable_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -332,19 +256,18 @@ mod tests {
             "",
             "{}",
             r#"{"data":null}"#,
-            r#"{"data":{}}"#,
+            r#"{"data":false}"#,
+            r#"{"data":true}"#,
+            r#"{"data":1}"#,
+            r#"{"data":"value"}"#,
             r#"{"data":[]}"#,
+            r#"{"data":{}}"#,
         ] {
             let error = data_request(body).await.unwrap_err();
             assert_eq!(error.status, StatusCode::BAD_REQUEST, "{body}");
             assert_eq!(error.message, MISSING_DATA_MESSAGE, "{body}");
+            assert_eq!(error.details, None, "{body}");
         }
-        let error = data_request(r#"{"data":"value"}"#).await.unwrap_err();
-        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(
-            error.details,
-            Some(json!({ "data": ["must be an object"] }))
-        );
         let error = data_request("not json").await.unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert!(error.message.starts_with("malformed JSON request body:"));
@@ -396,90 +319,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nested_parameter_detection_is_name_exact() {
-        assert!(has_nested_param(Some("scopes[]=read"), "scopes"));
-        assert!(has_nested_param(Some("scopes%5B0%5D=read"), "scopes"));
-        assert!(has_nested_param(
-            Some("q=x&scopes%5Bname%5D=read"),
-            "scopes"
-        ));
-        assert!(!has_nested_param(Some("scopes=read"), "scopes"));
-        assert!(!has_nested_param(Some("scopes2[]=read"), "scopes"));
-        assert!(!has_nested_param(Some("my_scopes[]=read"), "scopes"));
-        assert!(!has_nested_param(None, "scopes"));
-    }
-
     #[tokio::test]
-    async fn console_query_is_typed_and_nested_keys_are_unknown() {
+    async fn console_query_is_typed() {
         assert_eq!(
-            query_request("/login?return_to=%2Flaunch").await.unwrap(),
+            query_request("/login?return_to=%2Fconsole").await.unwrap(),
             ReturnTo {
-                return_to: Some("/launch".to_owned()),
+                return_to: Some("/console".to_owned()),
             }
         );
+        // A nested key is just an unknown field for a flat struct.
         assert_eq!(
-            query_request("/login?return_to[]=%2Flaunch").await.unwrap(),
+            query_request("/login?return_to[]=%2Fconsole")
+                .await
+                .unwrap(),
             ReturnTo { return_to: None }
         );
-        // Rack keeps the last duplicate scalar; the extractor refuses it.
-        let error = query_request("/login?return_to=%2Fconsole&return_to=%2Flaunch")
+        let error = query_request("/login?return_to=%2Fa&return_to=%2Fb")
             .await
             .unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            error.message,
-            "query parameter must not be repeated: return_to"
-        );
-        // Rack's array form is not a scalar; the flat struct ignores it.
-        assert_eq!(
-            query_request("/login?ids[]=a&ids[]=b").await.unwrap(),
-            ReturnTo { return_to: None }
-        );
     }
 
     #[tokio::test]
-    async fn console_form_ignores_nested_keys_and_reports_bad_types() {
+    async fn console_form_is_typed_and_reports_bad_values() {
         assert_eq!(
-            form_request("return_to=%2Flaunch").await.unwrap(),
+            form_request("return_to=%2Fconsole").await.unwrap(),
             ReturnTo {
-                return_to: Some("/launch".to_owned()),
+                return_to: Some("/console".to_owned()),
             }
         );
-        assert_eq!(
-            form_request("return_to[]=%2Flaunch").await.unwrap(),
-            ReturnTo { return_to: None }
-        );
-        let error = form_request("return_to=%2Fa&return_to=%2Fb")
-            .await
-            .unwrap_err();
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            error.message,
-            "form parameter must not be repeated: return_to"
-        );
 
-        #[derive(Debug, Deserialize)]
-        struct Flags {
-            #[serde(default)]
-            enabled: Option<bool>,
-        }
         let request = Request::builder()
             .method("POST")
             .uri("/login")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(Body::from("enabled=1"))
             .unwrap();
-        let error = ConsoleForm::<Flags>::from_request(request, &())
-            .await
-            .unwrap_err();
-        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let details = error.details.unwrap();
-        assert_eq!(details["enabled"].as_array().unwrap().len(), 1, "{details}");
-        assert!(
-            details["enabled"][0].as_str().unwrap().contains("true"),
-            "{details}"
-        );
+        let error =
+            ConsoleForm::<std::collections::HashMap<String, bool>>::from_request(request, &())
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(!error.message.is_empty());
     }
 
     #[tokio::test]

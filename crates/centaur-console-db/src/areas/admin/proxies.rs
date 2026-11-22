@@ -10,6 +10,10 @@ use crate::model::{self, Proxy as ProxyModel};
 
 /// The columns a proxy payload renders. The token hash is stored but never
 /// returned, and the requester principal is referenced by its id alone.
+pub const PROXY_COLUMNS: &str = "\
+    id, name, labels, principal_id, principal_assigned_at, \
+    requester_principal_id, requester_principal_assigned_at, created_at, updated_at";
+
 pub const PROXY_SELECT: &str = "\
     SELECT id, name, labels, principal_id, principal_assigned_at, \
     requester_principal_id, requester_principal_assigned_at, created_at, updated_at";
@@ -68,24 +72,22 @@ pub async fn create_proxy(
     principal_id: Option<i64>,
     requester_principal_id: Option<i64>,
 ) -> Result<ProxyRow> {
-    let id: i64 = sqlx::query_scalar(
+    let sql = format!(
         "INSERT INTO proxies \
             (name, labels, bearer_token_hash, principal_id, principal_assigned_at, \
              requester_principal_id, requester_principal_assigned_at, created_at, updated_at) \
          VALUES ($1, $2, $3, $4, CASE WHEN $4::bigint IS NULL THEN NULL ELSE now() END, $5, \
                  CASE WHEN $5::bigint IS NULL THEN NULL ELSE now() END, now(), now()) \
-         RETURNING id",
-    )
-    .bind(name)
-    .bind(sqlx::types::Json(labels.clone()))
-    .bind(token_hash)
-    .bind(principal_id)
-    .bind(requester_principal_id)
-    .fetch_one(pool)
-    .await?;
-    admin_proxy(pool, id)
-        .await?
-        .ok_or_else(|| crate::Error::InvalidData("proxy vanished after insert".to_owned()))
+         RETURNING {PROXY_COLUMNS}"
+    );
+    Ok(sqlx::query_as(&sql)
+        .bind(name)
+        .bind(sqlx::types::Json(labels.clone()))
+        .bind(token_hash)
+        .bind(principal_id)
+        .bind(requester_principal_id)
+        .fetch_one(pool)
+        .await?)
 }
 
 /// Apply `change`. An update that changes nothing leaves `updated_at` alone, as

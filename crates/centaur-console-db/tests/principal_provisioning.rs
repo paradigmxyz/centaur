@@ -13,17 +13,15 @@
 //! sync-config cache version Rails' callbacks produce) so neither path can
 //! drift.
 
-use std::env;
-
 use centaur_console_db::{
     ConsoleUser, ConsoleUserStatus, areas::auth_pages::provision_user_principal,
 };
 use serde_json::{Value, json};
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use std::str::FromStr;
+use sqlx::{PgPool, Row};
+
+mod common;
+
+use common::database;
 
 /// The default role is global state and cleanup removes every stale
 /// `provisioning-test-default-` row, so these tests run one at a time.
@@ -40,21 +38,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Option<Self> {
         let serial = SERIAL.lock().await;
-        let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-            assert!(
-                env::var_os("CI").is_none(),
-                "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-            );
-            eprintln!(
-                "skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema"
-            );
-            return None;
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(PgConnectOptions::from_str(&url).unwrap())
-            .await
-            .unwrap();
+        let pool = database().await?;
         let unique = format!("{:016x}", rand::random::<u64>());
         // A crashed earlier run can leave its default role behind; only this
         // test uses the `provisioning-test-default-` prefix.

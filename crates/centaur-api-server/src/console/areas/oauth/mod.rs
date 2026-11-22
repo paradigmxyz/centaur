@@ -38,7 +38,7 @@ pub(super) fn slack_api_endpoint(path: &str) -> String {
 
 use axum::{
     Json, Router,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     routing::{delete, get, post},
 };
 use centaur_console_db::{
@@ -48,14 +48,16 @@ use centaur_console_db::{
     },
 };
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::{
     AppState,
     console::{
         guard::GuardedRoutes,
-        http::{ConsoleError, DataPayload},
+        http::{ConsoleError, DataPayload, ListParams, labels_value},
     },
+    console_session::ConsoleSessionConfig,
 };
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
@@ -69,7 +71,7 @@ pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
             "/oauth_apps/{id}",
             get(apps::console_show)
                 .patch(apps::console_update)
-                .delete(apps::console_destroy),
+                .delete(apps::destroy),
         )
         .console_admin(
             "/oauth_apps/{id}/credentials",
@@ -94,7 +96,7 @@ pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
             "/broker_credentials/{id}",
             get(credentials::console_show)
                 .patch(credentials::console_update)
-                .delete(credentials::console_destroy),
+                .delete(credentials::destroy),
         )
 }
 
@@ -110,7 +112,7 @@ pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
             "/oauth_apps/{id}",
             get(apps::bearer_show)
                 .put(apps::bearer_update)
-                .delete(apps::bearer_destroy),
+                .delete(apps::destroy),
         )
         .operator(
             "/broker_credentials",
@@ -124,7 +126,7 @@ pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
             "/broker_credentials/{id}",
             get(credentials::bearer_show)
                 .put(credentials::bearer_update)
-                .delete(credentials::bearer_destroy),
+                .delete(credentials::destroy),
         )
 }
 
@@ -149,6 +151,16 @@ pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
 /// Rails' blank?: an empty or whitespace-only string.
 pub(super) fn blank(value: &str) -> bool {
     value.trim().is_empty()
+}
+
+/// The label containment value a list query binds, or `None` for no filter.
+pub(super) fn label_filter(params: &ListParams) -> Option<sqlx::types::Json<Value>> {
+    if params.labels.is_empty() {
+        return None;
+    }
+    Some(sqlx::types::Json(Value::Object(labels_value(
+        &params.labels,
+    ))))
 }
 
 /// garde rule for a required `String` field: ActiveModel's presence check, which
@@ -252,35 +264,18 @@ pub(super) async fn credential_by_oid(
     )
 }
 
-/// `ConsoleEnv["PUBLIC_URL"]` when configured, else Rails' `request.base_url`.
-pub(super) fn public_base_url(headers: &HeaderMap) -> String {
-    if let Some(value) = crate::console::console_env("PUBLIC_URL")
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return value.trim_end_matches('/').to_owned();
-    }
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("127.0.0.1");
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("http");
-    format!("{scheme}://{host}")
+pub(super) fn oauth_callback_redirect_uri(config: &ConsoleSessionConfig, slug: &str) -> String {
+    format!(
+        "{}/oauth/{slug}/callback",
+        super::auth_pages::public_base_url(config)
+    )
 }
 
-pub(super) fn oauth_callback_redirect_uri(headers: &HeaderMap, slug: &str) -> String {
-    format!("{}/oauth/{slug}/callback", public_base_url(headers))
-}
-
-pub(super) fn oauth_start_url(headers: &HeaderMap, slug: &str) -> String {
-    format!("{}/oauth/{slug}/start", public_base_url(headers))
+pub(super) fn oauth_start_url(config: &ConsoleSessionConfig, slug: &str) -> String {
+    format!(
+        "{}/oauth/{slug}/start",
+        super::auth_pages::public_base_url(config)
+    )
 }
 
 /// The deployment is missing Console's encryption keys; every write of an

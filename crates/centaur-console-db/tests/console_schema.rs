@@ -4,8 +4,6 @@
 //! `bin/rails db:prepare`. Each test inserts uniquely named rows, so tests can
 //! share one database and run in parallel.
 
-use std::env;
-
 use active_record_encryption::ActiveRecordEncryption;
 use centaur_console_db::{
     ApiClient, ApiClientPrincipal, REDACTED, SecretValues, SlackChannelPermission, Subject,
@@ -13,7 +11,11 @@ use centaur_console_db::{
     find_principal, find_principal_by_foreign_id, find_user_id_by_email, models::Config,
 };
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
+
+mod common;
+
+use common::database;
 
 const PRIMARY_KEY: &str = "dev_ar_encryption_primary_key_0000000000000000";
 const SALT: &str = "dev_ar_encryption_key_derivation_salt_000000000";
@@ -21,24 +23,6 @@ const SALT: &str = "dev_ar_encryption_key_derivation_salt_000000000";
 const ENCRYPTED: &str =
     r#"{"p":"xOiyro9XYBkfABUF","h":{"iv":"pCjJC5SxH78ZN0Nm","at":"s9DIUyHAkF8ZAthKO6ROtw=="}}"#;
 const PLAINTEXT: &str = "known secret";
-
-async fn database() -> Option<PgPool> {
-    let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-        assert!(
-            env::var_os("CI").is_none(),
-            "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-        );
-        eprintln!("skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema");
-        return None;
-    };
-    Some(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect to the test database"),
-    )
-}
 
 struct Fixture {
     pool: PgPool,

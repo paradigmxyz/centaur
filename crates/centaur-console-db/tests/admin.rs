@@ -4,8 +4,6 @@
 //! `bin/rails db:prepare`. Each test inserts uniquely named rows, so tests can
 //! share one database and run in parallel.
 
-use std::env;
-
 use centaur_console_db::areas::admin::{
     PROXY_LIST_FROM, PROXY_LIST_ORDER, PROXY_SELECT, ProxyChange, ProxyRow, SystemSettingValues,
     admin_proxy, admin_user, admin_users, api_client, approve_user, attach_api_client_principal,
@@ -16,26 +14,11 @@ use centaur_console_db::areas::admin::{
     system_setting, update_api_client, update_proxy, write_system_settings,
 };
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json;
 
-async fn database() -> Option<PgPool> {
-    let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-        assert!(
-            env::var_os("CI").is_none(),
-            "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-        );
-        eprintln!("skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema");
-        return None;
-    };
-    Some(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect to the test database"),
-    )
-}
+mod common;
+
+use common::database;
 
 struct Fixture {
     pool: PgPool,
@@ -386,9 +369,10 @@ async fn system_settings_write_only_when_a_value_changes() {
             .await
             .unwrap();
     let setting = system_setting(&fixture.pool).await.unwrap();
-    let unchanged = write_system_settings(&fixture.pool, setting.id, &setting.values, None)
+    write_system_settings(&fixture.pool, setting.id, &setting.values, None)
         .await
         .unwrap();
+    let unchanged = system_setting(&fixture.pool).await.unwrap();
     assert_eq!(unchanged.updated_at, setting.updated_at);
 
     let role = fixture.role("default").await;

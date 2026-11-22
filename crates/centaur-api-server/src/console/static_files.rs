@@ -1,5 +1,5 @@
-//! The Console's static files: the SPA shell, its hashed assets, the root
-//! public files, and the PWA manifest and service worker.
+//! The Console's static files: the SPA shell, its hashed assets, and the root
+//! public files.
 //!
 //! Nothing here reads the session, the database, or request state; it is a
 //! static mount behind the Console host router. `services/console/web` builds
@@ -23,11 +23,10 @@ use axum::{
     Router,
     http::{
         HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE},
+        header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY},
     },
     middleware::map_response,
-    response::{IntoResponse, Response},
-    routing::get,
+    response::Response,
 };
 use tower_http::{
     compression::CompressionLayer,
@@ -46,21 +45,9 @@ pub(crate) const APP_CSP: &str = "default-src 'self'; script-src 'self'; style-s
 /// a deploy picks up the new asset names on the next page load.
 const SPA_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 
-const MANIFEST_JSON: &str = include_str!("../../../../services/console/config/pwa/manifest.json");
-const SERVICE_WORKER_JS: &str =
-    include_str!("../../../../services/console/config/pwa/service-worker.js");
-
-/// Files the shell, manifest, and service worker fetch from the site root.
-/// `/icon.svg` is embedded and served by `pages`.
-const PUBLIC_FILES: &[&str] = &[
-    "icon-dark.svg",
-    "icon-light.svg",
-    "pwa-icon.svg",
-    "pwa-icon-192.png",
-    "pwa-icon-512.png",
-    "offline.html",
-    "robots.txt",
-];
+/// Root public files the shell and pages fetch. `/icon.svg` is embedded and
+/// served by `pages`.
+const PUBLIC_FILES: &[&str] = &["icon-dark.svg", "icon-light.svg", "robots.txt"];
 
 fn console_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -129,15 +116,7 @@ fn router_at(paths: Paths) -> Router<AppState> {
     }
     let public = public.layer(map_response(public_headers));
 
-    // `index.html` links `/manifest.json` and `pwa.ts` registers
-    // `/service-worker.js`; the extensionless paths are the canonical routes.
-    let pwa = Router::new()
-        .route("/manifest", get(manifest))
-        .route("/manifest.json", get(manifest))
-        .route("/service-worker", get(service_worker))
-        .route("/service-worker.js", get(service_worker));
-
-    shell.merge(assets).merge(public).merge(pwa)
+    shell.merge(assets).merge(public)
 }
 
 fn served(response: &Response) -> bool {
@@ -171,30 +150,13 @@ async fn public_headers(mut response: Response) -> Response {
     response
 }
 
-async fn manifest() -> Response {
-    pwa_file("application/manifest+json; charset=utf-8", MANIFEST_JSON)
-}
-
-async fn service_worker() -> Response {
-    pwa_file("text/javascript; charset=utf-8", SERVICE_WORKER_JS)
-}
-
-fn pwa_file(content_type: &'static str, body: &'static str) -> Response {
-    (
-        [
-            (CONTENT_TYPE, content_type),
-            (CACHE_CONTROL, "no-cache"),
-            (CONTENT_SECURITY_POLICY, APP_CSP),
-        ],
-        body,
-    )
-        .into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::Body,
+        http::{Request, header::CONTENT_TYPE},
+    };
     use tower::ServiceExt;
 
     async fn get_path(router: &Router, path: &str) -> Response {
@@ -253,16 +215,10 @@ mod tests {
             header(&response, CACHE_CONTROL),
             Some(PUBLIC_ASSET_CACHE_CONTROL)
         );
-        let response = get_path(&app, "/offline.html").await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        let response = get_path(&app, "/manifest.json").await;
-        assert_eq!(
-            header(&response, CONTENT_TYPE),
-            Some("application/manifest+json; charset=utf-8")
-        );
-        let response = get_path(&app, "/service-worker.js").await;
-        assert_eq!(header(&response, CACHE_CONTROL), Some("no-cache"));
+        for path in ["/offline.html", "/manifest.json", "/service-worker.js"] {
+            let response = get_path(&app, path).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
 
         // Only `/` and `/console/...` are SPA navigations.
         let response = get_path(&app, "/elsewhere").await;

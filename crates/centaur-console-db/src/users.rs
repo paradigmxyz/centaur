@@ -59,17 +59,6 @@ pub async fn find_console_password_user_by_email(
         .transpose()
 }
 
-/// The active owner of an API key whose SHA-256 token hash is `token_hash`.
-/// Soft-deleted keys and inactive owners have no access.
-pub async fn find_console_api_key_owner(
-    pool: &PgPool,
-    token_hash: &str,
-) -> Result<Option<ConsoleUser>> {
-    Ok(find_console_api_key(pool, token_hash)
-        .await?
-        .map(|(_, user)| user))
-}
-
 /// The active API key with this `token_hash` and its owner. Callers that need
 /// the authenticated key's identity (Console's self-revoke guard) read the id;
 /// the bearer guard passes it on rather than re-hashing the header.

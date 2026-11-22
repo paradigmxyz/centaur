@@ -206,22 +206,11 @@ record! {
     }
 }
 
-fn sources_by_role(row: &SecretRow) -> BTreeMap<String, SourcePayload> {
+/// The row's sources keyed by role, optionally only those of one role kind.
+fn sources_by_role(row: &SecretRow, role_kind: Option<&str>) -> BTreeMap<String, SourcePayload> {
     row.sources
         .iter()
-        .filter_map(|source| {
-            source
-                .role
-                .as_ref()
-                .map(|role| (role.clone(), SourcePayload::from(source)))
-        })
-        .collect()
-}
-
-fn sources_by_role_kind(row: &SecretRow, role_kind: &str) -> BTreeMap<String, SourcePayload> {
-    row.sources
-        .iter()
-        .filter(|source| source.role_kind.as_deref() == Some(role_kind))
+        .filter(|source| role_kind.is_none() || source.role_kind.as_deref() == role_kind)
         .filter_map(|source| {
             source
                 .role
@@ -325,7 +314,7 @@ impl From<&SecretRow> for AwsAuthRecord {
         else {
             unreachable!("kind selects the fields");
         };
-        let by_role = sources_by_role(row);
+        let by_role = sources_by_role(row, None);
         AwsAuthRecord {
             base: RecordBase::from(row),
             allowed_regions: allowed_regions.clone(),
@@ -361,8 +350,8 @@ impl From<&SecretRow> for OauthTokenRecord {
             scopes: scopes.clone(),
             header: header.clone(),
             value_prefix: value_prefix.clone(),
-            credentials: sources_by_role_kind(row, "credential_field"),
-            token_endpoint_headers: sources_by_role_kind(row, "endpoint_header"),
+            credentials: sources_by_role(row, Some("credential_field")),
+            token_endpoint_headers: sources_by_role(row, Some("endpoint_header")),
             rules: rules(&row.rules),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -393,7 +382,7 @@ impl From<&SecretRow> for HmacRecord {
             signature_message: signature_message.clone(),
             allow_chunked_body: *allow_chunked_body,
             headers: headers.clone(),
-            credentials: sources_by_role(row),
+            credentials: sources_by_role(row, None),
             rules: rules(&row.rules),
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -582,10 +571,6 @@ pub(crate) fn grant(grant: &GrantRow, secret: &SecretRow) -> GrantPayload {
         created_at: grant.created_at,
         updated_at: grant.updated_at,
     }
-}
-
-pub(crate) fn role(role: &RoleSummary) -> RolePayload {
-    RolePayload::from(role)
 }
 
 // ---------------------------------------------------------------------------

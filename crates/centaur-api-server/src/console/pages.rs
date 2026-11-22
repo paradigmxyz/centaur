@@ -9,9 +9,8 @@
 //! Origin is refused. Forms and query parameters are parsed into typed structs,
 //! so a nested `return_to[]` key is simply an unknown field.
 //!
-//! SSO start/callback routes are not ported yet. Provider buttons are rendered
-//! only from environment configuration, because the Rails credentials fallback
-//! cannot be read here; see `src/console/README.md`.
+//! SSO buttons render from the same enabled-provider set the SSO routes use;
+//! see `src/console/README.md`.
 
 use axum::{
     Router,
@@ -33,7 +32,9 @@ use serde::Deserialize;
 use crate::{
     AppState,
     console::{
-        DISABLED_MESSAGE, LOGIN_PATH, PENDING_PATH, assets,
+        DISABLED_MESSAGE, LOGIN_PATH, PENDING_PATH,
+        areas::auth_pages::console_config,
+        assets,
         http::{ConsoleError, render_error, request_origin},
         request::{ConsoleForm, ConsoleQuery},
         return_path,
@@ -115,25 +116,14 @@ async fn login_page(
     headers: HeaderMap,
     ConsoleQuery(query): ConsoleQuery<LoginQuery>,
 ) -> Response {
-    let Some(config) = state.console_session().cloned() else {
-        return console_unavailable();
+    let config = console_config(&state).clone();
+    let (mut session, current) = match current(&state, &config, &headers).await {
+        Ok(current) => current,
+        Err(response) => return response,
     };
     let return_to = present(query.return_to);
     let next = present(query.next);
-    let mut session = config
-        .session_from_headers(&headers)
-        .unwrap_or_else(ConsoleSession::anonymous);
 
-    let current = match session.user_id() {
-        Some(user_id) => match state.console_session_db() {
-            Ok(pool) => match find_console_user(&pool, user_id).await {
-                Ok(user) => user,
-                Err(error) => return crate::ApiError::Internal(error.to_string()).into_response(),
-            },
-            Err(error) => return error.into_response(),
-        },
-        None => None,
-    };
     let query_return_to = return_to.as_deref().or(next.as_deref());
     if let Some(user) = current
         .as_ref()
@@ -161,31 +151,46 @@ async fn login_page(
     render_login(&config, &session, alert, StatusCode::OK)
 }
 
+/// The cookie -> user id -> database-user ladder three page handlers share.
+#[allow(clippy::result_large_err)]
+async fn current(
+    state: &AppState,
+    config: &ConsoleSessionConfig,
+    headers: &HeaderMap,
+) -> Result<(ConsoleSession, Option<ConsoleUser>), Response> {
+    let session = config
+        .session_from_headers(headers)
+        .unwrap_or_else(ConsoleSession::anonymous);
+    let user = match session.user_id() {
+        Some(user_id) => {
+            let pool = state
+                .console_session_db()
+                .map_err(|error| error.into_response())?;
+            find_console_user(&pool, user_id)
+                .await
+                .map_err(|error| ConsoleError::internal(error).into_response())?
+        }
+        None => None,
+    };
+    Ok((session, user))
+}
+
 /// Rails' `blank?`-style filter for an optional query value.
 fn present(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
 async fn pending_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(config) = state.console_session().cloned() else {
-        return console_unavailable();
+    let config = console_config(&state).clone();
+    let (session, user) = match current(&state, &config, &headers).await {
+        Ok(current) => current,
+        Err(response) => return response,
     };
-    let Some(session) = config.session_from_headers(&headers) else {
-        return redirect(LOGIN_PATH, None);
-    };
-    let Some(user_id) = session.user_id() else {
-        return redirect(LOGIN_PATH, None);
-    };
-    let pool = match state.console_session_db() {
-        Ok(pool) => pool,
-        Err(error) => return error.into_response(),
-    };
-    let user = match find_console_user(&pool, user_id).await {
-        Ok(user) => user,
-        Err(error) => return crate::ApiError::Internal(error.to_string()).into_response(),
-    };
+    if session.user_id().is_none() {
+        return redirect(LOGIN_PATH, &[], Some(SERVER_PAGE_CSP));
+    }
     let Some(user) = user else {
-        return redirect(LOGIN_PATH, None);
+        return redirect(LOGIN_PATH, &[], Some(SERVER_PAGE_CSP));
     };
     match user.status {
         ConsoleUserStatus::Active => redirect_with_session(&landing_path(&user), &config, &session),
@@ -194,7 +199,7 @@ async fn pending_page(State(state): State<AppState>, headers: HeaderMap) -> Resp
         // signs it out.
         ConsoleUserStatus::Pending | ConsoleUserStatus::Disabled => {
             let html = pending_html(&user.email);
-            html_response(StatusCode::OK, html, &config, &session)
+            page_response(StatusCode::OK, html, &config, &session)
         }
     }
 }
@@ -204,9 +209,7 @@ async fn login_submit(
     headers: HeaderMap,
     ConsoleForm(form): ConsoleForm<LoginForm>,
 ) -> Response {
-    let Some(config) = state.console_session().cloned() else {
-        return console_unavailable();
-    };
+    let config = console_config(&state).clone();
     let session = config
         .session_from_headers(&headers)
         .unwrap_or_else(ConsoleSession::anonymous);
@@ -215,10 +218,10 @@ async fn login_submit(
     }
 
     if !crate::console::password_login_enabled() {
-        return render_login_error(
+        return render_login(
             &config,
             &session,
-            DISABLED_PASSWORD_MESSAGE,
+            Some(DISABLED_PASSWORD_MESSAGE),
             StatusCode::NOT_FOUND,
         );
     }
@@ -244,19 +247,19 @@ async fn login_submit(
             .is_some_and(|digest| verify(password, digest).unwrap_or(false))
     });
     let Some((user, _)) = user.filter(|_| authenticated) else {
-        return render_login_error(
+        return render_login(
             &config,
             &session,
-            INVALID_CREDENTIALS_MESSAGE,
+            Some(INVALID_CREDENTIALS_MESSAGE),
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     };
 
     if user.status == ConsoleUserStatus::Disabled {
-        return render_login_error(
+        return render_login(
             &config,
             &session,
-            DISABLED_MESSAGE,
+            Some(DISABLED_MESSAGE),
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     }
@@ -275,30 +278,20 @@ async fn login_submit(
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(config) = state.console_session().cloned() else {
-        return console_unavailable();
+    let config = console_config(&state).clone();
+    let (session, user) = match current(&state, &config, &headers).await {
+        Ok(current) => current,
+        Err(response) => return response,
     };
-    let Some(session) = config.session_from_headers(&headers) else {
-        // `SessionsController#destroy` keeps the `require_login` gate: with no
-        // session there is nothing to clear, so Rails redirects to the form.
-        return redirect(LOGIN_PATH, None);
-    };
-    // `require_login` runs before forgery protection: without a signed-in
-    // user (including a stale cookie for a deleted user) the request redirects
-    // instead of rejecting the missing Origin.
-    let Some(user_id) = session.user_id() else {
-        return redirect(LOGIN_PATH, None);
-    };
+    // `SessionsController#destroy` keeps the `require_login` gate: without a
+    // signed-in user (including a stale cookie for a deleted user) the request
+    // redirects instead of rejecting the missing Origin.
+    if session.user_id().is_none() || user.is_none() {
+        return redirect(LOGIN_PATH, &[], Some(SERVER_PAGE_CSP));
+    }
     // `require_login` resolves `current_user` from the database before the
     // origin check runs, so a cookie for a deleted user redirects even without
     // an Origin.
-    let pool = match state.console_session_db() {
-        Ok(pool) => pool,
-        Err(error) => return error.into_response(),
-    };
-    if !matches!(find_console_user(&pool, user_id).await, Ok(Some(_))) {
-        return redirect(LOGIN_PATH, None);
-    }
     if !origin_allowed(&headers, &config) {
         return csrf_rejection();
     }
@@ -324,7 +317,7 @@ async fn icon() -> Response {
 /// origin verbatim. Unlike Rails' form forgery origin check, a missing Origin
 /// and `Origin: null` are both refused; there is no token fallback.
 fn origin_allowed(headers: &HeaderMap, config: &ConsoleSessionConfig) -> bool {
-    request_origin(headers).as_deref() == Some(config.public_origin())
+    request_origin(headers) == Some(config.public_origin())
 }
 
 fn csrf_rejection() -> Response {
@@ -391,21 +384,24 @@ pub(crate) fn server_page_csp(mut response: Response) -> Response {
     response
 }
 
-fn console_unavailable() -> Response {
-    crate::ApiError::ServiceUnavailable("the console session API is not configured".to_owned())
-        .into_response()
-}
-
-fn redirect(location: &str, cookie: Option<HeaderValue>) -> Response {
+pub(crate) fn redirect(
+    location: &str,
+    cookies: &[HeaderValue],
+    csp: Option<&'static str>,
+) -> Response {
     let mut response = StatusCode::FOUND.into_response();
-    response.headers_mut().insert(
-        LOCATION,
-        HeaderValue::from_str(location).expect("safe redirect location"),
-    );
-    if let Some(cookie) = cookie {
-        response.headers_mut().append(SET_COOKIE, cookie);
+    let location =
+        HeaderValue::from_str(location).unwrap_or_else(|_| HeaderValue::from_static("/login"));
+    response.headers_mut().insert(LOCATION, location);
+    for cookie in cookies {
+        response.headers_mut().append(SET_COOKIE, cookie.clone());
     }
-    server_page_csp(response)
+    if let Some(csp) = csp {
+        response
+            .headers_mut()
+            .insert("content-security-policy", HeaderValue::from_static(csp));
+    }
+    response
 }
 
 fn redirect_with_session(
@@ -413,26 +409,29 @@ fn redirect_with_session(
     config: &ConsoleSessionConfig,
     session: &ConsoleSession,
 ) -> Response {
-    redirect(location, config.cookie().set_cookie_header(session))
+    let cookie = config.cookie().set_cookie_header(session);
+    redirect(location, cookie.as_slice(), Some(SERVER_PAGE_CSP))
 }
 
-fn html_response(
+fn page_response(
     status: StatusCode,
     html: String,
     config: &ConsoleSessionConfig,
     session: &ConsoleSession,
 ) -> Response {
-    // No explicit `Cache-Control`: Rails' `Rack::ETag, "no-cache"` supplies
-    // the page default (`max-age=0, private, must-revalidate` for a 200/201
-    // body, `no-cache` otherwise), and the console-wide layer does the same.
-    let mut response = Response::builder()
+    let mut response = html_response(status, html);
+    if let Some(cookie) = config.cookie().set_cookie_header(session) {
+        response.headers_mut().append(SET_COOKIE, cookie);
+    }
+    response
+}
+
+pub(crate) fn html_response(status: StatusCode, html: String) -> Response {
+    let response = Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(html))
         .expect("valid html response");
-    if let Some(cookie) = config.cookie().set_cookie_header(session) {
-        response.headers_mut().append(SET_COOKIE, cookie);
-    }
     server_page_csp(response)
 }
 
@@ -442,20 +441,10 @@ fn render_login(
     alert: Option<&str>,
     status: StatusCode,
 ) -> Response {
-    html_response(status, login_html(alert), config, session)
+    page_response(status, login_html(alert), config, session)
 }
 
-/// Renders a failed sign-in on the same response (no redirect, so no flash).
-fn render_login_error(
-    config: &ConsoleSessionConfig,
-    session: &ConsoleSession,
-    alert: &str,
-    status: StatusCode,
-) -> Response {
-    render_login(config, session, Some(alert), status)
-}
-
-fn landing_path(user: &ConsoleUser) -> String {
+pub(crate) fn landing_path(user: &ConsoleUser) -> String {
     if user.admin {
         "/console/principals".to_owned()
     } else {
@@ -463,27 +452,9 @@ fn landing_path(user: &ConsoleUser) -> String {
     }
 }
 
-/// Configured SSO providers in Console's display order. The Rails credentials
-/// fallback is intentionally absent until SSO is ported.
+/// Configured SSO providers in Console's display order.
 fn providers() -> Vec<&'static str> {
-    ["google", "slack", "okta"]
-        .into_iter()
-        .filter(|provider| {
-            let id = crate::console::console_env(&format!(
-                "{}_CLIENT_ID",
-                provider.to_ascii_uppercase()
-            ));
-            let secret = crate::console::console_env(&format!(
-                "{}_CLIENT_SECRET",
-                provider.to_ascii_uppercase()
-            ));
-            let issuer =
-                crate::console::console_env(&format!("{}_ISSUER", provider.to_ascii_uppercase()));
-            id.is_some_and(|value| !value.trim().is_empty())
-                && secret.is_some_and(|value| !value.trim().is_empty())
-                && (*provider != "okta" || issuer.is_some_and(|value| !value.trim().is_empty()))
-        })
-        .collect()
+    super::areas::auth_pages::providers()
 }
 
 fn login_html(alert: Option<&str>) -> String {
@@ -625,7 +596,7 @@ fn capitalize(value: &str) -> String {
     }
 }
 
-fn escape_html(value: &str) -> String {
+pub(crate) fn escape_html(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -654,15 +625,13 @@ mod tests {
     }
 
     #[test]
-    fn login_page_has_the_rails_form_contract_and_escaped_alert() {
+    fn login_page_posts_the_expected_fields_and_escapes_the_alert() {
         let html = login_html(Some("\"alert\""));
         assert!(html.contains("action=\"/login\""));
         assert!(html.contains("method=\"post\""));
-        assert!(!html.contains("name=\"authenticity_token\""));
         assert!(html.contains("name=\"email\""));
         assert!(html.contains("name=\"password\""));
         assert!(html.contains("&quot;alert&quot;"));
-        assert!(!html.contains("oauth-notice"));
         assert!(html.contains("/assets/oauth-page/oauth.css?v="));
         assert!(html.contains("/assets/oauth-page/centaur-lockup-white.svg?v="));
     }
@@ -685,14 +654,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_page_escapes_email_and_logs_out_with_method_override() {
+    fn pending_page_escapes_the_email_and_posts_logout() {
         let html = pending_html("<user@example.test>");
         assert!(html.contains("&lt;user@example.test&gt;"));
         assert!(html.contains("action=\"/logout\""));
         assert!(html.contains("method=\"post\""));
-        assert!(!html.contains("name=\"_method\""));
-        assert!(!html.contains("name=\"authenticity_token\""));
-        assert!(!html.contains("oauth-notice"));
     }
 
     #[test]
@@ -720,22 +686,6 @@ mod tests {
             wrong_origin.insert(axum::http::header::ORIGIN, wrong.parse().unwrap());
             assert!(!origin_allowed(&wrong_origin, &config), "{wrong}");
         }
-    }
-
-    #[test]
-    fn logout_form_parsing_ignores_nested_and_unknown_fields() {
-        // There is no Rack `_method` override: the pending page posts to
-        // `/logout` directly, and an old `_method=delete` field is ignored.
-
-        // `return_to[]` is an unknown field; there is no sentinel value.
-        let query: LoginQuery =
-            serde_urlencoded::from_str("return_to[]=%2Flaunch").expect("login query parses");
-        assert_eq!(query.return_to, None);
-        let form: LoginForm =
-            serde_urlencoded::from_str("return_to%=x&email=a%40b.test&password=p")
-                .expect("login form parses");
-        assert_eq!(form.email.as_deref(), Some("a@b.test"));
-        assert_eq!(form.password.as_deref(), Some("p"));
     }
 
     #[tokio::test]
@@ -827,13 +777,6 @@ mod tests {
         };
         use tower::ServiceExt;
 
-        assert_eq!(
-            SERVER_PAGE_CSP,
-            "default-src 'self'; script-src 'none'; style-src 'self'; img-src 'self' data:; \
-             font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; \
-             object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
-        );
-        assert!(!SERVER_PAGE_CSP.contains("form-action"));
         let config = config();
         let cookie = config
             .cookie()

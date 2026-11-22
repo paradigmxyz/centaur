@@ -20,7 +20,6 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgConnection, PgPool};
-use time::OffsetDateTime;
 use url::Url;
 
 use crate::areas::automation::principal_labels;
@@ -256,44 +255,22 @@ pub async fn link_or_provision_user(
         .expect("the provisioned user exists"))
 }
 
-/// The `mcp_oauth_clients` projection the OAuth endpoints read. The JSONB
-/// columns stay [`Value`] until [`McpClient::from`] turns them into string
-/// lists, which keeps the tolerance the hand-written reader had.
-#[derive(Clone, Debug, FromRow)]
-struct McpClientRow {
-    id: i64,
-    name: Option<String>,
-    redirect_uris: Value,
-    grant_types: Value,
-    response_types: Value,
-    scopes: Value,
-    metadata: Value,
-}
-
-impl From<McpClientRow> for McpClient {
-    fn from(row: McpClientRow) -> Self {
-        Self {
-            id: row.id,
-            name: row.name.unwrap_or_default(),
-            redirect_uris: string_list(row.redirect_uris),
-            grant_types: string_list(row.grant_types),
-            response_types: string_list(row.response_types),
-            scopes: string_list(row.scopes),
-            metadata: row.metadata,
-        }
-    }
-}
+const MCP_CLIENT_SELECT: &str = "SELECT id, COALESCE(name, '') AS name, redirect_uris, \
+     grant_types, response_types, scopes FROM mcp_oauth_clients";
 
 /// `McpOauthClient` as the OAuth endpoints need it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, FromRow)]
 pub struct McpClient {
     pub id: i64,
     pub name: String,
+    #[sqlx(json)]
     pub redirect_uris: Vec<String>,
+    #[sqlx(json)]
     pub grant_types: Vec<String>,
+    #[sqlx(json)]
     pub response_types: Vec<String>,
+    #[sqlx(json)]
     pub scopes: Vec<String>,
-    pub metadata: Value,
 }
 
 impl McpClient {
@@ -357,36 +334,31 @@ pub async fn create_mcp_client(pool: &PgPool, client: &NewMcpClient) -> Result<M
         .bind(&client.metadata)
         .fetch_one(pool)
         .await?;
-    let row = model::find_by_id::<McpOauthClient, McpClientRow, _>(pool, id)
-        .await?
-        .ok_or_else(|| crate::Error::InvalidData("inserted MCP client is missing".to_owned()))?;
-    Ok(row.into())
+    Ok(McpClient {
+        id,
+        name: client.name.clone(),
+        redirect_uris: client.redirect_uris.clone(),
+        grant_types: client.grant_types.clone(),
+        response_types: client.response_types.clone(),
+        scopes: client.scopes.clone(),
+    })
 }
 
 /// The client whose public id is `public_client_id`.
 pub async fn find_mcp_client(pool: &PgPool, public_client_id: &str) -> Result<Option<McpClient>> {
+    let Some(id) = McpOauthClient::decode_oid(public_client_id) else {
+        return Ok(None);
+    };
     Ok(
-        model::find_by_oid::<McpOauthClient, McpClientRow, _>(pool, public_client_id)
-            .await?
-            .map(McpClient::from),
+        sqlx::query_as(&format!("{MCP_CLIENT_SELECT} WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
     )
 }
 
-fn string_list(value: Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// A stored authorization-code row, minus the digest.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, FromRow)]
 pub struct StoredAuthorizationCode {
     pub id: i64,
     pub client_id: i64,
@@ -394,9 +366,9 @@ pub struct StoredAuthorizationCode {
     pub principal_id: i64,
     pub redirect_uri: String,
     pub resource: String,
+    #[sqlx(json)]
     pub scopes: Vec<String>,
     pub code_challenge: String,
-    pub expires_at: OffsetDateTime,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -436,46 +408,15 @@ pub async fn find_usable_authorization_code(
     pool: &PgPool,
     plaintext: &str,
 ) -> Result<Option<StoredAuthorizationCode>> {
-    let row: Option<AuthorizationCodeRow> = sqlx::query_as(
-        "SELECT id, mcp_oauth_client_id, user_id, principal_id, redirect_uri, resource, scopes, \
-         code_challenge, expires_at AT TIME ZONE 'UTC' AS expires_at \
+    Ok(sqlx::query_as(
+        "SELECT id, mcp_oauth_client_id AS client_id, user_id, principal_id, redirect_uri, \
+         resource, scopes, code_challenge \
          FROM mcp_oauth_authorization_codes \
          WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()",
     )
     .bind(hash_token(plaintext))
     .fetch_optional(pool)
-    .await?;
-    Ok(row.map(StoredAuthorizationCode::from))
-}
-
-/// The stored code row as Postgres returns it; `scopes` is still JSONB.
-#[derive(Clone, Debug, FromRow)]
-struct AuthorizationCodeRow {
-    id: i64,
-    mcp_oauth_client_id: i64,
-    user_id: i64,
-    principal_id: i64,
-    redirect_uri: String,
-    resource: String,
-    scopes: Value,
-    code_challenge: String,
-    expires_at: OffsetDateTime,
-}
-
-impl From<AuthorizationCodeRow> for StoredAuthorizationCode {
-    fn from(row: AuthorizationCodeRow) -> Self {
-        Self {
-            id: row.id,
-            client_id: row.mcp_oauth_client_id,
-            user_id: row.user_id,
-            principal_id: row.principal_id,
-            redirect_uri: row.redirect_uri,
-            resource: row.resource,
-            scopes: string_list(row.scopes),
-            code_challenge: row.code_challenge,
-            expires_at: row.expires_at,
-        }
-    }
+    .await?)
 }
 
 /// Consume a code if it is still usable. Returns whether this call won the race
@@ -494,18 +435,19 @@ pub async fn consume_authorization_code(pool: &PgPool, id: i64) -> Result<bool> 
 }
 
 /// A stored refresh-token row, minus the digest.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, FromRow)]
 pub struct StoredRefreshToken {
     pub id: i64,
     pub client_id: i64,
     pub user_id: i64,
     pub principal_id: i64,
     pub resource: String,
+    #[sqlx(json)]
     pub scopes: Vec<String>,
 }
 
-pub async fn create_refresh_token(
-    pool: &PgPool,
+async fn insert_refresh_token(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     client_id: i64,
     user_id: i64,
     principal_id: i64,
@@ -527,64 +469,34 @@ pub async fn create_refresh_token(
     .bind(Value::from(scopes.to_vec()))
     .bind(hash_token(&plaintext))
     .bind(REFRESH_TOKEN_TTL_SECONDS)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(plaintext)
+}
+
+pub async fn create_refresh_token(
+    pool: &PgPool,
+    client_id: i64,
+    user_id: i64,
+    principal_id: i64,
+    resource: &str,
+    scopes: &[String],
+) -> Result<String> {
+    insert_refresh_token(pool, client_id, user_id, principal_id, resource, scopes).await
 }
 
 pub async fn find_usable_refresh_token(
     pool: &PgPool,
     plaintext: &str,
 ) -> Result<Option<StoredRefreshToken>> {
-    let row: Option<RefreshTokenRow> = sqlx::query_as(
-        "SELECT id, mcp_oauth_client_id, user_id, principal_id, resource, scopes \
+    Ok(sqlx::query_as(
+        "SELECT id, mcp_oauth_client_id AS client_id, user_id, principal_id, resource, scopes \
          FROM mcp_oauth_refresh_tokens \
          WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()",
     )
     .bind(hash_token(plaintext))
     .fetch_optional(pool)
-    .await?;
-    Ok(row.map(StoredRefreshToken::from))
-}
-
-/// The stored refresh-token row as Postgres returns it; `scopes` is still JSONB.
-#[derive(Clone, Debug, FromRow)]
-struct RefreshTokenRow {
-    id: i64,
-    mcp_oauth_client_id: i64,
-    user_id: i64,
-    principal_id: i64,
-    resource: String,
-    scopes: Value,
-}
-
-impl From<RefreshTokenRow> for StoredRefreshToken {
-    fn from(row: RefreshTokenRow) -> Self {
-        Self {
-            id: row.id,
-            client_id: row.mcp_oauth_client_id,
-            user_id: row.user_id,
-            principal_id: row.principal_id,
-            resource: row.resource,
-            scopes: string_list(row.scopes),
-        }
-    }
-}
-
-/// Revoke a refresh token for rotation. Returns whether it was still usable.
-///
-/// `revoked_at`/`last_used_at` are server clock values, so the statement stays
-/// plain SQL.
-pub async fn revoke_refresh_token(pool: &PgPool, id: i64) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE mcp_oauth_refresh_tokens \
-         SET revoked_at = now(), last_used_at = now(), updated_at = now() \
-         WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()",
-    )
-    .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
+    .await?)
 }
 
 /// `User#revoke_mcp_oauth_refresh_tokens!`. `revoked_at` is a server clock
@@ -1034,22 +946,14 @@ pub async fn rotate_refresh_token(
         transaction.rollback().await?;
         return Ok(None);
     }
-    let plaintext = issue_refresh_token();
-    sqlx::query(
-        "INSERT INTO mcp_oauth_refresh_tokens \
-         (mcp_oauth_client_id, user_id, principal_id, resource, scopes, token_hash, \
-          expires_at, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, \
-          (now() + ($7 * interval '1 second')), now(), now())",
+    let plaintext = insert_refresh_token(
+        &mut *transaction,
+        client_id,
+        user_id,
+        principal_id,
+        resource,
+        scopes,
     )
-    .bind(client_id)
-    .bind(user_id)
-    .bind(principal_id)
-    .bind(resource)
-    .bind(Value::from(scopes.to_vec()))
-    .bind(hash_token(&plaintext))
-    .bind(REFRESH_TOKEN_TTL_SECONDS)
-    .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
     Ok(Some(plaintext))
@@ -1108,7 +1012,6 @@ mod tests {
             grant_types: vec![],
             response_types: vec![],
             scopes: vec![],
-            metadata: json!({}),
         };
         assert!(client.redirect_uri_allowed("http://localhost/callback"));
         assert!(client.redirect_uri_allowed("http://localhost:49153/callback"));

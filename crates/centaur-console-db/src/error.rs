@@ -28,6 +28,15 @@ impl Error {
     pub fn not_found(model: &str) -> Self {
         Self::NotFound(format!("{model} not found"))
     }
+
+    /// Whether this is Postgres' unique-index violation (`23505`).
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(sqlx::Error::Database(database))
+                if database.code().as_deref() == Some("23505")
+        )
+    }
 }
 
 impl std::error::Error for Error {}

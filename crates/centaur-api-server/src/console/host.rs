@@ -269,9 +269,6 @@ mod tests {
             "/oauth/app/callback",
             "/mcp/oauth/authorize",
             "/.well-known/oauth-authorization-server",
-            "/manifest",
-            "/service-worker.js",
-            "/launch",
             "/assets/oauth-page/oauth.css",
             "/not-a-console-path",
         ] {

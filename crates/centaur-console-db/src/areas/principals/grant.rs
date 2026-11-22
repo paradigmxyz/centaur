@@ -1,33 +1,40 @@
 //! Grants and the effective-grant view for the principals area.
 
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use time::PrimitiveDateTime;
 
-use super::{GRANT_COLUMNS, GrantRow, GrantWrite, PrincipalError, Result, RoleSummaryPayload};
+use super::{
+    GRANT_COLUMNS, GrantRow, GrantWrite, Grantee, PrincipalError, Result, RoleSummaryPayload,
+};
 use crate::areas::reconciliation;
+use crate::areas::secrets::SecretKind;
 use crate::model::{self, ConsoleModel};
 use crate::{FieldErrors, invalidate};
 use invalidate::Scope;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum GrantableKind {
-    Static,
-    GcpAuth,
-    GcpIdToken,
-    AwsAuth,
-    OauthToken,
-    PgDsn,
-    Hmac,
-    SshKey,
-}
-
 const DEFAULT_DIRECT_PRIORITY: i32 = 100;
 const DEFAULT_ROLE_PRIORITY: i32 = 0;
 
+impl SecretKind {
+    /// The id this kind's column holds in `grant`, if it is the grantable.
+    pub fn id_in(self, grant: &GrantRow) -> Option<i64> {
+        match self {
+            Self::Static => grant.static_secret_id,
+            Self::GcpAuth => grant.gcp_auth_secret_id,
+            Self::GcpIdToken => grant.gcp_id_token_secret_id,
+            Self::AwsAuth => grant.aws_auth_secret_id,
+            Self::OauthToken => grant.oauth_token_secret_id,
+            Self::PgDsn => grant.pg_dsn_secret_id,
+            Self::Hmac => grant.hmac_secret_id,
+            Self::SshKey => grant.ssh_key_secret_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GrantableSummary {
-    pub kind: GrantableKind,
+    pub kind: SecretKind,
     pub id: i64,
     pub foreign_id: Option<String>,
     pub name: Option<String>,
@@ -55,30 +62,9 @@ impl GrantableSummary {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum GranteeRef {
-    Principal(i64),
-    Role(i64),
-}
-
-impl GranteeRef {
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::Principal(_) => "principal_id",
-            Self::Role(_) => "role_id",
-        }
-    }
-
-    pub fn id(self) -> i64 {
-        match self {
-            Self::Principal(id) | Self::Role(id) => id,
-        }
-    }
-}
-
 async fn grantable_summary(
     conn: &mut sqlx::PgConnection,
-    kind: GrantableKind,
+    kind: SecretKind,
     id: i64,
 ) -> Result<Option<GrantableSummary>> {
     let row: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(&format!(
@@ -100,10 +86,6 @@ async fn load_grant_by_oid(pool: &PgPool, oid: &str) -> Result<GrantRow> {
     Ok(model::find_by_oid::<model::Grant, GrantRow, _>(pool, oid)
         .await?
         .ok_or_else(model::Grant::not_found)?)
-}
-
-fn grantee_column(grantee: GranteeRef) -> (&'static str, i64) {
-    (grantee.column(), grantee.id())
 }
 
 /// `GrantsController#serialize` without the console `grantable` summary.
@@ -160,14 +142,14 @@ pub fn grant_payload(row: &GrantRow) -> Result<GrantPayload> {
         grantable: None,
     };
     match kind {
-        GrantableKind::Static => payload.static_secret_id = secret,
-        GrantableKind::GcpAuth => payload.gcp_auth_secret_id = secret,
-        GrantableKind::GcpIdToken => payload.gcp_id_token_secret_id = secret,
-        GrantableKind::AwsAuth => payload.aws_auth_secret_id = secret,
-        GrantableKind::OauthToken => payload.oauth_token_secret_id = secret,
-        GrantableKind::PgDsn => payload.pg_dsn_secret_id = secret,
-        GrantableKind::Hmac => payload.hmac_secret_id = secret,
-        GrantableKind::SshKey => payload.ssh_key_secret_id = secret,
+        SecretKind::Static => payload.static_secret_id = secret,
+        SecretKind::GcpAuth => payload.gcp_auth_secret_id = secret,
+        SecretKind::GcpIdToken => payload.gcp_id_token_secret_id = secret,
+        SecretKind::AwsAuth => payload.aws_auth_secret_id = secret,
+        SecretKind::OauthToken => payload.oauth_token_secret_id = secret,
+        SecretKind::PgDsn => payload.pg_dsn_secret_id = secret,
+        SecretKind::Hmac => payload.hmac_secret_id = secret,
+        SecretKind::SshKey => payload.ssh_key_secret_id = secret,
     }
     Ok(payload)
 }
@@ -215,10 +197,9 @@ pub async fn destroy_grant(pool: &PgPool, oid: &str) -> Result<()> {
 async fn resolve_one(
     pool: &PgPool,
     write: &GrantWrite,
-    types: &[(&str, GrantableKind)],
-) -> Result<Option<(GrantableKind, GrantableSummary)>> {
-    for (param, kind) in types {
-        let Some(value) = write.get(param) else {
+) -> Result<Option<(SecretKind, GrantableSummary)>> {
+    for kind in SecretKind::ALL {
+        let Some(value) = write.grantable(kind) else {
             continue;
         };
         let not_found = || PrincipalError::NotFound(format!("{} not found", kind.model_name()));
@@ -226,24 +207,23 @@ async fn resolve_one(
             return Err(not_found());
         };
         let mut conn = pool.acquire().await?;
-        let summary = grantable_summary(&mut conn, *kind, id)
+        let summary = grantable_summary(&mut conn, kind, id)
             .await?
             .ok_or_else(not_found)?;
-        return Ok(Some((*kind, summary)));
+        return Ok(Some((kind, summary)));
     }
     Ok(None)
 }
 
-async fn resolve_grantee(pool: &PgPool, write: &GrantWrite) -> Result<Option<GranteeRef>> {
-    if let Some(value) = write.get("principal_id") {
-        let view = super::find_principal_by_oid(pool, value).await?;
-        return Ok(Some(GranteeRef::Principal(view.row.id)));
-    }
-    if let Some(value) = write.get("role_id") {
-        let view = super::find_role_by_oid(pool, value).await?;
-        return Ok(Some(GranteeRef::Role(view.row.id)));
-    }
-    Ok(None)
+async fn resolve_grantee(pool: &PgPool, write: &GrantWrite) -> Result<Option<Grantee>> {
+    let Some((column, oid)) = write.grantee() else {
+        return Ok(None);
+    };
+    Ok(Some(if column == "principal_id" {
+        Grantee::Principal(super::find_principal_by_oid(pool, oid).await?.row.id)
+    } else {
+        Grantee::Role(super::find_role_by_oid(pool, oid).await?.row.id)
+    }))
 }
 
 /// `GrantsController#render_missing`: every field of a grant body is a reference
@@ -262,28 +242,21 @@ pub async fn create_grant(
     created_by: i64,
 ) -> Result<(GrantRow, bool)> {
     const GRANTEE_TYPES: [&str; 2] = ["principal_id", "role_id"];
-    const GRANTABLE_TYPES: [(&str, GrantableKind); 8] = [
-        ("static_secret_id", GrantableKind::Static),
-        ("gcp_auth_secret_id", GrantableKind::GcpAuth),
-        ("gcp_id_token_secret_id", GrantableKind::GcpIdToken),
-        ("aws_auth_secret_id", GrantableKind::AwsAuth),
-        ("oauth_token_secret_id", GrantableKind::OauthToken),
-        ("pg_dsn_secret_id", GrantableKind::PgDsn),
-        ("hmac_secret_id", GrantableKind::Hmac),
-        ("ssh_key_secret_id", GrantableKind::SshKey),
-    ];
 
     let Some(grantee) = resolve_grantee(pool, write).await? else {
         return Err(missing_reference(&GRANTEE_TYPES));
     };
-    let Some((kind, summary)) = resolve_one(pool, write, &GRANTABLE_TYPES).await? else {
-        let names: Vec<&str> = GRANTABLE_TYPES.iter().map(|(name, _)| *name).collect();
+    let Some((kind, summary)) = resolve_one(pool, write).await? else {
+        let names: Vec<&str> = SecretKind::ALL
+            .iter()
+            .map(|kind| kind.grant_column())
+            .collect();
         return Err(missing_reference(&names));
     };
 
     // `Grant#owner_only_grantee`: an owner-only OAuth connection may only be
     // granted to the principal that owns it.
-    if kind == GrantableKind::Static {
+    if kind == SecretKind::Static {
         let credential: Option<(i64, bool)> = sqlx::query_as(
             "SELECT c.id, a.owner_only FROM static_secrets s \
              JOIN broker_credentials c ON c.id = s.broker_credential_id \
@@ -294,11 +267,11 @@ pub async fn create_grant(
         .await?;
         if let Some((credential_id, true)) = credential {
             let owner = match grantee {
-                GranteeRef::Principal(id) => {
+                Grantee::Principal(id) => {
                     let mut conn = pool.acquire().await?;
                     reconciliation::connection_owner(&mut conn, id, credential_id).await?
                 }
-                GranteeRef::Role(_) => false,
+                Grantee::Role(_) => false,
             };
             if !owner {
                 let mut errors = FieldErrors::new();
@@ -311,11 +284,11 @@ pub async fn create_grant(
         }
     }
 
-    let (column, id) = grantee_column(grantee);
-    let secret_column = kind.column();
+    let (column, id) = (grantee.column(), grantee.id());
+    let secret_column = kind.grant_column();
     let priority = match grantee {
-        GranteeRef::Principal(_) => DEFAULT_DIRECT_PRIORITY,
-        GranteeRef::Role(_) => DEFAULT_ROLE_PRIORITY,
+        Grantee::Principal(_) => DEFAULT_DIRECT_PRIORITY,
+        Grantee::Role(_) => DEFAULT_ROLE_PRIORITY,
     };
     let existing: Option<GrantRow> = sqlx::query_as(&format!(
         "SELECT {GRANT_COLUMNS} FROM grants WHERE {column} = $1 AND {secret_column} = $2"
@@ -367,7 +340,7 @@ pub async fn create_grant(
 }
 
 /// The grant rows of one grantee, in insertion order.
-pub async fn list_grants(pool: &PgPool, grantee: GranteeRef) -> Result<Vec<GrantRow>> {
+pub async fn list_grants(pool: &PgPool, grantee: Grantee) -> Result<Vec<GrantRow>> {
     Ok(sqlx::query_as(&format!(
         "SELECT {GRANT_COLUMNS} FROM grants WHERE {} = $1 ORDER BY created_at ASC, id ASC",
         grantee.column()
@@ -381,42 +354,16 @@ fn effective_condition() -> &'static str {
     "g.principal_id = $1 OR g.role_id IN (SELECT role_id FROM principal_roles WHERE principal_id = $1)"
 }
 
-#[derive(sqlx::FromRow)]
-struct EffectiveCounts {
-    static_secret_id: i64,
-    gcp_auth_secret_id: i64,
-    gcp_id_token_secret_id: i64,
-    aws_auth_secret_id: i64,
-    oauth_token_secret_id: i64,
-    pg_dsn_secret_id: i64,
-    hmac_secret_id: i64,
-    ssh_key_secret_id: i64,
-}
-
-impl EffectiveCounts {
-    fn get(&self, kind: GrantableKind) -> i64 {
-        match kind {
-            GrantableKind::Static => self.static_secret_id,
-            GrantableKind::GcpAuth => self.gcp_auth_secret_id,
-            GrantableKind::GcpIdToken => self.gcp_id_token_secret_id,
-            GrantableKind::AwsAuth => self.aws_auth_secret_id,
-            GrantableKind::OauthToken => self.oauth_token_secret_id,
-            GrantableKind::PgDsn => self.pg_dsn_secret_id,
-            GrantableKind::Hmac => self.hmac_secret_id,
-            GrantableKind::SshKey => self.ssh_key_secret_id,
-        }
-    }
-}
-
+/// One count per kind, in [`SecretKind::ALL`] order.
 async fn effective_counts(pool: &PgPool, principal_id: i64) -> Result<Vec<i64>> {
-    let selects: Vec<String> = GrantableKind::ALL
+    let selects: Vec<String> = SecretKind::ALL
         .iter()
         .map(|kind| {
-            let column = kind.column();
+            let column = kind.grant_column();
             format!("COUNT(DISTINCT g.{column}) AS {column}")
         })
         .collect();
-    let row: EffectiveCounts = sqlx::query_as(&format!(
+    let row = sqlx::query(&format!(
         "SELECT {} FROM grants g WHERE {}",
         selects.join(", "),
         effective_condition()
@@ -424,20 +371,20 @@ async fn effective_counts(pool: &PgPool, principal_id: i64) -> Result<Vec<i64>> 
     .bind(principal_id)
     .fetch_one(pool)
     .await?;
-    Ok(GrantableKind::ALL
+    Ok(SecretKind::ALL
         .iter()
-        .map(|kind| row.get(*kind))
+        .map(|kind| row.get(kind.grant_column()))
         .collect())
 }
 
 async fn page_records(
     pool: &PgPool,
     principal_id: i64,
-    kind: GrantableKind,
+    kind: SecretKind,
     offset: i64,
     limit: i64,
 ) -> Result<Vec<(i64, Option<String>, Option<String>)>> {
-    let column = kind.column();
+    let column = kind.grant_column();
     Ok(sqlx::query_as(&format!(
         "SELECT s.id, s.foreign_id, s.name FROM {} s \
          INNER JOIN (SELECT g.{column} AS secret_id, MAX(g.priority) AS effective_priority \
@@ -457,13 +404,13 @@ async fn page_records(
 async fn sources(
     pool: &PgPool,
     principal_id: i64,
-    kind: GrantableKind,
+    kind: SecretKind,
     secret_ids: &[i64],
 ) -> Result<Vec<GrantRow>> {
     Ok(sqlx::query_as(&format!(
         "SELECT {GRANT_COLUMNS} FROM grants g WHERE ({}) AND g.{} = ANY($2) ORDER BY g.id",
         effective_condition(),
-        kind.column()
+        kind.grant_column()
     ))
     .bind(principal_id)
     .bind(secret_ids)
@@ -519,7 +466,7 @@ pub async fn effective_grants(
     let mut offset = (page - 1).saturating_mul(limit);
 
     let mut data = Vec::new();
-    for (index, kind) in GrantableKind::ALL.into_iter().enumerate() {
+    for (index, kind) in SecretKind::ALL.into_iter().enumerate() {
         let count = counts[index];
         if offset >= count {
             offset -= count;
@@ -550,7 +497,7 @@ pub async fn effective_grants(
                 }
                 data.push(EffectiveGrantPayload {
                     id: crate::oid(kind.oid_prefix(), secret_id),
-                    grant_key: kind.column(),
+                    grant_key: kind.grant_column(),
                     kind: kind.slug(),
                     foreign_id,
                     name,
@@ -565,36 +512,4 @@ pub async fn effective_grants(
         }
     }
     Ok((data, page, total))
-}
-
-impl GrantableKind {
-    pub const ALL: [GrantableKind; 8] = [
-        GrantableKind::Static,
-        GrantableKind::GcpAuth,
-        GrantableKind::GcpIdToken,
-        GrantableKind::AwsAuth,
-        GrantableKind::OauthToken,
-        GrantableKind::PgDsn,
-        GrantableKind::Hmac,
-        GrantableKind::SshKey,
-    ];
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_grantable_kind_has_a_unique_column_and_table() {
-        let columns: std::collections::HashSet<_> = GrantableKind::ALL
-            .into_iter()
-            .map(|kind| kind.column())
-            .collect();
-        let tables: std::collections::HashSet<_> = GrantableKind::ALL
-            .into_iter()
-            .map(|kind| kind.table())
-            .collect();
-        assert_eq!(columns.len(), GrantableKind::ALL.len());
-        assert_eq!(tables.len(), GrantableKind::ALL.len());
-    }
 }

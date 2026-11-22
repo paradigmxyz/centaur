@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use centaur_console_db::{
@@ -38,7 +38,7 @@ use time::PrimitiveDateTime;
 
 use super::{
     Patch, app_by_id, app_by_oid, blank, config_failure, created, credential_by_oid, document,
-    is_oid, oauth_callback_redirect_uri, oauth_start_url, pool, present,
+    is_oid, label_filter, oauth_callback_redirect_uri, oauth_start_url, pool, present,
     providers::{
         self, CUSTOM_CONFIG_KEYS, CUSTOM_KEY, CUSTOM_OPTIONAL_CONFIG_KEYS, OauthAppCredential,
         PROVIDER_KEYS, Preset, Provider, ProviderConfig, RegistrationRequest, registration_scope,
@@ -47,13 +47,14 @@ use super::{
 use crate::{
     AppState,
     console::{
-        bearer::BearerUser,
+        areas::auth_pages::console_config,
+        guard::BearerUser,
         http::{
-            ConsoleError, DataPayload, ListParams, ListSource, bind, labels_value, list,
-            list_response, list_rows,
+            ConsoleError, DataPayload, ListParams, ListSource, bind, list, list_response, list_rows,
         },
         request::{ConsoleBody, ConsoleData},
     },
+    console_session::ConsoleSessionConfig,
 };
 
 /// One OAuth app document write. Unknown fields are ignored; a field of the
@@ -116,16 +117,6 @@ const APP_CREDENTIAL_LIST: ListSource = ListSource::new(
     2,
 );
 
-/// The label containment value a list query binds, or `None` for no filter.
-fn label_filter(params: &ListParams) -> Option<sqlx::types::Json<Value>> {
-    if params.labels.is_empty() {
-        return None;
-    }
-    Some(sqlx::types::Json(Value::Object(labels_value(
-        &params.labels,
-    ))))
-}
-
 /// The `data` object of an OAuth app response
 /// (`OauthAppsController#record_payload`).
 #[derive(Serialize)]
@@ -187,7 +178,7 @@ fn payload(app: &OauthApp) -> AppPayload {
 
 fn console_app_payload(
     app: &OauthApp,
-    headers: &HeaderMap,
+    config: &ConsoleSessionConfig,
     credentials_count: i64,
 ) -> ConsoleAppPayload {
     ConsoleAppPayload {
@@ -195,8 +186,8 @@ fn console_app_payload(
             .client_secret
             .as_deref()
             .is_some_and(|secret| !secret.is_empty()),
-        redirect_uri: oauth_callback_redirect_uri(headers, &app.slug),
-        start_url: oauth_start_url(headers, &app.slug),
+        redirect_uri: oauth_callback_redirect_uri(config, &app.slug),
+        start_url: oauth_start_url(config, &app.slug),
         credentials_count,
         app: AppPayload::from(app),
     }
@@ -635,7 +626,6 @@ async fn save_app(
 pub(super) async fn console_index(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
-    headers: HeaderMap,
 ) -> Result<Response, ConsoleError> {
     let params = ListParams::from_query(&query)?;
     let pool = pool(&state)?;
@@ -647,7 +637,13 @@ pub(super) async fn console_index(
     let counts = oauth_app_credential_counts(&pool, &ids).await?;
     let data: Vec<ConsoleAppPayload> = apps
         .iter()
-        .map(|app| console_app_payload(app, &headers, *counts.get(&app.id).unwrap_or(&0)))
+        .map(|app| {
+            console_app_payload(
+                app,
+                console_config(&state),
+                *counts.get(&app.id).unwrap_or(&0),
+            )
+        })
         .collect();
     Ok(Json(list_response(params.pagination, &data, total)).into_response())
 }
@@ -655,12 +651,11 @@ pub(super) async fn console_index(
 pub(super) async fn console_show(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
     let app = app_by_oid(&pool, &id).await?;
     let count = oauth_app_credentials_count(&pool, app.id).await?;
-    Ok(document(console_app_payload(&app, &headers, count)).into_response())
+    Ok(document(console_app_payload(&app, console_config(&state), count)).into_response())
 }
 
 pub(super) async fn bearer_show(
@@ -703,32 +698,29 @@ pub(super) async fn bearer_index(
 pub(super) async fn console_create(
     State(state): State<AppState>,
     user: ConsoleUser,
-    headers: HeaderMap,
     ConsoleData(data): ConsoleData<OauthAppInput>,
 ) -> Result<Response, ConsoleError> {
-    create_app(&state, user.id, &headers, &data, true).await
+    create_app(&state, user.id, &data, true).await
 }
 
 pub(super) async fn bearer_create(
     State(state): State<AppState>,
     user: BearerUser,
-    headers: HeaderMap,
     ConsoleData(data): ConsoleData<OauthAppInput>,
 ) -> Result<Response, ConsoleError> {
-    create_app(&state, user.0.id, &headers, &data, false).await
+    create_app(&state, user.0.id, &data, false).await
 }
 
 async fn create_app(
     state: &AppState,
     user_id: i64,
-    headers: &HeaderMap,
     data: &OauthAppInput,
     console: bool,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(state)?;
     let app = save_app(&pool, data, None, None, user_id).await?;
     if console {
-        return Ok(created(console_app_payload(&app, headers, 0)).into_response());
+        return Ok(created(console_app_payload(&app, console_config(state), 0)).into_response());
     }
     Ok(created(AppPayload::from(&app)).into_response())
 }
@@ -737,27 +729,24 @@ pub(super) async fn console_update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: ConsoleUser,
-    headers: HeaderMap,
     ConsoleData(data): ConsoleData<OauthAppInput>,
 ) -> Result<Response, ConsoleError> {
-    update_app(&state, &id, user.id, &headers, &data, true).await
+    update_app(&state, &id, user.id, &data, true).await
 }
 
 pub(super) async fn bearer_update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: BearerUser,
-    headers: HeaderMap,
     ConsoleData(data): ConsoleData<OauthAppInput>,
 ) -> Result<Response, ConsoleError> {
-    update_app(&state, &id, user.0.id, &headers, &data, false).await
+    update_app(&state, &id, user.0.id, &data, false).await
 }
 
 async fn update_app(
     state: &AppState,
     identifier: &str,
     user_id: i64,
-    headers: &HeaderMap,
     data: &OauthAppInput,
     console: bool,
 ) -> Result<Response, ConsoleError> {
@@ -779,28 +768,21 @@ async fn update_app(
     };
     if console {
         let count = oauth_app_credentials_count(&pool, app.id).await?;
-        return Ok((status, document(console_app_payload(&app, headers, count))).into_response());
+        return Ok((
+            status,
+            document(console_app_payload(&app, console_config(state), count)),
+        )
+            .into_response());
     }
     Ok((status, document(AppPayload::from(&app))).into_response())
 }
 
-pub(super) async fn console_destroy(
+pub(super) async fn destroy(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ConsoleError> {
-    destroy_app(&state, &id).await
-}
-
-pub(super) async fn bearer_destroy(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ConsoleError> {
-    destroy_app(&state, &id).await
-}
-
-async fn destroy_app(state: &AppState, identifier: &str) -> Result<Response, ConsoleError> {
-    let pool = pool(state)?;
-    let app = app_by_oid(&pool, identifier).await?;
+    let pool = pool(&state)?;
+    let app = app_by_oid(&pool, &id).await?;
     if oauth_app_credentials_count(&pool, app.id).await? > 0 {
         return Err(ConsoleError::new(
             StatusCode::CONFLICT,
@@ -894,39 +876,40 @@ pub(super) async fn console_provider_details(
 }
 
 async fn provider_details_for(app: &OauthApp, credential: &BrokerCredential) -> Value {
+    provider_details(app, credential)
+        .await
+        .unwrap_or_else(|| json!({}))
+}
+
+async fn provider_details(app: &OauthApp, credential: &BrokerCredential) -> Option<Value> {
     if credential.dead {
-        return json!({});
+        return None;
     }
-    let Some(provider) = Provider::from_app(app) else {
-        return json!({});
-    };
-    if !credential
+    let provider = Provider::from_app(app)?;
+    if credential
         .expires_at
-        .is_none_or(|expires_at| expires_at > centaur_console_db::timestamp::now())
+        .is_some_and(|expires_at| expires_at <= centaur_console_db::timestamp::now())
     {
-        return json!({});
+        return None;
     }
-    let Some(encryption) = OauthEncryption::from_env() else {
-        return json!({});
-    };
-    let Some(access_token) = credential
+    let encryption = OauthEncryption::from_env()?;
+    let access_token = credential
         .access_token
         .as_deref()
         .map(|ciphertext| encryption.decrypt(ciphertext))
         .transpose()
         .ok()
         .flatten()
-        .filter(|token| !token.is_empty())
-    else {
-        return json!({});
-    };
+        .filter(|token| !token.is_empty())?;
     let subject = credential.provider_subject.clone().unwrap_or_default();
-    provider
-        .details_for(&OauthAppCredential {
-            access_token,
-            provider_subject: subject,
-        })
-        .await
+    Some(
+        provider
+            .details_for(&OauthAppCredential {
+                access_token,
+                provider_subject: subject,
+            })
+            .await,
+    )
 }
 
 fn input_error(preset: Preset) -> ConsoleError {
@@ -951,7 +934,6 @@ pub(super) async fn console_preset(
     State(state): State<AppState>,
     Path(provider_key): Path<String>,
     user: ConsoleUser,
-    headers: HeaderMap,
     body: Result<ConsoleBody<PresetBody>, ConsoleError>,
 ) -> Result<Response, ConsoleError> {
     let Some(preset) = Preset::fetch(&provider_key) else {
@@ -979,7 +961,7 @@ pub(super) async fn console_preset(
             };
             let request = RegistrationRequest {
                 endpoint: setup.registration_endpoint.clone(),
-                redirect_uri: oauth_callback_redirect_uri(&headers, &attributes.slug),
+                redirect_uri: oauth_callback_redirect_uri(console_config(&state), &attributes.slug),
                 scope: registration_scope(&attributes.allowed_scopes),
                 auth_method: preset.token_endpoint_auth_method(),
             };
@@ -1010,7 +992,7 @@ pub(super) async fn console_preset(
                 Ok(id) => model::find_by_id::<OauthAppModel, OauthApp, _>(&pool, id)
                     .await?
                     .ok_or_else(preset_failed)?,
-                Err(error) if unique_violation(&error) => {
+                Err(error) if error.is_unique_violation() => {
                     match find_oauth_app_by_slug(&pool, &attributes.slug).await? {
                         Some(app) if preset_matches(&app, &attributes) => app,
                         _ => return Err(preset_conflict()),
@@ -1023,7 +1005,7 @@ pub(super) async fn console_preset(
     Ok(document(PresetPayload {
         id: OauthAppModel::oid(app.id),
         slug: app.slug.clone(),
-        start_url: oauth_start_url(&headers, &app.slug),
+        start_url: oauth_start_url(console_config(&state), &app.slug),
     })
     .into_response())
 }
@@ -1035,24 +1017,11 @@ fn preset_matches(app: &OauthApp, attributes: &providers::PresetAttributes) -> b
         && app.enabled
 }
 
-fn unique_violation(error: &centaur_console_db::Error) -> bool {
-    match error {
-        centaur_console_db::Error::Database(sqlx::Error::Database(database)) => {
-            database.code().as_deref() == Some("23505")
-        }
-        _ => false,
-    }
-}
-
-pub(super) async fn sandbox_index(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Response, ConsoleError> {
+pub(super) async fn sandbox_index(State(state): State<AppState>) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
     let apps = enabled_oauth_apps(&pool, false).await?;
     let data: Vec<SandboxAppPayload> = apps
         .iter()
-        .filter(|app| !app.shared)
         .map(|app| SandboxAppPayload {
             id: OauthAppModel::oid(app.id),
             slug: app.slug.clone(),
@@ -1062,7 +1031,7 @@ pub(super) async fn sandbox_index(
             allowed_scopes: app.allowed_scopes.clone(),
             owner_only: app.owner_only,
             resource: resource_of(app),
-            start_url: oauth_start_url(&headers, &app.slug),
+            start_url: oauth_start_url(console_config(&state), &app.slug),
         })
         .collect();
     Ok(document(data).into_response())
@@ -1078,7 +1047,6 @@ fn resource_of(app: &OauthApp) -> Option<String> {
 pub(super) async fn console_integrations(
     State(state): State<AppState>,
     user: ConsoleUser,
-    headers: HeaderMap,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
     let apps = enabled_oauth_apps(&pool, user.admin).await?;
@@ -1100,7 +1068,14 @@ pub(super) async fn console_integrations(
     }
     let app_payloads: Vec<IntegrationAppPayload> = apps
         .iter()
-        .map(|app| integration_app_payload(app, by_app.get(&app.id).copied(), &user, &headers))
+        .map(|app| {
+            integration_app_payload(
+                app,
+                by_app.get(&app.id).copied(),
+                &user,
+                console_config(&state),
+            )
+        })
         .collect();
     let presets = if user.admin {
         available_presets(&pool).await
@@ -1144,7 +1119,7 @@ fn integration_app_payload(
     app: &OauthApp,
     credential: Option<&BrokerCredential>,
     user: &ConsoleUser,
-    headers: &HeaderMap,
+    config: &ConsoleSessionConfig,
 ) -> IntegrationAppPayload {
     IntegrationAppPayload {
         id: OauthAppModel::oid(app.id),
@@ -1155,7 +1130,7 @@ fn integration_app_payload(
         always_available: app.always_available,
         owner_only: app.owner_only,
         usage: usage_of(app),
-        start_url: oauth_start_url(headers, &app.slug),
+        start_url: oauth_start_url(config, &app.slug),
         connection: credential.map(|credential| ConnectionPayload {
             id: BrokerCredentialModel::oid(credential.id),
             status: if credential_needs_reconnect(app, credential) {

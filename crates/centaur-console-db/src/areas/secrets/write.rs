@@ -1,32 +1,38 @@
 //! Write paths for grantable secrets.
 //!
-//! The three APIs share one document (see [`Document`]) but differ in how it is
-//! produced and which nested records are allowed:
+//! Every kind is written by one pipeline. The kind's API layer builds one
+//! [`Document`] — the parent columns the kind stores, its sources and rules, and
+//! the identity — so the writer only does what every kind does:
 //!
-//! - bearer `PUT/PATCH` is a full replacement (no retained inline secret);
-//! - the console SPA keeps an inline value it omits.
+//! 1. resolve the target (creating it, or locking the existing row) and decrypt
+//!    the stored inline values;
+//! 2. build the document and validate the whole thing, reporting a nested error
+//!    under its path key (`source.config`, `rules[0].cidr`);
+//! 3. short-circuit an unchanged document, keeping the stored nested rows and
+//!    cache versions;
+//! 4. write the parent and replace its nested records in one transaction, then
+//!    bump the sync-config version of every principal the secret reaches.
 //!
-//! Every write validates the whole document first, then writes the parent and
-//! its nested records in one transaction. Nothing is written for a rejected
-//! document, and the reported errors do not depend on save order: the parent's
-//! errors come first and each nested error is reported under its path key
-//! (`source.config`, `rules[0].cidr`).
+//! Nothing is written for a rejected document, and the reported errors do not
+//! depend on save order: the parent's errors come first and each nested error is
+//! reported under its path key.
 //!
-//! The four bearer-only kinds' documents live in [`super::more`]; this module
-//! owns the shared entry points ([`write_secret`], [`delete_secret`]) and the
-//! secret-scoped role grants.
+//! The four Console kinds build and validate their document in
+//! [`super::document`]; the four bearer-only kinds in [`super::more`]. This
+//! module owns the writer they share, the deletes, and the secret-scoped role
+//! grants.
 
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::query::Query;
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgArguments};
 
-use super::document::encrypt;
+use super::document::Document as ConsoleDocument;
 use super::{
-    Document, DocumentFields, Errors, ForeignIdValue, GRANT_COLUMNS, GRANT_FROM, GrantRow,
-    GrantTableRow, RuleDocument, SecretDocumentPayload, SecretFields, SecretKind, SecretRow,
-    SourceDocument, SourceRow, WriteDocument, WriteError, WriteOptions, WriteTarget, decrypt,
-    document::value_to_string, load_secret,
+    Errors, ForeignIdValue, GRANT_COLUMNS, GRANT_FROM, GrantRow, GrantTableRow, RuleDocument,
+    RuleRow, SecretDocumentPayload, SecretFields, SecretKind, SecretRow, SourceDocument,
+    WriteDocument, WriteError, WriteOptions, WriteTarget, decrypt, load_secret,
 };
-use crate::invalidate::{self, Scope, SecretChanges};
+use crate::invalidate::{self, Scope};
 use crate::model::{self, ConsoleModel};
 use crate::write;
 
@@ -35,6 +41,96 @@ use crate::write;
 pub struct WriteResult {
     pub row: SecretRow,
     pub created: bool,
+}
+
+/// The document every kind writes.
+#[derive(Debug)]
+pub(super) struct Document {
+    pub foreign_id: ForeignIdValue,
+    /// The parent attributes by column, without `foreign_id` and `created_by_id`,
+    /// which the writer adds.
+    pub parent: Map<String, Value>,
+    pub sources: Vec<SourceDraft>,
+    pub rules: Vec<RuleDocument>,
+    /// The inline SSH key parsing error, reported on `private_key`.
+    pub private_key_error: Option<String>,
+}
+
+/// One credential source of the document, with the role columns the owning
+/// model requires.
+#[derive(Clone, Debug)]
+pub(super) struct SourceDraft {
+    pub role: Option<String>,
+    pub role_kind: Option<String>,
+    pub source_type: Option<String>,
+    pub secret: Option<String>,
+    pub config: Value,
+    pub broker_credential_id: Option<i64>,
+    pub broker_resolved: bool,
+}
+
+impl SourceDraft {
+    /// The single, role-less source the four Console kinds store.
+    pub fn from_document(source: SourceDocument) -> Self {
+        Self {
+            role: None,
+            role_kind: None,
+            source_type: source.source_type,
+            secret: source.secret,
+            config: source.config,
+            broker_credential_id: None,
+            broker_resolved: true,
+        }
+    }
+
+    /// The stored-document JSON the replacement comparison uses.
+    fn json(&self) -> Value {
+        json!({
+            "source_type": self.source_type.clone().unwrap_or_default(),
+            "config": self.config,
+            "secret": self.secret,
+            "role": self.role,
+            "role_kind": self.role_kind,
+            "broker_credential_id": self.broker_credential_id,
+        })
+    }
+
+    /// `SecretSource` validation errors. The bearer-only kinds render
+    /// `sources: ["is invalid"]`, the SSH key renders the nested keys, and the
+    /// Console kinds render them under the source's own path key.
+    pub fn errors(&self, role_owner: bool) -> Errors {
+        let source = SourceDocument {
+            source_type: self.source_type.clone(),
+            secret: self.secret.clone(),
+            config: self.config.clone(),
+        };
+        let mut errors = source.errors(self.broker_resolved);
+        if role_owner && super::blank(self.role.as_deref()) {
+            errors.add(
+                "role",
+                "can't be blank for a oauth_token_secret or hmac_secret or aws_auth_secret source",
+            );
+        }
+        errors
+    }
+}
+
+/// The API a document came from. The two write paths differ only here: the
+/// Console SPA leaves an unchanged parent row untouched (so its `updated_at`
+/// stays) and reports a rejected document before short-circuiting an unchanged
+/// one; the bearer API rewrites the parent on every replacement and
+/// short-circuits first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Family {
+    Console,
+    Bearer,
+}
+
+/// A validated-or-not document plus the stored plaintext it is compared with.
+pub(super) struct Pending {
+    pub document: Document,
+    pub errors: Errors,
+    pub existing_plain: Vec<Option<String>>,
 }
 
 /// The write entry point for every kind: the console/bearer document or the
@@ -49,7 +145,7 @@ pub async fn write_secret(
 ) -> std::result::Result<WriteResult, WriteError> {
     match document {
         WriteDocument::Console(payload) => {
-            write_document(pool, kind, &target, &payload, operator_id, options).await
+            write_console_document(pool, kind, &target, &payload, operator_id, options).await
         }
         WriteDocument::Bearer(request) => {
             super::more::write_secret(pool, target, request, operator_id).await
@@ -63,7 +159,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(database) if database.code().as_deref() == Some("23505"))
 }
 
-async fn write_document(
+async fn write_console_document(
     pool: &PgPool,
     kind: SecretKind,
     target: &WriteTarget,
@@ -74,7 +170,7 @@ async fn write_document(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match write_once(pool, kind, target, payload, operator_id, options).await {
+        match write_console_once(pool, kind, target, payload, operator_id, options).await {
             Err(WriteError::Internal(crate::Error::Database(error)))
                 if is_unique_violation(&error)
                     && matches!(target, WriteTarget::ForeignId(_))
@@ -87,7 +183,7 @@ async fn write_document(
     }
 }
 
-async fn write_once(
+async fn write_console_once(
     pool: &PgPool,
     kind: SecretKind,
     target: &WriteTarget,
@@ -97,117 +193,142 @@ async fn write_once(
 ) -> std::result::Result<WriteResult, WriteError> {
     let mut transaction = pool.begin().await?;
     let (existing, was_new) = resolve_target(&mut transaction, kind, target).await?;
-    let existing_plain = match existing.as_ref().and_then(|row| row.source()) {
-        Some(source) => match source.secret.as_deref() {
-            Some(ciphertext) => Some(decrypt(ciphertext)?),
-            None => None,
-        },
-        None => None,
-    };
+    let existing_secret = existing
+        .as_ref()
+        .and_then(SecretRow::source)
+        .and_then(|source| source.secret.as_deref())
+        .map(decrypt)
+        .transpose()?;
 
-    let mut document = Document::from_payload(
+    let document = ConsoleDocument::from_payload(
         kind,
         payload,
         existing.as_ref(),
-        existing_plain.as_deref(),
+        existing_secret.as_deref(),
         options,
     )?;
+    let mut document = document;
     if let (WriteTarget::ForeignId(identifier), None) = (target, existing.as_ref())
         && payload.foreign_id.is_none()
     {
         document.foreign_id = ForeignIdValue::Set(Some(identifier.clone()));
     }
 
-    let foreign_id_taken = match &document.foreign_id {
-        ForeignIdValue::Set(Some(foreign_id)) if !foreign_id.is_empty() => {
-            let excluded = existing.as_ref().map(|row| row.id).unwrap_or_default();
-            sqlx::query_scalar::<_, bool>(&format!(
-                "SELECT EXISTS (SELECT 1 FROM {} WHERE foreign_id = $1 AND id <> $2)",
-                kind.table()
-            ))
-            .bind(foreign_id)
-            .bind(excluded)
-            .fetch_one(&mut *transaction)
-            .await?
-        }
-        _ => false,
-    };
+    let foreign_id_taken = foreign_id_taken(
+        &mut transaction,
+        kind,
+        &document.foreign_id,
+        existing.as_ref(),
+    )
+    .await?;
 
     // Resolve a token_broker source's credential reference before validation so
     // the source row stores the resolved broker link.
-    let broker_id = resolve_broker_reference(&mut transaction, document.source.as_ref()).await?;
-    let source_errors = document
+    let mut sources: Vec<SourceDraft> = document
         .source
-        .as_ref()
-        .map(|source| source.errors(broker_id.is_some()));
-    let rule_errors: Vec<Errors> = document.rules.iter().map(RuleDocument::errors).collect();
+        .iter()
+        .cloned()
+        .map(SourceDraft::from_document)
+        .collect();
+    resolve_brokers(&mut transaction, &mut sources).await?;
 
     // Validate the whole document before writing anything. A nested error is
     // reported under the path key the SPA shows it beside; parent errors are
     // never dropped because a nested record also failed.
-    let mut errors = document.parent_errors(kind, existing.as_ref(), foreign_id_taken);
-    if let Some(source_errors) = source_errors.as_ref() {
+    let mut errors = document.parent_errors(kind, foreign_id_taken);
+    for source in &sources {
         let source_key = source_key(kind);
-        for (attribute, messages) in source_errors.entries() {
+        for (attribute, messages) in source.errors(false).entries() {
             for message in messages {
                 errors.add(&format!("{source_key}.{attribute}"), message.clone());
             }
         }
     }
-    for (index, rule_errors) in rule_errors.iter().enumerate() {
-        for (attribute, messages) in rule_errors.entries() {
+    for (index, rule) in document.rules.iter().enumerate() {
+        for (attribute, messages) in rule.errors().entries() {
             for message in messages {
                 errors.add(&format!("rules[{index}].{attribute}"), message.clone());
             }
         }
     }
-    if !errors.is_empty() {
-        transaction.rollback().await?;
-        return Err(WriteError::Validation(errors.into_value()));
-    }
 
-    if !was_new
-        && let Some(existing) = existing.as_ref()
-        && equivalent(
-            kind,
-            existing,
-            existing_plain.as_deref(),
-            &document,
-            broker_id,
-        )
-    {
+    let pending = Pending {
+        document: document.into_write(kind, sources),
+        errors,
+        existing_plain: stored_plaintexts(existing.as_ref())?,
+    };
+    run_write(
+        pool,
+        kind,
+        transaction,
+        existing.as_ref(),
+        was_new,
+        pending,
+        operator_id,
+        Family::Console,
+    )
+    .await
+}
+
+/// The shared replacement write: the short-circuit, validation, the parent row,
+/// the nested records, and the cache bump.
+#[allow(clippy::too_many_arguments)] // One call site per family; the arguments are the transaction's state.
+pub(super) async fn run_write(
+    pool: &PgPool,
+    kind: SecretKind,
+    mut transaction: Transaction<'_, Postgres>,
+    existing: Option<&SecretRow>,
+    was_new: bool,
+    pending: Pending,
+    operator_id: Option<i64>,
+    family: Family,
+) -> std::result::Result<WriteResult, WriteError> {
+    let unchanged = existing
+        .is_some_and(|row| equivalent(kind, row, &pending.existing_plain, &pending.document));
+    if unchanged && family == Family::Bearer {
+        // An unchanged document keeps the nested rows, the cache versions, and
+        // the id sequences untouched.
+        let row = existing.expect("equivalence requires an existing record");
         transaction.rollback().await?;
         return Ok(WriteResult {
-            row: existing.clone(),
+            row: row.clone(),
+            created: false,
+        });
+    }
+    if !pending.errors.is_empty() {
+        // Validate first, write after: a rejected document leaves no rows behind
+        // and consumes no ids.
+        transaction.rollback().await?;
+        return Err(WriteError::Validation(pending.errors.into_value()));
+    }
+    if unchanged {
+        let row = existing.expect("equivalence requires an existing record");
+        transaction.rollback().await?;
+        return Ok(WriteResult {
+            row: row.clone(),
             created: false,
         });
     }
 
-    let (id, parent_changed) = persist_parent(
+    let id = persist_parent(
         &mut transaction,
         kind,
-        &document,
-        existing.as_ref(),
+        &pending.document,
+        existing,
         operator_id,
+        family,
     )
     .await?;
-    replace_nested(&mut transaction, kind, id, &document, broker_id).await?;
-    let changes = SecretChanges::replaced(
-        was_new || parent_changed,
-        usize::from(
-            existing
-                .as_ref()
-                .map(|row| row.source().is_some())
-                .unwrap_or(false),
-        ),
-        usize::from(document.source.is_some()),
-        existing
-            .as_ref()
-            .map(|row| row.rules.len())
-            .unwrap_or_default(),
-        document.rules.len(),
-    );
-    invalidate::invalidate(&mut transaction, Scope::secret_write(kind, id, changes)).await?;
+    replace_nested(&mut transaction, kind, id, &pending.document).await?;
+    if kind == SecretKind::SshKey {
+        // The key's source belongs_to it with `touch: true`, so replacing the
+        // source also bumps the key's updated_at.
+        sqlx::query(&write::touch_sql(kind.table()))
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    invalidate::invalidate(&mut transaction, Scope::Secret { kind, id }).await?;
     transaction.commit().await?;
     let row = reload(pool, kind, id).await?;
     Ok(WriteResult {
@@ -216,7 +337,7 @@ async fn write_once(
     })
 }
 
-async fn resolve_target(
+pub(super) async fn resolve_target(
     transaction: &mut Transaction<'_, Postgres>,
     kind: SecretKind,
     target: &WriteTarget,
@@ -263,409 +384,346 @@ pub(super) fn not_found(kind: SecretKind) -> WriteError {
     WriteError::NotFound(format!("{} not found", kind.model_name()))
 }
 
-async fn resolve_broker_reference(
+/// Whether another row of this kind already holds the document's foreign id.
+pub(super) async fn foreign_id_taken(
     transaction: &mut Transaction<'_, Postgres>,
-    source: Option<&SourceDocument>,
-) -> std::result::Result<Option<i64>, WriteError> {
-    let Some(source) = source else {
-        return Ok(None);
+    kind: SecretKind,
+    foreign_id: &ForeignIdValue,
+    existing: Option<&SecretRow>,
+) -> std::result::Result<bool, WriteError> {
+    let ForeignIdValue::Set(Some(foreign_id)) = foreign_id else {
+        return Ok(false);
     };
-    if source.source_type.as_deref() != Some("token_broker") {
-        return Ok(None);
+    if foreign_id.is_empty() {
+        return Ok(false);
     }
-    let Some(reference) = source
-        .config
-        .get("credential_id")
-        .map(value_to_string)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-    let id = if let Some(id) = model::BrokerCredential::decode_oid(&reference) {
-        sqlx::query_scalar::<_, i64>("SELECT id FROM broker_credentials WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut **transaction)
-            .await?
-    } else {
-        sqlx::query_scalar::<_, i64>("SELECT id FROM broker_credentials WHERE foreign_id = $1")
-            .bind(&reference)
-            .fetch_optional(&mut **transaction)
-            .await?
-    };
-    Ok(id)
+    let excluded = existing.map(|row| row.id).unwrap_or_default();
+    Ok(sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {} WHERE foreign_id = $1 AND id <> $2)",
+        kind.table()
+    ))
+    .bind(foreign_id)
+    .bind(excluded)
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
-/// A JSON value bound to a nullable jsonb column: an explicit `null` is `NULL`,
-/// like `optional_json_value` before it.
-fn optional_json(value: &Value) -> Option<Value> {
-    (!value.is_null()).then(|| value.clone())
+/// Resolves every `token_broker` source's credential reference, so the stored
+/// source row carries the broker link. An unresolved reference is a validation
+/// error on the source, not a lookup failure.
+pub(super) async fn resolve_brokers(
+    transaction: &mut Transaction<'_, Postgres>,
+    sources: &mut [SourceDraft],
+) -> std::result::Result<(), WriteError> {
+    for source in sources {
+        source.broker_credential_id = None;
+        source.broker_resolved = true;
+        if source.source_type.as_deref() != Some("token_broker") {
+            continue;
+        }
+        let reference = source
+            .config
+            .get("credential_id")
+            .map(super::value_to_string)
+            .filter(|value| !value.is_empty());
+        source.broker_credential_id = match reference {
+            Some(reference) => match model::BrokerCredential::decode_oid(&reference) {
+                Some(id) => {
+                    sqlx::query_scalar::<_, i64>("SELECT id FROM broker_credentials WHERE id = $1")
+                        .bind(id)
+                        .fetch_optional(&mut **transaction)
+                        .await?
+                }
+                None => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT id FROM broker_credentials WHERE foreign_id = $1",
+                    )
+                    .bind(&reference)
+                    .fetch_optional(&mut **transaction)
+                    .await?
+                }
+            },
+            None => None,
+        };
+        source.broker_resolved = source.broker_credential_id.is_some();
+    }
+    Ok(())
 }
 
-/// Inserts or updates the parent row, returning its id and whether any parent
-/// attribute actually changed (Rails' `changes_to_save` for cache bumps).
+/// The decrypted inline value of each stored source, for the replacement
+/// comparison.
+pub(super) fn stored_plaintexts(
+    existing: Option<&SecretRow>,
+) -> std::result::Result<Vec<Option<String>>, WriteError> {
+    let Some(row) = existing else {
+        return Ok(Vec::new());
+    };
+    row.sources
+        .iter()
+        .map(|source| {
+            source
+                .secret
+                .as_deref()
+                .map(decrypt)
+                .transpose()
+                .map_err(WriteError::Internal)
+        })
+        .collect()
+}
+
+async fn reload(
+    pool: &PgPool,
+    kind: SecretKind,
+    id: i64,
+) -> std::result::Result<SecretRow, WriteError> {
+    let mut connection = pool.acquire().await?;
+    load_secret(&mut connection, kind, id)
+        .await?
+        .ok_or_else(|| WriteError::NotFound(format!("secret {id} disappeared")))
+}
+
+fn source_key(kind: SecretKind) -> &'static str {
+    match kind {
+        SecretKind::PgDsn => "dsn",
+        SecretKind::GcpAuth | SecretKind::GcpIdToken => "keyfile",
+        _ => "source",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The parent row
+// ---------------------------------------------------------------------------
+
+/// How a parent column stores its value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Text,
+    Json,
+    Bool,
+}
+
+/// The parent columns of each kind in bind order. `foreign_id` and
+/// `created_by_id` are written separately.
+fn parent_columns(kind: SecretKind) -> &'static [(&'static str, Column)] {
+    match kind {
+        SecretKind::Static => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("labels", Column::Json),
+            ("kind", Column::Text),
+            ("inject_config", Column::Json),
+            ("replace_config", Column::Json),
+        ],
+        SecretKind::PgDsn => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("database", Column::Text),
+            ("role", Column::Text),
+            ("labels", Column::Json),
+            ("settings", Column::Json),
+        ],
+        SecretKind::GcpAuth => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("subject", Column::Text),
+            ("labels", Column::Json),
+            ("credentials_provider", Column::Json),
+            ("scopes", Column::Json),
+        ],
+        SecretKind::GcpIdToken => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("audience", Column::Text),
+            ("header", Column::Text),
+            ("labels", Column::Json),
+        ],
+        SecretKind::AwsAuth => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("labels", Column::Json),
+            ("allowed_regions", Column::Json),
+            ("allowed_services", Column::Json),
+        ],
+        SecretKind::OauthToken => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("labels", Column::Json),
+            // `grant` is a reserved word in Postgres.
+            ("\"grant\"", Column::Text),
+            ("token_endpoint", Column::Text),
+            ("audience", Column::Text),
+            ("header", Column::Text),
+            ("value_prefix", Column::Text),
+            ("scopes", Column::Json),
+        ],
+        SecretKind::Hmac => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("labels", Column::Json),
+            ("timestamp_format", Column::Text),
+            ("signature_algorithm", Column::Text),
+            ("signature_key_encoding", Column::Text),
+            ("signature_output_encoding", Column::Text),
+            ("signature_message", Column::Text),
+            ("allow_chunked_body", Column::Bool),
+            ("headers", Column::Json),
+        ],
+        SecretKind::SshKey => &[
+            ("name", Column::Text),
+            ("description", Column::Text),
+            ("labels", Column::Json),
+            ("public_key", Column::Text),
+        ],
+    }
+}
+
+/// A JSON parent value: the absent key is `null`.
+fn json_value(parent: &Map<String, Value>, column: &str) -> Value {
+    parent.get(column).cloned().unwrap_or(Value::Null)
+}
+
+/// One parent column's value, bound as its column type.
+enum Bind {
+    Text(Option<String>),
+    Json(Value),
+    Bool(bool),
+}
+
+fn parent_binds(kind: SecretKind, parent: &Map<String, Value>) -> Vec<Bind> {
+    parent_columns(kind)
+        .iter()
+        .map(|(column, storage)| match storage {
+            Column::Text => Bind::Text(
+                parent
+                    .get(*column)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            ),
+            Column::Json => Bind::Json(json_value(parent, column)),
+            Column::Bool => Bind::Bool(
+                parent
+                    .get(*column)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ),
+        })
+        .collect()
+}
+
+fn bind_all<'q>(
+    mut query: Query<'q, Postgres, PgArguments>,
+    binds: Vec<Bind>,
+) -> Query<'q, Postgres, PgArguments> {
+    for bind in binds {
+        query = match bind {
+            Bind::Text(value) => query.bind(value),
+            Bind::Json(value) => query.bind((!value.is_null()).then_some(value)),
+            Bind::Bool(value) => query.bind(value),
+        };
+    }
+    query
+}
+
+/// Inserts or updates the parent row, from the kind's column list. The Console
+/// SPA leaves an unchanged row alone; the bearer API rewrites it, and writes a
+/// supplied foreign id without a second `updated_at` bump.
 async fn persist_parent(
     transaction: &mut Transaction<'_, Postgres>,
     kind: SecretKind,
     document: &Document,
     existing: Option<&SecretRow>,
     operator_id: Option<i64>,
-) -> std::result::Result<(i64, bool), WriteError> {
+    family: Family,
+) -> std::result::Result<i64, WriteError> {
     let foreign_id = match &document.foreign_id {
-        ForeignIdValue::Omitted => existing.and_then(|row| row.foreign_id.clone()),
         ForeignIdValue::Set(value) => value.clone(),
+        ForeignIdValue::Omitted => existing.and_then(|row| row.foreign_id.clone()),
     };
-    match (kind, &document.fields) {
-        (
-            SecretKind::Static,
-            DocumentFields::Static {
-                kind: static_kind,
-                inject_config,
-                replace_config,
-            },
-        ) => {
-            let static_kind = static_kind.clone().unwrap_or_else(|| "custom".to_owned());
-            if let Some(existing) = existing {
-                let changed = json!(existing.name) != json!(document.name)
-                    || json!(existing.description) != json!(document.description)
-                    || existing.labels != document.labels
-                    || matches!(&existing.fields, SecretFields::Static { kind, inject_config: existing_inject, replace_config: existing_replace }
-                        if kind != &static_kind
-                            || existing_inject != inject_config
-                            || existing_replace != replace_config);
-                if let ForeignIdValue::Set(_) = document.foreign_id {
-                    // foreign_id is included in the update below; include it in
-                    // the change check when it actually differs.
-                    if existing.foreign_id != foreign_id {
-                        return update_parent(
-                            transaction,
-                            kind,
-                            existing.id,
-                            document,
-                            foreign_id,
-                            true,
-                        )
-                        .await;
-                    }
-                }
-                if !changed {
-                    return Ok((existing.id, false));
-                }
-                return update_parent(transaction, kind, existing.id, document, foreign_id, false)
-                    .await;
-            }
-            let sql = write::insert_returning_sql(
-                kind.table(),
-                &[
-                    "foreign_id",
-                    "name",
-                    "description",
-                    "kind",
-                    "labels",
-                    "inject_config",
-                    "replace_config",
-                    "created_by_id",
-                ],
-                "id",
-            );
-            let id = sqlx::query_scalar::<_, i64>(&sql)
-                .bind(foreign_id)
-                .bind(document.name.clone())
-                .bind(document.description.clone())
-                .bind(static_kind)
-                .bind(document.labels.clone())
-                .bind(optional_json(inject_config))
-                .bind(optional_json(replace_config))
-                .bind(operator_id)
-                .fetch_one(&mut **transaction)
-                .await?;
-            Ok((id, true))
-        }
-        (
-            SecretKind::PgDsn,
-            DocumentFields::PgDsn {
-                database,
-                role,
-                settings,
-            },
-        ) => {
-            if let Some(existing) = existing {
-                let changed = json!(existing.name) != json!(document.name)
-                    || json!(existing.description) != json!(document.description)
-                    || existing.labels != document.labels
-                    || !matches!(&existing.fields, SecretFields::PgDsn { database: existing_database, role: existing_role, settings: existing_settings }
-                        if Some(existing_database.as_str()) == database.as_deref()
-                            && existing_role == role
-                            && existing_settings == settings);
-                let foreign_changed = matches!(document.foreign_id, ForeignIdValue::Set(_))
-                    && existing.foreign_id != foreign_id;
-                if !changed && !foreign_changed {
-                    return Ok((existing.id, false));
-                }
-                return update_parent(
-                    transaction,
-                    kind,
-                    existing.id,
-                    document,
-                    foreign_id,
-                    foreign_changed,
-                )
-                .await;
-            }
-            let sql = write::insert_returning_sql(
-                kind.table(),
-                &[
-                    "foreign_id",
-                    "name",
-                    "description",
-                    "database",
-                    "role",
-                    "labels",
-                    "settings",
-                    "created_by_id",
-                ],
-                "id",
-            );
-            let id = sqlx::query_scalar::<_, i64>(&sql)
-                .bind(foreign_id)
-                .bind(document.name.clone())
-                .bind(document.description.clone())
-                .bind(database.clone())
-                .bind(role.clone())
-                .bind(document.labels.clone())
-                .bind(settings.clone())
-                .bind(operator_id)
-                .fetch_one(&mut **transaction)
-                .await?;
-            Ok((id, true))
-        }
-        (
-            SecretKind::GcpAuth,
-            DocumentFields::GcpAuth {
-                credentials_provider,
-                subject,
-                scopes,
-            },
-        ) => {
-            if let Some(existing) = existing {
-                let changed = json!(existing.name) != json!(document.name)
-                    || json!(existing.description) != json!(document.description)
-                    || existing.labels != document.labels
-                    || !matches!(&existing.fields, SecretFields::GcpAuth { credentials_provider: existing_provider, subject: existing_subject, scopes: existing_scopes }
-                        if existing_provider == credentials_provider
-                            && existing_subject == subject
-                            && existing_scopes == scopes);
-                let foreign_changed = matches!(document.foreign_id, ForeignIdValue::Set(_))
-                    && existing.foreign_id != foreign_id;
-                if !changed && !foreign_changed {
-                    return Ok((existing.id, false));
-                }
-                return update_parent(
-                    transaction,
-                    kind,
-                    existing.id,
-                    document,
-                    foreign_id,
-                    foreign_changed,
-                )
-                .await;
-            }
-            let sql = write::insert_returning_sql(
-                kind.table(),
-                &[
-                    "foreign_id",
-                    "name",
-                    "description",
-                    "subject",
-                    "labels",
-                    "credentials_provider",
-                    "scopes",
-                    "created_by_id",
-                ],
-                "id",
-            );
-            let id = sqlx::query_scalar::<_, i64>(&sql)
-                .bind(foreign_id)
-                .bind(document.name.clone())
-                .bind(document.description.clone())
-                .bind(subject.clone())
-                .bind(document.labels.clone())
-                .bind(optional_json(credentials_provider))
-                .bind(scopes.clone())
-                .bind(operator_id)
-                .fetch_one(&mut **transaction)
-                .await?;
-            Ok((id, true))
-        }
-        (SecretKind::GcpIdToken, DocumentFields::GcpIdToken { audience, header }) => {
-            if let Some(existing) = existing {
-                let changed = json!(existing.name) != json!(document.name)
-                    || json!(existing.description) != json!(document.description)
-                    || existing.labels != document.labels
-                    || !matches!(&existing.fields, SecretFields::GcpIdToken { audience: existing_audience, header: existing_header }
-                        if Some(existing_audience.as_str()) == audience.as_deref()
-                            && existing_header == header);
-                let foreign_changed = matches!(document.foreign_id, ForeignIdValue::Set(_))
-                    && existing.foreign_id != foreign_id;
-                if !changed && !foreign_changed {
-                    return Ok((existing.id, false));
-                }
-                return update_parent(
-                    transaction,
-                    kind,
-                    existing.id,
-                    document,
-                    foreign_id,
-                    foreign_changed,
-                )
-                .await;
-            }
-            let sql = write::insert_returning_sql(
-                kind.table(),
-                &[
-                    "foreign_id",
-                    "name",
-                    "description",
-                    "audience",
-                    "header",
-                    "labels",
-                    "created_by_id",
-                ],
-                "id",
-            );
-            let id = sqlx::query_scalar::<_, i64>(&sql)
-                .bind(foreign_id)
-                .bind(document.name.clone())
-                .bind(document.description.clone())
-                .bind(audience.clone())
-                .bind(header.clone())
-                .bind(document.labels.clone())
-                .bind(operator_id)
-                .fetch_one(&mut **transaction)
-                .await?;
-            Ok((id, true))
-        }
-        _ => Err(WriteError::BadRequest(format!(
-            "{} secrets are not writable through this API",
-            kind.label()
-        ))),
-    }
-}
+    let Some(existing) = existing else {
+        let mut columns = vec!["foreign_id"];
+        columns.extend(parent_columns(kind).iter().map(|(column, _)| *column));
+        columns.push("created_by_id");
+        let sql = write::insert_returning_sql(kind.table(), &columns, "id");
+        let row = bind_all(
+            sqlx::query(&sql).bind(foreign_id),
+            parent_binds(kind, &document.parent),
+        )
+        .bind(operator_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        return Ok(row.get("id"));
+    };
 
-/// Updates the parent row for the four writable kinds. `foreign_id` is written
-/// only when the document supplied one (or explicitly cleared it); `changed`
-/// says whether to include the foreign id in the SET list.
-async fn update_parent(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    id: i64,
-    document: &Document,
-    foreign_id: Option<String>,
-    include_foreign_id: bool,
-) -> std::result::Result<(i64, bool), WriteError> {
-    let mut columns: Vec<&str> = vec!["name", "description"];
-    if include_foreign_id {
-        columns.push("foreign_id");
+    let foreign_changed = match &document.foreign_id {
+        ForeignIdValue::Set(value) => existing.foreign_id != *value,
+        ForeignIdValue::Omitted => false,
+    };
+    if family == Family::Console {
+        if !foreign_changed && parent_matches(kind, &document.parent, existing) {
+            return Ok(existing.id);
+        }
+        let mut columns: Vec<&str> = parent_columns(kind)
+            .iter()
+            .map(|(column, _)| *column)
+            .collect();
+        if foreign_changed {
+            columns.push("foreign_id");
+        }
+        let sql = write::update_sql(kind.table(), &columns);
+        let mut query = bind_all(sqlx::query(&sql), parent_binds(kind, &document.parent));
+        if foreign_changed {
+            query = query.bind(foreign_id);
+        }
+        query.bind(existing.id).execute(&mut **transaction).await?;
+        return Ok(existing.id);
     }
-    columns.push("labels");
-    match (&document.fields, kind) {
-        (DocumentFields::Static { .. }, SecretKind::Static) => {
-            columns.extend(["kind", "inject_config", "replace_config"]);
-        }
-        (DocumentFields::PgDsn { .. }, SecretKind::PgDsn) => {
-            columns.extend(["database", "role", "settings"]);
-        }
-        (DocumentFields::GcpAuth { .. }, SecretKind::GcpAuth) => {
-            columns.extend(["subject", "credentials_provider", "scopes"]);
-        }
-        (DocumentFields::GcpIdToken { .. }, SecretKind::GcpIdToken) => {
-            columns.extend(["audience", "header"]);
-        }
-        _ => {}
-    }
+
+    let columns: Vec<&str> = parent_columns(kind)
+        .iter()
+        .map(|(column, _)| *column)
+        .collect();
     let sql = write::update_sql(kind.table(), &columns);
-    let mut query = sqlx::query(&sql)
-        .bind(document.name.clone())
-        .bind(document.description.clone());
-    if include_foreign_id {
-        query = query.bind(foreign_id);
+    bind_all(sqlx::query(&sql), parent_binds(kind, &document.parent))
+        .bind(existing.id)
+        .execute(&mut **transaction)
+        .await?;
+    if let ForeignIdValue::Set(foreign_id) = &document.foreign_id {
+        // Rails' `update_columns(foreign_id:)`: the identity changes without a
+        // second `updated_at` bump.
+        sqlx::query(&format!(
+            "UPDATE {} SET foreign_id = $1 WHERE id = $2",
+            kind.table()
+        ))
+        .bind(foreign_id)
+        .bind(existing.id)
+        .execute(&mut **transaction)
+        .await?;
     }
-    query = query.bind(document.labels.clone());
-    query = match (&document.fields, kind) {
-        (
-            DocumentFields::Static {
-                kind: static_kind,
-                inject_config,
-                replace_config,
-            },
-            SecretKind::Static,
-        ) => query
-            .bind(static_kind.clone().unwrap_or_else(|| "custom".to_owned()))
-            .bind(optional_json(inject_config))
-            .bind(optional_json(replace_config)),
-        (
-            DocumentFields::PgDsn {
-                database,
-                role,
-                settings,
-            },
-            SecretKind::PgDsn,
-        ) => query
-            .bind(database.clone())
-            .bind(role.clone())
-            .bind(settings.clone()),
-        (
-            DocumentFields::GcpAuth {
-                credentials_provider,
-                subject,
-                scopes,
-            },
-            SecretKind::GcpAuth,
-        ) => query
-            .bind(subject.clone())
-            .bind(optional_json(credentials_provider))
-            .bind(scopes.clone()),
-        (DocumentFields::GcpIdToken { audience, header }, SecretKind::GcpIdToken) => {
-            query.bind(audience.clone()).bind(header.clone())
-        }
-        _ => query,
-    };
-    query.bind(id).execute(&mut **transaction).await?;
-    Ok((id, true))
+    Ok(existing.id)
 }
 
-/// Deletes the replaced source/rules and inserts the new ones, keeping each
-/// rule's position.
+/// Replaces the parent's nested records: every stored source and rule is
+/// destroyed and the document's are inserted, keeping each rule's position.
 async fn replace_nested(
     transaction: &mut Transaction<'_, Postgres>,
     kind: SecretKind,
     id: i64,
     document: &Document,
-    broker_id: Option<i64>,
 ) -> std::result::Result<(), WriteError> {
-    if let Some(owner_column) = kind.source_owner_column() {
-        sqlx::query(&format!(
-            "DELETE FROM secret_sources WHERE {owner_column} = $1"
-        ))
-        .bind(id)
-        .execute(&mut **transaction)
-        .await?;
-    }
-    if let Some(owner_column) = kind.rule_owner_column() {
-        sqlx::query(&format!(
-            "DELETE FROM request_rules WHERE {owner_column} = $1"
-        ))
-        .bind(id)
-        .execute(&mut **transaction)
-        .await?;
+    for (table, column) in [
+        ("secret_sources", kind.source_owner_column()),
+        ("request_rules", kind.rule_owner_column()),
+    ]
+    .into_iter()
+    .filter_map(|(table, column)| column.map(|column| (table, column)))
+    {
+        sqlx::query(&format!("DELETE FROM {table} WHERE {column} = $1"))
+            .bind(id)
+            .execute(&mut **transaction)
+            .await?;
     }
 
-    if let (Some(owner_column), Some(source)) = (kind.source_owner_column(), &document.source) {
-        let encrypted = source
-            .secret
-            .as_deref()
-            .map(encrypt)
-            .transpose()
-            .map_err(WriteError::Internal)?;
+    if let Some(owner_column) = kind.source_owner_column() {
         let sql = write::insert_sql(
             "secret_sources",
             &[
@@ -678,16 +736,24 @@ async fn replace_nested(
                 "broker_credential_id",
             ],
         );
-        sqlx::query(&sql)
-            .bind(id)
-            .bind(source.source_type.clone())
-            .bind(source.config.clone())
-            .bind(encrypted)
-            .bind(Option::<String>::None)
-            .bind(Option::<String>::None)
-            .bind(broker_id)
-            .execute(&mut **transaction)
-            .await?;
+        for source in &document.sources {
+            let encrypted = source
+                .secret
+                .as_deref()
+                .map(super::encrypt)
+                .transpose()
+                .map_err(WriteError::Internal)?;
+            sqlx::query(&sql)
+                .bind(id)
+                .bind(source.source_type.clone().unwrap_or_default())
+                .bind(source.config.clone())
+                .bind(encrypted)
+                .bind(source.role.clone())
+                .bind(source.role_kind.clone())
+                .bind(source.broker_credential_id)
+                .execute(&mut **transaction)
+                .await?;
+        }
     }
     if let Some(owner_column) = kind.rule_owner_column() {
         let sql = write::insert_sql(
@@ -716,203 +782,263 @@ async fn replace_nested(
     Ok(())
 }
 
-async fn reload(
-    pool: &PgPool,
-    kind: SecretKind,
-    id: i64,
-) -> std::result::Result<SecretRow, WriteError> {
-    let mut connection = pool.acquire().await?;
-    load_secret(&mut connection, kind, id)
-        .await?
-        .ok_or_else(|| WriteError::NotFound(format!("secret {id} disappeared")))
-}
+// ---------------------------------------------------------------------------
+// Equivalence
+// ---------------------------------------------------------------------------
 
-fn source_equal(
-    existing: Option<&SourceRow>,
-    existing_plain: Option<&str>,
-    document: Option<&SourceDocument>,
-    broker_id: Option<i64>,
-) -> bool {
-    match (existing, document) {
-        (None, None) => true,
-        (Some(existing), Some(document)) => {
-            existing.source_type == document.source_type.clone().unwrap_or_default()
-                && existing.config == document.config
-                && existing_plain == document.secret.as_deref()
-                && existing.role.is_none()
-                && existing.role_kind.is_none()
-                && existing.broker_credential_id == broker_id
-        }
-        _ => false,
-    }
-}
-
-fn rules_equal(existing: &[super::RuleRow], document: &[RuleDocument]) -> bool {
-    if existing.len() != document.len() {
-        return false;
-    }
-    let mut existing: Vec<&super::RuleRow> = existing.iter().collect();
-    existing.sort_by_key(|rule| rule.position);
-    let mut document: Vec<&RuleDocument> = document.iter().collect();
-    document.sort_by_key(|rule| rule.position);
-    existing.iter().zip(document).all(|(existing, document)| {
-        existing.host == document.host
-            && existing.cidr == document.cidr
-            && existing.position == document.position
-            && existing.http_methods == document.http_methods
-            && existing.paths == document.paths
-    })
-}
-
-fn parent_map(kind: SecretKind, document: &Document) -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert("name".to_owned(), json!(document.name));
-    map.insert("description".to_owned(), json!(document.description));
-    map.insert("labels".to_owned(), document.labels.clone());
-    if let ForeignIdValue::Set(foreign_id) = &document.foreign_id {
-        map.insert("foreign_id".to_owned(), json!(foreign_id));
-    }
-    match (&document.fields, kind) {
-        (
-            DocumentFields::Static {
-                kind: static_kind,
-                inject_config,
-                replace_config,
-            },
-            SecretKind::Static,
-        ) => {
-            map.insert(
-                "kind".to_owned(),
-                json!(static_kind.clone().unwrap_or_else(|| "custom".to_owned())),
-            );
-            map.insert("inject_config".to_owned(), inject_config.clone());
-            map.insert("replace_config".to_owned(), replace_config.clone());
-        }
-        (
-            DocumentFields::PgDsn {
-                database,
-                role,
-                settings,
-            },
-            SecretKind::PgDsn,
-        ) => {
-            map.insert("database".to_owned(), json!(database));
-            map.insert("role".to_owned(), json!(role));
-            map.insert("settings".to_owned(), settings.clone());
-        }
-        (
-            DocumentFields::GcpAuth {
-                credentials_provider,
-                subject,
-                scopes,
-            },
-            SecretKind::GcpAuth,
-        ) => {
-            map.insert(
-                "credentials_provider".to_owned(),
-                credentials_provider.clone(),
-            );
-            map.insert("subject".to_owned(), json!(subject));
-            map.insert("scopes".to_owned(), scopes.clone());
-        }
-        (DocumentFields::GcpIdToken { audience, header }, SecretKind::GcpIdToken) => {
-            map.insert("audience".to_owned(), json!(audience));
-            map.insert("header".to_owned(), json!(header));
-        }
-        _ => {}
-    }
-    map
-}
-
-fn existing_parent_map(kind: SecretKind, existing: &SecretRow) -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert("name".to_owned(), json!(existing.name));
-    map.insert("description".to_owned(), json!(existing.description));
-    map.insert("labels".to_owned(), existing.labels.clone());
-    map.insert("foreign_id".to_owned(), json!(existing.foreign_id));
-    match (&existing.fields, kind) {
-        (
-            SecretFields::Static {
-                kind: static_kind,
-                inject_config,
-                replace_config,
-            },
-            SecretKind::Static,
-        ) => {
-            map.insert("kind".to_owned(), json!(static_kind));
-            map.insert("inject_config".to_owned(), inject_config.clone());
-            map.insert("replace_config".to_owned(), replace_config.clone());
-        }
-        (
-            SecretFields::PgDsn {
-                database,
-                role,
-                settings,
-            },
-            SecretKind::PgDsn,
-        ) => {
-            map.insert("database".to_owned(), json!(database));
-            map.insert("role".to_owned(), json!(role));
-            map.insert("settings".to_owned(), settings.clone());
-        }
-        (
-            SecretFields::GcpAuth {
-                credentials_provider,
-                subject,
-                scopes,
-            },
-            SecretKind::GcpAuth,
-        ) => {
-            map.insert(
-                "credentials_provider".to_owned(),
-                credentials_provider.clone(),
-            );
-            map.insert("subject".to_owned(), json!(subject));
-            map.insert("scopes".to_owned(), scopes.clone());
-        }
-        (SecretFields::GcpIdToken { audience, header }, SecretKind::GcpIdToken) => {
-            map.insert("audience".to_owned(), json!(audience));
-            map.insert("header".to_owned(), json!(header));
-        }
-        _ => {}
-    }
-    map
-}
-
-/// `SyncConfigReplacement.equivalent?`: every parent attribute and the nested
-/// documents (with inline plaintext) are unchanged.
+/// `SyncConfigReplacement.equivalent?`: the identity (when the document sets
+/// one), the parent attributes, the sources with their inline plaintext, and the
+/// rules are unchanged. Nested records are compared as sorted documents, so the
+/// order they were stored in does not matter.
 fn equivalent(
     kind: SecretKind,
     existing: &SecretRow,
-    existing_plain: Option<&str>,
+    existing_plain: &[Option<String>],
     document: &Document,
-    broker_id: Option<i64>,
 ) -> bool {
-    let mut parent = parent_map(kind, document);
-    if matches!(document.foreign_id, ForeignIdValue::Omitted) {
-        parent.remove("foreign_id");
+    if let ForeignIdValue::Set(foreign_id) = &document.foreign_id
+        && existing.foreign_id != *foreign_id
+    {
+        return false;
     }
-    parent == existing_parent_map(kind, existing)
-        && source_equal(
-            existing.source(),
-            existing_plain,
-            document.source.as_ref(),
-            broker_id,
-        )
-        && rules_equal(&existing.rules, &document.rules)
+    parent_matches(kind, &document.parent, existing)
+        && sources_match(&existing.sources, existing_plain, &document.sources)
+        && rules_match(&existing.rules, &document.rules)
 }
 
-fn source_key(kind: SecretKind) -> &'static str {
-    match kind {
-        SecretKind::PgDsn => "dsn",
-        SecretKind::GcpAuth | SecretKind::GcpIdToken => "keyfile",
-        _ => "source",
-    }
+/// Every parent column the kind stores equals the stored value.
+fn parent_matches(kind: SecretKind, parent: &Map<String, Value>, existing: &SecretRow) -> bool {
+    parent_columns(kind)
+        .iter()
+        .all(|(column, _)| stored_value(kind, existing, column) == json_value(parent, column))
 }
 
-// ---------------------------------------------------------------------------
-// Deletes and secret-scoped role grants
-// ---------------------------------------------------------------------------
+fn sources_match(
+    existing: &[super::SourceRow],
+    existing_plain: &[Option<String>],
+    sources: &[SourceDraft],
+) -> bool {
+    if existing.len() != sources.len() {
+        return false;
+    }
+    let mut stored: Vec<Value> = existing
+        .iter()
+        .zip(existing_plain)
+        .map(|(source, plain)| {
+            json!({
+                "source_type": source.source_type,
+                "config": source.config,
+                "secret": plain,
+                "role": source.role,
+                "role_kind": source.role_kind,
+                "broker_credential_id": source.broker_credential_id,
+            })
+        })
+        .collect();
+    let mut draft: Vec<Value> = sources.iter().map(SourceDraft::json).collect();
+    sort_documents(&mut stored);
+    sort_documents(&mut draft);
+    stored == draft
+}
+
+fn rules_match(existing: &[RuleRow], rules: &[RuleDocument]) -> bool {
+    if existing.len() != rules.len() {
+        return false;
+    }
+    let mut stored: Vec<Value> = existing
+        .iter()
+        .map(|rule| {
+            rule_json(
+                rule.position,
+                &rule.host,
+                &rule.cidr,
+                &rule.http_methods,
+                &rule.paths,
+            )
+        })
+        .collect();
+    let mut draft: Vec<Value> = rules
+        .iter()
+        .map(|rule| {
+            rule_json(
+                rule.position,
+                &rule.host,
+                &rule.cidr,
+                &rule.http_methods,
+                &rule.paths,
+            )
+        })
+        .collect();
+    sort_documents(&mut stored);
+    sort_documents(&mut draft);
+    stored == draft
+}
+
+fn rule_json(
+    position: i32,
+    host: &Option<String>,
+    cidr: &Option<String>,
+    http_methods: &Value,
+    paths: &Value,
+) -> Value {
+    json!({
+        "position": position,
+        "host": host,
+        "cidr": cidr,
+        "http_methods": http_methods,
+        "paths": paths,
+    })
+}
+
+/// `SyncConfigReplacement.documents`: sort by role then position, both of which
+/// already distinguish every record of one secret.
+fn sort_documents(documents: &mut [Value]) {
+    documents.sort_by(|left, right| {
+        let key = |document: &Value| {
+            (
+                document
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                document
+                    .get("position")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
+}
+
+/// A stored parent attribute by column.
+fn stored_value(kind: SecretKind, row: &SecretRow, column: &str) -> Value {
+    match column {
+        "name" => json!(row.name),
+        "description" => json!(row.description),
+        "labels" => row.labels.clone(),
+        _ => match (&row.fields, kind, column) {
+            (SecretFields::Static { kind, .. }, SecretKind::Static, "kind") => json!(kind),
+            (SecretFields::Static { inject_config, .. }, SecretKind::Static, "inject_config") => {
+                inject_config.clone()
+            }
+            (SecretFields::Static { replace_config, .. }, SecretKind::Static, "replace_config") => {
+                replace_config.clone()
+            }
+            (SecretFields::PgDsn { database, .. }, SecretKind::PgDsn, "database") => {
+                json!(database)
+            }
+            (SecretFields::PgDsn { role, .. }, SecretKind::PgDsn, "role") => json!(role),
+            (SecretFields::PgDsn { settings, .. }, SecretKind::PgDsn, "settings") => {
+                settings.clone()
+            }
+            (
+                SecretFields::GcpAuth {
+                    credentials_provider,
+                    ..
+                },
+                SecretKind::GcpAuth,
+                "credentials_provider",
+            ) => credentials_provider.clone(),
+            (SecretFields::GcpAuth { subject, .. }, SecretKind::GcpAuth, "subject") => {
+                json!(subject)
+            }
+            (SecretFields::GcpAuth { scopes, .. }, SecretKind::GcpAuth, "scopes") => scopes.clone(),
+            (SecretFields::GcpIdToken { audience, .. }, SecretKind::GcpIdToken, "audience") => {
+                json!(audience)
+            }
+            (SecretFields::GcpIdToken { header, .. }, SecretKind::GcpIdToken, "header") => {
+                json!(header)
+            }
+            (
+                SecretFields::AwsAuth {
+                    allowed_regions, ..
+                },
+                SecretKind::AwsAuth,
+                "allowed_regions",
+            ) => allowed_regions.clone(),
+            (
+                SecretFields::AwsAuth {
+                    allowed_services, ..
+                },
+                SecretKind::AwsAuth,
+                "allowed_services",
+            ) => allowed_services.clone(),
+            (SecretFields::OauthToken { grant, .. }, SecretKind::OauthToken, "grant") => {
+                json!(grant)
+            }
+            (
+                SecretFields::OauthToken { token_endpoint, .. },
+                SecretKind::OauthToken,
+                "token_endpoint",
+            ) => json!(token_endpoint),
+            (SecretFields::OauthToken { audience, .. }, SecretKind::OauthToken, "audience") => {
+                json!(audience)
+            }
+            (SecretFields::OauthToken { header, .. }, SecretKind::OauthToken, "header") => {
+                json!(header)
+            }
+            (
+                SecretFields::OauthToken { value_prefix, .. },
+                SecretKind::OauthToken,
+                "value_prefix",
+            ) => json!(value_prefix),
+            (SecretFields::OauthToken { scopes, .. }, SecretKind::OauthToken, "scopes") => {
+                scopes.clone()
+            }
+            (
+                SecretFields::Hmac {
+                    timestamp_format, ..
+                },
+                SecretKind::Hmac,
+                "timestamp_format",
+            ) => json!(timestamp_format),
+            (
+                SecretFields::Hmac {
+                    signature_algorithm,
+                    ..
+                },
+                SecretKind::Hmac,
+                "signature_algorithm",
+            ) => json!(signature_algorithm),
+            (
+                SecretFields::Hmac {
+                    signature_key_encoding,
+                    ..
+                },
+                SecretKind::Hmac,
+                "signature_key_encoding",
+            ) => json!(signature_key_encoding),
+            (
+                SecretFields::Hmac {
+                    signature_output_encoding,
+                    ..
+                },
+                SecretKind::Hmac,
+                "signature_output_encoding",
+            ) => json!(signature_output_encoding),
+            (
+                SecretFields::Hmac {
+                    signature_message, ..
+                },
+                SecretKind::Hmac,
+                "signature_message",
+            ) => json!(signature_message),
+            (
+                SecretFields::Hmac {
+                    allow_chunked_body, ..
+                },
+                SecretKind::Hmac,
+                "allow_chunked_body",
+            ) => json!(allow_chunked_body),
+            (SecretFields::Hmac { headers, .. }, SecretKind::Hmac, "headers") => headers.clone(),
+            (SecretFields::SshKey { public_key }, SecretKind::SshKey, "public_key") => {
+                json!(public_key)
+            }
+            _ => Value::Null,
+        },
+    }
+}
 
 /// `destroy!`: cascades to the secret's sources, rules, and grants. Rails'
 /// `SyncConfigCacheInvalidation` defers the parent's bump to commit, where the
@@ -939,7 +1065,7 @@ pub async fn delete_secret(
     // its grants still exist; the bearer-only kinds defer to commit. Both are
     // the behavior the two areas shipped with, keyed by kind here.
     if kind.editable() {
-        invalidate::invalidate(&mut transaction, Scope::secret_delete(kind, id)).await?;
+        invalidate::invalidate(&mut transaction, Scope::Secret { kind, id }).await?;
     }
     let grants: Vec<GranteeRow> = sqlx::query_as(&format!(
         "SELECT principal_id, role_id FROM grants WHERE {} = $1",

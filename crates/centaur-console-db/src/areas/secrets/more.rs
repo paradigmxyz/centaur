@@ -25,17 +25,21 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 
-use super::{
-    BearerRequest, Errors, ForeignIdValue, RuleDocument, RuleRow, SecretFields, SecretKind,
-    SecretRow, SourceDocument, WriteError, WriteResult, WriteTarget, blank, decrypt, encrypt,
-    load_secret, value_to_string,
+use super::write::{
+    Document, Pending, SourceDraft, foreign_id_taken, resolve_brokers, resolve_target, run_write,
+    stored_plaintexts,
 };
-use crate::invalidate::{self, Scope, SecretChanges};
+use super::{
+    BearerRequest, Errors, ForeignIdValue, RuleDocument, SecretKind, SecretRow, WriteError,
+    WriteResult, WriteTarget, blank,
+};
 use crate::ssh_key::{derive_public_key, normalize_private_key, supported_public_key};
 use crate::validation::ValidateFields;
-use crate::write;
+
+/// Which API the write came from: the bearer replacement.
+const FAMILY: super::write::Family = super::write::Family::Bearer;
 
 /// One `{source_type, secret, config}` source block.
 ///
@@ -232,22 +236,9 @@ pub struct SshKeyRequest {
     pub private_key: Option<SourceInput>,
 }
 
-/// One credential/header source of the document, with the role columns the
-/// owning model requires.
-#[derive(Clone, Debug)]
-struct SourceDraft {
-    role: Option<String>,
-    role_kind: Option<String>,
-    source_type: Option<String>,
-    secret: Option<String>,
-    config: Value,
-    broker_credential_id: Option<i64>,
-    broker_resolved: bool,
-}
-
 impl SourceDraft {
     /// A source built from a typed request block.
-    fn new(source: SourceInput, role: Option<&str>, role_kind: Option<&str>) -> Self {
+    fn from_input(source: SourceInput, role: Option<&str>, role_kind: Option<&str>) -> Self {
         Self {
             role: role.map(str::to_owned),
             role_kind: role_kind.map(str::to_owned),
@@ -258,36 +249,6 @@ impl SourceDraft {
             broker_resolved: true,
         }
     }
-
-    /// `SecretSource` validation errors. The aws/oauth_token/hmac APIs only
-    /// render `sources: ["is invalid"]`; the SSH API renders the nested keys.
-    fn errors(&self, role_owner: bool) -> Errors {
-        let source = SourceDocument {
-            source_type: self.source_type.clone(),
-            secret: self.secret.clone(),
-            config: self.config.clone(),
-        };
-        let mut errors = source.errors(self.broker_resolved);
-        if role_owner && blank(self.role.as_deref()) {
-            errors.add(
-                "role",
-                "can't be blank for a oauth_token_secret or hmac_secret or aws_auth_secret source",
-            );
-        }
-        errors
-    }
-}
-
-/// The replacement document built from a typed request body.
-struct Document {
-    foreign_id: ForeignIdValue,
-    /// The document's base attributes, with the column default for every field
-    /// the body omitted (Console's replace semantics).
-    base: Map<String, Value>,
-    sources: Vec<SourceDraft>,
-    rules: Vec<RuleDocument>,
-    /// The inline SSH key parsing error, reported on `private_key`.
-    private_key_error: Option<String>,
 }
 
 pub async fn write_secret(
@@ -299,11 +260,10 @@ pub async fn write_secret(
     let kind = request.kind();
     let mut transaction = pool.begin().await?;
     let (existing, was_new) = resolve_target(&mut transaction, kind, &target).await?;
-    let existing_plain = decrypt_sources(existing.as_ref())?;
     let mut document = Document::from_request(request.clone(), existing.as_ref());
     apply_target_foreign_id(&mut document, &target, existing.as_ref());
 
-    resolve_brokers(&mut transaction, &mut document).await?;
+    resolve_brokers(&mut transaction, &mut document.sources).await?;
 
     let role_owner = kind != SecretKind::SshKey;
     let source_errors: Vec<Errors> = document
@@ -313,8 +273,13 @@ pub async fn write_secret(
         .collect();
     let rules_invalid = document.rules.iter().any(|rule| !rule.errors().is_empty());
 
-    let foreign_id_taken =
-        foreign_id_taken(&mut transaction, kind, &document, existing.as_ref()).await?;
+    let foreign_id_taken = foreign_id_taken(
+        &mut transaction,
+        kind,
+        &document.foreign_id,
+        existing.as_ref(),
+    )
+    .await?;
 
     // Validate the whole document before writing anything: the parent's own
     // validators plus the nested sources and rules.
@@ -335,217 +300,23 @@ pub async fn write_secret(
     if rules_invalid {
         errors.add("rules", "is invalid");
     }
-    let valid = errors.is_empty();
 
-    let equivalent = existing
-        .as_ref()
-        .is_some_and(|row| document.equivalent(row, &existing_plain));
-
-    if equivalent {
-        // An unchanged document keeps the nested rows, the cache versions, and
-        // the id sequences untouched.
-        transaction.rollback().await?;
-        let row = existing.expect("equivalence requires an existing record");
-        return Ok(WriteResult {
-            row,
-            created: false,
-        });
-    }
-
-    if !valid {
-        // Validate first, write after: a rejected document leaves no rows behind
-        // and consumes no ids.
-        transaction.rollback().await?;
-        return Err(WriteError::Validation(errors.into_value()));
-    }
-
-    let parent_changed = existing
-        .as_ref()
-        .is_some_and(|row| !document.base_matches(row));
-
-    if was_new {
-        let id = insert_parent(&mut transaction, kind, &document, operator_id).await?;
-        insert_sources(&mut transaction, kind, id, &document.sources).await?;
-        insert_rules(&mut transaction, kind, id, &document.rules).await?;
-        let changes = SecretChanges::created(document.sources.len(), document.rules.len());
-        invalidate::invalidate(&mut transaction, Scope::secret_write(kind, id, changes)).await?;
-        transaction.commit().await?;
-        let row = reload(pool, kind, id).await?;
-        return Ok(WriteResult { row, created: true });
-    }
-
-    let id = existing.as_ref().map(|row| row.id).unwrap_or_default();
-    let old_sources = existing.as_ref().map(|row| row.sources.len()).unwrap_or(0);
-    let old_rules = existing.as_ref().map(|row| row.rules.len()).unwrap_or(0);
-
-    if parent_changed {
-        update_parent(&mut transaction, kind, id, &document).await?;
-    }
-    delete_nested(&mut transaction, kind, id).await?;
-    insert_sources(&mut transaction, kind, id, &document.sources).await?;
-    insert_rules(&mut transaction, kind, id, &document.rules).await?;
-    if kind == SecretKind::SshKey {
-        // The key's source belongs_to it with `touch: true`, so replacing the
-        // source also bumps the key's updated_at.
-        sqlx::query(&write::touch_sql(kind.table()))
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    let changes = SecretChanges::replaced(
-        parent_changed,
-        old_sources,
-        document.sources.len(),
-        old_rules,
-        document.rules.len(),
-    );
-    invalidate::invalidate(&mut transaction, Scope::secret_write(kind, id, changes)).await?;
-    transaction.commit().await?;
-    let row = reload(pool, kind, id).await?;
-    Ok(WriteResult {
-        row,
-        created: false,
-    })
-}
-
-async fn resolve_target(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    target: &WriteTarget,
-) -> std::result::Result<(Option<SecretRow>, bool), WriteError> {
-    match target {
-        WriteTarget::New => Ok((None, true)),
-        WriteTarget::Oid(oid) => {
-            let Some(id) = kind.decode_oid(oid) else {
-                return Err(not_found(kind));
-            };
-            let locked = sqlx::query(&format!(
-                "SELECT id FROM {} WHERE id = $1 FOR UPDATE",
-                kind.table()
-            ))
-            .bind(id)
-            .fetch_optional(&mut **transaction)
-            .await?;
-            if locked.is_none() {
-                return Err(not_found(kind));
-            }
-            let row = load_secret(transaction, kind, id).await?;
-            Ok((row, false))
-        }
-        WriteTarget::ForeignId(foreign_id) => {
-            let id = sqlx::query_scalar::<_, i64>(&format!(
-                "SELECT id FROM {} WHERE foreign_id = $1 FOR UPDATE",
-                kind.table()
-            ))
-            .bind(foreign_id)
-            .fetch_optional(&mut **transaction)
-            .await?;
-            match id {
-                Some(id) => {
-                    let row = load_secret(transaction, kind, id).await?;
-                    Ok((row, false))
-                }
-                None => Ok((None, true)),
-            }
-        }
-    }
-}
-
-fn not_found(kind: SecretKind) -> WriteError {
-    WriteError::NotFound(format!("{} not found", kind.model_name()))
-}
-
-async fn reload(
-    pool: &PgPool,
-    kind: SecretKind,
-    id: i64,
-) -> std::result::Result<SecretRow, WriteError> {
-    let mut connection = pool.acquire().await?;
-    load_secret(&mut connection, kind, id)
-        .await?
-        .ok_or_else(|| WriteError::NotFound(format!("secret {id} disappeared")))
-}
-
-/// The stored plaintext of each source, for the replacement comparison.
-fn decrypt_sources(
-    existing: Option<&SecretRow>,
-) -> std::result::Result<Vec<Option<String>>, WriteError> {
-    let Some(row) = existing else {
-        return Ok(Vec::new());
+    let pending = Pending {
+        document,
+        errors,
+        existing_plain: stored_plaintexts(existing.as_ref())?,
     };
-    row.sources
-        .iter()
-        .map(|source| {
-            source
-                .secret
-                .as_deref()
-                .map(decrypt)
-                .transpose()
-                .map_err(WriteError::Internal)
-        })
-        .collect()
-}
-
-async fn foreign_id_taken(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    document: &Document,
-    existing: Option<&SecretRow>,
-) -> std::result::Result<bool, WriteError> {
-    let ForeignIdValue::Set(Some(foreign_id)) = &document.foreign_id else {
-        return Ok(false);
-    };
-    if foreign_id.is_empty() {
-        return Ok(false);
-    }
-    let excluded = existing.map(|row| row.id).unwrap_or_default();
-    Ok(sqlx::query_scalar::<_, bool>(&format!(
-        "SELECT EXISTS (SELECT 1 FROM {} WHERE foreign_id = $1 AND id <> $2)",
-        kind.table()
-    ))
-    .bind(foreign_id)
-    .bind(excluded)
-    .fetch_one(&mut **transaction)
-    .await?)
-}
-
-async fn resolve_brokers(
-    transaction: &mut Transaction<'_, Postgres>,
-    document: &mut Document,
-) -> std::result::Result<(), WriteError> {
-    for source in &mut document.sources {
-        if source.source_type.as_deref() != Some("token_broker") {
-            source.broker_credential_id = None;
-            source.broker_resolved = true;
-            continue;
-        }
-        let reference = source
-            .config
-            .get("credential_id")
-            .map(value_to_string)
-            .filter(|value| !value.is_empty());
-        source.broker_credential_id = match reference {
-            Some(reference) => match crate::decode_oid("bcr", &reference) {
-                Some(id) => {
-                    sqlx::query_scalar::<_, i64>("SELECT id FROM broker_credentials WHERE id = $1")
-                        .bind(id)
-                        .fetch_optional(&mut **transaction)
-                        .await?
-                }
-                None => {
-                    sqlx::query_scalar::<_, i64>(
-                        "SELECT id FROM broker_credentials WHERE foreign_id = $1",
-                    )
-                    .bind(&reference)
-                    .fetch_optional(&mut **transaction)
-                    .await?
-                }
-            },
-            None => None,
-        };
-        source.broker_resolved = source.broker_credential_id.is_some();
-    }
-    Ok(())
+    run_write(
+        pool,
+        kind,
+        transaction,
+        existing.as_ref(),
+        was_new,
+        pending,
+        operator_id,
+        FAMILY,
+    )
+    .await
 }
 
 /// `BaseController#resolve_for_upsert`: a PUT addressed by a foreign id creates
@@ -613,7 +384,7 @@ fn aws_auth_document(request: AwsAuthRequest, existing: Option<&SecretRow>) -> D
     .into_iter()
     .filter_map(|(role, source)| {
         let source = source.filter(|source| !source.is_blank())?;
-        Some(SourceDraft::new(
+        Some(SourceDraft::from_input(
             source,
             Some(role),
             Some("credential_field"),
@@ -622,7 +393,7 @@ fn aws_auth_document(request: AwsAuthRequest, existing: Option<&SecretRow>) -> D
     .collect();
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        base,
+        parent: base,
         sources,
         rules: parse_rules(request.rules.unwrap_or_default()),
         private_key_error: None,
@@ -651,7 +422,7 @@ fn oauth_token_document(request: OauthTokenRequest, existing: Option<&SecretRow>
     ));
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        base,
+        parent: base,
         sources,
         rules: parse_rules(request.rules.unwrap_or_default()),
         private_key_error: None,
@@ -689,7 +460,7 @@ fn hmac_document(request: HmacRequest, existing: Option<&SecretRow>) -> Document
     );
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        base,
+        parent: base,
         sources: role_sources(request.credentials, "credential_field"),
         rules: parse_rules(request.rules.unwrap_or_default()),
         private_key_error: None,
@@ -712,7 +483,7 @@ fn ssh_key_document(request: SshKeyRequest, existing: Option<&SecretRow>) -> Doc
     let mut sources = Vec::new();
     let mut private_key_error = None;
     if let Some(source) = request.private_key.filter(|source| !source.is_blank()) {
-        let mut draft = SourceDraft::new(source, None, None);
+        let mut draft = SourceDraft::from_input(source, None, None);
         if draft.source_type.as_deref() == Some("control_plane") {
             // An inline key's public key is derived, and its value is stored
             // normalized.
@@ -736,7 +507,7 @@ fn ssh_key_document(request: SshKeyRequest, existing: Option<&SecretRow>) -> Doc
 
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        base,
+        parent: base,
         sources,
         rules: Vec::new(),
         private_key_error,
@@ -752,7 +523,7 @@ fn role_sources(
         .unwrap_or_default()
         .into_iter()
         .filter(|(_, source)| !source.is_blank())
-        .map(|(role, source)| SourceDraft::new(source, Some(&role), Some(role_kind)))
+        .map(|(role, source)| SourceDraft::from_input(source, Some(&role), Some(role_kind)))
         .collect()
 }
 
@@ -810,11 +581,7 @@ fn normalize_public_key(value: Option<String>) -> Option<String> {
 
 impl Document {
     fn text(&self, key: &str) -> Option<&str> {
-        self.base.get(key).and_then(Value::as_str)
-    }
-
-    fn value(&self, key: &str) -> Value {
-        self.base.get(key).cloned().unwrap_or(Value::Null)
+        self.parent.get(key).and_then(Value::as_str)
     }
 
     /// The typed request's field rules plus the merged, database-backed and
@@ -1115,56 +882,6 @@ impl Document {
             }
         }
     }
-
-    /// `SyncConfigReplacement.equivalent?`: the base attributes and
-    /// the sorted nested documents (with inline plaintext) are unchanged.
-    fn equivalent(&self, existing: &SecretRow, existing_plain: &[Option<String>]) -> bool {
-        if !self.base_matches(existing) {
-            return false;
-        }
-        let mut existing_sources: Vec<Value> = Vec::new();
-        for (source, plain) in existing.sources.iter().zip(existing_plain) {
-            existing_sources.push(json!({
-                "source_type": source.source_type,
-                "config": source.config,
-                "secret": plain,
-                "role": source.role,
-                "role_kind": source.role_kind,
-                "broker_credential_id": source.broker_credential_id,
-            }));
-        }
-        let mut candidate_sources: Vec<Value> = self
-            .sources
-            .iter()
-            .map(|source| {
-                json!({
-                    "source_type": source.source_type,
-                    "config": source.config,
-                    "secret": source.secret,
-                    "role": source.role,
-                    "role_kind": source.role_kind,
-                    "broker_credential_id": source.broker_credential_id,
-                })
-            })
-            .collect();
-        sort_documents(&mut existing_sources);
-        sort_documents(&mut candidate_sources);
-        if existing_sources != candidate_sources {
-            return false;
-        }
-        let mut existing_rules: Vec<Value> = existing.rules.iter().map(rule_document).collect();
-        let mut candidate_rules: Vec<Value> = self.rules.iter().map(rule_draft_document).collect();
-        sort_documents(&mut existing_rules);
-        sort_documents(&mut candidate_rules);
-        existing_rules == candidate_rules
-    }
-
-    /// Every base attribute equals the stored value.
-    fn base_matches(&self, existing: &SecretRow) -> bool {
-        self.base
-            .iter()
-            .all(|(key, value)| existing_value(existing, key) == *value)
-    }
 }
 
 fn error_entries(errors: &Errors) -> Vec<(String, String)> {
@@ -1185,415 +902,6 @@ fn oauth_grant_fields(grant: &str) -> Option<(&'static [&'static str], &'static 
         "jwt_bearer" => Some((&["issuer", "subject", "private_key"], &["private_key_id"])),
         _ => None,
     }
-}
-
-fn rule_document(rule: &RuleRow) -> Value {
-    json!({
-        "position": rule.position,
-        "host": &rule.host,
-        "cidr": &rule.cidr,
-        "http_methods": &rule.http_methods,
-        "paths": &rule.paths,
-    })
-}
-
-fn rule_draft_document(rule: &RuleDocument) -> Value {
-    json!({
-        "position": rule.position,
-        "host": &rule.host,
-        "cidr": &rule.cidr,
-        "http_methods": &rule.http_methods,
-        "paths": &rule.paths,
-    })
-}
-
-/// `SyncConfigReplacement.documents`: sort by role then position, both of which
-/// already distinguish every record of one secret.
-fn sort_documents(documents: &mut [Value]) {
-    documents.sort_by(|left, right| {
-        let key = |document: &Value| {
-            (
-                document
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                document
-                    .get("position")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-            )
-        };
-        key(left).cmp(&key(right))
-    });
-}
-
-fn existing_value(row: &SecretRow, key: &str) -> Value {
-    match key {
-        "foreign_id" => json!(row.foreign_id),
-        "name" => json!(row.name),
-        "description" => json!(row.description),
-        "labels" => row.labels.clone(),
-        "allowed_regions" => match &row.fields {
-            SecretFields::AwsAuth {
-                allowed_regions, ..
-            } => allowed_regions.clone(),
-            _ => Value::Null,
-        },
-        "allowed_services" => match &row.fields {
-            SecretFields::AwsAuth {
-                allowed_services, ..
-            } => allowed_services.clone(),
-            _ => Value::Null,
-        },
-        "grant" => match &row.fields {
-            SecretFields::OauthToken { grant, .. } => json!(grant),
-            _ => Value::Null,
-        },
-        "token_endpoint" => match &row.fields {
-            SecretFields::OauthToken { token_endpoint, .. } => {
-                json!(token_endpoint)
-            }
-            _ => Value::Null,
-        },
-        "audience" => match &row.fields {
-            SecretFields::OauthToken { audience, .. } => json!(audience),
-            _ => Value::Null,
-        },
-        "header" => match &row.fields {
-            SecretFields::OauthToken { header, .. } => json!(header),
-            _ => Value::Null,
-        },
-        "value_prefix" => match &row.fields {
-            SecretFields::OauthToken { value_prefix, .. } => json!(value_prefix),
-            _ => Value::Null,
-        },
-        "scopes" => match &row.fields {
-            SecretFields::OauthToken { scopes, .. } => scopes.clone(),
-            _ => Value::Null,
-        },
-        "timestamp_format" => match &row.fields {
-            SecretFields::Hmac {
-                timestamp_format, ..
-            } => json!(timestamp_format),
-            _ => Value::Null,
-        },
-        "signature_algorithm" => match &row.fields {
-            SecretFields::Hmac {
-                signature_algorithm,
-                ..
-            } => json!(signature_algorithm),
-            _ => Value::Null,
-        },
-        "signature_key_encoding" => match &row.fields {
-            SecretFields::Hmac {
-                signature_key_encoding,
-                ..
-            } => json!(signature_key_encoding),
-            _ => Value::Null,
-        },
-        "signature_output_encoding" => match &row.fields {
-            SecretFields::Hmac {
-                signature_output_encoding,
-                ..
-            } => json!(signature_output_encoding),
-            _ => Value::Null,
-        },
-        "signature_message" => match &row.fields {
-            SecretFields::Hmac {
-                signature_message, ..
-            } => json!(signature_message),
-            _ => Value::Null,
-        },
-        "allow_chunked_body" => match &row.fields {
-            SecretFields::Hmac {
-                allow_chunked_body, ..
-            } => json!(allow_chunked_body),
-            _ => Value::Null,
-        },
-        "headers" => match &row.fields {
-            SecretFields::Hmac { headers, .. } => headers.clone(),
-            _ => Value::Null,
-        },
-        "public_key" => match &row.fields {
-            SecretFields::SshKey { public_key } => json!(public_key),
-            _ => Value::Null,
-        },
-        _ => Value::Null,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Writes
-// ---------------------------------------------------------------------------
-
-/// The parent columns of each kind, in bind order. `created_by_id` is last.
-fn parent_columns(kind: SecretKind) -> &'static [&'static str] {
-    match kind {
-        SecretKind::AwsAuth => &[
-            "foreign_id",
-            "name",
-            "description",
-            "labels",
-            "allowed_regions",
-            "allowed_services",
-            "created_by_id",
-        ],
-        SecretKind::OauthToken => &[
-            "foreign_id",
-            "name",
-            "description",
-            "labels",
-            // `grant` is a reserved word in Postgres.
-            "\"grant\"",
-            "token_endpoint",
-            "audience",
-            "header",
-            "value_prefix",
-            "scopes",
-            "created_by_id",
-        ],
-        SecretKind::Hmac => &[
-            "foreign_id",
-            "name",
-            "description",
-            "labels",
-            "timestamp_format",
-            "signature_algorithm",
-            "signature_key_encoding",
-            "signature_output_encoding",
-            "signature_message",
-            "allow_chunked_body",
-            "headers",
-            "created_by_id",
-        ],
-        SecretKind::SshKey => &[
-            "foreign_id",
-            "name",
-            "description",
-            "labels",
-            "public_key",
-            "created_by_id",
-        ],
-        _ => &[],
-    }
-}
-
-async fn insert_parent(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    document: &Document,
-    operator_id: Option<i64>,
-) -> std::result::Result<i64, WriteError> {
-    let columns = parent_columns(kind);
-    if columns.is_empty() {
-        return Err(WriteError::BadRequest(format!(
-            "{} secrets are not writable through this API",
-            kind.label()
-        )));
-    }
-    let foreign_id = match &document.foreign_id {
-        ForeignIdValue::Set(value) => value.clone(),
-        ForeignIdValue::Omitted => None,
-    };
-    let text = |key: &str| document.text(key).map(str::to_owned);
-    let value = |key: &str| document.value(key);
-    let sql = write::insert_returning_sql(kind.table(), columns, "id");
-    let query = sqlx::query_scalar::<_, i64>(&sql)
-        .bind(foreign_id)
-        .bind(text("name"))
-        .bind(text("description"))
-        .bind(value("labels"));
-    let query = match kind {
-        SecretKind::AwsAuth => query
-            .bind(value("allowed_regions"))
-            .bind(value("allowed_services")),
-        SecretKind::OauthToken => query
-            .bind(text("grant"))
-            .bind(text("token_endpoint"))
-            .bind(text("audience"))
-            .bind(text("header"))
-            .bind(text("value_prefix"))
-            .bind(value("scopes")),
-        SecretKind::Hmac => query
-            .bind(text("timestamp_format"))
-            .bind(text("signature_algorithm"))
-            .bind(text("signature_key_encoding"))
-            .bind(text("signature_output_encoding"))
-            .bind(text("signature_message"))
-            .bind(
-                document
-                    .value("allow_chunked_body")
-                    .as_bool()
-                    .unwrap_or(false),
-            )
-            .bind(value("headers")),
-        SecretKind::SshKey => query.bind(text("public_key")),
-        _ => unreachable!("checked above"),
-    };
-    Ok(query
-        .bind(operator_id)
-        .fetch_one(&mut **transaction)
-        .await?)
-}
-
-async fn update_parent(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    id: i64,
-    document: &Document,
-) -> std::result::Result<(), WriteError> {
-    let mut columns: Vec<&str> = vec!["name", "description", "labels"];
-    columns.extend(parent_columns(kind).iter().copied().filter(|column| {
-        !matches!(
-            *column,
-            "foreign_id" | "name" | "description" | "labels" | "created_by_id"
-        )
-    }));
-    let text = |key: &str| document.text(key).map(str::to_owned);
-    let value = |key: &str| document.value(key);
-    let sql = write::update_sql(kind.table(), &columns);
-    let query = sqlx::query(&sql)
-        .bind(text("name"))
-        .bind(text("description"))
-        .bind(value("labels"));
-    let query = match kind {
-        SecretKind::AwsAuth => query
-            .bind(value("allowed_regions"))
-            .bind(value("allowed_services")),
-        SecretKind::OauthToken => query
-            .bind(text("grant"))
-            .bind(text("token_endpoint"))
-            .bind(text("audience"))
-            .bind(text("header"))
-            .bind(text("value_prefix"))
-            .bind(value("scopes")),
-        SecretKind::Hmac => query
-            .bind(text("timestamp_format"))
-            .bind(text("signature_algorithm"))
-            .bind(text("signature_key_encoding"))
-            .bind(text("signature_output_encoding"))
-            .bind(text("signature_message"))
-            .bind(
-                document
-                    .value("allow_chunked_body")
-                    .as_bool()
-                    .unwrap_or(false),
-            )
-            .bind(value("headers")),
-        SecretKind::SshKey => query.bind(text("public_key")),
-        _ => query,
-    };
-    query.bind(id).execute(&mut **transaction).await?;
-    if let ForeignIdValue::Set(foreign_id) = &document.foreign_id {
-        // Rails' `update_columns(foreign_id:)`: the identity changes without a
-        // second `updated_at` bump.
-        sqlx::query(&format!(
-            "UPDATE {} SET foreign_id = $1 WHERE id = $2",
-            kind.table()
-        ))
-        .bind(foreign_id)
-        .bind(id)
-        .execute(&mut **transaction)
-        .await?;
-    }
-    Ok(())
-}
-
-async fn delete_nested(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    id: i64,
-) -> std::result::Result<(), WriteError> {
-    for (table, column) in [
-        ("secret_sources", kind.source_owner_column()),
-        ("request_rules", kind.rule_owner_column()),
-    ]
-    .into_iter()
-    .filter_map(|(table, column)| column.map(|column| (table, column)))
-    {
-        sqlx::query(&format!("DELETE FROM {table} WHERE {column} = $1"))
-            .bind(id)
-            .execute(&mut **transaction)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn insert_sources(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    id: i64,
-    sources: &[SourceDraft],
-) -> std::result::Result<(), WriteError> {
-    let Some(owner_column) = kind.source_owner_column() else {
-        return Ok(());
-    };
-    let sql = write::insert_sql(
-        "secret_sources",
-        &[
-            owner_column,
-            "source_type",
-            "config",
-            "secret",
-            "role",
-            "role_kind",
-            "broker_credential_id",
-        ],
-    );
-    for source in sources {
-        let encrypted = source
-            .secret
-            .as_deref()
-            .map(encrypt)
-            .transpose()
-            .map_err(WriteError::Internal)?;
-        sqlx::query(&sql)
-            .bind(id)
-            .bind(source.source_type.clone().unwrap_or_default())
-            .bind(source.config.clone())
-            .bind(encrypted)
-            .bind(source.role.clone())
-            .bind(source.role_kind.clone())
-            .bind(source.broker_credential_id)
-            .execute(&mut **transaction)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn insert_rules(
-    transaction: &mut Transaction<'_, Postgres>,
-    kind: SecretKind,
-    id: i64,
-    rules: &[RuleDocument],
-) -> std::result::Result<(), WriteError> {
-    let Some(owner_column) = kind.rule_owner_column() else {
-        return Ok(());
-    };
-    let sql = write::insert_sql(
-        "request_rules",
-        &[
-            owner_column,
-            "host",
-            "cidr",
-            "position",
-            "http_methods",
-            "paths",
-        ],
-    );
-    for rule in rules {
-        sqlx::query(&sql)
-            .bind(id)
-            .bind(rule.host.clone())
-            .bind(rule.cidr.clone())
-            .bind(rule.position)
-            .bind(rule.http_methods.clone())
-            .bind(rule.paths.clone())
-            .execute(&mut **transaction)
-            .await?;
-    }
-    Ok(())
 }
 
 /// DB-backed write lifecycle tests. They skip locally when

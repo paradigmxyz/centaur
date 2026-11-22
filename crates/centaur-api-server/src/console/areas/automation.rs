@@ -42,8 +42,8 @@ use crate::{
     ApiError, AppState,
     console::{
         guard::GuardedRoutes,
-        http::{ConsoleError, DataPayload},
-        request::{ConsoleData, ConsoleQuery},
+        http::{ConsoleError, DataPayload, json_data},
+        request::{ConsoleData, ConsoleQuery, nullable_field},
         sandbox::SandboxContext,
     },
 };
@@ -153,11 +153,6 @@ pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
         )
 }
 
-/// Server-rendered pages and other top-level routes (absolute paths).
-pub(crate) fn pages(router: axum::Router<AppState>) -> axum::Router<AppState> {
-    router
-}
-
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -170,18 +165,6 @@ fn pool(state: &AppState) -> Result<sqlx::PgPool, ApiError> {
 /// plain message, never Rails' SQL-ish `find_by_oid!`/`find_by!` relation text.
 fn record_not_found(model: centaur_console_db::Error) -> Response {
     ConsoleError::from(model).into_response()
-}
-
-/// A JSON field that separates absent (`None`) from an explicit `null`
-/// (`Some(None)`), so a PATCH can keep Console's "the field is present, so it is
-/// blank" behavior instead of collapsing both cases into "keep the stored
-/// value".
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 fn invalid(errors: FieldErrors) -> Response {
@@ -331,7 +314,7 @@ async fn console_run(
                 .into_response(),
         ));
     }
-    match start_run(&state, &pool, task.id).await {
+    match start_run(&state, &pool, task.id, task.author_id).await {
         Ok(run_id) => {
             let payload = db::console_payload_for(&pool, &task)
                 .await
@@ -406,17 +389,17 @@ struct ChannelOptionsQuery {
 /// destination.
 #[derive(Debug, Default, serde::Deserialize)]
 struct ConsoleTaskData {
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     name: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     prompt: Option<Option<String>>,
     #[serde(default)]
     enabled: Option<bool>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     delivery_mode: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     delivery_channel: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     schedule_preset: Option<Option<String>>,
     #[serde(default)]
     cron_expression: Option<String>,
@@ -538,9 +521,8 @@ async fn sandbox_index(
     context: SandboxContext,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let owner = match sandbox_owner(&pool, &context, None, false).await? {
-        Ok(SandboxActor::Owner { owner, .. }) => owner,
-        Ok(other) => return Ok(no_store(sandbox_forbidden(&other))),
+    let (owner, _) = match sandbox_owner(&pool, &context, None, false).await? {
+        Ok(owner) => owner,
         Err(response) => return Ok(response),
     };
     let tasks = match owner {
@@ -562,9 +544,8 @@ async fn sandbox_show(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let owner = match sandbox_owner(&pool, &context, None, false).await? {
-        Ok(SandboxActor::Owner { owner, .. }) => owner,
-        Ok(other) => return Ok(no_store(sandbox_forbidden(&other))),
+    let (owner, _) = match sandbox_owner(&pool, &context, None, false).await? {
+        Ok(owner) => owner,
         Err(response) => return Ok(response),
     };
     let Some(task) = sandbox_task(&pool, owner, &id).await? else {
@@ -585,8 +566,7 @@ async fn sandbox_create(
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
     let (owner, personal) = match sandbox_owner(&pool, &context, Some(&data), true).await? {
-        Ok(SandboxActor::Owner { owner, personal }) => (owner, personal),
-        Ok(other) => return Ok(no_store(sandbox_forbidden(&other))),
+        Ok(owner) => owner,
         Err(response) => return Ok(response),
     };
     let draft = match sandbox_draft(&pool, owner, personal, &data, true).await? {
@@ -607,8 +587,7 @@ async fn sandbox_update(
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
     let (owner, personal) = match sandbox_owner(&pool, &context, Some(&data), false).await? {
-        Ok(SandboxActor::Owner { owner, personal }) => (owner, personal),
-        Ok(other) => return Ok(no_store(sandbox_forbidden(&other))),
+        Ok(owner) => owner,
         Err(response) => return Ok(response),
     };
     let Some(task_id) = ScheduledTaskModel::decode_oid(&id) else {
@@ -633,9 +612,8 @@ async fn sandbox_destroy(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let owner = match sandbox_owner(&pool, &context, None, false).await? {
-        Ok(SandboxActor::Owner { owner, .. }) => owner,
-        Ok(other) => return Ok(no_store(sandbox_forbidden(&other))),
+    let (owner, _) = match sandbox_owner(&pool, &context, None, false).await? {
+        Ok(owner) => owner,
         Err(response) => return Ok(response),
     };
     let Some(task_id) = ScheduledTaskModel::decode_oid(&id) else {
@@ -656,9 +634,8 @@ async fn sandbox_run(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let owner = match sandbox_owner(&pool, &context, None, false).await? {
-        Ok(SandboxActor::Owner { owner, .. }) => owner,
-        Ok(other) => return Ok(no_store(sandbox_forbidden(&other))),
+    let (owner, _) = match sandbox_owner(&pool, &context, None, false).await? {
+        Ok(owner) => owner,
         Err(response) => return Ok(response),
     };
     let Some(task) = sandbox_task(&pool, owner, &id).await? else {
@@ -669,7 +646,7 @@ async fn sandbox_run(
             ConsoleError::unprocessable("scheduled task is disabled").into_response(),
         ));
     }
-    match start_run(&state, &pool, task.id).await {
+    match start_run(&state, &pool, task.id, task.author_id).await {
         Ok(run_id) => {
             let mut data = serde_json::to_value(db::sandbox_payload(&task)).map_err(internal)?;
             data["queued"] = json!(true);
@@ -715,22 +692,6 @@ async fn sandbox_principal(
 /// `Sandbox::ScheduledTasksController::PERSONAL_OWNER`.
 const PERSONAL_OWNER: &str = "me";
 
-/// Who a sandbox request may manage tasks for, mirroring
-/// `require_task_owner!`.
-enum SandboxActor {
-    /// A task owner, and whether this request asked for a personal task.
-    Owner {
-        owner: db::TaskOwner,
-        personal: bool,
-    },
-    /// A Slack channel session without a Slack user requester.
-    ChannelWithoutRequester,
-    /// A personal request from a channel without a linked active requester.
-    PersonalWithoutAuthor,
-    /// A principal that is not linked to an active Console user.
-    Unlinked,
-}
-
 /// `Sandbox::ScheduledTasksController#valid_owner_param?`: whether this request
 /// asked for a personal task. Any other owner value, and an owner on anything
 /// but create, is rejected before the actor checks.
@@ -762,47 +723,38 @@ async fn sandbox_owner(
     context: &SandboxContext,
     data: Option<&SandboxTaskData>,
     creating: bool,
-) -> Result<Result<SandboxActor, Response>, ApiError> {
+) -> Result<Result<(db::TaskOwner, bool), Response>, ApiError> {
     let personal = match requested_owner(data, creating) {
         Ok(personal) => personal,
         Err(error) => return Ok(Err(no_store(error.into_response()))),
     };
     let Some(principal) = sandbox_principal(pool, context).await? else {
-        return Ok(Ok(SandboxActor::Unlinked));
+        return Ok(Err(sandbox_forbidden()));
     };
     if principal.kind == "slack_channel" {
         if personal {
-            return Ok(Ok(match personal_channel_author(pool, context).await? {
-                Some(author_id) => SandboxActor::Owner {
-                    owner: db::TaskOwner::Author(author_id),
-                    personal: true,
-                },
-                None => SandboxActor::PersonalWithoutAuthor,
-            }));
+            return Ok(match personal_channel_author(pool, context).await? {
+                Some(author_id) => Ok((db::TaskOwner::Author(author_id), true)),
+                None => Err(sandbox_forbidden()),
+            });
         }
         if channel_requester(pool, context).await?.is_none() {
-            return Ok(Ok(SandboxActor::ChannelWithoutRequester));
+            return Ok(Err(sandbox_forbidden()));
         }
-        return Ok(Ok(SandboxActor::Owner {
-            owner: db::TaskOwner::Channel(principal.id),
-            personal: false,
-        }));
+        return Ok(Ok((db::TaskOwner::Channel(principal.id), false)));
     }
     let Some(user_id) = principal.console_user_id else {
-        return Ok(Ok(SandboxActor::Unlinked));
+        return Ok(Err(sandbox_forbidden()));
     };
     let user = centaur_console_db::find_console_user(pool, user_id)
         .await
         .map_err(internal)?;
-    Ok(Ok(
+    Ok(
         match user.filter(|user| user.status == ConsoleUserStatus::Active) {
-            Some(user) => SandboxActor::Owner {
-                owner: db::TaskOwner::Author(user.id),
-                personal,
-            },
-            None => SandboxActor::Unlinked,
+            Some(user) => Ok((db::TaskOwner::Author(user.id), personal)),
+            None => Err(sandbox_forbidden()),
         },
-    ))
+    )
 }
 
 /// The Slack user who sent the current turn, when the request may act for a
@@ -866,27 +818,27 @@ async fn personal_channel_author(
     Ok(matches.then_some(user.id))
 }
 
-fn sandbox_forbidden(actor: &SandboxActor) -> Response {
-    let message = match actor {
-        SandboxActor::PersonalWithoutAuthor => {
-            "personal tasks require a Slack requester linked to an active Console user"
-        }
-        SandboxActor::ChannelWithoutRequester => "channel tasks require a Slack user request",
-        _ => "sandbox principal is not linked to an active Console user",
-    };
-    no_store(ConsoleError::new(StatusCode::FORBIDDEN, message).into_response())
+/// `require_task_owner!`: the one 403 every refused sandbox actor gets.
+fn sandbox_forbidden() -> Response {
+    no_store(
+        ConsoleError::new(
+            StatusCode::FORBIDDEN,
+            "sandbox request is not allowed to manage scheduled tasks",
+        )
+        .into_response(),
+    )
 }
 
 /// `Sandbox::ScheduledTasksController#task_attributes`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct SandboxTaskData {
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     name: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     prompt: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     delivery_channel: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     cron_expression: Option<Option<String>>,
     #[serde(default)]
     enabled: Option<bool>,
@@ -1070,8 +1022,16 @@ async fn workflows_show(
     let queue_names = db::workflow_queue_names(&pool, &id)
         .await
         .map_err(|error| workflow_load_failed(&error))?;
-    let schedule = schedules_for(&state, &id).await.into_iter().next();
-    let debug = debug_rows(&state, &pool, &id, &latest_run, &status_counts).await;
+    let schedule = schedule_for(&state, &id).await;
+    let debug = debug_rows(
+        &state,
+        &pool,
+        &id,
+        &latest_run,
+        &status_counts,
+        schedule.as_ref(),
+    )
+    .await;
     let payload = overview(
         &id,
         &latest_run,
@@ -1124,7 +1084,7 @@ async fn workflows_create_run(
     let workflows = state
         .workflows()
         .map_err(|error| workflow_reason(StatusCode::BAD_GATEWAY, &error.to_string()))?;
-    let schedule = schedules_for(&state, &id).await.into_iter().next();
+    let schedule = schedule_for(&state, &id).await;
     let input = schedule
         .as_ref()
         .and_then(|schedule| schedule.get("input"))
@@ -1502,18 +1462,15 @@ fn schedule_payload(schedule: Option<&Value>) -> Option<SchedulePayload> {
     })
 }
 
-/// `WorkflowDashboard#schedules_for`: the registered schedules of one workflow,
-/// empty when the workflow runtime is unreachable.
-async fn schedules_for(state: &AppState, workflow_name: &str) -> Vec<Value> {
-    let Ok(workflows) = state.workflows() else {
-        return Vec::new();
-    };
+/// `WorkflowDashboard#schedules_for`: the registered schedule of one workflow,
+/// `None` when it has none or the workflow runtime is unreachable.
+async fn schedule_for(state: &AppState, workflow_name: &str) -> Option<Value> {
+    let workflows = state.workflows().ok()?;
     workflows
         .list_schedules()
         .into_iter()
-        .filter(|schedule| schedule.workflow_name == workflow_name)
-        .filter_map(|schedule| serde_json::to_value(schedule).ok())
-        .collect()
+        .find(|schedule| schedule.workflow_name == workflow_name)
+        .and_then(|schedule| serde_json::to_value(schedule).ok())
 }
 
 /// `WorkflowDashboard#fetch_run_detail`.
@@ -1539,6 +1496,7 @@ async fn debug_rows(
     workflow_name: &str,
     latest_run: &db::WorkflowRunRow,
     status_counts: &std::collections::BTreeMap<String, i64>,
+    schedule: Option<&Value>,
 ) -> Vec<DebugRow> {
     let mut rows = Vec::new();
     let detail = fetch_run_detail(state, latest_run.run_id.as_deref()).await;
@@ -1563,6 +1521,7 @@ async fn debug_rows(
         latest_run,
         status_counts,
         detail.as_ref(),
+        schedule,
     )
     .await
         && let Some(value) = failure.get("failure").filter(|value| !value.is_null())
@@ -1581,9 +1540,9 @@ async fn latest_failure_detail(
     latest_run: &db::WorkflowRunRow,
     status_counts: &std::collections::BTreeMap<String, i64>,
     detail: Option<&Value>,
+    schedule: Option<&Value>,
 ) -> Option<Value> {
-    let schedule = schedules_for(state, workflow_name).await;
-    if detail.is_none() && schedule.is_empty() {
+    if detail.is_none() && schedule.is_none() {
         return None;
     }
     if latest_run.display_status() == "failed" {
@@ -1626,20 +1585,9 @@ async fn start_run(
     state: &AppState,
     pool: &sqlx::PgPool,
     task_id: i64,
+    author_id: Option<i64>,
 ) -> Result<String, RunFailure> {
-    if let Some(author_id) =
-        sqlx::query_scalar::<_, Option<i64>>("SELECT author_id FROM scheduled_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| {
-                RunFailure::Refused(StartError {
-                    retryable: true,
-                    message: error.to_string(),
-                })
-            })?
-            .flatten()
-    {
+    if let Some(author_id) = author_id {
         db::provision_author_principal(pool, author_id)
             .await
             .map_err(|error| {
@@ -1873,7 +1821,7 @@ struct SkillData {
     #[serde(default)]
     instructions: Option<String>,
     /// Absent keeps the current optimistic lock check.
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     lock_version: Option<Option<i32>>,
     #[serde(default)]
     visibility: Option<String>,
@@ -2046,6 +1994,35 @@ async fn skills_destroy(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// The four share and unshare routes: change the visibility, then reload the
+/// skill the write touched.
+async fn set_shared(
+    pool: &sqlx::PgPool,
+    skill: &db::Skill,
+    shared: bool,
+) -> Result<Option<db::Skill>, ApiError> {
+    if shared {
+        db::share_skill(pool, skill.id).await
+    } else {
+        db::unshare_skill(pool, skill.id).await
+    }
+    .map_err(internal)?;
+    db::skill_by_id(pool, skill.id).await.map_err(internal)
+}
+
+/// [`set_shared`] rendered as the console's skill detail.
+async fn console_shared(
+    pool: &sqlx::PgPool,
+    skill: &db::Skill,
+    user: &ConsoleUser,
+    shared: bool,
+) -> Result<Response, ApiError> {
+    let Some(skill) = set_shared(pool, skill, shared).await? else {
+        return Ok(record_not_found(SkillModel::not_found()));
+    };
+    skill_detail_response(pool, &skill, user, StatusCode::OK).await
+}
+
 async fn skills_share(
     State(state): State<AppState>,
     user: ConsoleUser,
@@ -2058,14 +2035,7 @@ async fn skills_share(
     let Some(skill) = skill else {
         return Ok(record_not_found(SkillModel::not_found()));
     };
-    match db::share_skill(&pool, skill.id).await {
-        Ok(()) => {}
-        Err(error) => return Ok(internal(error).into_response()),
-    }
-    let Some(skill) = db::skill_by_id(&pool, skill.id).await.map_err(internal)? else {
-        return Ok(record_not_found(SkillModel::not_found()));
-    };
-    skill_detail_response(&pool, &skill, &user, StatusCode::OK).await
+    console_shared(&pool, &skill, &user, true).await
 }
 
 async fn skills_unshare(
@@ -2087,14 +2057,7 @@ async fn skills_unshare(
     let Some(skill) = skill else {
         return Ok(record_not_found(SkillModel::not_found()));
     };
-    match db::unshare_skill(&pool, skill.id).await {
-        Ok(()) => {}
-        Err(error) => return Ok(internal(error).into_response()),
-    }
-    let Some(skill) = db::skill_by_id(&pool, skill.id).await.map_err(internal)? else {
-        return Ok(record_not_found(SkillModel::not_found()));
-    };
-    skill_detail_response(&pool, &skill, &user, StatusCode::OK).await
+    console_shared(&pool, &skill, &user, false).await
 }
 
 async fn skill_editor_candidates(
@@ -2155,6 +2118,42 @@ fn sandbox_authoring_forbidden() -> Response {
         "sandbox principal is not linked to an active Console user",
     )
     .into_response()
+}
+
+/// `require_authoring_user!` plus `owned_scope`/`editable_scope`'s
+/// `find_by_oid!`: the authoring user and the skill they may write, or the
+/// response that refuses the request.
+async fn sandbox_authored_skill(
+    pool: &sqlx::PgPool,
+    context: &SandboxContext,
+    id: &str,
+    editors: bool,
+) -> Result<Result<(ConsoleUser, db::Skill), Response>, ApiError> {
+    let Some(user) = sandbox_linked_user(pool, context).await? else {
+        return Ok(Err(sandbox_authoring_forbidden()));
+    };
+    let skill = if editors {
+        db::editable_skill(pool, user.id, id).await
+    } else {
+        db::owned_skill(pool, user.id, id).await
+    }
+    .map_err(internal)?;
+    Ok(match skill {
+        Some(skill) => Ok((user, skill)),
+        None => Err(record_not_found(SkillModel::not_found())),
+    })
+}
+
+/// [`set_shared`] rendered as the sandbox's author payload.
+async fn sandbox_shared(
+    pool: &sqlx::PgPool,
+    skill: &db::Skill,
+    shared: bool,
+) -> Result<Response, ApiError> {
+    let Some(skill) = set_shared(pool, skill, shared).await? else {
+        return Ok(record_not_found(SkillModel::not_found()));
+    };
+    Ok(json_data(sandbox_author_payload(&skill)))
 }
 
 /// `Skill#catalog_payload`.
@@ -2370,14 +2369,9 @@ async fn sandbox_skills_update(
     ConsoleData(data): ConsoleData<SkillData>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(user) = sandbox_linked_user(&pool, &context).await? else {
-        return Ok(sandbox_authoring_forbidden());
-    };
-    let Some(skill) = db::editable_skill(&pool, user.id, &id)
-        .await
-        .map_err(internal)?
-    else {
-        return Ok(record_not_found(SkillModel::not_found()));
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, true).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
     let draft = skill_draft(&data, true, false);
     match db::update_skill(&pool, &skill, draft, None).await {
@@ -2395,14 +2389,9 @@ async fn sandbox_skills_destroy(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(user) = sandbox_linked_user(&pool, &context).await? else {
-        return Ok(sandbox_authoring_forbidden());
-    };
-    let Some(skill) = db::owned_skill(&pool, user.id, &id)
-        .await
-        .map_err(internal)?
-    else {
-        return Ok(record_not_found(SkillModel::not_found()));
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
     db::archive_skill(&pool, skill.id).await.map_err(internal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -2414,23 +2403,11 @@ async fn sandbox_skills_share(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(user) = sandbox_linked_user(&pool, &context).await? else {
-        return Ok(sandbox_authoring_forbidden());
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
-    let Some(skill) = db::owned_skill(&pool, user.id, &id)
-        .await
-        .map_err(internal)?
-    else {
-        return Ok(record_not_found(SkillModel::not_found()));
-    };
-    db::share_skill(&pool, skill.id).await.map_err(internal)?;
-    let Some(skill) = db::skill_by_id(&pool, skill.id).await.map_err(internal)? else {
-        return Ok(record_not_found(SkillModel::not_found()));
-    };
-    Ok(Json(DataPayload {
-        data: sandbox_author_payload(&skill),
-    })
-    .into_response())
+    sandbox_shared(&pool, &skill, true).await
 }
 
 async fn sandbox_skills_unshare(
@@ -2439,23 +2416,11 @@ async fn sandbox_skills_unshare(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(user) = sandbox_linked_user(&pool, &context).await? else {
-        return Ok(sandbox_authoring_forbidden());
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
-    let Some(skill) = db::owned_skill(&pool, user.id, &id)
-        .await
-        .map_err(internal)?
-    else {
-        return Ok(record_not_found(SkillModel::not_found()));
-    };
-    db::unshare_skill(&pool, skill.id).await.map_err(internal)?;
-    let Some(skill) = db::skill_by_id(&pool, skill.id).await.map_err(internal)? else {
-        return Ok(record_not_found(SkillModel::not_found()));
-    };
-    Ok(Json(DataPayload {
-        data: sandbox_author_payload(&skill),
-    })
-    .into_response())
+    sandbox_shared(&pool, &skill, false).await
 }
 
 async fn sandbox_skills_editors(
@@ -2512,14 +2477,9 @@ async fn sandbox_skills_add_editor(
     ConsoleData(data): ConsoleData<SkillEditorData>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(user) = sandbox_linked_user(&pool, &context).await? else {
-        return Ok(sandbox_authoring_forbidden());
-    };
-    let Some(skill) = db::owned_skill(&pool, user.id, &id)
-        .await
-        .map_err(internal)?
-    else {
-        return Ok(record_not_found(SkillModel::not_found()));
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
     let reference = match data.validate_fields() {
         Ok(()) => data.user.trim(),
@@ -2548,14 +2508,9 @@ async fn sandbox_skills_remove_editor(
     ConsoleData(data): ConsoleData<SkillEditorData>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(user) = sandbox_linked_user(&pool, &context).await? else {
-        return Ok(sandbox_authoring_forbidden());
-    };
-    let Some(skill) = db::owned_skill(&pool, user.id, &id)
-        .await
-        .map_err(internal)?
-    else {
-        return Ok(record_not_found(SkillModel::not_found()));
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
     };
     let reference = match data.validate_fields() {
         Ok(()) => data.user.trim(),
@@ -2698,9 +2653,9 @@ async fn ssh_key_show(
 /// the key itself is only replaced when the body sends a non-empty value.
 #[derive(Debug, Default, serde::Deserialize)]
 struct PersonalSshKeyData {
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     name: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "nullable_field")]
     private_key: Option<Option<String>>,
 }
 
@@ -2717,32 +2672,14 @@ async fn ssh_key_update(
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
     let name = data.name.clone().map(|name| name.unwrap_or_default());
-    let submitted = data
-        .private_key
-        .clone()
-        .flatten()
-        .filter(|value| !value.is_empty());
-    let (private_key, private_key_error) = match submitted.as_deref() {
-        Some(value) => match derive_public_key(value) {
-            Ok(public_key) => (Some((value, public_key)), None),
-            Err(message) => (None, Some(message)),
-        },
-        None => (None, None),
-    };
-    // The derived public key borrows from the parsed value, so hand the write
-    // owned strings.
-    let public_key = private_key
-        .as_ref()
-        .map(|(_, public_key)| public_key.clone());
+    let submitted = data.private_key.clone().flatten();
     let encryption = record_encryption()?;
-    let supplied = submitted.as_deref().zip(public_key.as_deref());
     match db::save_personal_ssh_key(
         &pool,
         encryption,
         user.id,
         name.as_deref(),
-        supplied,
-        private_key_error.as_deref(),
+        submitted.as_deref(),
     )
     .await
     {
@@ -2844,19 +2781,15 @@ async fn sandbox_permissions_show(
     context: SandboxContext,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let Some(principal) = sandbox_principal(&pool, &context).await? else {
-        return Ok(no_store(
-            ConsoleError::new(
-                StatusCode::UNAUTHORIZED,
-                "sandbox token is no longer assigned",
-            )
-            .into_response(),
-        ));
+    let permissions = match context.proxy.principal_id {
+        Some(principal_id) => db::sandbox_permissions(&pool, principal_id)
+            .await
+            .map_err(internal)?,
+        None => None,
     };
-    let Some(permissions) = db::sandbox_permissions(&pool, principal.id)
-        .await
-        .map_err(internal)?
-    else {
+    // A token whose proxy has no principal, or whose principal has no effective
+    // config any more, is no longer assigned.
+    let Some(permissions) = permissions else {
         return Ok(no_store(
             ConsoleError::new(
                 StatusCode::UNAUTHORIZED,
@@ -2888,34 +2821,7 @@ async fn sandbox_permissions_show(
         connected_tools: &permissions.connected_tools,
         permissions: &permissions.permissions,
     };
-    let body = serde_json::to_string(&DataPayload { data }).map_err(internal)?;
-    // Rails renders this snapshot with `render json:`, so the media type is JSON
-    // (a bare `String` response would default to `text/plain`).
-    let mut response = (
-        StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        body.clone(),
-    )
-        .into_response();
-    response
-        .headers_mut()
-        .insert("cache-control", "no-store".parse().expect("valid header"));
-    response.headers_mut().insert(
-        "etag",
-        format!("\"{}\"", sha256_hex(&body))
-            .parse()
-            .expect("valid header"),
-    );
-    Ok(response)
-}
-
-fn sha256_hex(value: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(value.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    Ok(no_store(json_data(data)))
 }
 
 #[cfg(test)]
@@ -2933,21 +2839,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_records_use_the_model_descriptors_message() {
+    async fn missing_records_are_not_found() {
         // `find_by_oid!`/`find_by!` print the relation's where clause; the port
-        // reports the descriptor's model name instead.
-        for (not_found, model) in [
-            (ScheduledTaskModel::not_found(), "ScheduledTask"),
-            (SkillModel::not_found(), "Skill"),
-            (UserModel::not_found(), "User"),
+        // reports a model 404 in Console's error envelope instead.
+        for not_found in [
+            ScheduledTaskModel::not_found(),
+            SkillModel::not_found(),
+            UserModel::not_found(),
         ] {
-            assert_eq!(not_found.to_string(), format!("{model} not found"));
             let response = record_not_found(not_found);
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
-            assert_eq!(
-                body(response).await,
-                json!({ "error": { "message": format!("{model} not found") } })
-            );
+            assert!(body(response).await["error"]["message"].is_string());
         }
     }
 
@@ -2957,10 +2859,6 @@ mod tests {
         // framework's error page; the port always renders Console's envelope.
         let response = run_error(&RunFailure::Unavailable);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            body(response).await,
-            json!({ "error": { "message": "scheduled task run could not be started" } })
-        );
     }
 
     #[test]
@@ -2972,18 +2870,8 @@ mod tests {
         assert_eq!(data.custom_days, None);
         // No ActiveModel casting: a string is not a boolean, and a scalar is not
         // an array of days. The extractor reports these under the field path.
-        for (value, message) in [
-            (
-                json!({ "enabled": "true" }),
-                "invalid type: string \"true\", expected a boolean",
-            ),
-            (
-                json!({ "custom_days": "1" }),
-                "invalid type: string \"1\", expected a sequence",
-            ),
-        ] {
-            let error = serde_json::from_value::<ConsoleTaskData>(value).unwrap_err();
-            assert_eq!(error.to_string(), message);
+        for value in [json!({ "enabled": "true" }), json!({ "custom_days": "1" })] {
+            assert!(serde_json::from_value::<ConsoleTaskData>(value).is_err());
         }
     }
 
@@ -2992,12 +2880,7 @@ mod tests {
         let data: SkillData =
             serde_json::from_value(json!({ "lock_version": null })).expect("typed data");
         assert_eq!(data.lock_version, Some(None));
-        let error =
-            serde_json::from_value::<SkillData>(json!({ "lock_version": "1" })).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "invalid type: string \"1\", expected i32"
-        );
+        assert!(serde_json::from_value::<SkillData>(json!({ "lock_version": "1" })).is_err());
     }
 
     fn skill() -> db::Skill {

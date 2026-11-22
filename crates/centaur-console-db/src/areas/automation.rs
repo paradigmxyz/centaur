@@ -46,8 +46,6 @@ const CUSTOM_SCHEDULE_DAYS: [(&str, &str); 7] = [
     ("Sat", "6"),
     ("Sun", "0"),
 ];
-/// The role the provisioner grants to the principals it creates.
-pub const USER_MCP_ROLE_FOREIGN_ID: &str = "user-mcp";
 /// `ScheduledTasksController::MAX_CHANNEL_OPTIONS`.
 pub const MAX_CHANNEL_OPTIONS: i64 = 20;
 
@@ -610,16 +608,6 @@ impl ScheduledTask {
     pub fn schedule_label(&self) -> String {
         schedule_label(self.cron_expression.as_deref())
     }
-
-    /// `ScheduledTask#next_occurrence`: the first run after `after`.
-    pub fn next_occurrence(
-        &self,
-        after: chrono::DateTime<chrono::Utc>,
-    ) -> Option<PrimitiveDateTime> {
-        let cron = self.cron_expression.as_deref()?;
-        let schedule = Schedule::parse(cron, self.timezone.as_deref()?).ok()?;
-        schedule.next_after(after).map(naive)
-    }
 }
 
 /// `ScheduledTask.cron_for`: the cron expression a console submission asks for.
@@ -669,90 +657,11 @@ fn custom_cron(days: &[String], time: Option<&str>) -> String {
     format!("{minute} {hour} * * {}", ordered_days.join(","))
 }
 
-/// `ScheduledTask.cron_schedule_is_valid`: Console's standard five-field
-/// grammar and a schedule api-rs can step through.
+/// `ScheduledTask.cron_schedule_is_valid`: a schedule api-rs can step through.
+/// [`Schedule::parse`] already reads the same five-field grammar, and more
+/// strictly, so its answer is the validation.
 pub fn cron_valid(expression: &str, timezone: &str) -> bool {
-    standard_cron(expression) && Schedule::parse(expression, timezone).is_ok()
-}
-
-/// `ScheduledTask.standard_cron?`: numbers and names, `*`, ranges, steps, and
-/// lists; a step needs a range, and a range must not wrap.
-pub fn standard_cron(expression: &str) -> bool {
-    let fields: Vec<&str> = expression.split_whitespace().collect();
-    let specs = [
-        (0u32, 59u32, &[][..]),
-        (0, 23, &[][..]),
-        (1, 31, &[][..]),
-        (
-            1,
-            12,
-            &[
-                "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-            ][..],
-        ),
-        (0, 7, &["sun", "mon", "tue", "wed", "thu", "fri", "sat"][..]),
-    ];
-    fields.len() == specs.len()
-        && fields
-            .iter()
-            .zip(specs)
-            .all(|(field, (min, max, names))| standard_cron_field(field, min, max, names))
-}
-
-fn standard_cron_field(field: &str, min: u32, max: u32, names: &[&str]) -> bool {
-    let elements: Vec<&str> = field.split(',').collect();
-    if elements.len() > 1 && elements.iter().any(|element| element.starts_with('*')) {
-        return false;
-    }
-    elements.iter().all(|element| {
-        let (range, step) = match element.split_once('/') {
-            Some((range, step)) => (range, Some(step)),
-            None => (*element, None),
-        };
-        if let Some(step) = step
-            && (step.is_empty()
-                || step.len() > 2
-                || !step.bytes().all(|byte| byte.is_ascii_digit())
-                || step.parse::<u32>().unwrap_or(0) == 0)
-        {
-            return false;
-        }
-        if range == "*" {
-            return true;
-        }
-        let (first, last) = match range.split_once('-') {
-            Some((first, last)) => (first, Some(last)),
-            None => (range, None),
-        };
-        if step.is_some() && last.is_none() {
-            return false;
-        }
-        let Some(start) = cron_value(first, min, max, names) else {
-            return false;
-        };
-        match last {
-            Some(last) => match cron_value(last, min, max, names) {
-                Some(finish) => start <= finish,
-                None => false,
-            },
-            None => true,
-        }
-    })
-}
-
-fn cron_value(text: &str, min: u32, max: u32, names: &[&str]) -> Option<u32> {
-    let value =
-        if !text.is_empty() && text.len() <= 2 && text.bytes().all(|byte| byte.is_ascii_digit()) {
-            text.parse::<u32>().ok()?
-        } else {
-            let index = names.iter().position(|name| *name == text.to_lowercase())?;
-            if names.len() == 12 {
-                index as u32 + 1
-            } else {
-                index as u32
-            }
-        };
-    (min..=max).contains(&value).then_some(value)
+    Schedule::parse(expression, timezone).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -800,21 +709,9 @@ impl TaskWrite {
     }
 }
 
-/// The second message `SlackChannelCatalogSync` leaves in the console form's
-/// `meta.catalog_error`, plus whether the bot token is configured at all.
-pub fn slack_bot_token_configured() -> bool {
-    ["CENTAUR_CONSOLE_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN"]
-        .iter()
-        .any(|name| {
-            std::env::var(name)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-        })
-}
-
 /// `ScheduledTasksController#catalog_error`.
 pub async fn catalog_error(pool: &PgPool, policy: &SlackPolicy) -> Result<Option<String>> {
-    if !slack_bot_token_configured() {
+    if !super::principals::slack_catalog_configured() {
         return Ok(Some("SLACK_BOT_TOKEN is not configured.".to_owned()));
     }
     let channels: i64 = sqlx::query_scalar("SELECT count(*) FROM slack_bot_channels")
@@ -929,7 +826,10 @@ pub async fn slack_policy_for_user(pool: &PgPool, user_id: i64) -> Result<SlackP
     slack_policy(&mut connection, user_id).await
 }
 
-async fn slack_policy(connection: &mut PgConnection, user_id: i64) -> Result<SlackPolicy> {
+pub(crate) async fn slack_policy(
+    connection: &mut PgConnection,
+    user_id: i64,
+) -> Result<SlackPolicy> {
     let mut candidates: Vec<(String, String)> = Vec::new();
     let rows: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT subject, team_id FROM user_identities \
@@ -993,34 +893,32 @@ async fn slack_policy(connection: &mut PgConnection, user_id: i64) -> Result<Sla
     })
 }
 
-/// `Principal::SLACK_USER_ID_FORMAT`.
-pub fn slack_user_id_valid(value: &str) -> bool {
-    value == "USLACK"
-        || matches!(value.as_bytes().first(), Some(b'U') | Some(b'W'))
-            && value.len() >= 9
-            && value[1..]
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+/// The Slack id format behind `Principal::SLACK_USER_ID_FORMAT`,
+/// `Principal::SLACK_TEAM_ID_FORMAT`, and
+/// `ScheduledTask::DELIVERY_DESTINATION_FORMAT`: one of `prefixes`, then
+/// uppercase alphanumerics, at least nine characters in all.
+pub(crate) fn slack_id_valid(value: &str, prefixes: &[u8]) -> bool {
+    let bytes = value.as_bytes();
+    bytes.first().is_some_and(|first| prefixes.contains(first))
+        && bytes.len() >= 9
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+/// `Principal::SLACK_USER_ID_FORMAT`; `USLACK` is Console's bot identity.
+pub(crate) fn slack_user_id_valid(value: &str) -> bool {
+    value == "USLACK" || slack_id_valid(value, b"UW")
 }
 
 /// `Principal::SLACK_TEAM_ID_FORMAT`.
-pub fn slack_team_id_valid(value: &str) -> bool {
-    matches!(value.as_bytes().first(), Some(b'T') | Some(b'E'))
-        && value.len() >= 9
-        && value[1..]
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+pub(crate) fn slack_team_id_valid(value: &str) -> bool {
+    slack_id_valid(value, b"TE")
 }
 
 /// `ScheduledTask::DELIVERY_DESTINATION_FORMAT`.
 fn delivery_destination_valid(value: &str) -> bool {
-    matches!(
-        value.as_bytes().first(),
-        Some(b'C') | Some(b'D') | Some(b'G') | Some(b'U') | Some(b'W')
-    ) && value.len() >= 9
-        && value[1..]
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    slack_id_valid(value, b"CDGUW")
 }
 
 /// `SlackDeliveryPolicy#allowed?`.
@@ -1507,7 +1405,9 @@ async fn validate(
     Ok(errors)
 }
 
-async fn begin_write(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+/// Console's database connections are read-only by default, so every write
+/// runs in an explicitly read-write transaction.
+pub(crate) async fn begin_write(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION READ WRITE")
         .execute(&mut *tx)
@@ -2459,18 +2359,13 @@ pub async fn create_skill(
 ) -> SkillWriteResult<Skill> {
     let mut tx = begin_write(pool).await?;
     let (editors, invalid) = resolve_editors(&mut tx, owner_id, editor_oids).await?;
-    let name = draft.name.clone().unwrap_or_default();
-    let description = draft.description.clone().unwrap_or_default();
-    let content = draft.content.clone().unwrap_or_default();
-    let errors = validate_skill(
+    let (name, description, content) = merged(None, &draft);
+    validated(
         &mut tx,
         None,
-        SkillAttributes {
-            name: &name,
-            description: &description,
-            content: &content,
-            visibility: draft.visibility.as_deref(),
-        },
+        &draft,
+        (&name, &description, &content),
+        invalid,
     )
     .await?;
     let visibility = draft
@@ -2479,11 +2374,6 @@ pub async fn create_skill(
         .and_then(skill_visibility)
         .unwrap_or("shared")
         .to_owned();
-    if !errors.is_empty() || invalid {
-        return Err(SkillWriteError::Invalid(errors_with_editors(
-            errors, invalid,
-        )));
-    }
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO skills (user_id, name, description, content, visibility, shared_at, \
              lock_version, created_at, updated_at) \
@@ -2520,6 +2410,51 @@ fn errors_with_editors(mut errors: FieldErrors, invalid: bool) -> FieldErrors {
     errors
 }
 
+/// The attributes a skill write stores: the draft's values, or the stored
+/// skill's where the draft leaves one out. A create has no stored skill, so an
+/// omitted attribute is blank.
+fn merged(skill: Option<&Skill>, draft: &SkillDraft) -> (String, String, String) {
+    let stored = |value: &Option<String>, of: fn(&Skill) -> &String| {
+        value
+            .clone()
+            .or_else(|| skill.map(of).cloned())
+            .unwrap_or_default()
+    };
+    (
+        stored(&draft.name, |skill| &skill.name),
+        stored(&draft.description, |skill| &skill.description),
+        stored(&draft.content, |skill| &skill.content),
+    )
+}
+
+/// `SkillAuthoring#save`'s shared guard: validate the merged attributes and
+/// refuse the write when either the validation or the editor selection failed.
+async fn validated(
+    executor: &mut PgConnection,
+    skill_id: Option<i64>,
+    draft: &SkillDraft,
+    (name, description, content): (&str, &str, &str),
+    invalid: bool,
+) -> SkillWriteResult<()> {
+    let errors = validate_skill(
+        executor,
+        skill_id,
+        SkillAttributes {
+            name,
+            description,
+            content,
+            visibility: draft.visibility.as_deref(),
+        },
+    )
+    .await?;
+    if !errors.is_empty() || invalid {
+        return Err(SkillWriteError::Invalid(errors_with_editors(
+            errors, invalid,
+        )));
+    }
+    Ok(())
+}
+
 /// `SkillAuthoring#save` for an existing skill. `editor_oids` of `None` keeps
 /// the current editors.
 pub async fn update_skill(
@@ -2533,34 +2468,21 @@ pub async fn update_skill(
         Some(oids) => resolve_editors(&mut tx, skill.user_id, oids).await?,
         None => (Vec::new(), false),
     };
-    let name = draft.name.clone().unwrap_or_else(|| skill.name.clone());
-    let description = draft
-        .description
-        .clone()
-        .unwrap_or_else(|| skill.description.clone());
-    let content = draft
-        .content
-        .clone()
-        .unwrap_or_else(|| skill.content.clone());
-    let errors = validate_skill(
+    let (name, description, content) = merged(Some(skill), &draft);
+    validated(
         &mut tx,
         Some(skill.id),
-        SkillAttributes {
-            name: &name,
-            description: &description,
-            content: &content,
-            visibility: draft.visibility.as_deref(),
-        },
+        &draft,
+        (&name, &description, &content),
+        invalid,
     )
     .await?;
-    let visibility = draft.visibility.as_deref().and_then(skill_visibility);
-    if !errors.is_empty() || invalid {
-        return Err(SkillWriteError::Invalid(errors_with_editors(
-            errors, invalid,
-        )));
-    }
     let expected = draft.lock_version.unwrap_or(skill.lock_version);
-    let visibility = visibility.unwrap_or(skill.visibility.as_str());
+    let visibility = draft
+        .visibility
+        .as_deref()
+        .and_then(skill_visibility)
+        .unwrap_or(skill.visibility.as_str());
     let updated = sqlx::query(
         "UPDATE skills SET name = $2, description = $3, content = $4, visibility = $5, \
              shared_at = CASE WHEN $5 = 'shared' THEN coalesce(shared_at, now()) ELSE NULL END, \
@@ -2613,27 +2535,26 @@ async fn replace_skill_editors(
 
 /// `Skill#share!`: shared, with `shared_at` preserved.
 pub async fn share_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
-    sqlx::query(
-        // `share!` is `update!`: it bumps the optimistic lock only when an
-        // attribute actually changes.
-        "UPDATE skills SET visibility = 'shared', shared_at = coalesce(shared_at, now()), \
-             updated_at = now(), lock_version = lock_version + 1 \
-         WHERE id = $1 AND (visibility <> 'shared' OR shared_at IS NULL)",
-    )
-    .bind(skill_id)
-    .execute(pool)
-    .await?;
-    Ok(())
+    set_public(pool, skill_id, true).await
 }
 
 /// `Skill#unshare!`.
 pub async fn unshare_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
+    set_public(pool, skill_id, false).await
+}
+
+/// The one visibility write behind both: `share!`/`unshare!` are `update!`, so
+/// they bump the optimistic lock only when an attribute actually changes.
+async fn set_public(pool: &PgPool, skill_id: i64, shared: bool) -> Result<()> {
     sqlx::query(
-        "UPDATE skills SET visibility = 'private', shared_at = NULL, updated_at = now(), \
-             lock_version = lock_version + 1 \
-         WHERE id = $1 AND (visibility <> 'private' OR shared_at IS NOT NULL)",
+        "UPDATE skills SET visibility = $2, \
+             shared_at = CASE WHEN $2 = 'shared' THEN coalesce(shared_at, now()) ELSE NULL END, \
+             updated_at = now(), lock_version = lock_version + 1 \
+         WHERE id = $1 AND (visibility <> $2 OR (shared_at IS NULL) = $3)",
     )
     .bind(skill_id)
+    .bind(if shared { "shared" } else { "private" })
+    .bind(shared)
     .execute(pool)
     .await?;
     Ok(())
@@ -2945,16 +2866,26 @@ mod key_rules {
 }
 
 /// `PersonalSshKeysController#update`: creates or replaces the caller's key.
-/// `private_key` is `(normalized value, derived public key)` and is only
-/// supplied when the body sent one.
+/// `submitted` is the pasted private key, when the body sent one.
 pub async fn save_personal_ssh_key(
     pool: &PgPool,
     encryption: &active_record_encryption::ActiveRecordEncryption,
     owner_id: i64,
     name: Option<&str>,
-    private_key: Option<(&str, &str)>,
-    private_key_error: Option<&str>,
+    submitted: Option<&str>,
 ) -> SkillWriteResult<PersonalSshKey> {
+    // An empty value keeps the stored key, as Rails' blank filter does.
+    let derived = submitted
+        .filter(|value| !value.is_empty())
+        .map(|value| (value, crate::ssh_key::derive_public_key(value)));
+    let private_key = match &derived {
+        Some((value, Ok(public_key))) => Some((*value, public_key.as_str())),
+        _ => None,
+    };
+    let private_key_error = match &derived {
+        Some((_, Err(message))) => Some(message.as_str()),
+        _ => None,
+    };
     let mut tx = begin_write(pool).await?;
     let existing: Option<(i64, String, String)> = sqlx::query_as(
         "SELECT id, name, public_key FROM ssh_key_secrets WHERE owner_id = $1 FOR UPDATE",
@@ -3048,8 +2979,14 @@ pub async fn save_personal_ssh_key(
             if source_changed {
                 // The source belongs to the key, so it invalidates every union of
                 // principals reached by the key's direct and role grants.
-                invalidate::invalidate(&mut tx, Scope::secret_delete(SecretKind::SshKey, *id))
-                    .await?;
+                invalidate::invalidate(
+                    &mut tx,
+                    Scope::Secret {
+                        kind: SecretKind::SshKey,
+                        id: *id,
+                    },
+                )
+                .await?;
             }
         }
         None => {

@@ -1,6 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronsUpDown, LogOut, Monitor, Moon, Sun } from "lucide-react";
-import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { signOut, type Me } from "@/app/session";
@@ -22,14 +21,9 @@ const THEME_LABELS: Record<ThemePreference, string> = {
   dark: "Dark mode",
 };
 
-interface InstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-}
-
 export function AccountMenu({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const { preference, setPreference } = useTheme();
-  const installPrompt = useInstallPrompt();
 
   const leave = async () => {
     try {
@@ -70,14 +64,6 @@ export function AccountMenu({ me }: { me: Me }) {
               <span className="text-xs text-muted-foreground">Centaur Console</span>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            {installPrompt && (
-              <DropdownMenuItem
-                title="Install Centaur Console as a standalone app"
-                onSelect={() => void installPrompt.prompt()}
-              >
-                <Monitor /> Install app
-              </DropdownMenuItem>
-            )}
             <DropdownMenuItem
               aria-label={`Current theme: ${preference}. Switch to ${next} mode`}
               onSelect={(event) => {
@@ -96,23 +82,4 @@ export function AccountMenu({ me }: { me: Me }) {
       </SidebarMenuItem>
     </SidebarMenu>
   );
-}
-
-/** The deferred PWA install prompt, once the browser reports the app installable. */
-function useInstallPrompt(): InstallPromptEvent | null {
-  const [event, setEvent] = useState<InstallPromptEvent | null>(null);
-  useEffect(() => {
-    const onPrompt = (e: Event) => {
-      e.preventDefault();
-      setEvent(e as InstallPromptEvent);
-    };
-    const onInstalled = () => setEvent(null);
-    window.addEventListener("beforeinstallprompt", onPrompt);
-    window.addEventListener("appinstalled", onInstalled);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", onPrompt);
-      window.removeEventListener("appinstalled", onInstalled);
-    };
-  }, []);
-  return event;
 }

@@ -12,10 +12,9 @@
 //! [`crate::validation::Validation`].
 
 use garde::{Error, Result};
-use regex::Regex;
 
 use super::{PRINCIPAL_KINDS, SANDBOX_REPO_CACHE_VALUES};
-use crate::validation::rules::{BLANK_MESSAGE, INCLUSION_MESSAGE};
+use crate::validation::rules::{BLANK_MESSAGE, INCLUSION_MESSAGE, matches};
 
 pub(crate) const URL_SAFE_PATTERN: &str = r"^[A-Za-z0-9\-._~]+$";
 
@@ -81,12 +80,6 @@ pub(crate) fn channel_id(value: &str, _: &()) -> Result {
         return Err(Error::new("is invalid"));
     }
     Ok(())
-}
-
-fn matches(pattern: &str, value: &str) -> bool {
-    Regex::new(pattern)
-        .expect("static regex compiles")
-        .is_match(value)
 }
 
 #[cfg(test)]

@@ -27,7 +27,7 @@ use serde_json::{Map, Number, Value, json};
 use crate::validation::ValidateFields;
 use crate::{Error, Result};
 
-use super::{SecretFields, SecretKind, SecretRow, SourceRow};
+use super::{SecretFields, SecretKind, SecretRow};
 
 /// A write failure the API layer turns into the matching HTTP error.
 #[derive(Debug)]
@@ -102,16 +102,6 @@ impl Scalar {
             Self::Bool(value) => Value::Bool(value),
             Self::Number(value) => Value::Number(value),
             Self::String(value) => Value::String(value),
-        }
-    }
-
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Null => Some(Self::Null),
-            Value::Bool(value) => Some(Self::Bool(*value)),
-            Value::Number(value) => Some(Self::Number(value.clone())),
-            Value::String(value) => Some(Self::String(value.clone())),
-            Value::Array(_) | Value::Object(_) => None,
         }
     }
 }
@@ -194,15 +184,6 @@ impl ParamValue {
             }
         }
     }
-
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Array(values) => Some(Self::List(
-                values.iter().filter_map(Scalar::from_value).collect(),
-            )),
-            value => Scalar::from_value(value).map(Self::Scalar),
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for ParamValue {
@@ -231,25 +212,6 @@ pub struct ScalarMap(pub Map<String, Value>);
 impl ScalarMap {
     pub fn into_value(self) -> Value {
         Value::Object(self.0)
-    }
-
-    /// The stored document's permitted entries, for the sandbox merge. Stored
-    /// values come from validated writes, so this only has to tolerate legacy
-    /// rows.
-    fn from_value(value: &Value) -> Self {
-        Self(
-            value
-                .as_object()
-                .map(|map| {
-                    map.iter()
-                        .filter_map(|(key, value)| {
-                            ParamValue::from_value(value)
-                                .map(|value| (key.clone(), value.into_value()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        )
     }
 }
 
@@ -289,14 +251,6 @@ impl SourcePayload {
                 .unwrap_or_else(empty_object),
         }
     }
-
-    fn from_row(source: &SourceRow, plaintext: Option<&str>) -> Self {
-        Self {
-            source_type: Some(source.source_type.clone()),
-            secret: plaintext.map(str::to_owned),
-            config: Some(ScalarMap::from_value(&source.config)),
-        }
-    }
 }
 
 /// One `pg_dsn` session setting.
@@ -324,22 +278,6 @@ impl SettingPayload {
         }
         Value::Object(setting)
     }
-
-    fn from_value(setting: &Value) -> Self {
-        let setting = setting.as_object();
-        Self {
-            name: setting
-                .and_then(|setting| setting.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            value: setting
-                .and_then(|setting| setting.get("value"))
-                .and_then(ParamValue::from_value),
-            value_from: setting
-                .and_then(|setting| setting.get("value_from"))
-                .map(ScalarMap::from_value),
-        }
-    }
 }
 
 /// One request rule. `http_methods`/`paths` keep the scalar values the model
@@ -366,23 +304,13 @@ impl RulePayload {
             paths: scalar_array(self.paths),
         }
     }
-
-    fn from_row(rule: &super::RuleRow) -> Self {
-        Self {
-            host: rule.host.clone(),
-            cidr: rule.cidr.clone(),
-            http_methods: Some(scalars_from_value(&rule.http_methods)),
-            paths: Some(scalars_from_value(&rule.paths)),
-        }
-    }
 }
 
 /// The typed `data` object of a secret create/update.
 ///
 /// Every field is an `Option<Option<T>>`: the outer `None` means the key was
-/// omitted and an explicit `null` is `Some(None)`. The sandbox update overlays a
-/// request on the stored document, so `reverse_merge`'s "an explicit null still
-/// replaces" has to stay observable.
+/// omitted and an explicit `null` is `Some(None)`, which clears the stored
+/// value.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SecretDocumentPayload {
     #[serde(default, deserialize_with = "explicit_null")]
@@ -436,113 +364,6 @@ impl SecretDocumentPayload {
         field.as_ref().and_then(Option::as_ref)
     }
 
-    /// `current_document` for a sandbox edit: the stored fields plus the stored
-    /// source's plaintext, ready for the request to be `reverse_merge`d over.
-    pub fn from_row(kind: SecretKind, row: &SecretRow, plaintext: Option<&str>) -> Self {
-        let mut payload = Self {
-            name: Some(row.name.clone()),
-            description: Some(row.description.clone()),
-            labels: Some(Some(ScalarMap::from_value(&row.labels))),
-            ..Self::default()
-        };
-        match (&row.fields, kind) {
-            (
-                SecretFields::Static {
-                    kind,
-                    inject_config,
-                    replace_config,
-                },
-                SecretKind::Static,
-            ) => {
-                payload.kind = Some(Some(kind.clone()));
-                payload.inject_config = Some(scalar_map_from(inject_config));
-                payload.replace_config = Some(scalar_map_from(replace_config));
-                payload.rules = Some(Some(row.rules.iter().map(RulePayload::from_row).collect()));
-            }
-            (
-                SecretFields::PgDsn {
-                    database,
-                    role,
-                    settings,
-                },
-                SecretKind::PgDsn,
-            ) => {
-                payload.database = Some(Some(database.clone()));
-                payload.role = Some(role.clone());
-                payload.settings = Some(Some(
-                    settings
-                        .as_array()
-                        .map(|settings| settings.iter().map(SettingPayload::from_value).collect())
-                        .unwrap_or_default(),
-                ));
-            }
-            (
-                SecretFields::GcpAuth {
-                    credentials_provider,
-                    subject,
-                    scopes,
-                },
-                SecretKind::GcpAuth,
-            ) => {
-                payload.credentials_provider = Some(scalar_map_from(credentials_provider));
-                payload.subject = Some(subject.clone());
-                payload.scopes = Some(Some(scalars_from_value(scopes)));
-                payload.rules = Some(Some(row.rules.iter().map(RulePayload::from_row).collect()));
-            }
-            (SecretFields::GcpIdToken { audience, header }, SecretKind::GcpIdToken) => {
-                payload.audience = Some(Some(audience.clone()));
-                payload.header = Some(header.clone());
-                payload.rules = Some(Some(row.rules.iter().map(RulePayload::from_row).collect()));
-            }
-            _ => {}
-        }
-        if let Some(source) = row.source() {
-            let source = Some(SourcePayload::from_row(source, plaintext));
-            match kind {
-                SecretKind::PgDsn => payload.dsn = Some(source),
-                SecretKind::GcpAuth | SecretKind::GcpIdToken => payload.keyfile = Some(source),
-                _ => payload.source = Some(source),
-            }
-        }
-        payload
-    }
-
-    /// Fields the request supplies replace the stored document's (`reverse_merge`
-    /// in `SandboxAdminSecretWrites#update`).
-    pub fn overlay(mut self, request: Self) -> Self {
-        macro_rules! replace {
-            ($($field:ident),* $(,)?) => {
-                $(
-                    if request.$field.is_some() {
-                        self.$field = request.$field;
-                    }
-                )*
-            };
-        }
-        replace!(
-            foreign_id,
-            name,
-            description,
-            labels,
-            kind,
-            inject_config,
-            replace_config,
-            database,
-            role,
-            settings,
-            credentials_provider,
-            subject,
-            scopes,
-            audience,
-            header,
-            source,
-            dsn,
-            keyfile,
-            rules,
-        );
-        self
-    }
-
     fn provided<T>(field: &Option<Option<T>>) -> Option<&T> {
         field.as_ref().and_then(Option::as_ref)
     }
@@ -571,17 +392,6 @@ fn optional_object(field: &Option<Option<ScalarMap>>) -> Value {
         .cloned()
         .map(ScalarMap::into_value)
         .unwrap_or(Value::Null)
-}
-
-fn scalar_map_from(value: &Value) -> Option<ScalarMap> {
-    (!value.is_null()).then(|| ScalarMap::from_value(value))
-}
-
-fn scalars_from_value(value: &Value) -> Vec<Scalar> {
-    value
-        .as_array()
-        .map(|values| values.iter().filter_map(Scalar::from_value).collect())
-        .unwrap_or_default()
 }
 
 fn empty_object() -> Value {
@@ -849,12 +659,7 @@ impl Document {
 
     /// The parent's validation errors. Cross-field rules and the nested-record
     /// presence checks stay here because they see the whole merged document.
-    pub fn parent_errors(
-        &self,
-        kind: SecretKind,
-        _existing: Option<&SecretRow>,
-        foreign_id_taken: bool,
-    ) -> Errors {
+    pub fn parent_errors(&self, kind: SecretKind, foreign_id_taken: bool) -> Errors {
         let has_provider = matches!(
             &self.fields,
             DocumentFields::GcpAuth {
@@ -1384,14 +1189,11 @@ fn inline_dsn_error(database: &str, source: &SourceDocument) -> Option<String> {
 /// authoritative), `Some(None)` when it has no dbname, and `Some(Some(db))`.
 fn parse_dsn(value: &str) -> Option<Option<String>> {
     let trimmed = value.trim();
-    if let Some(rest) = trimmed
-        .strip_prefix("postgres://")
-        .or_else(|| trimmed.strip_prefix("postgresql://"))
-    {
-        let path = rest.split(['?', '#']).next().unwrap_or(rest);
-        let database = path.split('/').nth(1).unwrap_or_default();
-        let database = percent_decode(database);
-        return Some((!database.is_empty()).then_some(database));
+    if trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://") {
+        let url = url::Url::parse(trimmed).ok()?;
+        let database = url.path().split('/').nth(1).unwrap_or_default();
+        let database = percent_encoding::percent_decode_str(database).decode_utf8_lossy();
+        return Some((!database.is_empty()).then(|| database.into_owned()));
     }
     let mut database = None;
     let mut chars = trimmed.chars().peekable();
@@ -1449,34 +1251,6 @@ fn parse_dsn(value: &str) -> Option<Option<String>> {
         }
     }
     Some(database)
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2]))
-        {
-            decoded.push(high * 16 + low);
-            index += 3;
-            continue;
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn source_type_rule(value: &Option<String>, _: &SourceValidation) -> garde::Result {
@@ -1781,4 +1555,113 @@ pub fn decrypt(value: &str) -> Result<String> {
 
 pub(crate) fn encrypt(value: &str) -> Result<String> {
     crate::areas::encryption::encrypt(value)
+}
+
+impl Document {
+    /// The shared write document: this kind's parent columns, the nested source
+    /// and rules, and the identity. The writer in [`super::write`] persists it.
+    pub(super) fn into_write(
+        self,
+        kind: SecretKind,
+        sources: Vec<super::write::SourceDraft>,
+    ) -> super::write::Document {
+        let mut parent = Map::new();
+        parent.insert("name".to_owned(), json!(self.name));
+        parent.insert("description".to_owned(), json!(self.description));
+        parent.insert("labels".to_owned(), self.labels);
+        match (&self.fields, kind) {
+            (
+                DocumentFields::Static {
+                    kind,
+                    inject_config,
+                    replace_config,
+                },
+                SecretKind::Static,
+            ) => {
+                parent.insert(
+                    "kind".to_owned(),
+                    json!(kind.clone().unwrap_or_else(|| "custom".to_owned())),
+                );
+                parent.insert("inject_config".to_owned(), inject_config.clone());
+                parent.insert("replace_config".to_owned(), replace_config.clone());
+            }
+            (
+                DocumentFields::PgDsn {
+                    database,
+                    role,
+                    settings,
+                },
+                SecretKind::PgDsn,
+            ) => {
+                parent.insert("database".to_owned(), json!(database));
+                parent.insert("role".to_owned(), json!(role));
+                parent.insert("settings".to_owned(), settings.clone());
+            }
+            (
+                DocumentFields::GcpAuth {
+                    credentials_provider,
+                    subject,
+                    scopes,
+                },
+                SecretKind::GcpAuth,
+            ) => {
+                parent.insert(
+                    "credentials_provider".to_owned(),
+                    credentials_provider.clone(),
+                );
+                parent.insert("subject".to_owned(), json!(subject));
+                parent.insert("scopes".to_owned(), scopes.clone());
+            }
+            (DocumentFields::GcpIdToken { audience, header }, SecretKind::GcpIdToken) => {
+                parent.insert("audience".to_owned(), json!(audience));
+                parent.insert("header".to_owned(), json!(header));
+            }
+            _ => {}
+        }
+        super::write::Document {
+            foreign_id: self.foreign_id,
+            parent,
+            sources,
+            rules: self.rules,
+            private_key_error: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dsn;
+
+    fn database(value: &str) -> Option<Option<String>> {
+        parse_dsn(value)
+    }
+
+    #[test]
+    fn a_dsn_names_its_database_or_none() {
+        assert_eq!(
+            database("postgres://user:pw@db.example.com:5432/app?sslmode=require"),
+            Some(Some("app".to_owned()))
+        );
+        assert_eq!(
+            database("postgresql://db.example.com/app"),
+            Some(Some("app".to_owned()))
+        );
+        // Percent escapes decode; a plus is a literal character in a path.
+        assert_eq!(
+            database("postgres://db.example.com/a%20b"),
+            Some(Some("a b".to_owned()))
+        );
+        assert_eq!(
+            database("postgres://db.example.com/a+b"),
+            Some(Some("a+b".to_owned()))
+        );
+        assert_eq!(database("postgres://db.example.com"), Some(None));
+        assert_eq!(
+            database("dbname=app host=db.example.com"),
+            Some(Some("app".to_owned()))
+        );
+        assert_eq!(database("host=db.example.com"), Some(None));
+        // Malformed DSNs are not an error: the proxy stays authoritative.
+        assert_eq!(database("dbname"), None);
+    }
 }

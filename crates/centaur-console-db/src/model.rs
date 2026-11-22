@@ -42,8 +42,6 @@ pub trait ConsoleModel: 'static {
     const NAME: &'static str;
     /// Whether the table has a unique `foreign_id` column.
     const HAS_FOREIGN_ID: bool = false;
-    /// Whether the table has a `labels` jsonb column.
-    const HAS_LABELS: bool = false;
     /// The soft-delete column, when deletes only scope the row out.
     const SOFT_DELETE_COLUMN: Option<&'static str> = None;
 
@@ -160,10 +158,10 @@ where
 
 /// The Console tables the areas address. The doc comment on each marker is the
 /// Rails model whose name a 404 renders; the arguments after it are
-/// `table, oid prefix, NAME, has foreign_id, has labels, soft-delete column`.
+/// `table, oid prefix, NAME, has foreign_id, soft-delete column`.
 macro_rules! console_models {
     ($($(#[$doc:meta])* $marker:ident: $table:literal, $prefix:literal, $name:literal,
-        $foreign_id:literal, $labels:literal, $soft:expr;)*) => {
+        $foreign_id:literal, $soft:expr;)*) => {
         $(
             $(#[$doc])*
             #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -174,7 +172,6 @@ macro_rules! console_models {
                 const OID_PREFIX: &'static str = $prefix;
                 const NAME: &'static str = $name;
                 const HAS_FOREIGN_ID: bool = $foreign_id;
-                const HAS_LABELS: bool = $labels;
                 const SOFT_DELETE_COLUMN: Option<&'static str> = $soft;
             }
         )*
@@ -183,93 +180,68 @@ macro_rules! console_models {
 
 console_models! {
     /// `Principal`
-    Principal: "principals", "prn", "Principal", true, true, None;
+    Principal: "principals", "prn", "Principal", true, None;
     /// `Role`
-    Role: "roles", "role", "Role", true, true, None;
+    Role: "roles", "role", "Role", true, None;
     /// `Grant`
-    Grant: "grants", "grant", "Grant", false, false, None;
+    Grant: "grants", "grant", "Grant", false, None;
     /// `PrincipalRole` (nested under a principal and a role)
-    PrincipalRole: "principal_roles", "prole", "PrincipalRole", false, false, None;
+    PrincipalRole: "principal_roles", "prole", "PrincipalRole", false, None;
     /// `SecretSource` (nested under a secret)
-    SecretSource: "secret_sources", "scs", "SecretSource", false, false, None;
+    SecretSource: "secret_sources", "scs", "SecretSource", false, None;
     /// `RequestRule` (nested under a secret)
-    RequestRule: "request_rules", "rqr", "RequestRule", false, false, None;
+    RequestRule: "request_rules", "rqr", "RequestRule", false, None;
     /// `StaticSecret`
-    StaticSecret: "static_secrets", "ssr", "StaticSecret", true, true, None;
+    StaticSecret: "static_secrets", "ssr", "StaticSecret", true, None;
     /// `GcpAuthSecret`
-    GcpAuthSecret: "gcp_auth_secrets", "gas", "GcpAuthSecret", true, true, None;
+    GcpAuthSecret: "gcp_auth_secrets", "gas", "GcpAuthSecret", true, None;
     /// `GcpIdTokenSecret`
-    GcpIdTokenSecret: "gcp_id_token_secrets", "gid", "GcpIdTokenSecret", true, true, None;
+    GcpIdTokenSecret: "gcp_id_token_secrets", "gid", "GcpIdTokenSecret", true, None;
     /// `AwsAuthSecret`
-    AwsAuthSecret: "aws_auth_secrets", "aas", "AwsAuthSecret", true, true, None;
+    AwsAuthSecret: "aws_auth_secrets", "aas", "AwsAuthSecret", true, None;
     /// `OauthTokenSecret`
-    OauthTokenSecret: "oauth_token_secrets", "ots", "OauthTokenSecret", true, true, None;
+    OauthTokenSecret: "oauth_token_secrets", "ots", "OauthTokenSecret", true, None;
     /// `PgDsnSecret`
-    PgDsnSecret: "pg_dsn_secrets", "pgs", "PgDsnSecret", true, true, None;
+    PgDsnSecret: "pg_dsn_secrets", "pgs", "PgDsnSecret", true, None;
     /// `HmacSecret`
-    HmacSecret: "hmac_secrets", "hms", "HmacSecret", true, true, None;
+    HmacSecret: "hmac_secrets", "hms", "HmacSecret", true, None;
     /// `SshKeySecret` (its owner is unique, so it is found by owner too)
-    SshKeySecret: "ssh_key_secrets", "sks", "SshKeySecret", true, true, None;
+    SshKeySecret: "ssh_key_secrets", "sks", "SshKeySecret", true, None;
     /// `OauthApp`
-    OauthApp: "oauth_apps", "oap", "OauthApp", false, true, None;
+    OauthApp: "oauth_apps", "oap", "OauthApp", false, None;
     /// `BrokerCredential`
-    BrokerCredential: "broker_credentials", "bcr", "BrokerCredential", true, true, None;
+    BrokerCredential: "broker_credentials", "bcr", "BrokerCredential", true, None;
     /// `McpOauthClient`
-    McpOauthClient: "mcp_oauth_clients", "moc", "McpOauthClient", false, false, None;
+    McpOauthClient: "mcp_oauth_clients", "moc", "McpOauthClient", false, None;
     /// `McpOauthAuthorizationCode` (no opaque id of its own)
-    McpOauthAuthorizationCode: "mcp_oauth_authorization_codes", "moa", "McpOauthAuthorizationCode", false, false, None;
+    McpOauthAuthorizationCode: "mcp_oauth_authorization_codes", "moa", "McpOauthAuthorizationCode", false, None;
     /// `McpOauthRefreshToken`
-    McpOauthRefreshToken: "mcp_oauth_refresh_tokens", "mor", "McpOauthRefreshToken", false, false, None;
+    McpOauthRefreshToken: "mcp_oauth_refresh_tokens", "mor", "McpOauthRefreshToken", false, None;
     /// `User`
-    User: "users", "usr", "User", false, false, None;
+    User: "users", "usr", "User", false, None;
     /// `UserIdentity` (nested under a user)
-    UserIdentity: "user_identities", "usid", "UserIdentity", false, false, None;
+    UserIdentity: "user_identities", "usid", "UserIdentity", false, None;
     /// `ApiClient`
-    ApiClient: "api_clients", "acl", "ApiClient", false, false, None;
+    ApiClient: "api_clients", "acl", "ApiClient", false, None;
     /// `ApiClientPrincipal` (nested under a client)
-    ApiClientPrincipal: "api_client_principals", "aclp", "ApiClientPrincipal", false, false, None;
+    ApiClientPrincipal: "api_client_principals", "aclp", "ApiClientPrincipal", false, None;
     /// `ApiKey`
-    ApiKey: "api_keys", "ak", "ApiKey", false, false, Some("deleted_at");
+    ApiKey: "api_keys", "ak", "ApiKey", false, Some("deleted_at");
     /// `Proxy`
-    Proxy: "proxies", "prx", "Proxy", false, true, None;
+    Proxy: "proxies", "prx", "Proxy", false, None;
     /// `SystemSetting` (a singleton, no opaque id)
-    SystemSetting: "system_settings", "", "SystemSetting", false, false, None;
+    SystemSetting: "system_settings", "", "SystemSetting", false, None;
     /// `ScheduledTask`
-    ScheduledTask: "scheduled_tasks", "tsk", "ScheduledTask", false, false, None;
+    ScheduledTask: "scheduled_tasks", "tsk", "ScheduledTask", false, None;
     /// `Skill`
-    Skill: "skills", "skl", "Skill", false, false, None;
-    /// `SkillEditor` (nested under a skill; no opaque id)
-    SkillEditor: "skill_editors", "", "SkillEditor", false, false, None;
-    /// `SlackBotChannel` (no opaque id)
-    SlackBotChannel: "slack_bot_channels", "", "SlackBotChannel", false, false, None;
+    Skill: "skills", "skl", "Skill", false, None;
     /// `SlackChannelPermission`
-    SlackChannelPermission: "slack_channel_permissions", "scp", "SlackChannelPermission", false, false, None;
-    /// `PrincipalSyncConfigSnapshot` (no opaque id)
-    PrincipalSyncConfigSnapshot: "principal_sync_config_snapshots", "", "PrincipalSyncConfigSnapshot", false, false, None;
+    SlackChannelPermission: "slack_channel_permissions", "scp", "SlackChannelPermission", false, None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Clippy rejects both `assert!`/`assert_eq!` on a constant, so the flags
-    /// are asserted through a call.
-    fn assert_flag(value: bool) {
-        assert!(value);
-    }
-
-    #[test]
-    fn descriptors_match_the_schema() {
-        assert_eq!(Principal::TABLE, "principals");
-        assert_eq!(Principal::OID_PREFIX, "prn");
-        assert_eq!(Principal::NAME, "Principal");
-        assert_flag(Principal::HAS_FOREIGN_ID);
-        assert_flag(Principal::HAS_LABELS);
-        assert_eq!(Principal::SOFT_DELETE_COLUMN, None);
-        assert_eq!(ApiKey::SOFT_DELETE_COLUMN, Some("deleted_at"));
-        assert_flag(!ApiKey::HAS_FOREIGN_ID);
-        assert_eq!(StaticSecret::TABLE, "static_secrets");
-    }
 
     #[test]
     fn not_found_is_the_plain_model_name() {

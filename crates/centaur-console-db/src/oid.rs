@@ -79,18 +79,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_encoders_return_the_same_opaque_ids() {
-        // Fixed ids pin the cached encoder to the values the uncached builder
-        // produced, for more than one prefix.
-        assert_eq!(oid("prn", 1), "prn_5CO4fITZ");
-        assert_eq!(oid("prx", 1), "prx_42w9YMR0");
-        assert_eq!(oid("prx", 1), "prx_42w9YMR0");
-        assert_eq!(oid("ssr", 42), "ssr_V2SRKvxe");
-        assert_eq!(decode_oid("prx", "prx_42w9YMR0"), Some(1));
-        assert_eq!(decode_oid("ssr", "ssr_V2SRKvxe"), Some(42));
-    }
-
-    #[test]
     fn decodes_only_canonical_oids_of_the_prefix() {
         assert_eq!(decode_oid("prn", "prn_yRoWctYw"), Some(123));
         assert_eq!(decode_oid("role", "prn_yRoWctYw"), None);

@@ -37,6 +37,7 @@ const CLOCK_SKEW_SECONDS: i64 = 300;
 /// the derived key.
 #[derive(Clone)]
 pub(crate) struct SessionCookieConfig {
+    secret: String,
     key: [u8; 32],
     secure: bool,
     max_age_seconds: i64,
@@ -55,57 +56,29 @@ impl fmt::Debug for SessionCookieConfig {
 
 impl SessionCookieConfig {
     pub(crate) fn new(secret: &str, secure: bool) -> Self {
-        let mut key = [0; 32];
-        pbkdf2_hmac::<Sha256>(
-            secret.as_bytes(),
-            KEY_DERIVATION_SALT,
-            KEY_DERIVATION_ITERATIONS,
-            &mut key,
-        );
+        let key = derive_key(secret, KEY_DERIVATION_SALT);
         Self {
+            secret: secret.to_owned(),
             key,
             secure,
             max_age_seconds: SESSION_COOKIE_MAX_AGE.as_secs() as i64,
         }
     }
 
-    pub(crate) fn cookie_name(&self) -> &'static str {
-        SESSION_COOKIE_NAME
+    /// Derives another key from the configured secret, with its own label.
+    pub(crate) fn derive_key(&self, label: &[u8]) -> [u8; 32] {
+        derive_key(&self.secret, label)
     }
 
     /// Decodes the last cookie with the Console name (Rack's duplicate-cookie
     /// behavior), if it is authentic and still inside its 30-day lifetime.
     pub(crate) fn session_from_headers(&self, headers: &HeaderMap) -> Option<ConsoleSession> {
-        let value = session_cookie(headers, SESSION_COOKIE_NAME)?;
+        let value = cookie_value(headers, SESSION_COOKIE_NAME)?;
         self.decode(value)
     }
 
     pub(crate) fn decode(&self, value: &str) -> Option<ConsoleSession> {
-        let mut parts = value.split('.');
-        let (Some(version), Some(nonce), Some(ciphertext), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return None;
-        };
-        if version != VERSION_PREFIX {
-            return None;
-        }
-        let nonce = URL_SAFE_NO_PAD.decode(nonce).ok()?;
-        if nonce.len() != 12 {
-            return None;
-        }
-        let ciphertext = URL_SAFE_NO_PAD.decode(ciphertext).ok()?;
-        let nonce = <&Nonce<U12>>::try_from(nonce.as_slice()).ok()?;
-        let plaintext = Aes256Gcm::new_from_slice(&self.key)
-            .ok()?
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &ciphertext,
-                    aad: AEAD_AAD,
-                },
-            )
-            .ok()?;
+        let plaintext = open(&self.key, AEAD_AAD, value)?;
         let payload: SessionPayload = serde_json::from_slice(&plaintext).ok()?;
         if payload.v != VERSION {
             return None;
@@ -135,17 +108,6 @@ impl SessionCookieConfig {
         HeaderValue::from_str(&cookie).ok()
     }
 
-    pub(crate) fn clear_cookie_header(&self) -> HeaderValue {
-        let mut cookie = format!(
-            "{SESSION_COOKIE_NAME}=; path=/; HttpOnly; SameSite=Lax; Max-Age=0; \
-             Expires=Thu, 01 Jan 1970 00:00:00 GMT"
-        );
-        if self.secure {
-            cookie.push_str("; Secure");
-        }
-        HeaderValue::from_str(&cookie).expect("cookie header is ASCII")
-    }
-
     pub(crate) fn encode(&self, session: &ConsoleSession) -> Option<String> {
         self.encode_payload(&SessionPayload {
             v: VERSION,
@@ -157,28 +119,7 @@ impl SessionCookieConfig {
 
     fn encode_payload(&self, payload: &SessionPayload) -> Option<String> {
         let plaintext = serde_json::to_vec(payload).ok()?;
-        self.seal(&plaintext)
-    }
-
-    fn seal(&self, plaintext: &[u8]) -> Option<String> {
-        let mut nonce = [0; 12];
-        getrandom::fill(&mut nonce).ok()?;
-        let nonce = Nonce::<U12>::from(nonce);
-        let ciphertext = Aes256Gcm::new_from_slice(&self.key)
-            .ok()?
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext,
-                    aad: AEAD_AAD,
-                },
-            )
-            .ok()?;
-        Some(format!(
-            "{VERSION_PREFIX}.{}.{}",
-            URL_SAFE_NO_PAD.encode(nonce),
-            URL_SAFE_NO_PAD.encode(ciphertext)
-        ))
+        seal(&self.key, AEAD_AAD, &plaintext)
     }
 
     #[cfg(test)]
@@ -186,13 +127,65 @@ impl SessionCookieConfig {
         self.max_age_seconds = seconds;
         self
     }
+}
 
-    /// Encrypts an arbitrary JSON payload, for the test that proves a cookie
-    /// carrying the never-shipped CSRF field is rejected.
-    #[cfg(test)]
-    fn encode_json(&self, payload: &serde_json::Value) -> Option<String> {
-        self.seal(&serde_json::to_vec(payload).ok()?)
+fn derive_key(secret: &str, label: &[u8]) -> [u8; 32] {
+    let mut key = [0; 32];
+    pbkdf2_hmac::<Sha256>(
+        secret.as_bytes(),
+        label,
+        KEY_DERIVATION_ITERATIONS,
+        &mut key,
+    );
+    key
+}
+
+/// Seals bytes as `v1.<base64url nonce>.<base64url ciphertext+tag>`.
+pub(crate) fn seal(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Option<String> {
+    let mut nonce = [0; 12];
+    getrandom::fill(&mut nonce).ok()?;
+    let nonce = Nonce::<U12>::from(nonce);
+    let ciphertext = Aes256Gcm::new_from_slice(key)
+        .ok()?
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .ok()?;
+    Some(format!(
+        "{VERSION_PREFIX}.{}.{}",
+        URL_SAFE_NO_PAD.encode(nonce),
+        URL_SAFE_NO_PAD.encode(ciphertext)
+    ))
+}
+
+/// Opens a value produced by [`seal`].
+pub(crate) fn open(key: &[u8; 32], aad: &[u8], value: &str) -> Option<Vec<u8>> {
+    let mut parts = value.split('.');
+    let (Some(version), Some(nonce), Some(ciphertext), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if version != VERSION_PREFIX {
+        return None;
     }
+    let nonce = URL_SAFE_NO_PAD.decode(nonce).ok()?;
+    let nonce = <&Nonce<U12>>::try_from(nonce.as_slice()).ok()?;
+    let ciphertext = URL_SAFE_NO_PAD.decode(ciphertext).ok()?;
+    Aes256Gcm::new_from_slice(key)
+        .ok()?
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &ciphertext,
+                aad,
+            },
+        )
+        .ok()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -244,10 +237,6 @@ impl ConsoleSession {
         self.return_to = Some(return_to.into());
     }
 
-    pub(crate) fn clear_return_to(&mut self) {
-        self.return_to = None;
-    }
-
     #[cfg(test)]
     pub(crate) fn with_issued_at(mut self, issued_at: i64) -> Self {
         self.issued_at = issued_at;
@@ -255,7 +244,7 @@ impl ConsoleSession {
     }
 }
 
-fn session_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     // Rack parses duplicate cookie names into a hash, so the last one wins.
     headers
         .get_all(COOKIE)
@@ -382,13 +371,6 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(!insecure.contains("Secure"));
-        assert!(
-            config()
-                .clear_cookie_header()
-                .to_str()
-                .unwrap()
-                .contains("Max-Age=0")
-        );
     }
 
     #[test]
@@ -404,22 +386,6 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(config.session_from_headers(&headers), Some(session));
-    }
-
-    #[test]
-    fn console_session_cookie_rejects_the_removed_csrf_field() {
-        let config = config();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        let legacy = config
-            .encode_json(&serde_json::json!({
-                "v": 1,
-                "user_id": 42,
-                "csrf": "a-long-obsolete-csrf-secret",
-                "issued_at": now,
-            }))
-            .unwrap();
-        // The never-shipped variant is not decoded tolerantly.
-        assert_eq!(config.decode(&legacy), None);
     }
 
     #[test]

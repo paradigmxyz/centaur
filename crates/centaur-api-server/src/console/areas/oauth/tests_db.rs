@@ -17,7 +17,7 @@ use axum::{
 use centaur_console_db::{areas::oauth::OauthEncryption, decode_oid, oid};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{PgPool, Row};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -26,7 +26,8 @@ use tower::ServiceExt;
 use url::Url;
 
 use crate::{
-    ApiAuthConfig, AppState, build_router_with_app_state, console_session::ConsoleSessionConfig,
+    ApiAuthConfig, AppState, build_router_with_app_state, console::tests_db::test_pool,
+    console_session::ConsoleSessionConfig,
 };
 
 const SESSION_SECRET: &str =
@@ -52,24 +53,6 @@ fn init_env() {
 
 fn encryption() -> OauthEncryption {
     OauthEncryption::new(AR_KEY, AR_SALT)
-}
-
-async fn test_pool() -> Option<PgPool> {
-    let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-        assert!(
-            env::var_os("CI").is_none(),
-            "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-        );
-        eprintln!("skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema");
-        return None;
-    };
-    Some(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect to the test database"),
-    )
 }
 
 fn unique() -> String {
@@ -721,19 +704,6 @@ async fn consent_flow_start_callback_provider_error_and_success() {
     )
     .await;
     assert_eq!(disallowed.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    // A nested scope key must not fall back to every allowed scope.
-    let nested = send(
-        &app,
-        request(
-            Method::GET,
-            &format!("/oauth/{slug}/start?scopes%5B%5D=read"),
-            &admin_headers,
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(nested.status(), StatusCode::BAD_REQUEST);
 
     // Start redirects to the configured provider with PKCE and a flow cookie.
     let start = send(

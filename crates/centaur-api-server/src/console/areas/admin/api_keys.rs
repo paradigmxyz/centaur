@@ -20,15 +20,16 @@ use centaur_console_db::areas::admin::{
 use centaur_console_db::model::{ApiKey as ApiKeyModel, ConsoleModel};
 use centaur_console_db::validation::{ValidateFields, rules};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use time::PrimitiveDateTime;
 
-use super::common::{self, AdminError, json_created, json_ok, no_content};
+use super::common::{self, json_ok};
 use crate::{
     AppState,
     console::{
         guard::{BearerApiKey, BearerUser, GuardedRoutes},
-        http::{ConsoleError, ListParams, ListSource, bind, list},
+        http::{
+            ConsoleError, ListParams, ListSource, bind, created_data, json_data, list, no_content,
+        },
         request::ConsoleData,
     },
 };
@@ -76,11 +77,6 @@ impl From<&ApiKeyRow> for ApiKeyPayload {
     }
 }
 
-#[derive(Serialize)]
-struct ApiKeyPayloadEnvelope {
-    data: ApiKeyPayload,
-}
-
 fn payload(key: &ApiKeyRow) -> ApiKeyPayload {
     ApiKeyPayload::from(key)
 }
@@ -95,7 +91,7 @@ async fn index(
     State(state): State<AppState>,
     user: BearerUser,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let params = ListParams::from_query(&query)?;
     let pool = common::pool(&state)?;
     let body = list::<ApiKeyRow, ApiKeyPayload, _, _>(
@@ -113,28 +109,26 @@ async fn show(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: BearerUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let key = load(&pool, user.0.id, &id).await?;
-    Ok(json_ok(ApiKeyPayloadEnvelope {
-        data: payload(&key),
-    }))
+    Ok(json_data(payload(&key)))
 }
 
 async fn create(
     State(state): State<AppState>,
     user: BearerUser,
     ConsoleData(data): ConsoleData<CreateApiKey>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     data.validate_fields()?;
     let name = data.name.unwrap_or_default();
-    let token = issue_token();
-    let key = create_api_key(&pool, user.0.id, &name, &token_digest(&token)).await?;
+    let token = common::issue_token(TOKEN_PREFIX);
+    let key = create_api_key(&pool, user.0.id, &name, &common::token_digest(&token)).await?;
     // The freshly minted token is the only field the listing never renders.
     let mut payload = payload(&key);
     payload.token = Some(token);
-    Ok(json_created(ApiKeyPayloadEnvelope { data: payload }))
+    Ok(created_data(payload))
 }
 
 async fn destroy(
@@ -142,35 +136,24 @@ async fn destroy(
     Path(id): Path<String>,
     api_key: BearerApiKey,
     user: BearerUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let key = load(&pool, user.0.id, &id).await?;
     // Console compares against the key this request authenticated with; the
     // bearer guard attaches that key's id.
     if api_key.0 == key.id {
-        return Err(
-            ConsoleError::unprocessable("cannot revoke the API key used for this request").into(),
-        );
+        return Err(ConsoleError::unprocessable(
+            "cannot revoke the API key used for this request",
+        ));
     }
     soft_delete_api_key(&pool, key.id).await?;
     Ok(no_content())
 }
 
-async fn load(pool: &sqlx::PgPool, user_id: i64, oid: &str) -> Result<ApiKeyRow, AdminError> {
-    let id = ApiKeyModel::decode_oid(oid).ok_or_else(ApiKeyModel::not_found)?;
-    Ok(api_key(pool, user_id, id)
+async fn load(pool: &sqlx::PgPool, user_id: i64, oid: &str) -> Result<ApiKeyRow, ConsoleError> {
+    Ok(api_key(pool, user_id, common::oid::<ApiKeyModel>(oid)?)
         .await?
         .ok_or_else(ApiKeyModel::not_found)?)
-}
-
-fn issue_token() -> String {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("operating system randomness");
-    format!("{TOKEN_PREFIX}{}", hex::encode(bytes))
-}
-
-fn token_digest(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 #[cfg(test)]
@@ -178,29 +161,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn issued_tokens_have_the_console_shape() {
-        let token = issue_token();
-        assert!(token.starts_with("iak_"));
-        assert_eq!(token.len(), 4 + 64);
-        assert!(
-            token[4..]
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
-        );
-        assert_ne!(issue_token(), issue_token());
+    fn issued_tokens_use_the_api_key_prefix() {
+        assert_eq!(TOKEN_PREFIX, "iak_");
+        assert!(common::issue_token(TOKEN_PREFIX).starts_with(TOKEN_PREFIX));
     }
 
     #[test]
     fn a_key_name_is_required() {
-        let rejected = |body: serde_json::Value| {
-            let create: CreateApiKey = serde_json::from_value(body).expect("a typed request");
-            create.validate_fields().err().map(|errors| {
-                errors
-                    .entries()
-                    .map(|(attribute, _)| attribute.to_owned())
-                    .collect::<Vec<_>>()
-            })
-        };
+        let rejected = |body: serde_json::Value| common::detail_keys::<CreateApiKey>(body);
         assert_eq!(
             rejected(serde_json::json!({})),
             Some(vec!["name".to_owned()])

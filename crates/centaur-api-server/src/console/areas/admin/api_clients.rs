@@ -24,16 +24,17 @@ use centaur_console_db::model::{
 };
 use centaur_console_db::validation::{ValidateFields, rules};
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 use time::PrimitiveDateTime;
 
-use super::common::{
-    self, AdminError, json_created, json_ok, no_content, no_store, nullable_field,
-};
+use super::common::{self, json_ok, no_store, nullable_field};
 use crate::{
     AppState,
     console::guard::GuardedRoutes,
-    console::{http::ConsoleError, request::ConsoleBody, request::ConsoleData},
+    console::{
+        http::{ConsoleError, created_data, json_data, no_content},
+        request::ConsoleBody,
+        request::ConsoleData,
+    },
 };
 
 /// `ApiClient::SCOPES`.
@@ -191,16 +192,6 @@ struct ApiClientsMeta {
     total: usize,
 }
 
-#[derive(Serialize)]
-struct ApiClientPayloadEnvelope {
-    data: ApiClientPayload,
-}
-
-#[derive(Serialize)]
-struct LinkPayloadEnvelope {
-    data: LinkPayload,
-}
-
 pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     if !crate::console::api_clients_enabled() {
         return routes;
@@ -222,7 +213,10 @@ pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
         )
 }
 
-async fn index(State(state): State<AppState>, _user: ConsoleUser) -> Result<Response, AdminError> {
+async fn index(
+    State(state): State<AppState>,
+    _user: ConsoleUser,
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let clients = api_clients(&pool).await?;
     Ok(json_ok(ApiClientsPayload {
@@ -237,19 +231,17 @@ async fn show(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
-    Ok(json_ok(ApiClientPayloadEnvelope {
-        data: payload(&client, None),
-    }))
+    Ok(json_data(payload(&client, None)))
 }
 
 async fn create(
     State(state): State<AppState>,
     user: ConsoleUser,
     ConsoleData(data): ConsoleData<CreateApiClient>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     // Console checks the principal reference before the record, so a bad
     // reference is reported alone.
@@ -261,27 +253,24 @@ async fn create(
         .to_owned();
     let principal = find_api_client_principal(&pool, &principal_ref).await?;
     if !principal_ref.is_empty() && principal.is_none() {
-        return Err(common::base_error(format!(
-            "No principal matches \"{principal_ref}\"."
-        )));
+        return Err(common::field_error(
+            centaur_console_db::FieldErrors::BASE,
+            format!("No principal matches \"{principal_ref}\"."),
+        ));
     }
     data.validate_fields()?;
-    let secret = issue_secret();
+    let secret = common::issue_token(SECRET_PREFIX);
     let id = create_api_client(
         &pool,
         data.name.as_deref().unwrap_or_default(),
         data.scopes.as_slice(),
         user.id,
-        &secret_digest(&secret),
+        &common::token_digest(&secret),
         principal.map(|principal| principal.id),
     )
     .await?;
-    let client = api_client(&pool, id).await?.ok_or_else(|| {
-        ConsoleError::internal(format!("api client {id} vanished after its insert"))
-    })?;
-    Ok(no_store(json_created(ApiClientPayloadEnvelope {
-        data: payload(&client, Some(&secret)),
-    })))
+    let client = reload(&pool, id).await?;
+    Ok(no_store(created_data(payload(&client, Some(&secret)))))
 }
 
 async fn update(
@@ -289,7 +278,7 @@ async fn update(
     Path(id): Path<String>,
     _user: ConsoleUser,
     ConsoleData(data): ConsoleData<UpdateApiClient>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     data.validate_fields()?;
@@ -308,19 +297,15 @@ async fn update(
             .unwrap_or(&client.client.scopes);
         update_api_client(&pool, client.client.id, name, scopes).await?;
     }
-    let client = api_client(&pool, client.client.id)
-        .await?
-        .ok_or_else(|| ConsoleError::internal("api client vanished after its update"))?;
-    Ok(json_ok(ApiClientPayloadEnvelope {
-        data: payload(&client, None),
-    }))
+    let client = reload(&pool, client.client.id).await?;
+    Ok(json_data(payload(&client, None)))
 }
 
 async fn destroy(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     delete_api_client(&pool, client.client.id).await?;
@@ -331,24 +316,20 @@ async fn rotate_secret(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
-    let secret = issue_secret();
-    rotate_api_client_secret(&pool, client.client.id, &secret_digest(&secret)).await?;
-    let client = api_client(&pool, client.client.id)
-        .await?
-        .ok_or_else(|| ConsoleError::internal("api client vanished after its rotation"))?;
-    Ok(no_store(json_ok(ApiClientPayloadEnvelope {
-        data: payload(&client, Some(&secret)),
-    })))
+    let secret = common::issue_token(SECRET_PREFIX);
+    rotate_api_client_secret(&pool, client.client.id, &common::token_digest(&secret)).await?;
+    let client = reload(&pool, client.client.id).await?;
+    Ok(no_store(json_data(payload(&client, Some(&secret)))))
 }
 
 async fn disable(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     if !client.client.disabled() {
@@ -361,7 +342,7 @@ async fn enable(
     State(state): State<AppState>,
     Path(id): Path<String>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     set_api_client_disabled(&pool, client.client.id, false).await?;
@@ -373,7 +354,7 @@ async fn attach_principal(
     Path(id): Path<String>,
     _user: ConsoleUser,
     ConsoleBody(body): ConsoleBody<AttachPrincipal>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     let principal_ref = body
@@ -384,21 +365,20 @@ async fn attach_principal(
         .trim()
         .to_owned();
     let Some(principal) = find_api_client_principal(&pool, &principal_ref).await? else {
-        return Err(common::base_error(
+        return Err(common::field_error(
+            centaur_console_db::FieldErrors::BASE,
             "No principal matches that OID or foreign ID.",
         ));
     };
     let link = attach_api_client_principal(&pool, client.client.id, principal.id).await?;
-    Ok(json_created(LinkPayloadEnvelope {
-        data: link_payload(&link),
-    }))
+    Ok(created_data(link_payload(&link)))
 }
 
 async fn detach_principal(
     State(state): State<AppState>,
     Path((id, link_id)): Path<(String, String)>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     let link = load_link(&pool, client.client.id, &link_id).await?;
@@ -410,21 +390,18 @@ async fn make_default_principal(
     State(state): State<AppState>,
     Path((id, link_id)): Path<(String, String)>,
     _user: ConsoleUser,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     let pool = common::pool(&state)?;
     let client = load(&pool, &id).await?;
     let link = load_link(&pool, client.client.id, &link_id).await?;
     let link = make_default_api_client_principal(&pool, client.client.id, link.id)
         .await?
         .ok_or_else(|| ConsoleError::internal("api client link vanished after its update"))?;
-    Ok(json_ok(LinkPayloadEnvelope {
-        data: link_payload(&link),
-    }))
+    Ok(json_data(link_payload(&link)))
 }
 
-async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<ApiClientWithLinks, AdminError> {
-    let id = ApiClientModel::decode_oid(oid).ok_or_else(ApiClientModel::not_found)?;
-    Ok(api_client(pool, id)
+async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<ApiClientWithLinks, ConsoleError> {
+    Ok(api_client(pool, common::oid::<ApiClientModel>(oid)?)
         .await?
         .ok_or_else(ApiClientModel::not_found)?)
 }
@@ -433,31 +410,25 @@ async fn load_link(
     pool: &sqlx::PgPool,
     api_client_id: i64,
     oid: &str,
-) -> Result<ApiClientLink, AdminError> {
-    let id =
-        ApiClientPrincipalModel::decode_oid(oid).ok_or_else(ApiClientPrincipalModel::not_found)?;
-    Ok(find_api_client_link(pool, api_client_id, id)
+) -> Result<ApiClientLink, ConsoleError> {
+    Ok(find_api_client_link(
+        pool,
+        api_client_id,
+        common::oid::<ApiClientPrincipalModel>(oid)?,
+    )
+    .await?
+    .ok_or_else(ApiClientPrincipalModel::not_found)?)
+}
+
+/// The reloaded client after a write, as Rails' `render_api_client` does.
+async fn reload(pool: &sqlx::PgPool, id: i64) -> Result<ApiClientWithLinks, ConsoleError> {
+    api_client(pool, id)
         .await?
-        .ok_or_else(ApiClientPrincipalModel::not_found)?)
+        .ok_or_else(|| ConsoleError::internal(format!("api client {id} vanished after its update")))
 }
 
-async fn render(pool: &sqlx::PgPool, id: i64) -> Result<Response, AdminError> {
-    let client = api_client(pool, id)
-        .await?
-        .ok_or_else(|| ConsoleError::internal("api client vanished after its update"))?;
-    Ok(json_ok(ApiClientPayloadEnvelope {
-        data: payload(&client, None),
-    }))
-}
-
-fn issue_secret() -> String {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("operating system randomness");
-    format!("{SECRET_PREFIX}{}", hex::encode(bytes))
-}
-
-fn secret_digest(secret: &str) -> String {
-    hex::encode(Sha256::digest(secret.as_bytes()))
+async fn render(pool: &sqlx::PgPool, id: i64) -> Result<Response, ConsoleError> {
+    Ok(json_data(payload(&reload(pool, id).await?, None)))
 }
 
 fn payload(client: &ApiClientWithLinks, secret: Option<&str>) -> ApiClientPayload {
@@ -498,36 +469,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn issued_secrets_have_the_console_shape() {
-        let secret = issue_secret();
-        assert!(secret.starts_with("acs_"));
-        assert_eq!(secret.len(), 4 + 64);
-        assert!(
-            secret[4..]
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        );
-        assert_eq!(secret_digest(&secret).len(), 64);
-        assert_ne!(issue_secret(), issue_secret());
+    fn issued_secrets_use_the_api_client_prefix() {
+        assert_eq!(SECRET_PREFIX, "acs_");
+        assert!(common::issue_token(SECRET_PREFIX).starts_with(SECRET_PREFIX));
     }
 
     /// The `details` keys a create request is rejected under, or `None` when it
-    /// passes, sorted so a test does not pin report order.
+    /// passes.
     fn rejected(body: serde_json::Value) -> Option<Vec<String>> {
-        let create: CreateApiClient = serde_json::from_value(body).expect("a typed request");
-        create
-            .validate_fields()
-            .err()
-            .map(|errors| rejected_keys(&errors))
-    }
-
-    fn rejected_keys(errors: &centaur_console_db::FieldErrors) -> Vec<String> {
-        let mut keys: Vec<String> = errors
-            .entries()
-            .map(|(attribute, _)| attribute.to_owned())
-            .collect();
-        keys.sort();
-        keys
+        common::detail_keys::<CreateApiClient>(body)
     }
 
     #[test]
@@ -569,13 +519,7 @@ mod tests {
 
     #[test]
     fn a_patch_leaves_an_absent_name_alone_and_rejects_null() {
-        let patch = |body: serde_json::Value| {
-            let update: UpdateApiClient = serde_json::from_value(body).expect("a typed patch");
-            update
-                .validate_fields()
-                .err()
-                .map(|errors| rejected_keys(&errors))
-        };
+        let patch = |body: serde_json::Value| common::detail_keys::<UpdateApiClient>(body);
         assert_eq!(patch(json!({})), None);
         assert_eq!(
             patch(json!({ "name": null })),

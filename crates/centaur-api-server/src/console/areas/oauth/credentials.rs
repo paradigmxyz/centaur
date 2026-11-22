@@ -16,7 +16,8 @@ use axum::{
 use centaur_console_db::{
     ConsoleUser, FieldErrors,
     areas::oauth::{
-        BrokerCredential, BrokerCredentialWrite, NewBrokerCredential, OauthEncryption,
+        BrokerCredential, BrokerCredentialWrite, DEFAULT_EARLY_REFRESH_FRACTION,
+        DEFAULT_EARLY_REFRESH_SLACK_SECONDS, DEFAULT_MAX_REFRESH_INTERVAL_SECONDS, OauthEncryption,
         PREQIN_TOKEN_ENDPOINT, URL_SAFE_MESSAGE, credential_referenced_by_secret_source,
         delete_broker_credential, insert_broker_credential, oauth_app_for_credential,
         update_broker_credential, url_safe, wrapping_secret_for_credential,
@@ -30,20 +31,17 @@ use centaur_console_db::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
-use sqlx::types::Json as SqlJson;
 use time::PrimitiveDateTime;
 
 use super::{
-    Patch, blank, config_failure, created, credential_by_oid, document, is_oid, pool, present,
+    Patch, blank, config_failure, created, credential_by_oid, document, is_oid, label_filter, pool,
+    present,
 };
 use crate::{
     AppState,
     console::{
-        bearer::BearerUser,
-        http::{
-            ConsoleError, ListParams, ListSource, bind, labels_value, list, list_response,
-            list_rows,
-        },
+        guard::BearerUser,
+        http::{ConsoleError, ListParams, ListSource, bind, list, list_response, list_rows},
         request::ConsoleData,
     },
 };
@@ -135,14 +133,6 @@ fn apply_string(target: &mut String, patch: &Patch<String>) {
         Patch::Null => target.clear(),
         Patch::Missing => {}
     }
-}
-
-/// The label containment value a list query binds, or `None` for no filter.
-fn label_filter(params: &ListParams) -> Option<SqlJson<Value>> {
-    if params.labels.is_empty() {
-        return None;
-    }
-    Some(SqlJson(Value::Object(labels_value(&params.labels))))
 }
 
 fn header_names(credential: &BrokerCredential) -> Vec<String> {
@@ -382,9 +372,9 @@ impl Write {
             token_endpoint: String::new(),
             scopes: Vec::new(),
             client_id: None,
-            early_refresh_fraction: 0.2,
-            early_refresh_slack_seconds: 300,
-            max_refresh_interval_seconds: 86_400,
+            early_refresh_fraction: DEFAULT_EARLY_REFRESH_FRACTION,
+            early_refresh_slack_seconds: DEFAULT_EARLY_REFRESH_SLACK_SECONDS,
+            max_refresh_interval_seconds: DEFAULT_MAX_REFRESH_INTERVAL_SECONDS,
             refresh_timeout_seconds: 30,
             stored: StoredSecrets::default(),
             incoming: IncomingSecrets::default(),
@@ -543,14 +533,6 @@ impl Write {
             .or(self.stored.client_secret.as_deref())
     }
 
-    fn effective_secret(
-        &self,
-        incoming: &Option<String>,
-        stored: &Option<String>,
-    ) -> Option<String> {
-        incoming.clone().or_else(|| stored.clone())
-    }
-
     fn validation_errors(&self, headers: &HeadersValue) -> FieldErrors {
         let mut validation = Validation::new();
         validation.check(self);
@@ -568,23 +550,22 @@ impl Write {
         if self.grant == "client_credentials" && self.effective_client_secret().is_none_or(blank) {
             validation.add("client_secret", "can't be blank");
         }
-        let username = self.effective_secret(&self.incoming.username, &self.stored.username);
         let username_message = match self.grant.as_str() {
             "password" => Some("can't be blank for the password grant"),
             "preqin" => Some("can't be blank for the Preqin broker grant"),
             _ => None,
         };
         if let Some(message) = username_message
-            && username.as_deref().is_none_or(blank)
+            && secret_missing(&self.incoming.username, &self.stored.username)
         {
             validation.add("username", message);
         }
-        let password = self.effective_secret(&self.incoming.password, &self.stored.password);
-        if self.grant == "password" && password.as_deref().is_none_or(blank) {
+        if self.grant == "password"
+            && secret_missing(&self.incoming.password, &self.stored.password)
+        {
             validation.add("password", "can't be blank for the password grant");
         }
-        let api_key = self.effective_secret(&self.incoming.api_key, &self.stored.api_key);
-        if self.grant == "preqin" && api_key.as_deref().is_none_or(blank) {
+        if self.grant == "preqin" && secret_missing(&self.incoming.api_key, &self.stored.api_key) {
             validation.add("api_key", "can't be blank for the Preqin broker grant");
         }
         if headers_invalid(headers) {
@@ -595,6 +576,10 @@ impl Write {
 }
 
 const HEADERS_MESSAGE: &str = "must be an object mapping header names to string values";
+
+fn secret_missing(incoming: &Option<String>, stored: &Option<String>) -> bool {
+    incoming.as_deref().or(stored.as_deref()).is_none_or(blank)
+}
 
 fn valid_grant(value: &str, _: &()) -> garde::Result {
     if !GRANTS.contains(&value) {
@@ -724,57 +709,35 @@ async fn save_credential(
         }
     }
     let (stored, headers_ciphertext) = write_values(&write, &headers)?;
-    let id = match write.id {
+    let row = BrokerCredentialWrite {
+        id: write.id,
+        foreign_id: write.foreign_id.clone(),
+        name: write.name.clone(),
+        description: write.description.clone(),
+        labels: write.labels.clone(),
+        grant: write.grant.clone(),
+        token_endpoint: write.token_endpoint.clone(),
+        scopes: write.scopes.clone(),
+        client_id: write.client_id.clone(),
+        client_secret: stored.client_secret.clone(),
+        username: stored.username.clone(),
+        password: stored.password.clone(),
+        api_key: stored.api_key.clone(),
+        token_endpoint_headers: headers_ciphertext.clone(),
+        refresh_token: stored.refresh_token.clone(),
+        early_refresh_fraction: write.early_refresh_fraction,
+        early_refresh_slack_seconds: write.early_refresh_slack_seconds,
+        max_refresh_interval_seconds: write.max_refresh_interval_seconds,
+        refresh_timeout_seconds: write.refresh_timeout_seconds,
+        reset_refresh_state: write.reset_refresh_state,
+        created_by_id: Some(created_by_id),
+    };
+    let id = match row.id {
         Some(id) => {
-            let update = BrokerCredentialWrite {
-                foreign_id: write.foreign_id.clone(),
-                name: write.name.clone(),
-                description: write.description.clone(),
-                labels: write.labels.clone(),
-                grant: write.grant.clone(),
-                token_endpoint: write.token_endpoint.clone(),
-                scopes: write.scopes.clone(),
-                client_id: write.client_id.clone(),
-                client_secret: stored.client_secret.clone(),
-                username: stored.username.clone(),
-                password: stored.password.clone(),
-                api_key: stored.api_key.clone(),
-                token_endpoint_headers: headers_ciphertext.clone(),
-                refresh_token: stored.refresh_token.clone(),
-                early_refresh_fraction: write.early_refresh_fraction,
-                early_refresh_slack_seconds: write.early_refresh_slack_seconds,
-                max_refresh_interval_seconds: write.max_refresh_interval_seconds,
-                refresh_timeout_seconds: write.refresh_timeout_seconds,
-                reset_refresh_state: write.reset_refresh_state,
-            };
-            update_broker_credential(pool, id, &update).await?;
+            update_broker_credential(pool, id, &row).await?;
             id
         }
-        None => {
-            let new = NewBrokerCredential {
-                foreign_id: write.foreign_id.clone(),
-                name: write.name.clone(),
-                description: write.description.clone(),
-                labels: write.labels.clone(),
-                grant: write.grant.clone(),
-                token_endpoint: write.token_endpoint.clone(),
-                scopes: write.scopes.clone(),
-                client_id: write.client_id.clone(),
-                client_secret: stored.client_secret.clone(),
-                username: stored.username.clone(),
-                password: stored.password.clone(),
-                api_key: stored.api_key.clone(),
-                token_endpoint_headers: headers_ciphertext.clone(),
-                refresh_token: stored.refresh_token.clone(),
-                early_refresh_fraction: write.early_refresh_fraction,
-                early_refresh_slack_seconds: write.early_refresh_slack_seconds,
-                max_refresh_interval_seconds: write.max_refresh_interval_seconds,
-                refresh_timeout_seconds: write.refresh_timeout_seconds,
-                reset_refresh_state: write.reset_refresh_state,
-                created_by_id: Some(created_by_id),
-            };
-            insert_broker_credential(pool, &new).await?
-        }
+        None => insert_broker_credential(pool, &row).await?,
     };
     let credential = model::find_by_id::<BrokerCredentialModel, BrokerCredential, _>(pool, id)
         .await?
@@ -941,23 +904,12 @@ async fn update(
     Ok((status, document(CredentialPayload::from(&credential))).into_response())
 }
 
-pub(super) async fn console_destroy(
+pub(super) async fn destroy(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ConsoleError> {
-    destroy(&state, &id).await
-}
-
-pub(super) async fn bearer_destroy(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Response, ConsoleError> {
-    destroy(&state, &id).await
-}
-
-async fn destroy(state: &AppState, id: &str) -> Result<Response, ConsoleError> {
-    let pool = pool(state)?;
-    let credential = credential_by_oid(&pool, id).await?;
+    let pool = pool(&state)?;
+    let credential = credential_by_oid(&pool, &id).await?;
     if credential_referenced_by_secret_source(&pool, credential.id).await? {
         return Err(ConsoleError::new(
             StatusCode::CONFLICT,

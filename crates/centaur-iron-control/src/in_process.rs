@@ -20,8 +20,8 @@ use centaur_console_db::areas::admin::{
     delete_proxy as db_delete_proxy, update_proxy as db_update_proxy,
 };
 use centaur_console_db::areas::principals::{
-    GrantWrite, GranteeRef, PermissionOwner, PermissionWrite, PrincipalError, PrincipalWrite,
-    RoleWrite, assign_role as db_assign_role, create_grant as db_create_grant, destroy_grant,
+    GrantWrite, Grantee as DbGrantee, PermissionWrite, PrincipalError, PrincipalWrite, RoleWrite,
+    assign_role as db_assign_role, create_grant as db_create_grant, destroy_grant,
     find_role_by_foreign_id, find_role_by_oid, grant_payload, list_grants, load_role_view,
     principal_roles, remove_role as db_remove_role, upsert_principal as db_upsert_principal,
     upsert_role as db_upsert_role,
@@ -92,7 +92,7 @@ pub(crate) async fn upsert_slack_channel_permission(
         download_enabled: Some(input.download_enabled),
         history_enabled: Some(input.history_enabled),
     };
-    db_upsert_slack_channel_permission(pool, PermissionOwner::Principal(id), &write)
+    db_upsert_slack_channel_permission(pool, DbGrantee::Principal(id), &write)
         .await
         .map(|_| ())
         .map_err(|error| principal_error("upsert slack channel permission", error))
@@ -241,16 +241,16 @@ pub(crate) async fn unassign_role(pool: &PgPool, principal: &str, role: &str) ->
 
 pub(crate) async fn list_role_grants(pool: &PgPool, role: &str) -> Result<Vec<Grant>> {
     let id = decode_oid(ROLE_OID_PREFIX, role).ok_or_else(|| not_found("role", role))?;
-    grants(pool, GranteeRef::Role(id), "list role grants").await
+    grants(pool, DbGrantee::Role(id), "list role grants").await
 }
 
 pub(crate) async fn list_principal_grants(pool: &PgPool, principal: &str) -> Result<Vec<Grant>> {
     let id = decode_oid(PRINCIPAL_OID_PREFIX, principal)
         .ok_or_else(|| not_found("principal", principal))?;
-    grants(pool, GranteeRef::Principal(id), "list principal grants").await
+    grants(pool, DbGrantee::Principal(id), "list principal grants").await
 }
 
-async fn grants(pool: &PgPool, grantee: GranteeRef, operation: &'static str) -> Result<Vec<Grant>> {
+async fn grants(pool: &PgPool, grantee: DbGrantee, operation: &'static str) -> Result<Vec<Grant>> {
     let rows = list_grants(pool, grantee)
         .await
         .map_err(|error| principal_error(operation, error))?;

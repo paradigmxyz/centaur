@@ -9,8 +9,6 @@
 //! params: registration takes the RFC 7591 JSON body, the token endpoint takes
 //! the RFC 6749 form body, and the consent page takes typed query/form fields.
 
-use std::collections::BTreeMap;
-
 use axum::{
     extract::{OriginalUri, State},
     http::{
@@ -24,34 +22,31 @@ use centaur_console_db::{
     ConsoleUser, ConsoleUserStatus,
     areas::auth_pages::{
         DEFAULT_GRANT_TYPES, DEFAULT_RESPONSE_TYPES, DEFAULT_SCOPES, McpClient, NewMcpClient,
-        StoredAuthorizationCode, StoredRefreshToken, allowed_redirect_uri,
-        consume_authorization_code, create_authorization_code, create_mcp_client,
-        create_refresh_token, find_mcp_client, find_usable_authorization_code,
+        allowed_redirect_uri, consume_authorization_code, create_authorization_code,
+        create_mcp_client, create_refresh_token, find_mcp_client, find_usable_authorization_code,
         find_usable_refresh_token, principal_foreign_id, provision_user_principal,
         revoke_refresh_tokens_for_user, rotate_refresh_token, touch_mcp_client_last_used,
     },
     find_console_user,
     model::{self, ConsoleModel},
-    validation::plain_message,
 };
-use garde::Validate;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use url::Url;
 
-use super::{
-    SERVER_PAGE_CSP, absolute_url, console_config, console_env, console_unavailable, env_any,
-    html_page, login_redirect, public_base_url, redirect, require_active_user, server_page,
-};
+use super::{absolute_url, console_config, console_env, public_base_url, require_active_user};
 use crate::{
     AppState,
     console::{
         assets,
         http::{ConsoleError, request_origin},
-        pages::login_error,
+        pages::{
+            SERVER_PAGE_CSP, escape_html, html_response as html_page, redirect,
+            server_page_csp as server_page,
+        },
         request::{ConsoleBody, ConsoleForm, ConsoleQuery},
     },
     console_session::ConsoleSessionConfig,
@@ -61,143 +56,72 @@ const ACCESS_TOKEN_TTL_SECONDS: i64 = 60 * 60;
 
 /// `POST /mcp/oauth/register`: RFC 7591 client metadata as a JSON body.
 ///
-/// The four client-metadata lists deserialize already normalized — the
-/// controller's `redirect_uris` trimming, `normalize_list_param`, and
-/// `normalize_scope_param` — and validate with `McpOauthClient`'s rules, so the
-/// endpoint only turns their report into its OAuth error message.
-#[derive(Debug, Deserialize, garde::Validate)]
+/// The lists are normalized and validated hand-written because this endpoint
+/// answers the OAuth `invalid_client_metadata` error, not a field envelope.
+#[derive(Debug, Deserialize)]
 pub(super) struct RegisterRequest {
     #[serde(default)]
-    #[garde(skip)]
     client_name: Option<String>,
-    /// `Array(params[:redirect_uris]).map(&:to_s).map(&:strip).reject(&:blank?)`.
-    #[serde(default, deserialize_with = "deserialize_redirect_uris")]
-    #[garde(length(min = 1), inner(custom(public_redirect_uri)))]
-    redirect_uris: Vec<String>,
-    #[serde(
-        default = "default_grant_types",
-        deserialize_with = "deserialize_grant_types"
-    )]
-    #[garde(inner(custom(grant_type)))]
-    grant_types: Vec<String>,
-    #[serde(
-        default = "default_response_types",
-        deserialize_with = "deserialize_response_types"
-    )]
-    #[garde(inner(custom(response_type)))]
-    response_types: Vec<String>,
-    #[serde(default = "default_scopes", deserialize_with = "deserialize_scopes")]
-    #[garde(inner(custom(supported_scope)))]
-    scope: Vec<String>,
     #[serde(default)]
-    #[garde(skip)]
+    redirect_uris: Option<Vec<String>>,
+    #[serde(default)]
+    grant_types: Option<Vec<String>>,
+    #[serde(default)]
+    response_types: Option<Vec<String>>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
     client_uri: Option<String>,
     #[serde(default)]
-    #[garde(skip)]
     logo_uri: Option<String>,
     #[serde(default)]
-    #[garde(skip)]
     contacts: Option<Vec<String>>,
     #[serde(default)]
-    #[garde(skip)]
     software_id: Option<String>,
     #[serde(default)]
-    #[garde(skip)]
     software_version: Option<String>,
 }
 
-fn deserialize_redirect_uris<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Vec::<String>::deserialize(deserializer)?
-        .into_iter()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .collect())
-}
-
-fn deserialize_grant_types<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(normalize_list_param(
-        Vec::<String>::deserialize(deserializer)?,
-        &DEFAULT_GRANT_TYPES,
-    ))
-}
-
-fn default_grant_types() -> Vec<String> {
-    DEFAULT_GRANT_TYPES.map(str::to_owned).to_vec()
-}
-
-fn deserialize_response_types<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(normalize_list_param(
-        Vec::<String>::deserialize(deserializer)?,
-        &DEFAULT_RESPONSE_TYPES,
-    ))
-}
-
-fn default_response_types() -> Vec<String> {
-    DEFAULT_RESPONSE_TYPES.map(str::to_owned).to_vec()
-}
-
-fn deserialize_scopes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(normalize_scope_param(
-        Option::<String>::deserialize(deserializer)?,
-        &DEFAULT_SCOPES,
-    ))
-}
-
-fn default_scopes() -> Vec<String> {
-    DEFAULT_SCOPES.map(str::to_owned).to_vec()
-}
-
-fn public_redirect_uri(value: &str, _: &()) -> garde::Result {
-    if allowed_redirect_uri(value) {
-        return Ok(());
+fn validate_registration(
+    redirect_uris: &[String],
+    grant_types: &[String],
+    response_types: &[String],
+    scopes: &[String],
+) -> Result<(), String> {
+    if redirect_uris.is_empty() {
+        return Err("redirect_uris can't be blank".to_owned());
     }
-    Err(garde::Error::new(
-        "is not an allowed public-client redirect URI",
-    ))
-}
-
-fn grant_type(value: &str, _: &()) -> garde::Result {
-    included(value, &DEFAULT_GRANT_TYPES)
-}
-
-fn response_type(value: &str, _: &()) -> garde::Result {
-    included(value, &DEFAULT_RESPONSE_TYPES)
-}
-
-fn supported_scope(value: &str, _: &()) -> garde::Result {
-    included(value, &DEFAULT_SCOPES)
-}
-
-fn included(value: &str, allowed: &[&str]) -> garde::Result {
-    if allowed.contains(&value) {
-        return Ok(());
+    if let Some(uri) = redirect_uris.iter().find(|uri| !allowed_redirect_uri(uri)) {
+        return Err(format!("redirect_uris contains an invalid URI: {uri}"));
     }
-    Err(garde::Error::new(format!(
-        "must be one of {}",
-        allowed.join(", ")
-    )))
-}
-
-/// Rails' `values - allowed`: the offenders in list order. `Array#-` preserves
-/// duplicates, so a repeated offender is reported twice.
-fn unsupported_values<'a>(values: &'a [String], allowed: &[&str]) -> Vec<&'a str> {
-    values
+    if let Some(value) = grant_types
         .iter()
-        .filter(|value| !allowed.contains(&value.as_str()))
-        .map(String::as_str)
-        .collect()
+        .find(|value| !DEFAULT_GRANT_TYPES.contains(&value.as_str()))
+    {
+        return Err(format!(
+            "grant_types must be one of {}: {value}",
+            DEFAULT_GRANT_TYPES.join(", ")
+        ));
+    }
+    if let Some(value) = response_types
+        .iter()
+        .find(|value| !DEFAULT_RESPONSE_TYPES.contains(&value.as_str()))
+    {
+        return Err(format!(
+            "response_types must be one of {}: {value}",
+            DEFAULT_RESPONSE_TYPES.join(", ")
+        ));
+    }
+    if let Some(value) = scopes
+        .iter()
+        .find(|value| !DEFAULT_SCOPES.contains(&value.as_str()))
+    {
+        return Err(format!(
+            "scope must be one of {}: {value}",
+            DEFAULT_SCOPES.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// The authorization request: the consent page's query string and the consent
@@ -242,8 +166,8 @@ pub(super) struct TokenRequest {
 }
 
 /// GET /.well-known/oauth-authorization-server and openid-configuration.
-pub(super) async fn metadata(State(_state): State<AppState>, headers: HeaderMap) -> Response {
-    let base = public_base_url(&headers);
+pub(super) async fn metadata(State(state): State<AppState>, _headers: HeaderMap) -> Response {
+    let base = public_base_url(console_config(&state));
     server_page(
         axum::Json(MetadataPayload {
             authorization_endpoint: absolute_url(&base, "/mcp/oauth/authorize"),
@@ -281,16 +205,16 @@ pub(super) async fn register(
     State(state): State<AppState>,
     ConsoleBody(request): ConsoleBody<RegisterRequest>,
 ) -> Response {
-    let Some(_config) = console_config(&state) else {
-        return console_unavailable();
-    };
+    let _config = console_config(&state);
 
-    if let Err(report) = request.validate() {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_metadata",
-            &plain_message(&report).expect("a failed validation carries a message"),
-        );
+    let redirect_uris = normalize_list(request.redirect_uris.clone(), &[]);
+    let grant_types = normalize_list(request.grant_types.clone(), &DEFAULT_GRANT_TYPES);
+    let response_types = normalize_list(request.response_types.clone(), &DEFAULT_RESPONSE_TYPES);
+    let scopes = normalize_scope_param(request.scope.clone(), &DEFAULT_SCOPES);
+    if let Err(message) =
+        validate_registration(&redirect_uris, &grant_types, &response_types, &scopes)
+    {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata", &message);
     }
     let name = request
         .client_name
@@ -302,10 +226,10 @@ pub(super) async fn register(
     let metadata = registration_metadata(&request);
     let client = NewMcpClient {
         name,
-        redirect_uris: request.redirect_uris,
-        grant_types: request.grant_types,
-        response_types: request.response_types,
-        scopes: request.scope,
+        redirect_uris,
+        grant_types,
+        response_types,
+        scopes,
         metadata,
     };
 
@@ -350,30 +274,26 @@ struct ClientPayload {
 /// The registration metadata Rails kept from the request parameters. An absent
 /// or `null` field is dropped; any other value is stored as sent.
 fn registration_metadata(request: &RegisterRequest) -> Value {
-    serde_json::to_value(RegistrationMetadata {
-        client_uri: request.client_uri.clone(),
-        logo_uri: request.logo_uri.clone(),
-        contacts: request.contacts.clone(),
-        software_id: request.software_id.clone(),
-        software_version: request.software_version.clone(),
-    })
-    .unwrap_or_default()
-}
-
-/// `Mcp::OauthController#registration_metadata`: the registration parameters
-/// that were present, stored as the client's `metadata`.
-#[derive(serde::Serialize)]
-struct RegistrationMetadata {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_uri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    logo_uri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    contacts: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    software_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    software_version: Option<String>,
+    let mut metadata = serde_json::Map::new();
+    if let Some(value) = &request.client_uri {
+        metadata.insert("client_uri".to_owned(), Value::String(value.clone()));
+    }
+    if let Some(value) = &request.logo_uri {
+        metadata.insert("logo_uri".to_owned(), Value::String(value.clone()));
+    }
+    if let Some(value) = &request.contacts {
+        metadata.insert(
+            "contacts".to_owned(),
+            serde_json::to_value(value).unwrap_or_default(),
+        );
+    }
+    if let Some(value) = &request.software_id {
+        metadata.insert("software_id".to_owned(), Value::String(value.clone()));
+    }
+    if let Some(value) = &request.software_version {
+        metadata.insert("software_version".to_owned(), Value::String(value.clone()));
+    }
+    Value::Object(metadata)
 }
 
 /// GET /mcp/oauth/authorize
@@ -383,9 +303,7 @@ pub(super) async fn authorize_page(
     ConsoleQuery(params): ConsoleQuery<AuthorizationParams>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
-    let Some(config) = console_config(&state).cloned() else {
-        return console_unavailable();
-    };
+    let config = console_config(&state).clone();
     let full_path = match uri.query() {
         Some(query) if !query.is_empty() => format!("{}?{query}", uri.path()),
         _ => uri.path().to_owned(),
@@ -405,9 +323,6 @@ pub(super) async fn authorize_page(
         Ok(authorization) => authorization,
         Err(response) => return response,
     };
-    if config.session_from_headers(&headers).is_none() {
-        return login_redirect(&config, &headers, login_error::SESSION_EXPIRED, Vec::new());
-    }
     let form_fields = authorization.hidden_fields();
     let html = consent_html(
         &authorization.client.name,
@@ -426,9 +341,7 @@ pub(super) async fn approve(
     headers: HeaderMap,
     ConsoleForm(params): ConsoleForm<AuthorizationParams>,
 ) -> Response {
-    let Some(config) = console_config(&state).cloned() else {
-        return console_unavailable();
-    };
+    let config = console_config(&state).clone();
     if config.session_from_headers(&headers).is_none() {
         return csrf_rejection();
     }
@@ -492,9 +405,7 @@ pub(super) async fn token(
     headers: HeaderMap,
     ConsoleForm(request): ConsoleForm<TokenRequest>,
 ) -> Response {
-    let Some(_config) = console_config(&state) else {
-        return console_unavailable();
-    };
+    let _config = console_config(&state);
     // The TTL is a strict positive integer now: an invalid value is this
     // endpoint's own 400 in the RFC 6749 error body, not Ruby's silent `to_i`
     // prefix/fallback. Check it before a grant can consume a code.
@@ -522,9 +433,35 @@ pub(super) async fn token(
     no_store(response)
 }
 
+#[allow(clippy::result_large_err)]
+async fn resolve_grant_client(pool: &sqlx::PgPool, client_id: &str) -> Result<McpClient, Response> {
+    match find_mcp_client(pool, client_id).await {
+        Ok(Some(client)) => Ok(client),
+        Ok(None) => Err(oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "Unknown client.",
+        )),
+        Err(error) => Err(ConsoleError::internal(error).into_response()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn active_grant_user(
+    pool: &sqlx::PgPool,
+    user_id: i64,
+    invalid: &str,
+) -> Result<ConsoleUser, Response> {
+    match find_console_user(pool, user_id).await {
+        Ok(Some(user)) => Ok(user),
+        Ok(None) => Err(invalid_grant(invalid)),
+        Err(error) => Err(ConsoleError::internal(error).into_response()),
+    }
+}
+
 async fn exchange_authorization_code(
     state: &AppState,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     request: &TokenRequest,
     ttl: i64,
 ) -> Response {
@@ -533,16 +470,15 @@ async fn exchange_authorization_code(
         Err(error) => return error.into_response(),
     };
     let client_id = request.client_id.clone().unwrap_or_default();
-    let Some(client) = find_mcp_client_or_none(&pool, &client_id).await else {
-        return oauth_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_client",
-            "Unknown client.",
-        );
+    let client = match resolve_grant_client(&pool, &client_id).await {
+        Ok(client) => client,
+        Err(response) => return response,
     };
     let code_value = request.code.clone().unwrap_or_default();
-    let Some(code) = find_usable_authorization_code_or_none(&pool, &code_value).await else {
-        return invalid_grant("Authorization code is invalid or expired.");
+    let code = match find_usable_authorization_code(&pool, &code_value).await {
+        Ok(Some(code)) => code,
+        Ok(None) => return invalid_grant("Authorization code is invalid or expired."),
+        Err(error) => return ConsoleError::internal(error).into_response(),
     };
     if code.client_id != client.id {
         return invalid_grant("Authorization code was not issued to this client.");
@@ -556,9 +492,15 @@ async fn exchange_authorization_code(
     ) {
         return invalid_grant("PKCE verification failed.");
     }
-    let user = match find_console_user(&pool, code.user_id).await {
-        Ok(Some(user)) => user,
-        Ok(None) | Err(_) => return invalid_grant("Authorization code is invalid or expired."),
+    let user = match active_grant_user(
+        &pool,
+        code.user_id,
+        "Authorization code is invalid or expired.",
+    )
+    .await
+    {
+        Ok(user) => user,
+        Err(response) => return response,
     };
     let consumed = match consume_authorization_code(&pool, code.id).await {
         Ok(consumed) => consumed,
@@ -591,13 +533,15 @@ async fn exchange_authorization_code(
     }
     render_token_response(
         &pool,
-        &client,
-        &user,
-        code.principal_id,
-        &code.resource,
-        &code.scopes,
-        &refresh,
-        headers,
+        Grant {
+            client: &client,
+            user: &user,
+            principal_id: code.principal_id,
+            resource: &code.resource,
+            scopes: &code.scopes,
+            refresh_token: &refresh,
+        },
+        console_config(state),
         ttl,
     )
     .await
@@ -605,7 +549,7 @@ async fn exchange_authorization_code(
 
 async fn exchange_refresh_token(
     state: &AppState,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     request: &TokenRequest,
     ttl: i64,
 ) -> Response {
@@ -614,23 +558,28 @@ async fn exchange_refresh_token(
         Err(error) => return error.into_response(),
     };
     let client_id = request.client_id.clone().unwrap_or_default();
-    let Some(client) = find_mcp_client_or_none(&pool, &client_id).await else {
-        return oauth_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_client",
-            "Unknown client.",
-        );
+    let client = match resolve_grant_client(&pool, &client_id).await {
+        Ok(client) => client,
+        Err(response) => return response,
     };
     let refresh_value = request.refresh_token.clone().unwrap_or_default();
-    let Some(refresh) = find_usable_refresh_token_or_none(&pool, &refresh_value).await else {
-        return invalid_grant("Refresh token is invalid or expired.");
+    let refresh = match find_usable_refresh_token(&pool, &refresh_value).await {
+        Ok(Some(refresh)) => refresh,
+        Ok(None) => return invalid_grant("Refresh token is invalid or expired."),
+        Err(error) => return ConsoleError::internal(error).into_response(),
     };
     if refresh.client_id != client.id {
         return invalid_grant("Refresh token was not issued to this client.");
     }
-    let user = match find_console_user(&pool, refresh.user_id).await {
-        Ok(Some(user)) => user,
-        Ok(None) | Err(_) => return invalid_grant("Refresh token is invalid or expired."),
+    let user = match active_grant_user(
+        &pool,
+        refresh.user_id,
+        "Refresh token is invalid or expired.",
+    )
+    .await
+    {
+        Ok(user) => user,
+        Err(response) => return response,
     };
     if user.status != ConsoleUserStatus::Active {
         if let Err(error) = revoke_refresh_tokens_for_user(&pool, user.id).await {
@@ -658,87 +607,80 @@ async fn exchange_refresh_token(
     }
     render_token_response(
         &pool,
-        &client,
-        &user,
-        refresh.principal_id,
-        &refresh.resource,
-        &refresh.scopes,
-        &rotated,
-        headers,
+        Grant {
+            client: &client,
+            user: &user,
+            principal_id: refresh.principal_id,
+            resource: &refresh.resource,
+            scopes: &refresh.scopes,
+            refresh_token: &rotated,
+        },
+        console_config(state),
         ttl,
     )
     .await
 }
 
-async fn find_mcp_client_or_none(pool: &sqlx::PgPool, client_id: &str) -> Option<McpClient> {
-    find_mcp_client(pool, client_id).await.ok().flatten()
-}
-
-async fn find_usable_authorization_code_or_none(
-    pool: &sqlx::PgPool,
-    value: &str,
-) -> Option<StoredAuthorizationCode> {
-    find_usable_authorization_code(pool, value)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn find_usable_refresh_token_or_none(
-    pool: &sqlx::PgPool,
-    value: &str,
-) -> Option<StoredRefreshToken> {
-    find_usable_refresh_token(pool, value).await.ok().flatten()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn render_token_response(
-    pool: &sqlx::PgPool,
-    client: &McpClient,
-    user: &ConsoleUser,
+struct Grant<'a> {
+    client: &'a McpClient,
+    user: &'a ConsoleUser,
     principal_id: i64,
-    resource: &str,
-    scopes: &[String],
-    refresh_token: &str,
-    headers: &HeaderMap,
-    ttl: i64,
-) -> Response {
-    let secret = match env_any(&["CENTAUR_JWT_SIGNING_SECRET"]) {
-        Some(secret) => secret,
-        None => {
-            return oauth_error(
+    resource: &'a str,
+    scopes: &'a [String],
+    refresh_token: &'a str,
+}
+
+#[allow(clippy::result_large_err)]
+fn jwt_signing_secret() -> Result<String, Response> {
+    std::env::var("CENTAUR_JWT_SIGNING_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
                 "CENTAUR_JWT_SIGNING_SECRET is not configured",
-            );
-        }
+            )
+        })
+}
+
+async fn render_token_response(
+    pool: &sqlx::PgPool,
+    grant: Grant<'_>,
+    config: &ConsoleSessionConfig,
+    ttl: i64,
+) -> Response {
+    let secret = match jwt_signing_secret() {
+        Ok(secret) => secret,
+        Err(response) => return response,
     };
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let scope = scopes.join(" ");
-    let foreign_id = match principal_foreign_id(pool, principal_id).await {
+    let scope = grant.scopes.join(" ");
+    let foreign_id = match principal_foreign_id(pool, grant.principal_id).await {
         Ok(Some(foreign_id)) => foreign_id,
         Ok(None) | Err(_) => {
             return ConsoleError::internal("the console principal is missing").into_response();
         }
     };
     let payload = AccessTokenClaims {
-        iss: public_base_url(headers),
-        sub: model::User::oid(user.id),
-        aud: resource,
+        iss: public_base_url(config),
+        sub: model::User::oid(grant.user.id),
+        aud: grant.resource,
         exp: now + ttl,
         nbf: now - 5,
         iat: now,
         jti: format!("mcpjwt_{}", random_hex(16)),
         scope: &scope,
-        client_id: client.public_client_id(),
-        principal_id: model::Principal::oid(principal_id),
+        client_id: grant.client.public_client_id(),
+        principal_id: model::Principal::oid(grant.principal_id),
         principal_foreign_id: foreign_id,
-        email: &user.email,
-        name: user
+        email: &grant.user.email,
+        name: grant
+            .user
             .name
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| user.email.clone()),
+            .unwrap_or_else(|| grant.user.email.clone()),
     };
     let mut header = Header::new(Algorithm::HS256);
     header.typ = Some("JWT".to_owned());
@@ -748,13 +690,7 @@ async fn render_token_response(
         &EncodingKey::from_secret(secret.as_bytes()),
     ) {
         Ok(token) => token,
-        Err(_) => {
-            return oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "CENTAUR_JWT_SIGNING_SECRET is not configured",
-            );
-        }
+        Err(error) => return ConsoleError::internal(error).into_response(),
     };
     server_page(
         axum::Json(TokenPayload {
@@ -762,7 +698,7 @@ async fn render_token_response(
             token_type: "Bearer",
             expires_in: ttl,
             scope,
-            refresh_token: refresh_token.to_owned(),
+            refresh_token: grant.refresh_token.to_owned(),
         })
         .into_response(),
     )
@@ -807,15 +743,15 @@ fn random_hex(bytes: usize) -> String {
 /// Ruby's `String#to_i` prefix, which read `"3600s"` as 3600 and fell back to
 /// the default for anything non-positive.
 fn access_token_ttl_seconds() -> Result<i64, String> {
-    let Some(raw) = env_any(&["CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS"]).or_else(|| {
-        console_env("MCP_ACCESS_TOKEN_TTL_SECONDS").filter(|value| !value.trim().is_empty())
-    }) else {
+    let raw = std::env::var("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            console_env("MCP_ACCESS_TOKEN_TTL_SECONDS").filter(|value| !value.trim().is_empty())
+        });
+    let Some(raw) = raw else {
         return Ok(ACCESS_TOKEN_TTL_SECONDS);
     };
-    parse_access_token_ttl(&raw)
-}
-
-fn parse_access_token_ttl(raw: &str) -> Result<i64, String> {
     match raw.trim().parse::<i64>() {
         Ok(value) if value > 0 => Ok(value),
         _ => Err("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS must be a positive integer".to_owned()),
@@ -860,12 +796,10 @@ async fn validate_authorization(
     params: &AuthorizationParams,
 ) -> Result<Authorization, Response> {
     let client_id = params.client_id.clone().unwrap_or_default();
-    let Some(client) = find_mcp_client_or_none(pool, &client_id).await else {
-        return Err(authorization_request_error(
-            None,
-            "invalid_request",
-            "Unknown client.",
-        ));
+    let client = match find_mcp_client(pool, &client_id).await {
+        Ok(Some(client)) => client,
+        Ok(None) => return Err(plain_error("Unknown client.")),
+        Err(error) => return Err(ConsoleError::internal(error).into_response()),
     };
     let redirect_uri = params.redirect_uri.clone().unwrap_or_default();
     if params.response_type.as_deref() != Some("code") {
@@ -906,7 +840,11 @@ async fn validate_authorization(
         ));
     }
     let scopes = normalize_scope_param(params.scope.clone(), &DEFAULT_SCOPES);
-    let unsupported = unsupported_values(&scopes, &DEFAULT_SCOPES);
+    let unsupported: Vec<&str> = scopes
+        .iter()
+        .filter(|scope| !DEFAULT_SCOPES.contains(&scope.as_str()))
+        .map(String::as_str)
+        .collect();
     if !unsupported.is_empty() {
         return Err(authorization_redirect(
             &client,
@@ -938,14 +876,6 @@ async fn validate_authorization(
     })
 }
 
-fn authorization_request_error(
-    _client: Option<&McpClient>,
-    _error: &str,
-    description: &str,
-) -> Response {
-    plain_error(description)
-}
-
 fn authorization_redirect(
     client: &McpClient,
     redirect_uri: &str,
@@ -954,63 +884,34 @@ fn authorization_redirect(
     description: &str,
 ) -> Response {
     if client.id > 0 && client.redirect_uri_allowed(redirect_uri) {
-        let mut query = BTreeMap::new();
-        if let Ok(url) = Url::parse(redirect_uri) {
-            for (key, value) in url.query_pairs() {
-                query.insert(key.into_owned(), value.into_owned());
-            }
-        }
-        query.insert("error".to_owned(), error.to_owned());
-        query.insert("error_description".to_owned(), description.to_owned());
+        let mut params = vec![("error", error), ("error_description", description)];
         if let Some(state) = state.filter(|value| !value.trim().is_empty()) {
-            query.insert("state".to_owned(), state.to_owned());
+            params.push(("state", state));
         }
-        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        for (key, value) in &query {
-            serializer.append_pair(key, value);
-        }
-        return redirect(
-            &redirect_with_query(redirect_uri, &serializer.finish()),
-            Vec::new(),
-            Some(SERVER_PAGE_CSP),
-        );
+        return redirect_with_params(redirect_uri, &params);
     }
     plain_error(description)
 }
 
 fn success_redirect(redirect_uri: &str, state: Option<&str>, code: &str) -> Response {
-    let mut query = BTreeMap::new();
-    if let Ok(url) = Url::parse(redirect_uri) {
-        for (key, value) in url.query_pairs() {
-            query.insert(key.into_owned(), value.into_owned());
-        }
-    }
-    query.insert("code".to_owned(), code.to_owned());
+    let mut params = vec![("code", code)];
     if let Some(state) = state.filter(|value| !value.trim().is_empty()) {
-        query.insert("state".to_owned(), state.to_owned());
+        params.push(("state", state));
     }
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (key, value) in &query {
-        serializer.append_pair(key, value);
-    }
-    redirect(
-        &redirect_with_query(redirect_uri, &serializer.finish()),
-        Vec::new(),
-        Some(SERVER_PAGE_CSP),
-    )
+    redirect_with_params(redirect_uri, &params)
 }
 
-fn redirect_with_query(redirect_uri: &str, query: &str) -> String {
-    // `URI#query=` replaces the query string but keeps the URI's original
-    // shape, including a host-only URI with no trailing slash and any fragment.
-    let (without_fragment, fragment) = match redirect_uri.find('#') {
-        Some(index) => redirect_uri.split_at(index),
-        None => (redirect_uri, ""),
+fn redirect_with_params(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
+    let Ok(mut url) = Url::parse(redirect_uri) else {
+        return plain_error("The redirect URI is invalid.");
     };
-    let base = without_fragment
-        .split_once('?')
-        .map_or(without_fragment, |(base, _)| base);
-    format!("{base}?{query}{fragment}")
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in params {
+            query.append_pair(key, value);
+        }
+    }
+    redirect(url.as_str(), &[], Some(SERVER_PAGE_CSP))
 }
 
 fn plain_error(message: &str) -> Response {
@@ -1061,7 +962,7 @@ fn no_store(mut response: Response) -> Response {
 /// verbatim. Unlike Rails' form origin check, a missing Origin and
 /// `Origin: null` are both refused, matching the console JSON API.
 fn origin_valid(headers: &HeaderMap, config: &ConsoleSessionConfig) -> bool {
-    request_origin(headers).as_deref() == Some(config.public_origin())
+    request_origin(headers) == Some(config.public_origin())
 }
 
 fn csrf_rejection() -> Response {
@@ -1075,8 +976,9 @@ fn csrf_rejection() -> Response {
     )
 }
 
-fn normalize_list_param(values: Vec<String>, default: &[&str]) -> Vec<String> {
+fn normalize_list(values: Option<Vec<String>>, default: &[&str]) -> Vec<String> {
     let values = values
+        .unwrap_or_default()
         .into_iter()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
@@ -1121,7 +1023,9 @@ fn resolve_requested_resource(requested: Option<&str>) -> Option<String> {
 }
 
 fn configured_mcp_resource_url() -> Option<String> {
-    env_any(&["CENTAUR_MCP_PUBLIC_URL"])
+    std::env::var("CENTAUR_MCP_PUBLIC_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| console_env("MCP_PUBLIC_URL").filter(|value| !value.trim().is_empty()))
 }
 
@@ -1143,23 +1047,10 @@ fn normalize_mcp_resource_url(value: &str) -> Option<String> {
 }
 
 fn redirect_host(value: &str) -> String {
-    match Url::parse(value) {
-        Ok(url) => url
-            .host_str()
-            .map(|host| {
-                // `URI#host` keeps the brackets Ruby's parser adds around IPv6
-                // literals; `Url::host_str` returns the bare address.
-                if host.contains(':') && !host.starts_with('[') {
-                    format!("[{host}]")
-                } else {
-                    host.to_owned()
-                }
-            })
-            .unwrap_or_default(),
-        // `redirect_uri_host` falls back to the raw value only when URI.parse
-        // raises; a valid URI without a host renders as a blank host.
-        Err(_) => value.to_owned(),
-    }
+    Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn consent_html(
@@ -1217,31 +1108,32 @@ fn asset_path(name: &str) -> String {
     assets::path(name).unwrap_or_else(|| format!("/assets/oauth-page/{name}"))
 }
 
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use centaur_console_db::validation::ValidateFields;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn access_token_ttl_is_a_strict_positive_integer() {
-        assert_eq!(parse_access_token_ttl("3600"), Ok(3600));
-        assert_eq!(parse_access_token_ttl(" 120 "), Ok(120));
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: the lock serializes this test's process-environment mutation.
+        unsafe { std::env::set_var("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS", "3600") };
+        assert_eq!(access_token_ttl_seconds(), Ok(3600));
+        // SAFETY: see above.
+        unsafe { std::env::set_var("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS", " 120 ") };
+        assert_eq!(access_token_ttl_seconds(), Ok(120));
         for invalid in ["3600s", "nope", "0", "-5", "1_000"] {
-            let error = parse_access_token_ttl(invalid).unwrap_err();
+            // SAFETY: see above.
+            unsafe { std::env::set_var("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS", invalid) };
+            let error = access_token_ttl_seconds().unwrap_err();
             assert_eq!(
                 error, "CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS must be a positive integer",
                 "{invalid}"
             );
         }
+        // SAFETY: see above.
+        unsafe { std::env::remove_var("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS") };
     }
 
     #[test]
@@ -1259,17 +1151,6 @@ mod tests {
     }
 
     #[test]
-    fn consent_page_host_matches_uri_host_semantics() {
-        assert_eq!(
-            redirect_host("https://console.example/cb"),
-            "console.example"
-        );
-        assert_eq!(redirect_host("http://[::1]:8080/cb"), "[::1]");
-        assert_eq!(redirect_host("cursor:/callback"), "");
-        assert_eq!(redirect_host("not a uri"), "not a uri");
-    }
-
-    #[test]
     fn scopes_split_on_commas_and_spaces_and_default_when_blank() {
         assert_eq!(
             normalize_scope_param(Some("mcp:tools,other".to_owned()), &["mcp:tools"]),
@@ -1283,7 +1164,11 @@ mod tests {
 
     fn registration_valid(body: serde_json::Value) -> bool {
         let request: RegisterRequest = serde_json::from_value(body).unwrap();
-        request.validate_fields().is_ok()
+        let redirect_uris = normalize_list(request.redirect_uris, &[]);
+        let grant_types = normalize_list(request.grant_types, &DEFAULT_GRANT_TYPES);
+        let response_types = normalize_list(request.response_types, &DEFAULT_RESPONSE_TYPES);
+        let scopes = normalize_scope_param(request.scope, &DEFAULT_SCOPES);
+        validate_registration(&redirect_uris, &grant_types, &response_types, &scopes).is_ok()
     }
 
     #[test]
@@ -1327,19 +1212,22 @@ mod tests {
             "grant_types": [" authorization_code ", ""],
         }))
         .unwrap();
-        assert!(request.validate_fields().is_ok());
-        assert_eq!(request.redirect_uris, ["http://127.0.0.1:9/cb"]);
-        assert_eq!(request.grant_types, ["authorization_code"]);
-        // Absent lists and a blank scope take the model's defaults.
-        assert_eq!(
-            request.response_types,
-            DEFAULT_RESPONSE_TYPES.map(str::to_owned)
+        let redirect_uris = normalize_list(request.redirect_uris, &[]);
+        let grant_types = normalize_list(request.grant_types, &DEFAULT_GRANT_TYPES);
+        let response_types = normalize_list(request.response_types, &DEFAULT_RESPONSE_TYPES);
+        let scopes = normalize_scope_param(request.scope, &DEFAULT_SCOPES);
+        assert!(
+            validate_registration(&redirect_uris, &grant_types, &response_types, &scopes).is_ok()
         );
-        assert_eq!(request.scope, DEFAULT_SCOPES.map(str::to_owned));
+        assert_eq!(redirect_uris, ["http://127.0.0.1:9/cb"]);
+        assert_eq!(grant_types, ["authorization_code"]);
+        // Absent lists and a blank scope take the model's defaults.
+        assert_eq!(response_types, DEFAULT_RESPONSE_TYPES.map(str::to_owned));
+        assert_eq!(scopes, DEFAULT_SCOPES.map(str::to_owned));
     }
 
     #[test]
-    fn redirect_errors_keep_existing_query_and_sort_keys() {
+    fn redirect_errors_keep_the_existing_query() {
         let response = authorization_redirect(
             &McpClient {
                 id: 1,
@@ -1348,7 +1236,6 @@ mod tests {
                 grant_types: Vec::new(),
                 response_types: Vec::new(),
                 scopes: Vec::new(),
-                metadata: Value::Null,
             },
             "http://127.0.0.1/cb?z=9&a=1",
             Some("state value"),
@@ -1362,7 +1249,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             location,
-            "http://127.0.0.1/cb?a=1&error=access_denied&error_description=The+user+denied+the+authorization+request.&state=state+value&z=9"
+            "http://127.0.0.1/cb?z=9&a=1&error=access_denied&error_description=The+user+denied+the+authorization+request.&state=state+value"
         );
     }
 

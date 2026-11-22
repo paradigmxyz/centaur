@@ -10,13 +10,8 @@
 //! files embedded in the binary. The built SPA is served from disk by
 //! `static_files`; the chart runs no Rails web pod.
 //!
-//! This foundation lays out the builders used by later area modules; some
-//! helpers are intentionally not called until those areas arrive.
-#![allow(dead_code)]
-
 pub(crate) mod areas;
 mod assets;
-pub(crate) mod bearer;
 pub(crate) mod guard;
 pub(crate) mod host;
 pub(crate) mod http;
@@ -33,13 +28,11 @@ use axum::{
     Router,
     extract::Request,
     http::StatusCode,
-    http::{HeaderValue, header::CACHE_CONTROL},
-    middleware::{self, Next},
     response::{IntoResponse, Response},
 };
 use centaur_console_db::ConsoleUserStatus;
 
-use crate::{AppState, console_session::console_router};
+use crate::{AppState, console::guard::GuardedRoutes, console_session::console_router};
 
 pub(crate) const DISABLED_MESSAGE: &str = "Your account is disabled.";
 pub(crate) const PENDING_PATH: &str = "/pending";
@@ -54,35 +47,33 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .merge(static_files::router())
         .nest("/api/v1/console", console_router(state.clone()))
         .nest("/api/v1/sandbox", sandbox::sandbox_router(state.clone()))
-        .nest("/api/v1", bearer::bearer_router(state))
-        .layer(middleware::from_fn(reject_repeated_scalar_query))
-        .layer(middleware::from_fn(default_cache_control))
+        .nest("/api/v1", bearer_router(state))
 }
 
-/// Rails installs `Rack::ETag, "no-cache"`, which fills in `Cache-Control` on
-/// every response that does not set one: `max-age=0, private,
-/// must-revalidate` for a digestible 200/201 body, `no-cache` for everything
-/// else (redirects, 204s, error pages). Mirror it here so pages, redirects, and
-/// empty responses carry the same cache policy as the reference; handlers that
-/// already set a directive keep it.
-async fn default_cache_control(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    if !response.headers().contains_key(CACHE_CONTROL) {
-        let value = if matches!(response.status(), StatusCode::OK | StatusCode::CREATED) {
-            "max-age=0, private, must-revalidate"
-        } else {
-            "no-cache"
-        };
-        response
-            .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static(value));
-    }
-    response
+/// The bearer operator API, nested at `/api/v1` while Console is enabled.
+pub(crate) fn bearer_router(state: AppState) -> Router<AppState> {
+    let routes = areas::bearer(GuardedRoutes::new(state));
+    #[cfg(test)]
+    let routes = test_bearer_routes(routes);
+    routes.into_router()
 }
 
-/// Console's JSON 404 for unknown paths while the Console layer is mounted.
-pub(crate) fn json_not_found() -> Response {
-    http::json_not_found()
+#[cfg(test)]
+fn test_bearer_routes(routes: GuardedRoutes) -> GuardedRoutes {
+    use axum::routing::get;
+
+    routes.operator("/probe/bearer/admin", get(probe_bearer_admin))
+}
+
+#[cfg(test)]
+async fn probe_bearer_admin(
+    user: crate::console::guard::BearerUser,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "user_id": user.0.id,
+        "email": user.0.email,
+        "admin": user.0.admin,
+    }))
 }
 
 /// The app-wide fallback: Console-owned prefixes get Console's JSON 404 body;
@@ -97,10 +88,9 @@ pub(crate) async fn fallback(request: Request) -> Response {
         || in_namespace("/console")
         || in_namespace("/mcp/oauth")
         || in_namespace("/oauth")
-        || path == "/launch"
         || in_namespace("/assets/oauth-page")
     {
-        json_not_found()
+        http::json_not_found()
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
@@ -173,29 +163,6 @@ pub fn validate_boolean_settings() -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Rejects a repeated scalar query parameter before any handler runs. Rack
-/// keeps the last value; the port refuses the ambiguous request instead.
-/// Bracket-shaped keys (`ids[]=`, `labels[team]=`) are Rack's array/hash forms,
-/// not scalars, and keep their existing handling.
-async fn reject_repeated_scalar_query(request: Request, next: Next) -> Response {
-    if let Some(query) = request.uri().query() {
-        let mut seen = std::collections::HashSet::new();
-        for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
-            if key.contains('[') {
-                continue;
-            }
-            if !seen.insert(key.clone().into_owned()) {
-                return http::render_error(
-                    StatusCode::BAD_REQUEST,
-                    &format!("query parameter must not be repeated: {key}"),
-                    None,
-                );
-            }
-        }
-    }
-    next.run(request).await
 }
 
 pub(crate) fn status_name(status: ConsoleUserStatus) -> &'static str {
@@ -443,8 +410,6 @@ mod tests {
             "/oauth/example/start",
             "/mcp/oauth/authorize",
             "/.well-known/oauth-authorization-server",
-            "/manifest",
-            "/service-worker.js",
             "/assets/oauth-page/oauth.css",
         ] {
             let response = send(&app, INTERNAL_HOST, Method::GET, path, &[]).await;
@@ -485,41 +450,5 @@ mod tests {
         }
         // An explicitly empty value is ConsoleEnv's `presence` third state.
         assert_eq!(boolean_setting(""), None);
-    }
-
-    #[tokio::test]
-    async fn repeated_scalar_query_parameters_are_rejected() {
-        use axum::body::Body;
-        use axum::http::{Request, header};
-        use tower::ServiceExt;
-
-        let config = crate::ConsoleSessionConfig::from_settings(
-            Some("test-only-console-session-secret"),
-            Some("https://console.example.test"),
-        )
-        .unwrap()
-        .unwrap();
-        let app = crate::build_router_with_app_state(
-            AppState::unready(crate::ApiAuthConfig::testing("test-secret"))
-                .with_console_session(config),
-        );
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/login?return_to=%2Fa&return_to=%2Fb")
-                    .header(header::HOST, "console.example.test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["message"],
-            "query parameter must not be repeated: return_to"
-        );
     }
 }

@@ -18,7 +18,7 @@
 //!     name: Option<String>,
 //! }
 //!
-//! async fn create(ConsoleData(data): ConsoleData<CreateApiKey>) -> Result<Response, AdminError> {
+//! async fn create(ConsoleData(data): ConsoleData<CreateApiKey>) -> Result<Response, ConsoleError> {
 //!     data.validate_fields()?; // 422 validation failed, `details.name`
 //!     // ...
 //! }
@@ -185,12 +185,36 @@ impl Validation {
 /// Each covers a shape garde has no built-in rule for; the message is a short
 /// one-liner and is not itself contract.
 pub mod rules {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, RwLock};
+
     use garde::{Error, Result};
 
     /// ActiveModel's `:blank` message.
     pub const BLANK_MESSAGE: &str = "can't be blank";
     /// ActiveModel's `:inclusion` message.
     pub const INCLUSION_MESSAGE: &str = "is not included in the list";
+
+    /// Whether `value` matches the static `pattern`, compiling it once. An
+    /// invalid pattern is a programming error, not input.
+    pub fn matches(pattern: &'static str, value: &str) -> bool {
+        static CACHE: LazyLock<RwLock<HashMap<&'static str, regex::Regex>>> =
+            LazyLock::new(|| RwLock::new(HashMap::new()));
+        if let Some(regex) = CACHE
+            .read()
+            .expect("the cache is not poisoned")
+            .get(pattern)
+        {
+            return regex.is_match(value);
+        }
+        let regex = regex::Regex::new(pattern).expect("static regex compiles");
+        let matched = regex.is_match(value);
+        CACHE
+            .write()
+            .expect("the cache is not poisoned")
+            .insert(pattern, regex);
+        matched
+    }
 
     /// A create-style field: the key may be absent, but an absent, `null`, or
     /// blank value fails the record's presence validation.

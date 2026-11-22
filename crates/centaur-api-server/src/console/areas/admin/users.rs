@@ -17,11 +17,14 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 use time::PrimitiveDateTime;
 
-use super::common::{self, AdminError, json_ok};
+use super::common::{self, json_ok};
 use crate::{
     AppState,
     console::guard::GuardedRoutes,
-    console::{http::ConsoleError, request::ConsoleQuery},
+    console::{
+        http::{ConsoleError, json_data},
+        request::ConsoleQuery,
+    },
 };
 
 /// `User.statuses.keys`, in the enum's declaration order.
@@ -37,11 +40,12 @@ struct UsersQuery {
 
 impl UsersQuery {
     /// Rails' `params[:status].present?`: a blank filter is no filter, but the
-    /// stored value is matched exactly (no trimming).
+    /// stored value is matched exactly (no trimming). The gate already rejected
+    /// an unknown value, so anything else here is blank.
     fn filter(&self) -> Option<&str> {
         self.status
             .as_deref()
-            .filter(|status| !status.trim().is_empty())
+            .filter(|status| STATUSES.contains(status))
     }
 }
 
@@ -104,11 +108,6 @@ struct UsersMeta {
     total: usize,
 }
 
-#[derive(Serialize)]
-struct UserPayloadEnvelope {
-    data: UserPayload,
-}
-
 pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
         .console_admin("/users", get(index))
@@ -122,10 +121,10 @@ async fn index(
     State(state): State<AppState>,
     user: ConsoleUser,
     ConsoleQuery(query): ConsoleQuery<UsersQuery>,
-) -> Result<Response, AdminError> {
+) -> Result<Response, ConsoleError> {
     if let Err(report) = query.validate() {
         let message = plain_message(&report).expect("a failed status gate carries a message");
-        return Err(ConsoleError::bad_request(message).into());
+        return Err(ConsoleError::bad_request(message));
     }
     let status = query.filter();
     let pool = common::pool(&state)?;
@@ -143,67 +142,89 @@ async fn approve(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: ConsoleUser,
-) -> Result<Response, AdminError> {
-    let pool = common::pool(&state)?;
-    let target = load(&pool, &id).await?;
-    approve_user(&pool, target.id, user.id).await?;
-    render_user(&pool, target.id, user.id).await
+) -> Result<Response, ConsoleError> {
+    act(&state, &id, user, UserOp::Approve).await
 }
 
 async fn disable(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: ConsoleUser,
-) -> Result<Response, AdminError> {
-    let pool = common::pool(&state)?;
-    let target = load(&pool, &id).await?;
-    if target.id == user.id {
-        return Err(self_error("You can't disable your own account.").into());
-    }
-    disable_user(&pool, target.id).await?;
-    render_user(&pool, target.id, user.id).await
+) -> Result<Response, ConsoleError> {
+    act(&state, &id, user, UserOp::Disable).await
 }
 
 async fn promote(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: ConsoleUser,
-) -> Result<Response, AdminError> {
-    let pool = common::pool(&state)?;
-    let target = load(&pool, &id).await?;
-    promote_user(&pool, target.id).await?;
-    render_user(&pool, target.id, user.id).await
+) -> Result<Response, ConsoleError> {
+    act(&state, &id, user, UserOp::Promote).await
 }
 
 async fn demote(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: ConsoleUser,
-) -> Result<Response, AdminError> {
-    let pool = common::pool(&state)?;
-    let target = load(&pool, &id).await?;
-    if target.id == user.id {
-        return Err(self_error("You can't demote your own account.").into());
+) -> Result<Response, ConsoleError> {
+    act(&state, &id, user, UserOp::Demote).await
+}
+
+/// The four Users-page actions; they differ only in their write and whether
+/// they refuse the caller's own account.
+#[derive(Clone, Copy)]
+enum UserOp {
+    Approve,
+    Disable,
+    Promote,
+    Demote,
+}
+
+impl UserOp {
+    /// The refusal Console renders for the caller's own account.
+    fn self_refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Disable => Some("You can't disable your own account."),
+            Self::Demote => Some("You can't demote your own account."),
+            Self::Approve | Self::Promote => None,
+        }
     }
-    demote_user(&pool, target.id).await?;
+}
+
+async fn act(
+    state: &AppState,
+    oid: &str,
+    user: ConsoleUser,
+    operation: UserOp,
+) -> Result<Response, ConsoleError> {
+    let pool = common::pool(state)?;
+    let target = load(&pool, oid).await?;
+    if let Some(message) = operation.self_refusal()
+        && target.id == user.id
+    {
+        return Err(self_error(message));
+    }
+    match operation {
+        UserOp::Approve => approve_user(&pool, target.id, user.id).await?,
+        UserOp::Disable => disable_user(&pool, target.id).await?,
+        UserOp::Promote => promote_user(&pool, target.id).await?,
+        UserOp::Demote => demote_user(&pool, target.id).await?,
+    }
     render_user(&pool, target.id, user.id).await
 }
 
-async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<UserRow, AdminError> {
-    let id = UserModel::decode_oid(oid).ok_or_else(UserModel::not_found)?;
-    Ok(admin_user(pool, id)
+async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<UserRow, ConsoleError> {
+    Ok(admin_user(pool, common::oid::<UserModel>(oid)?)
         .await?
         .ok_or_else(UserModel::not_found)?)
 }
 
 /// The reloaded row after a write, as Rails' `render_user` does.
-async fn render_user(pool: &sqlx::PgPool, id: i64, current: i64) -> Result<Response, AdminError> {
+async fn render_user(pool: &sqlx::PgPool, id: i64, current: i64) -> Result<Response, ConsoleError> {
     let row = admin_user(pool, id)
         .await?
         .ok_or_else(|| ConsoleError::internal(format!("user {id} vanished after its update")))?;
-    Ok(json_ok(UserPayloadEnvelope {
-        data: payload(&row, current),
-    }))
+    Ok(json_data(payload(&row, current)))
 }
 
 fn self_error(message: &str) -> ConsoleError {

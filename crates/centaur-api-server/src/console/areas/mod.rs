@@ -37,10 +37,5 @@ pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
 }
 
 pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
-    let router = principals::pages(router);
-    let router = secrets::pages(router);
-    let router = oauth::pages(router);
-    let router = admin::pages(router);
-    let router = automation::pages(router);
-    auth_pages::pages(router)
+    auth_pages::pages(oauth::pages(router))
 }

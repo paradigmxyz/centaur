@@ -23,7 +23,7 @@ mod payloads;
 use std::collections::HashMap;
 
 use axum::{
-    Extension, Json, Router,
+    Extension, Json,
     extract::{Path, Query, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
@@ -49,7 +49,7 @@ use crate::{
     AppState,
     console::{
         guard::{BearerUser, GuardedRoutes, SandboxDelegated},
-        http::{ConsoleError, DataPayload, ListParams, Pagination, list_response, no_content},
+        http::{ConsoleError, ListParams, created_data, json_data, list_response, no_content},
         request::{ConsoleData, ConsoleQuery},
     },
 };
@@ -138,8 +138,8 @@ macro_rules! register_kinds {
     }};
 }
 
-/// `GET /api/v1/console/secrets` filters. Pagination stays on `Pagination` so
-/// Rails' integer parsing and clamping are unchanged.
+/// `GET /api/v1/console/secrets` filters. Pagination and `labels[key]` come
+/// from [`ListParams`], so Rails' integer parsing and clamping are unchanged.
 #[derive(Debug, Deserialize)]
 struct ConsoleIndexQuery {
     #[serde(default)]
@@ -148,10 +148,6 @@ struct ConsoleIndexQuery {
     q: Option<String>,
     #[serde(default)]
     exclude_grantee: Option<String>,
-    #[serde(default)]
-    page: Option<String>,
-    #[serde(default)]
-    limit: Option<String>,
 }
 
 /// `POST .../role_grants` reads `data.require(:role_id)`. The typed field makes
@@ -188,11 +184,6 @@ pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     )
 }
 
-/// Server-rendered pages and other top-level routes (absolute paths).
-pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
-    router
-}
-
 // ---------------------------------------------------------------------------
 // Console
 // ---------------------------------------------------------------------------
@@ -200,10 +191,12 @@ pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
 async fn console_index(
     State(state): State<AppState>,
     _user: ConsoleUser,
+    Query(raw): Query<HashMap<String, String>>,
     ConsoleQuery(query): ConsoleQuery<ConsoleIndexQuery>,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
-    let pagination = Pagination::from_optional(query.page.as_deref(), query.limit.as_deref())?;
+    let params = ListParams::from_query(&raw)?;
+    let pagination = params.pagination;
     let kind = match query.kind.as_deref().filter(|value| !value.is_empty()) {
         Some(kind) => match SecretKind::parse(kind) {
             Some(kind) => Some(kind),
@@ -230,7 +223,7 @@ async fn console_index(
     };
     let page = list_secrets(&pool, &filter).await?;
     let rows: Vec<_> = page.rows.iter().map(payloads::summary).collect();
-    Ok(json_ok(list_response(pagination, &rows, page.total)))
+    Ok(Json(list_response(pagination, &rows, page.total)).into_response())
 }
 
 async fn console_show(
@@ -245,9 +238,7 @@ async fn console_show(
     let row = find_secret(&pool, kind, &id)
         .await?
         .ok_or_else(|| not_found_secret(kind))?;
-    Ok(json_ok(DataPayload {
-        data: payloads::detail(&row),
-    }))
+    Ok(json_data(payloads::detail(&row)))
 }
 
 async fn console_role_grants(
@@ -257,13 +248,14 @@ async fn console_role_grants(
 ) -> Result<Response, ConsoleError> {
     let (pool, kind, secret) = console_secret(&state, &kind, &secret_id).await?;
     let (grants, assignable) = role_grants(&pool, kind, secret.id).await?;
-    Ok(json_ok(payloads::RoleGrantsResponse {
+    Ok(Json(payloads::RoleGrantsResponse {
         data: grants
             .iter()
             .map(|grant| payloads::grant(grant, &secret))
             .collect(),
-        assignable_roles: assignable.iter().map(payloads::role).collect(),
-    }))
+        assignable_roles: assignable.iter().map(payloads::RolePayload::from).collect(),
+    })
+    .into_response())
 }
 
 async fn console_create_role_grant(
@@ -278,17 +270,7 @@ async fn console_create_role_grant(
         .ok_or_else(|| ConsoleError::not_found("Role not found"))?;
     let (grant, created) =
         create_role_grant(&pool, kind, secret.id, role.id, Some(user.id)).await?;
-    let status = if created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    Ok(json_response(
-        status,
-        DataPayload {
-            data: payloads::grant(&grant, &secret),
-        },
-    ))
+    Ok(document_response(payloads::grant(&grant, &secret), created))
 }
 
 async fn console_delete_role_grant(
@@ -362,9 +344,7 @@ async fn console_kind_show<K: EditableKind>(
     let row = find_secret(&pool, K::KIND, &id)
         .await?
         .ok_or_else(|| not_found_secret(K::KIND))?;
-    Ok(json_ok(DataPayload {
-        data: K::record(&row),
-    }))
+    Ok(json_data(K::record(&row)))
 }
 
 async fn console_update<K: EditableKind>(
@@ -501,7 +481,7 @@ async fn bearer_index<K: SecretRoutes>(
     )
     .await?;
     let rows: Vec<_> = page.rows.iter().map(K::record).collect();
-    Ok(json_ok(list_response(params.pagination, &rows, page.total)))
+    Ok(Json(list_response(params.pagination, &rows, page.total)).into_response())
 }
 
 async fn bearer_show<K: SecretRoutes>(
@@ -513,9 +493,7 @@ async fn bearer_show<K: SecretRoutes>(
     let row = find_secret(&pool, K::KIND, &id)
         .await?
         .ok_or_else(|| not_found_secret(K::KIND))?;
-    Ok(json_ok(DataPayload {
-        data: K::record(&row),
-    }))
+    Ok(json_data(K::record(&row)))
 }
 
 async fn bearer_create<K: SecretRoutes>(
@@ -570,9 +548,7 @@ async fn bearer_lookup<K: SecretRoutes>(
     let row = find_secret_by_foreign_id(&pool, K::KIND, &foreign_id)
         .await?
         .ok_or_else(|| not_found_secret(K::KIND))?;
-    Ok(json_ok(DataPayload {
-        data: K::record(&row),
-    }))
+    Ok(json_data(K::record(&row)))
 }
 
 /// A personal SSH key may only be edited by its owner. A missing record is left
@@ -614,17 +590,7 @@ async fn write_kind<K: SecretRoutes>(
     options: WriteOptions,
 ) -> Result<Response, ConsoleError> {
     let result = write_secret(pool, K::KIND, target, document, operator_id, options).await?;
-    let status = if result.created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    Ok(json_response(
-        status,
-        DataPayload {
-            data: K::record(&result.row),
-        },
-    ))
+    Ok(document_response(K::record(&result.row), result.created))
 }
 
 async fn delete_kind(pool: &PgPool, kind: SecretKind, oid: &str) -> Result<Response, ConsoleError> {
@@ -662,12 +628,13 @@ async fn missing_route() -> Response {
     ConsoleError::not_found("not found").into_response()
 }
 
-fn json_ok<T: Serialize>(body: T) -> Response {
-    Json(body).into_response()
-}
-
-fn json_response<T: Serialize>(status: StatusCode, body: T) -> Response {
-    (status, Json(body)).into_response()
+/// `201 Created` for a new record and `200 OK` for an existing one.
+fn document_response<T: Serialize>(payload: T, created: bool) -> Response {
+    if created {
+        created_data(payload)
+    } else {
+        json_data(payload)
+    }
 }
 
 /// The writable Console pool every handler in this area reads and writes.

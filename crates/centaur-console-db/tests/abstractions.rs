@@ -5,32 +5,16 @@
 //! `bin/rails db:prepare`. Each test inserts uniquely named rows, so tests can
 //! share one database and run in parallel.
 
-use std::env;
-
 use centaur_console_db::areas::secrets::SecretKind;
-use centaur_console_db::invalidate::{self, Scope, SecretChanges};
+use centaur_console_db::invalidate::{self, Scope};
 use centaur_console_db::model::{self, ApiKey, ConsoleModel, StaticSecret};
 use centaur_console_db::write;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use time::PrimitiveDateTime;
 
-async fn database() -> Option<PgPool> {
-    let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-        assert!(
-            env::var_os("CI").is_none(),
-            "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-        );
-        eprintln!("skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema");
-        return None;
-    };
-    Some(
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect to the test database"),
-    )
-}
+mod common;
+
+use common::database;
 
 struct Fixture {
     pool: PgPool,
@@ -236,32 +220,40 @@ async fn invalidate_bumps_the_versions_rails_would() {
         .unwrap();
     assert_eq!(fixture.version(in_role).await, 3);
 
-    // A secret write counts one increment per saved/destroyed record and
-    // reaches both the direct grantee and the role's holders.
-    let changes = SecretChanges::replaced(true, 1, 1, 0, 1);
+    // A secret write bumps each grantee once and reaches both the direct
+    // grantee and the role's holders.
     invalidate::invalidate(
         &mut conn,
-        Scope::secret_write(SecretKind::Static, secret, changes),
+        Scope::Secret {
+            kind: SecretKind::Static,
+            id: secret,
+        },
     )
     .await
     .unwrap();
-    assert_eq!(fixture.version(direct).await, 7);
-    assert_eq!(fixture.version(in_role).await, 7);
+    assert_eq!(fixture.version(direct).await, 4);
+    assert_eq!(fixture.version(in_role).await, 4);
 
-    // A delete bumps each grantee once while the grants still exist.
-    invalidate::invalidate(&mut conn, Scope::secret_delete(SecretKind::Static, secret))
-        .await
-        .unwrap();
-    assert_eq!(fixture.version(direct).await, 8);
-    assert_eq!(fixture.version(in_role).await, 8);
+    // A delete bumps the same grantees while the grants still exist.
+    invalidate::invalidate(
+        &mut conn,
+        Scope::Secret {
+            kind: SecretKind::Static,
+            id: secret,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.version(direct).await, 5);
+    assert_eq!(fixture.version(in_role).await, 5);
 
     // A broker credential reaches every principal granted a secret its
     // `token_broker` source delivers.
     invalidate::invalidate(&mut conn, Scope::BrokerCredential(credential))
         .await
         .unwrap();
-    assert_eq!(fixture.version(direct).await, 9);
-    assert_eq!(fixture.version(in_role).await, 9);
+    assert_eq!(fixture.version(direct).await, 6);
+    assert_eq!(fixture.version(in_role).await, 6);
 }
 
 #[tokio::test]
