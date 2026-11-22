@@ -8,7 +8,7 @@
 //!
 //! HTML pages remain server-rendered with the static `public/assets/oauth-page`
 //! files embedded in the binary. The built SPA is served from disk by
-//! `spa_files`; the chart runs no Rails web pod.
+//! `static_files`; the chart runs no Rails web pod.
 //!
 //! This foundation lays out the builders used by later area modules; some
 //! helpers are intentionally not called until those areas arrive.
@@ -25,7 +25,7 @@ pub(crate) mod request;
 pub(crate) mod return_path;
 pub(crate) mod sandbox;
 pub(crate) mod session_cookie;
-mod spa_files;
+mod static_files;
 #[cfg(test)]
 mod tests_db;
 
@@ -51,7 +51,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .merge(areas::pages(pages::router()))
         .merge(assets::router())
-        .merge(spa_files::router())
+        .merge(static_files::router())
         .nest("/api/v1/console", console_router(state.clone()))
         .nest("/api/v1/sandbox", sandbox::sandbox_router(state.clone()))
         .nest("/api/v1", bearer::bearer_router(state))
@@ -256,11 +256,10 @@ mod tests {
             );
         }
 
-        // `/console/...` is a browser navigation, so it gets the SPA shell when
-        // the build output exists and the not-built page otherwise. The SPA
-        // shell is selected by path; Accept is not negotiated. Do not make this
-        // test depend on whether the SPA was built in this checkout.
-        let shell = spa_files::spa_shell_path();
+        // `/console/...` is a browser navigation and gets the SPA shell (a 404
+        // when this checkout has no build). Other paths are not SPA routes.
+        // `static_files` tests the shell itself against a temporary build.
+        let shell = static_files::spa_shell_path();
         let response = app
             .clone()
             .oneshot(
@@ -272,25 +271,12 @@ mod tests {
             )
             .await
             .unwrap();
-        if shell.is_file() {
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("text/html; charset=utf-8"),
-            );
+        let expected = if shell.is_file() {
+            StatusCode::OK
         } else {
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("text/plain; charset=utf-8"),
-            );
-        }
+            StatusCode::NOT_FOUND
+        };
+        assert_eq!(response.status(), expected);
 
         let response = app
             .oneshot(
@@ -302,25 +288,7 @@ mod tests {
             )
             .await
             .unwrap();
-        if shell.is_file() {
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("text/html; charset=utf-8"),
-            );
-        } else {
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("text/plain; charset=utf-8"),
-            );
-        }
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -486,12 +454,10 @@ mod tests {
         // The SPA fallback exists only on the public host. The harness does
         // not always build the shell, so the public host is either the shell
         // or the not-built page.
-        let shell = spa_files::spa_shell_path();
+        let shell = static_files::spa_shell_path();
         let response = send(&app, CONSOLE_HOST, Method::GET, "/console/principals", &[]).await;
         if shell.is_file() {
             assert_eq!(response.status(), StatusCode::OK);
-        } else {
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
         let response = send(&app, INTERNAL_HOST, Method::GET, "/console/principals", &[]).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

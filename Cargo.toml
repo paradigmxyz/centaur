@@ -80,7 +80,7 @@ tokio = "1"
 tokio-util = "0.7"
 toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.7.0", features = ["trace", "compression-br", "compression-gzip"] }
+tower-http = { version = "0.7.0", features = ["trace", "compression-br", "compression-gzip", "fs"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = "0.3"

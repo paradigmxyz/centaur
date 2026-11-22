@@ -1,19 +1,14 @@
-//! Console area: browser-facing authentication, PWA, and SPA routes.
+//! Console area: browser-facing authentication routes.
 //!
-//! This ports the browser surface around the JSON console API: SSO sign-in,
-//! the MCP OAuth authorization server's metadata/registration endpoints, the
-//! server-rendered consent page, the PWA manifest and service worker, the
-//! protocol launch handler, the health endpoint, and the SPA shell fallback.
-//! The form and redirect contracts are shared with Rails during a rolling
-//! deploy, so fields, messages, and paths must stay byte-compatible. Rails'
-//! format-suffix route aliases are not ported: only the two paths a page or
-//! client actually requests, `/manifest.json` (the SPA's manifest link) and
-//! `/service-worker.js` (the SPA's service-worker registration), are routed.
+//! SSO sign-in, the MCP OAuth authorization server's metadata, registration,
+//! consent, and token endpoints, and the `web+centaur://` launch handler. The
+//! SPA shell, its assets, and the PWA files are static and live in
+//! `console::static_files`.
 
 mod mcp_oauth;
 mod sso;
 
-use std::{env, path::PathBuf};
+use std::env;
 
 use crate::{
     AppState,
@@ -22,16 +17,16 @@ use crate::{
         http::{ConsoleError, json_not_found},
         return_path,
         session_cookie::ConsoleSession,
+        static_files::APP_CSP,
     },
     console_session::ConsoleSessionConfig,
 };
 use axum::{
     Router,
-    body::Body,
     extract::{OriginalUri, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, LOCATION, SET_COOKIE},
+        header::{CONTENT_TYPE, LOCATION, SET_COOKIE},
     },
     response::{IntoResponse, Response},
     routing::get,
@@ -47,38 +42,6 @@ use crate::console::request::ConsoleQuery;
 pub(super) const SERVER_PAGE_CSP: &str = "default-src 'self'; script-src 'none'; style-src 'self'; \
      img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self'; \
      manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-
-/// Rails' app-wide policy for the SPA shell.
-const APP_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
-     style-src-elem 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; \
-     connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; \
-     base-uri 'none'; frame-ancestors 'none'";
-
-const NOT_BUILT_MESSAGE: &str = "The console web app has not been built.\n\
-Run `pnpm -C services/console/web build`, or use the Vite dev server\n\
-(`pnpm -C services/console/web dev`) during development.\n";
-
-/// `Lib::SpaRequest::EXCLUDED_PREFIXES`: protocol, API, and login namespaces
-/// keep the JSON 404 instead of the SPA.
-const NON_SPA_PREFIXES: &[&str] = &[
-    "/api",
-    "/rails",
-    "/spa",
-    "/assets",
-    "/.well-known",
-    "/up",
-    "/mcp",
-    "/oauth",
-    "/auth",
-    "/login",
-    "/logout",
-    "/pending",
-];
-
-const MANIFEST_JSON: &str =
-    include_str!("../../../../../services/console/config/pwa/manifest.json");
-const SERVICE_WORKER_JS: &str =
-    include_str!("../../../../../services/console/config/pwa/service-worker.js");
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
 pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
@@ -128,84 +91,11 @@ pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
             "/mcp/oauth/token",
             axum::routing::post(mcp_oauth::token).fallback(not_found_for_method),
         )
-        .route("/manifest", get(manifest).fallback(not_found_for_method))
-        // `services/console/web/index.html` links `/manifest.json`, so that one
-        // Rails format suffix is part of the SPA's contract.
-        .route(
-            "/manifest.json",
-            get(manifest).fallback(not_found_for_method),
-        )
-        .route(
-            "/service-worker",
-            get(service_worker).fallback(not_found_for_method),
-        )
-        // `services/console/web/src/features/auth-pages/pwa.ts` registers
-        // `/service-worker.js`.
-        .route(
-            "/service-worker.js",
-            get(service_worker).fallback(not_found_for_method),
-        )
         .route("/launch", get(launch).fallback(not_found_for_method))
-        .route("/", get(spa_shell).fallback(not_found_for_method))
-        .route(
-            "/{*spa_path}",
-            get(spa_fallback).fallback(not_found_for_method),
-        )
 }
 
 async fn not_found_for_method() -> Response {
     json_not_found()
-}
-
-async fn manifest(headers: HeaderMap) -> Response {
-    let _ = headers;
-    let mut response = (StatusCode::OK, MANIFEST_JSON).into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/manifest+json; charset=utf-8"),
-    );
-    response.headers_mut().insert(
-        CONTENT_DISPOSITION,
-        HeaderValue::from_static(
-            "inline; filename=\"manifest.json\"; filename*=UTF-8''manifest.json",
-        ),
-    );
-    response.headers_mut().insert(
-        "content-transfer-encoding",
-        HeaderValue::from_static("binary"),
-    );
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    response
-        .headers_mut()
-        .insert("content-security-policy", HeaderValue::from_static(APP_CSP));
-    response
-}
-
-async fn service_worker() -> Response {
-    let mut response = (StatusCode::OK, SERVICE_WORKER_JS).into_response();
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/javascript; charset=utf-8"),
-    );
-    response.headers_mut().insert(
-        CONTENT_DISPOSITION,
-        HeaderValue::from_static(
-            "inline; filename=\"service-worker.js\"; filename*=UTF-8''service-worker.js",
-        ),
-    );
-    response.headers_mut().insert(
-        "content-transfer-encoding",
-        HeaderValue::from_static("binary"),
-    );
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    response
-        .headers_mut()
-        .insert("content-security-policy", HeaderValue::from_static(APP_CSP));
-    response
 }
 
 /// `GET /launch`: route a `web+centaur://` URL into the SPA. The custom-scheme
@@ -270,137 +160,6 @@ fn safe_launch_path(path: &str) -> bool {
             && rest.chars().all(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '_' | '/' | '-')
             }))
-}
-
-async fn spa_shell(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    OriginalUri(uri): OriginalUri,
-) -> Response {
-    serve_spa(state, headers, uri.path(), uri.query()).await
-}
-
-async fn spa_fallback(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    OriginalUri(uri): OriginalUri,
-) -> Response {
-    serve_spa(state, headers, uri.path(), uri.query()).await
-}
-
-async fn serve_spa(
-    state: AppState,
-    headers: HeaderMap,
-    path: &str,
-    query: Option<&str>,
-) -> Response {
-    if !spa_request(path) {
-        return non_spa_not_found(path);
-    }
-    let Some(config) = state.console_session().cloned() else {
-        return console_unavailable();
-    };
-    let mut session = config
-        .session_from_headers(&headers)
-        .unwrap_or_else(ConsoleSession::anonymous);
-    if session.user_id().is_none() {
-        let full_path = match query {
-            Some(query) if !query.is_empty() => format!("{path}?{query}"),
-            _ => path.to_owned(),
-        };
-        if let Some(safe) = return_path::safe(&full_path) {
-            session.set_return_to(safe);
-        }
-    }
-    let cookie = config.cookie().set_cookie_header(&session);
-    match std::fs::read(spa_shell_path()) {
-        Ok(body) => {
-            let mut response = Response::new(Body::from(body));
-            response.headers_mut().insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            );
-            response.headers_mut().insert(
-                "content-disposition",
-                HeaderValue::from_static(
-                    "inline; filename=\"index.html\"; filename*=UTF-8''index.html",
-                ),
-            );
-            response.headers_mut().insert(
-                "content-transfer-encoding",
-                HeaderValue::from_static("binary"),
-            );
-            response
-                .headers_mut()
-                .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-            response
-                .headers_mut()
-                .insert("content-security-policy", HeaderValue::from_static(APP_CSP));
-            if let Some(cookie) = cookie {
-                response.headers_mut().append(SET_COOKIE, cookie);
-            }
-            response
-        }
-        Err(_) => {
-            let mut response = (StatusCode::SERVICE_UNAVAILABLE, NOT_BUILT_MESSAGE).into_response();
-            response.headers_mut().insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            );
-            response
-                .headers_mut()
-                .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-            response
-                .headers_mut()
-                .insert("content-security-policy", HeaderValue::from_static(APP_CSP));
-            if let Some(cookie) = cookie {
-                response.headers_mut().append(SET_COOKIE, cookie);
-            }
-            response
-        }
-    }
-}
-
-/// `Lib::SpaRequest`'s path allowlist. Rails also required `request.format.html?`;
-/// the port dropped Accept/MIME negotiation, so a page route is HTML and the SPA
-/// shell is selected by path alone. The SPA shell's other rules (only when the
-/// build output exists, the return-path cookie, the app CSP) are unchanged.
-fn spa_request(path: &str) -> bool {
-    if path == "/" {
-        return true;
-    }
-    !NON_SPA_PREFIXES
-        .iter()
-        .any(|prefix| matches_prefix(path, prefix))
-}
-
-fn non_spa_not_found(path: &str) -> Response {
-    if path == "/"
-        || NON_SPA_PREFIXES
-            .iter()
-            .any(|prefix| matches_prefix(path, prefix))
-        || matches_prefix(path, "/console")
-    {
-        let mut response = json_not_found();
-        response
-            .headers_mut()
-            .insert("content-security-policy", HeaderValue::from_static(APP_CSP));
-        return response;
-    }
-    // Beyond the Console-owned prefixes the app-wide fallback keeps axum's
-    // empty 404 (see `console::fallback`), so an unknown non-HTML path is not
-    // Console's JSON body.
-    StatusCode::NOT_FOUND.into_response()
-}
-
-fn matches_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix
-        || path.starts_with(&format!("{prefix}/"))
-        || path.starts_with(&format!("{prefix}."))
-}
-
-fn spa_shell_path() -> PathBuf {
-    crate::console::spa_files::spa_shell_path()
 }
 
 pub(super) fn console_config(state: &AppState) -> Option<&ConsoleSessionConfig> {

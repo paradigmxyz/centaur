@@ -23,7 +23,7 @@ When disabled, these paths fall through to the rest of api-rs exactly as before.
 | `http.rs` | Error envelope, JSON 404, `{"data": ...}` envelopes, pagination, label filters, lists, origin. |
 | `request.rs` | Typed `data`/body/query/form extractors and their validation errors. |
 | `assets.rs` | Embedded `services/console/public/assets/oauth-page` files. |
-| `spa_files.rs` | Built `/spa/assets/*` files (long-lived cache, gzip/brotli) and the root public files the shell and manifest use. |
+| `static_files.rs` | Static mount: the SPA shell, `/spa/assets/*`, root public files, PWA manifest and service worker. No session or DB access. |
 | `pages.rs` | Server-rendered `/login`, `/pending`, `/logout`. |
 | `tests_db.rs` | DB-backed integration tests for the shipped routers. |
 
@@ -511,8 +511,9 @@ Match Rails' contract, not its implementation accidents. Do not reintroduce:
   wrong JSON type is a 422 validation error, and an unknown field is ignored.
 - Rails MIME/Accept negotiation (`request_format`, wildcard/quality handling,
   format suffixes). A page route always answers HTML, a JSON endpoint always
-  answers JSON, and the SPA shell is selected by path; the shell's own rules
-  (build output present, return-path cookie, app CSP) are unchanged.
+  answers JSON, and the SPA shell is served for `/` and `/console/...` only.
+- The SPA shell no longer writes `return_to` into the session; the SPA passes
+  `?return_to=` to `/login` itself.
 - Ruby `String#to_i` for `CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS` and Rails'
   `Integer(value, 10)` for pagination. Both are strict now: the TTL must be a
   positive integer or the token endpoint returns its OAuth 400; `page`/`limit`
@@ -794,11 +795,14 @@ The built SPA is read from disk: `CENTAUR_CONSOLE_SPA_SHELL` names the shell
 the hashed asset root (default `services/console/public/spa/assets`), and
 `CENTAUR_CONSOLE_PUBLIC_ROOT` the root public files (default
 `services/console/public`). The api-rs image builds the SPA and sets all three
-to `/app/services/console/...`; source maps are removed there. `spa_files.rs`
-serves `/spa/assets/*` with `public, max-age=31536000, immutable` and
-gzip/brotli, serves the root icons/offline page with Rails' public-file cache,
-and 404s unknown or `.map` assets. The shell stays a `pages`/`auth_pages`
-response with `no-cache` and the app CSP, and is never read from `public/`.
+to `/app/services/console/...`; source maps are removed there.
+`static_files.rs` serves them with `tower_http`'s `ServeDir`/`ServeFile`: the
+shell for `/` and `/console/...` (`no-cache`, app CSP), `/spa/assets/*`
+(`public, max-age=31536000, immutable`, gzip/brotli), the root icons and
+offline page (public-file cache), and the embedded PWA manifest and service
+worker (`no-cache`). The shell is a plain file: a signed-out visitor is sent to
+`/login?return_to=<page>` by the SPA when its first API call returns 401.
+Other paths are not SPA routes and 404.
 
 `/login` (GET/POST), `/pending`, and `POST /logout` are server-rendered. Their
 HTML and the OAuth layout are ported from `app/views/sessions/*` and
