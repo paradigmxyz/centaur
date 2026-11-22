@@ -137,11 +137,10 @@ console:
     # Default Always: the image is published under the mutable `latest` tag, so
     # IfNotPresent would pin pods to whatever digest a node already cached.
     pullPolicy: Always
-  # RAILS_ENV for the two remaining Rails processes: the migration Job and the
-  # worker.
+  # RAILS_ENV for the Rails worker (schema migrations and Slack catalog jobs).
   railsEnv: production
   database:
-    # Logical DB created on the bundled Postgres by the console-migrate Job's
+    # Logical DB created on the bundled Postgres by the Console worker's
     # create-db init container, and the database the Console handlers use. Must
     # match the primary connection's `database:` in the image's database.yml —
     # the connection URL carries no database path, so each process resolves the
@@ -209,17 +208,16 @@ console:
     # host.
     host: ""
     tls: []
-  # Resources for the console-migrate Job (`bin/rails db:prepare` plus the
-  # bootstrap). Short-lived; leave empty for the namespace defaults.
+  # Resources for the worker's migrate init container (`bin/rails db:prepare`
+  # plus the bootstrap). Leave empty for the namespace defaults.
   resources: {}
   # Solid Queue worker (`bin/jobs`) that runs the Console jobs that still live in
   # Rails: the Slack channel catalog refresh and membership refresh. Without it
-  # those jobs never execute. It shares the Console image with the migration Job
-  # and boots Rails, so it also runs the Console bootstrap initializer.
+  # those jobs never execute. Its init containers also own the Console schema
+  # (create-db, `db:prepare`, bootstrap), so it must run at least one replica.
   worker:
     replicaCount: 1
-    # Node steering for Console background worker pods. The migration Job and
-    # api-rs follow apiRs' scheduling instead.
+    # Node steering for Console background worker pods.
     nodeSelector: {}
     affinity: {}
     tolerations: []

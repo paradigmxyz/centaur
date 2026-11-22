@@ -199,9 +199,9 @@ admit_external_team() {
 
 # Stores the subscription access tokens as token-broker would after a refresh.
 # Without a refresh token token-broker never tries to refresh them. The Console
-# itself is served by api-rs, so the Rails processes left are the worker and the
-# migration Job; the worker shares the image, the DB env, and the ActiveRecord
-# encryption keys, so `bin/rails runner` runs there.
+# itself is served by api-rs, so the Rails worker is the only Rails process left;
+# it shares the image, the DB env, and the ActiveRecord encryption keys, so
+# `bin/rails runner` runs there.
 seed_broker_credentials() {
   local console="deploy/${RELEASE}-centaur-console-worker"
   until kubectl -n "$NAMESPACE" get "$console" > /dev/null 2>&1; do sleep 2; done
@@ -301,7 +301,7 @@ run_tests() {
   export E2E_SLACK_URL=http://127.0.0.1:30443
   export E2E_MODEL_URL=http://127.0.0.1:30080
   export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
-  # The console names its database after the Rails environment (contrib/chart/templates/console-migrate.yaml).
+  # The console names its database after the Rails environment (console.database.name, created by the Console worker).
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   # The key api-rs administers the console with.

@@ -12,10 +12,10 @@ URLs do not change.
 
 What the chart still runs from `services/console`:
 
-- the console-migrate Job, which owns the Console schema (`bin/rails db:prepare`)
-  and the initial-admin bootstrap, as a pre-upgrade Helm hook;
 - the Solid Queue worker, which runs the Slack channel catalog and membership
-  refresh jobs;
+  refresh jobs, and whose init containers own the Console schema
+  (`bin/rails db:prepare`) and the initial-admin bootstrap. It must run at least
+  one replica;
 - the `console` Service, now a compatibility alias forwarding its historical
   `console:3000` URL to api-rs, so in-cluster clients with a cached URL keep
   working.
@@ -53,14 +53,15 @@ rollback is data-safe.
 ```bash
 helm upgrade <release> contrib/chart -n <namespace> -f your-values.yaml
 kubectl rollout status deploy/<release>-centaur-api-rs -n <namespace>
-kubectl get pods -n <namespace> -l app.kubernetes.io/component=console-migrate
-kubectl get deploy -n <namespace> -l app.kubernetes.io/component=console-worker
+kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
 ```
 
-Helm runs the console-migrate Job before it updates the release, so the schema
-and the initial admin exist before api-rs and the worker start. api-rs,
-proxy-sync, token-broker, and the worker also wait for the Console schema in an
-init container, which is what orders a first install on the bundled Postgres.
+The worker's init containers create the databases (bundled Postgres), run
+`bin/rails db:prepare`, and bootstrap the initial admin before the worker starts.
+api-rs, proxy-sync, and token-broker wait for the Console schema in their own
+init containers. Any rollout that changes the worker's pod template, including
+a `helm rollback` in either direction, restarts it and applies pending
+migrations.
 
 Then verify:
 
@@ -84,13 +85,19 @@ kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
 
 The previous revision restores the Rails web Deployment, the Ingress, and the
 internal URL. The schema is the same one both implementations use, so no data
-migration is needed.
+migration is needed: data written on either side is readable on the other.
+
+Before upgrading, note the revision number of the current (Rails Console)
+release, and make sure Helm will not prune it: `helm upgrade` keeps 10
+revisions by default (`--history-max`). If that revision is gone, reinstall the
+previous chart version with the previous values instead.
 
 ## Expected one-time effects
 
 - **Every browser signs in once more.** The Rails and api-rs session cookies are
-  different formats under the same cookie name, so sessions do not carry over —
-  in either direction.
+  different formats under the same cookie name, so sessions do not carry over
+  between implementations. api-rs sessions issued before a rollback work again
+  after rolling forward, as long as `CONSOLE_SESSION_SECRET` is unchanged.
 - **In-flight OAuth flows fail.** A flow started on one implementation must
   finish there; users in the middle of an MCP consent or a broker OAuth callback
   see an invalid-state error and retry.

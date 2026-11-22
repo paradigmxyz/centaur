@@ -186,18 +186,16 @@ spec:
       initContainers:
         # api-rs registers principals and roles in the Console database during
         # startup, and the ported Console handlers read and write it, so wait for
-        # the console-migrate Job's schema before starting. Upgrades order the Job
-        # with a pre-upgrade hook; a bundled-Postgres install runs it as an
-        # ordinary resource, and this wait provides the ordering there. The Job
-        # ends with the initial-admin bootstrap, so on that install path api-rs
-        # can still win a sub-second race against the API-key row and exit; the
-        # kubelet restarts it and the next start succeeds.
+        # the schema the Console worker's init containers apply before starting.
+        # The worker bootstraps the initial admin right after the schema, so on a
+        # fresh install api-rs can win a sub-second race against the API-key row
+        # and exit; the kubelet restarts it and the next start succeeds.
 {{ include "centaur.consoleDbWait" (dict
   "root" .
   "name" "wait-for-console-schema"
   "database" $console.database.name
   "query" "SELECT to_regclass('public.users') IS NOT NULL"
-  "message" "waiting for the Console schema (console-migrate Job)…") | nindent 8 }}
+  "message" "waiting for the Console schema (Console worker)…") | nindent 8 }}
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}

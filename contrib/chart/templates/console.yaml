@@ -13,8 +13,8 @@
 # does not set CENTAUR_CONSOLE_URL. New wiring should use centaur.consoleUrl.
 #
 # The Console database schema is owned by the Rails migrations, applied by the
-# console-migrate Job (templates/console-migrate.yaml). The Rails worker
-# (templates/console-worker.yaml) keeps running the Slack channel catalog jobs.
+# Rails worker's init containers (templates/console-worker.yaml), which also runs
+# the Slack channel catalog jobs.
 apiVersion: v1
 kind: Service
 metadata:

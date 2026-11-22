@@ -551,8 +551,8 @@ export const scheduledTasks = {
 /**
  * Runs a Rails snippet in the Console worker, the Rails process the chart still
  * runs (api-rs serves the Console itself). The worker shares the Console image,
- * the database env, and the ActiveRecord encryption keys with the migration Job,
- * and its boot also runs the Console bootstrap initializer.
+ * the database env, and the ActiveRecord encryption keys, and it applies the
+ * Console schema and bootstrap in its init containers.
  */
 async function consoleRunner(script: string): Promise<string> {
   return kubectl({}, 'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', script)

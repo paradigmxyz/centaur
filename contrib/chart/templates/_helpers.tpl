@@ -266,8 +266,8 @@ The Console is served by api-rs; the chart runs no Rails web pod. The `console`
 Service survives only as a compatibility alias (same name and port, forwarding
 to api-rs) for in-cluster clients with a cached `centaur-console:3000` URL, and
 `centaur.consoleUrl` returns the api-rs Service URL. The Rails worker still runs
-for the Slack channel catalog jobs, and a migration Job runs the Rails schema
-migrations (see console-migrate.yaml).
+for the Slack channel catalog jobs and runs the Rails schema migrations in its
+init containers (see console-worker.yaml).
 */ -}}
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}
@@ -307,10 +307,8 @@ apiRs.enabled=false has none; fail rather than render a URL nothing answers.
 
 {{- /*
 Init container that blocks on a psql predicate against a Console database.
-Console-database clients use it so they start only after the console-migrate Job
-has applied the schema: on upgrades Helm runs the Job as a pre-upgrade hook
-(already ordered), and on a bundled-Postgres install the Job is an ordinary
-resource, so the wait provides the ordering there.
+Console-database clients use it so they start only after the Console worker's
+init containers have applied the schema.
 
 Params: root, name (container name), database (PGDATABASE), query (SQL returning
 t for ready), message (log line while waiting). It connects through

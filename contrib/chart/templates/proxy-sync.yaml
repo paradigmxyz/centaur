@@ -52,13 +52,13 @@ spec:
 {{- include "centaur.podScheduling" (dict "values" .Values.proxySync "indent" 6) }}
       initContainers:
         # proxy-sync reads principals, proxies, and their grants from the Console
-        # database, so wait for the schema the console-migrate Job applies.
+        # database, so wait for the schema the Console worker applies.
 {{ include "centaur.consoleDbWait" (dict
   "root" .
   "name" "wait-for-console-schema"
   "database" $console.database.name
   "query" "SELECT to_regclass('public.users') IS NOT NULL"
-  "message" "waiting for the Console schema (console-migrate Job)…") | nindent 8 }}
+  "message" "waiting for the Console schema (Console worker)…") | nindent 8 }}
       containers:
         - name: proxy-sync
           image: {{ printf "%s:%s" .Values.proxySync.image.repository .Values.proxySync.image.tag | quote }}
