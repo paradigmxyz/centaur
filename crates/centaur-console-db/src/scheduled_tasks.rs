@@ -26,6 +26,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use time::OffsetDateTime;
 
 use crate::areas::automation::{SlackPolicy, begin_write, slack_policy};
+use crate::timestamp::{from_chrono, to_chrono};
 use crate::{Result, cron::Schedule, oid::oid};
 
 pub use crate::areas::auth_pages::console_user_foreign_id;
@@ -120,7 +121,7 @@ where
          WHERE enabled AND next_run_at <= ($1::timestamptz AT TIME ZONE 'UTC') \
          ORDER BY next_run_at, id LIMIT $2",
     )
-    .bind(offset(now))
+    .bind(from_chrono(now))
     .bind(BATCH_SIZE)
     .fetch_all(pool)
     .await?;
@@ -417,7 +418,7 @@ async fn lock_task(connection: &mut PgConnection, id: i64, lock: &str) -> Result
         enabled: row.try_get("enabled")?,
         next_run_at: row
             .try_get::<Option<OffsetDateTime>, _>("next_run_at")?
-            .map(utc),
+            .map(to_chrono),
     }))
 }
 
@@ -435,8 +436,8 @@ async fn advance(
          WHERE id = $1",
     )
     .bind(id)
-    .bind(offset(scheduled_for))
-    .bind(next_run_at.map(offset))
+    .bind(from_chrono(scheduled_for))
+    .bind(next_run_at.map(from_chrono))
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -459,7 +460,7 @@ async fn record_run(
     )
     .bind(id)
     .bind(run_id)
-    .bind(offset(now))
+    .bind(from_chrono(now))
     .bind(error)
     .execute(&mut *connection)
     .await?;
@@ -473,17 +474,6 @@ async fn record_error(connection: &mut PgConnection, id: i64, error: &str) -> Re
         .execute(&mut *connection)
         .await?;
     Ok(())
-}
-
-fn offset(time: DateTime<Utc>) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(
-        time.timestamp_nanos_opt().unwrap_or_default(),
-    ))
-    .unwrap_or(OffsetDateTime::UNIX_EPOCH)
-}
-
-fn utc(time: OffsetDateTime) -> DateTime<Utc> {
-    DateTime::from_timestamp(time.unix_timestamp(), time.nanosecond()).unwrap_or_default()
 }
 
 #[cfg(test)]

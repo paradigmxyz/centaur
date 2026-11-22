@@ -290,7 +290,7 @@ pub fn slack_catalog_configured() -> bool {
 }
 
 /// The catalog error message, evaluated after the catalog was consulted.
-pub async fn slack_catalog_error(pool: &PgPool) -> Result<Option<&'static str>> {
+pub async fn slack_catalog_error(pool: &PgPool) -> crate::Result<Option<&'static str>> {
     if !slack_catalog_configured() {
         return Ok(Some("SLACK_BOT_TOKEN is not configured."));
     }

@@ -932,14 +932,7 @@ mod tests {
         write
     }
 
-    fn keys(errors: FieldErrors) -> Vec<String> {
-        let mut keys: Vec<String> = errors
-            .entries()
-            .map(|(attribute, _)| attribute.to_owned())
-            .collect();
-        keys.sort();
-        keys
-    }
+    use super::super::error_keys as keys;
 
     #[test]
     fn credential_validation_accepts_a_valid_write() {

@@ -334,7 +334,22 @@ fn csrf_rejection() -> Response {
 /// The shared server-rendered error page: the same layout and CSP as the
 /// sign-in, consent, and OAuth result pages, so a browser form post that the
 /// port rejects gets an HTML page instead of Rails' static `public/422.html`.
-pub(crate) fn server_error_page(status: StatusCode, heading: &str, message: &str) -> Response {
+/// A server-rendered error page in the OAuth layout, with an optional retry
+/// link.
+pub(crate) fn server_error_page(
+    status: StatusCode,
+    heading: &str,
+    message: &str,
+    retry_href: Option<&str>,
+) -> Response {
+    let retry = retry_href
+        .map(|href| {
+            format!(
+                r#"<div class="oauth-result-retry"><a href="{}" class="oauth-button oauth-button-primary">Try again</a></div>"#,
+                escape_html(href)
+            )
+        })
+        .unwrap_or_default();
     let html = format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -343,8 +358,6 @@ pub(crate) fn server_error_page(status: StatusCode, heading: &str, message: &str
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{heading} · Centaur Console</title>
     <meta name="color-scheme" content="dark light">
-    <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)">
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="{stylesheet}">
   </head>
@@ -355,7 +368,7 @@ pub(crate) fn server_error_page(status: StatusCode, heading: &str, message: &str
 <section class="oauth-card" aria-labelledby="oauth-result-heading">
   <img src="{logo}" alt="Centaur" class="oauth-logo-small" width="497" height="127">
   <h1 id="oauth-result-heading" class="oauth-result-heading is-error">{heading}</h1>
-  <p class="oauth-result-message">{message}</p>
+  <p class="oauth-result-message">{message}</p>{retry}
 </section>
       </div>
     </main>
@@ -513,8 +526,6 @@ fn login_html(alert: Option<&str>) -> String {
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Sign In · Centaur Console</title>
     <meta name="color-scheme" content="dark light">
-    <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)">
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="{stylesheet}">
   </head>
@@ -551,8 +562,6 @@ fn pending_html(email: &str) -> String {
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Awaiting Approval · Centaur Console</title>
     <meta name="color-scheme" content="dark light">
-    <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)">
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="{stylesheet}">
   </head>

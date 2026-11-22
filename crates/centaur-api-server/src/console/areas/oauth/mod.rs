@@ -22,6 +22,17 @@ mod providers;
 #[cfg(test)]
 mod tests_db;
 
+/// The sorted attribute keys of a validation result, for tests.
+#[cfg(test)]
+pub(super) fn error_keys(errors: centaur_console_db::FieldErrors) -> Vec<String> {
+    let mut keys: Vec<String> = errors
+        .entries()
+        .map(|(attribute, _)| attribute.to_owned())
+        .collect();
+    keys.sort();
+    keys
+}
+
 /// Tests replace Slack's API origin with a loopback mock, like Rails'
 /// `EnrichCredentialIdentityJob.slack_api_http` and exchange-client doubles.
 #[cfg(test)]

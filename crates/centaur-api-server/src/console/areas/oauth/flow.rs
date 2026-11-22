@@ -12,11 +12,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    body::Body,
     extract::{OriginalUri, Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode, Uri,
-        header::{CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE},
+        header::{COOKIE, LOCATION, SET_COOKIE},
     },
     response::{IntoResponse, Response},
 };
@@ -47,7 +46,7 @@ use crate::{
     AppState,
     console::{
         LOGIN_PATH, PENDING_PATH,
-        pages::{escape_html, login_error, server_page_csp},
+        pages::{login_error, server_page_csp},
         request::ConsoleQuery,
         return_path,
         session_cookie::ConsoleSession,
@@ -668,8 +667,6 @@ async fn start_inner(
     let (app, provider) = load_app(&pool, context, slug).await?;
     if !app.enabled {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -682,8 +679,6 @@ async fn start_inner(
         .any(|scope| !app.allowed_scopes.iter().any(|allowed| allowed == scope))
     {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -716,8 +711,6 @@ async fn start_inner(
         &redirect_uri,
     ) else {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::NOT_FOUND,
@@ -778,8 +771,6 @@ async fn callback_inner(
         .filter(|payload| state_valid(payload, unix_now()))
     else {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::BAD_REQUEST,
@@ -793,8 +784,6 @@ async fn callback_inner(
         || state_payload.config != provider_config_digest(&app.provider_config)
     {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::BAD_REQUEST,
@@ -807,8 +796,6 @@ async fn callback_inner(
     *clear_flow = true;
     let Some(flow) = read_flow_cookie(&context.config, headers) else {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::BAD_REQUEST,
@@ -818,8 +805,6 @@ async fn callback_inner(
     let flow_nonce = flow.get("nonce").and_then(Value::as_str);
     if !flow_valid(&flow) || flow_nonce != Some(state_payload.nonce.as_str()) {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::BAD_REQUEST,
@@ -834,8 +819,6 @@ async fn callback_inner(
 
     if let Some(error) = query.error.as_deref().filter(|value| !value.is_empty()) {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "denied",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -859,8 +842,6 @@ async fn callback_inner(
     .await
     .map_err(|error| {
         result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -869,8 +850,6 @@ async fn callback_inner(
     })?;
     provider.validate_result(&result).map_err(|error| {
         result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -892,8 +871,6 @@ async fn callback_inner(
             .await
             .map_err(|error| {
                 result_page(
-                    &context.config,
-                    &context.session,
                     Some(&app),
                     "error",
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -928,8 +905,6 @@ async fn callback_inner(
         }
         Err(UpsertFailure::AccountMismatch) => {
             return Err(result_page(
-                &context.config,
-                &context.session,
                 Some(&app),
                 "error",
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -938,8 +913,6 @@ async fn callback_inner(
         }
         Err(UpsertFailure::Concurrent) => {
             return Err(result_page(
-                &context.config,
-                &context.session,
                 Some(&app),
                 "error",
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -948,8 +921,6 @@ async fn callback_inner(
         }
         Err(UpsertFailure::SaveFailed | UpsertFailure::Internal) => {
             return Err(result_page(
-                &context.config,
-                &context.session,
                 Some(&app),
                 "error",
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -980,8 +951,6 @@ async fn load_app(
 ) -> Result<(DbOauthApp, Provider), Response> {
     let Some(app) = find_app(pool, slug).await? else {
         return Err(result_page(
-            &context.config,
-            &context.session,
             None,
             "error",
             StatusCode::NOT_FOUND,
@@ -990,8 +959,6 @@ async fn load_app(
     };
     let Some(provider) = Provider::from_app(&app) else {
         return Err(result_page(
-            &context.config,
-            &context.session,
             Some(&app),
             "error",
             StatusCode::NOT_FOUND,
@@ -1009,53 +976,22 @@ async fn load_app(
     Ok((app, provider))
 }
 
+/// The consent flow's failure page, with a retry link while the app is enabled.
 fn result_page(
-    _config: &ConsoleSessionConfig,
-    _session: &ConsoleSession,
     app: Option<&DbOauthApp>,
     kind: &str,
     status: StatusCode,
     message: &str,
 ) -> Response {
-    let (heading, tone) = if kind == "denied" {
-        ("Not connected", "is-denied")
+    let heading = if kind == "denied" {
+        "Not connected"
     } else {
-        ("Something went wrong", "is-error")
+        "Something went wrong"
     };
-    let css = crate::console::assets::path("oauth.css").unwrap_or_default();
-    let logo = crate::console::assets::path("centaur-lockup-white.svg").unwrap_or_default();
     let retry = app
         .filter(|app| app.enabled)
-        .map(|app| {
-            format!(
-                "<div class=\"oauth-result-retry\"><a href=\"/oauth/{}/start\" class=\"oauth-button oauth-button-primary\">Try again</a></div>",
-                escape_html(&app.slug)
-            )
-        })
-        .unwrap_or_default();
-    let html = format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{heading} · Centaur Console</title>\
-         <meta name=\"color-scheme\" content=\"dark light\">\
-         <link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">\
-         <link rel=\"stylesheet\" href=\"{css}\"></head><body><main class=\"oauth-main\">\
-         <div class=\"oauth-column\"><section class=\"oauth-card\" aria-labelledby=\"oauth-result-heading\">\
-         <img src=\"{logo}\" alt=\"Centaur\" class=\"oauth-logo-small\" width=\"497\" height=\"127\">\
-         <h1 id=\"oauth-result-heading\" class=\"oauth-result-heading {tone}\">{heading}</h1>\
-         <p class=\"oauth-result-message\">{}</p>{retry}</section></div></main></body></html>",
-        escape_html(message)
-    );
-    // Cache-Control comes from the console-wide Rails `Rack::ETag` equivalent,
-    // like every other rendered page; Rails sets no explicit value here.
-    let mut response = Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(Body::from(html))
-        .expect("valid result page");
-    response = server_page_csp(response);
-    let _ = (&mut response, _config, _session);
-    response
+        .map(|app| format!("/oauth/{}/start", app.slug));
+    crate::console::pages::server_error_page(status, heading, message, retry.as_deref())
 }
 
 fn redirect(

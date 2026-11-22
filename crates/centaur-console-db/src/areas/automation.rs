@@ -711,16 +711,8 @@ impl TaskWrite {
 
 /// `ScheduledTasksController#catalog_error`.
 pub async fn catalog_error(pool: &PgPool, policy: &SlackPolicy) -> Result<Option<String>> {
-    if !super::principals::slack_catalog_configured() {
-        return Ok(Some("SLACK_BOT_TOKEN is not configured.".to_owned()));
-    }
-    let channels: i64 = sqlx::query_scalar("SELECT count(*) FROM slack_bot_channels")
-        .fetch_one(pool)
-        .await?;
-    if channels == 0 {
-        return Ok(Some(
-            "Slack channel catalog is loading. Enter a channel ID or reload shortly.".to_owned(),
-        ));
+    if let Some(error) = super::principals::slack_catalog_error(pool).await? {
+        return Ok(Some(error.to_owned()));
     }
     let Some(team_id) = policy.slack_team_id.as_deref() else {
         return Ok(None);
@@ -1152,7 +1144,7 @@ async fn save_task(
                     Schedule::parse(&cron, &timezone)
                         .ok()
                         .and_then(|schedule| schedule.next_after(now))
-                        .map(naive)
+                        .map(|time| crate::timestamp::datetime(crate::timestamp::from_chrono(time)))
                 })
         } else {
             None
@@ -1413,13 +1405,6 @@ pub(crate) async fn begin_write(pool: &PgPool) -> Result<Transaction<'static, Po
         .execute(&mut *tx)
         .await?;
     Ok(tx)
-}
-
-fn naive(time: chrono::DateTime<chrono::Utc>) -> PrimitiveDateTime {
-    let nanos = i128::from(time.timestamp_nanos_opt().unwrap_or_default());
-    let time = time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-    PrimitiveDateTime::new(time.date(), time.time())
 }
 
 // ---------------------------------------------------------------------------

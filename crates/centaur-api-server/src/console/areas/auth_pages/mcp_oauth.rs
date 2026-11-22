@@ -973,6 +973,7 @@ fn csrf_rejection() -> Response {
         StatusCode::UNPROCESSABLE_ENTITY,
         "Your request was rejected",
         "The consent form could not be verified. Go back and try again.",
+        None,
     )
 }
 

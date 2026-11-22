@@ -83,6 +83,18 @@ pub fn offset(value: PrimitiveDateTime) -> OffsetDateTime {
     value.assume_utc()
 }
 
+/// A `chrono` UTC time (cron schedules use chrono) as an `OffsetDateTime`.
+pub fn from_chrono(value: chrono::DateTime<chrono::Utc>) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(
+        value.timestamp_nanos_opt().unwrap_or_default(),
+    ))
+    .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+pub fn to_chrono(value: OffsetDateTime) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(value.unix_timestamp(), value.nanosecond()).unwrap_or_default()
+}
+
 pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
 where
     D: Deserializer<'de>,

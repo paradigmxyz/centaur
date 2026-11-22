@@ -1264,12 +1264,7 @@ mod tests {
         write
     }
 
-    fn keys(errors: FieldErrors) -> Vec<String> {
-        errors
-            .entries()
-            .map(|(attribute, _)| attribute.to_owned())
-            .collect()
-    }
+    use super::super::error_keys as keys;
 
     #[test]
     fn app_validation_accepts_a_valid_app() {
