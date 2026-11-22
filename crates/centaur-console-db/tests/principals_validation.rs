@@ -262,6 +262,136 @@ async fn an_update_only_revalidates_the_fields_it_changes() {
     fixture.cleanup().await;
 }
 
+/// Rails' `link_console_user_by_slack_email` runs only when the upsert body
+/// carries `slack_email`: a `slack_dm` principal is linked when that explicit
+/// email matches a Console user, an explicit non-matching email clears the
+/// link, and an omitted (or blank) email leaves the stored link alone.
+#[tokio::test]
+async fn a_slack_dm_upsert_links_console_user_only_from_an_explicit_email() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let admin_email = format!("validation-{}@example.com", fixture.unique);
+    let unmatched_email = format!("unmatched-{}@example.com", fixture.unique);
+    let foreign_id = fixture.name("dm-link");
+
+    let (view, was_new) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            kind: Some(Some("slack_dm".to_owned())),
+            slack_email: Some(Some(admin_email.clone())),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert!(was_new);
+    assert_eq!(view.row.console_user_id, Some(fixture.user_id));
+
+    // An omitted email never re-runs the lookup, so the link survives.
+    let (view, _) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            name: Some(Some("Renamed".to_owned())),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.row.console_user_id, Some(fixture.user_id));
+
+    // A supplied email with no matching Console user clears the previous link.
+    let (view, _) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            slack_email: Some(Some(unmatched_email.clone())),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.row.console_user_id, None);
+
+    // A supplied matching email links again.
+    let (view, _) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            slack_email: Some(Some(admin_email.clone())),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.row.console_user_id, Some(fixture.user_id));
+
+    // An explicit null (or blank) email is not `present?`, so it keeps the link.
+    let (view, _) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            slack_email: Some(None),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.row.console_user_id, Some(fixture.user_id));
+
+    // A direct console_user_id still sets and clears the link when no email is
+    // supplied; the email lookup never runs in that case.
+    let (view, _) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            console_user_id: Some(None),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.row.console_user_id, None);
+    let (view, _) = upsert_principal(
+        &fixture.pool,
+        &foreign_id,
+        &PrincipalWrite {
+            console_user_id: Some(Some(fixture.user_id)),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.row.console_user_id, Some(fixture.user_id));
+
+    // Only a `slack_dm` principal has the Slack email bridge.
+    let (view, was_new) = upsert_principal(
+        &fixture.pool,
+        &fixture.name("channel-link"),
+        &PrincipalWrite {
+            kind: Some(Some("slack_channel".to_owned())),
+            slack_email: Some(Some(admin_email)),
+            ..PrincipalWrite::default()
+        },
+        fixture.user_id,
+    )
+    .await
+    .unwrap();
+    assert!(was_new);
+    assert_eq!(view.row.console_user_id, None);
+
+    fixture.cleanup().await;
+}
+
 #[tokio::test]
 async fn a_role_write_rejects_a_duplicate_or_unsafe_foreign_id_and_stored_labels() {
     let Some(fixture) = Fixture::new().await else {

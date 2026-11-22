@@ -2,7 +2,7 @@ use std::env;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use centaur_console_db::{models::Config, oid, slack_channels};
 
@@ -47,6 +47,14 @@ struct SandboxJwtClaims {
     proxy_id: String,
     principal_id: String,
 }
+
+/// Console admin routes (the `centaur_console` connector) use the same
+/// sandbox-delegated credential as the sandbox API. iron-proxy applies matching
+/// inject secrets in array order and the last write wins, so `build_config`
+/// appends this entry after the API JWT: on these paths the entitlement token
+/// is the `Authorization` value, while api-rs's own routes keep the API JWT.
+const SANDBOX_JWT_METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+const SANDBOX_JWT_PATHS: [&str; 2] = ["/api/v1/sandbox/*", "/api/v1/console/*"];
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct TokenWindows {
@@ -111,9 +119,23 @@ pub(crate) async fn append_api_jwt(
     config.secrets.push(json!({
         "source": { "type": "control_plane", "value": token },
         "inject": { "header": "Authorization", "formatter": "Bearer {{ .Value }}" },
-        "rules": state.api_hosts.iter().map(|host| json!({ "host": host })).collect::<Vec<_>>()
+        "rules": api_jwt_rules(&state.api_hosts)
     }));
     Ok(())
+}
+
+/// Host-only rules: the API JWT is the default credential for every api-rs path
+/// on the api hosts.
+fn api_jwt_rules(hosts: &[String]) -> Vec<Value> {
+    hosts.iter().map(|host| json!({ "host": host })).collect()
+}
+
+fn sandbox_jwt_rules(host: &str) -> Vec<Value> {
+    vec![json!({
+        "host": host,
+        "methods": SANDBOX_JWT_METHODS,
+        "paths": SANDBOX_JWT_PATHS,
+    })]
 }
 
 pub(crate) fn append_sandbox_jwt(
@@ -145,7 +167,7 @@ pub(crate) fn append_sandbox_jwt(
     config.secrets.push(json!({
         "source": { "type": "control_plane", "value": jwt(&claims, secret)? },
         "inject": { "header": "Authorization", "formatter": "Bearer {{ .Value }}" },
-        "rules": [{ "host": host, "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"], "paths": ["/api/v1/sandbox/*"] }]
+        "rules": sandbox_jwt_rules(host)
     }));
     Ok(())
 }
@@ -175,11 +197,68 @@ fn env_default(name: &str, default: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::window_start;
+    use serde_json::json;
+
+    use super::{api_jwt_rules, sandbox_jwt_rules, window_start};
 
     #[test]
     fn windowed_tokens_are_stable_within_a_window() {
         let start = window_start("prn_example", 1_700_000_001, 900);
         assert_eq!(start, window_start("prn_example", start + 899, 900));
+    }
+
+    #[test]
+    fn sandbox_token_covers_sandbox_and_console_paths() {
+        assert_eq!(
+            sandbox_jwt_rules("console.internal"),
+            vec![json!({
+                "host": "console.internal",
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                "paths": ["/api/v1/sandbox/*", "/api/v1/console/*"],
+            })]
+        );
+    }
+
+    #[test]
+    fn console_paths_match_both_rules_and_the_sandbox_rule_is_appended_last() {
+        // build_config appends the API JWT first and the sandbox JWT second.
+        // iron-proxy applies every matching inject rule in array order and the
+        // last write wins, so the entitlement token is the `Authorization`
+        // value on Console paths. The API rule has no path filter, so api-rs's
+        // own routes on the same host still receive the API JWT.
+        let mut rules = api_jwt_rules(&["console.internal".to_owned()]);
+        rules.extend(sandbox_jwt_rules("console.internal"));
+        assert_eq!(rules[0], json!({ "host": "console.internal" }));
+        assert_eq!(
+            rules[1]["paths"],
+            json!(["/api/v1/sandbox/*", "/api/v1/console/*"])
+        );
+        assert!(matches_path(&rules[0], "/api/v1/console/roles"));
+        assert!(matches_path(&rules[1], "/api/v1/console/roles"));
+        assert!(matches_path(
+            &rules[1],
+            "/api/v1/console/principals/prn_example"
+        ));
+        assert!(matches_path(&rules[1], "/api/v1/console"));
+        assert!(!matches_path(&rules[1], "/api/session/example"));
+    }
+
+    /// iron-proxy's `hostmatch.MatchPath`: a trailing `/*` matches the prefix
+    /// and the base path (including nested paths); an absent `paths` key
+    /// matches every path.
+    fn matches_path(rule: &serde_json::Value, path: &str) -> bool {
+        let Some(paths) = rule.get("paths").and_then(serde_json::Value::as_array) else {
+            return true;
+        };
+        paths.iter().any(|pattern| {
+            let Some(pattern) = pattern.as_str() else {
+                return false;
+            };
+            if let Some(base) = pattern.strip_suffix("/*") {
+                path == base || path.starts_with(&format!("{base}/"))
+            } else {
+                false
+            }
+        })
     }
 }

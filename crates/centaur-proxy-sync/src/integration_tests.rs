@@ -885,6 +885,45 @@ async fn api_jwt_carries_direct_and_role_slack_permissions() {
 }
 
 #[tokio::test]
+async fn sandbox_jwt_is_served_after_the_api_jwt_on_console_and_sandbox_paths() {
+    let Some(mut f) = Fixture::with_jwt(true).await else {
+        return;
+    };
+    // The apirs Console backend serves Console and api-rs on the same host, so
+    // both JWT rules match a Console request.
+    f.state.console_host = Some("api.internal".to_owned());
+    let principal = f.principal("principal").await;
+    let token = f.proxy(Some(principal), None, json!({})).await;
+
+    let body = f.sync(&token).await;
+    let secrets = body["secrets"].as_array().unwrap();
+    assert_eq!(secrets.len(), 2);
+
+    // The API JWT comes first and stays the rule for api-rs's own routes.
+    assert_eq!(secrets[0]["rules"], json!([{ "host": "api.internal" }]));
+    // iron-proxy applies matching injections in array order and the last one
+    // wins, so the entitlement token is Authorization on Console paths too.
+    assert_eq!(
+        secrets[1]["rules"],
+        json!([{
+            "host": "api.internal",
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+            "paths": ["/api/v1/sandbox/*", "/api/v1/console/*"],
+        }])
+    );
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_audience(&["centaur-console-sandbox-entitlements"]);
+    let claims = jsonwebtoken::decode::<Value>(
+        secrets[1]["source"]["value"].as_str().unwrap(),
+        &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET.as_bytes()),
+        &validation,
+    )
+    .unwrap()
+    .claims;
+    assert_eq!(claims["sandbox_id"], f.name("proxy"));
+}
+
+#[tokio::test]
 async fn sync_returns_only_the_hash_until_grants_change() {
     let Some(f) = Fixture::new().await else {
         return;

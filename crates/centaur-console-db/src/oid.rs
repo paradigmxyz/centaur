@@ -1,3 +1,8 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, RwLock},
+};
+
 use sha2::{Digest, Sha256};
 use sqids::Sqids;
 
@@ -25,9 +30,30 @@ pub fn decode_oid(prefix: &str, value: &str) -> Option<i64> {
     i64::try_from(id).ok()
 }
 
+/// Encoders are deterministic per prefix, so build each one once: rebuilding
+/// hashes the alphabet 62 times and dominates a list endpoint's response time.
+static ENCODERS: LazyLock<RwLock<HashMap<String, Arc<Sqids>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn encoder(prefix: &str) -> Arc<Sqids> {
+    if let Some(sqids) = ENCODERS
+        .read()
+        .expect("oid encoder cache poisoned")
+        .get(prefix)
+    {
+        return Arc::clone(sqids);
+    }
+    let mut encoders = ENCODERS.write().expect("oid encoder cache poisoned");
+    Arc::clone(
+        encoders
+            .entry(prefix.to_owned())
+            .or_insert_with(|| Arc::new(build_encoder(prefix))),
+    )
+}
+
 /// Console permutes the base alphabet per prefix, so ids of different models
 /// do not decode as each other.
-fn encoder(prefix: &str) -> Sqids {
+fn build_encoder(prefix: &str) -> Sqids {
     let mut alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         .chars()
         .collect();
@@ -50,6 +76,18 @@ mod tests {
         assert_eq!(oid("prn", 1), "prn_5CO4fITZ");
         assert_eq!(oid("prn", 3), "prn_xUC2fVYG");
         assert_eq!(oid("prn", 123), "prn_yRoWctYw");
+    }
+
+    #[test]
+    fn cached_encoders_return_the_same_opaque_ids() {
+        // Fixed ids pin the cached encoder to the values the uncached builder
+        // produced, for more than one prefix.
+        assert_eq!(oid("prn", 1), "prn_5CO4fITZ");
+        assert_eq!(oid("prx", 1), "prx_42w9YMR0");
+        assert_eq!(oid("prx", 1), "prx_42w9YMR0");
+        assert_eq!(oid("ssr", 42), "ssr_V2SRKvxe");
+        assert_eq!(decode_oid("prx", "prx_42w9YMR0"), Some(1));
+        assert_eq!(decode_oid("ssr", "ssr_V2SRKvxe"), Some(42));
     }
 
     #[test]
