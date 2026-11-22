@@ -47,7 +47,7 @@ Do not invent one-off probes for each tool. The canonical smoke surface is:
 ```bash
 uv run .agents/skills/tool-health-smoke/scripts/run_tool_health_smoke.py --timeout 45
 uv run .agents/skills/tool-health-smoke/scripts/run_tool_health_smoke.py --concurrency 4
-uv run .agents/skills/tool-health-smoke/scripts/run_tool_health_smoke.py --only slack,websearch,vlogs
+uv run .agents/skills/tool-health-smoke/scripts/run_tool_health_smoke.py --only slack,websearch,grafana
 uv run .agents/skills/tool-health-smoke/scripts/run_tool_health_smoke.py --json
 ```
 

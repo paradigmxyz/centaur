@@ -1,1 +1,0 @@
-"""CoinDesk news feed."""
