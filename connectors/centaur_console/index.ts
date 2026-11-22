@@ -1,28 +1,28 @@
 import type { Ctx } from "../centaur";
 import { query, type Params } from "../_lib/http";
 
-// Centaur Console's sandbox API, reached through the sandbox's iron-proxy, which injects the
-// short-lived sandbox entitlement for the caller's principal. Results are Console's own
-// payloads with the `{ data: ... }` envelope removed. Admin endpoints answer only in an active
-// Console admin's Slack DM.
+// Centaur Console API, reached through the sandbox's iron-proxy, which injects the short-lived
+// sandbox entitlement for the caller's principal. Results are Console's own payloads with the
+// `{ data: ... }` envelope removed. Admin calls use the console API as the linked Console admin;
+// they answer only in an active admin's Slack DM.
 
 const DEFAULT_BASE = "http://centaur-console:3000";
 const PERMISSIONS_PATH = "/api/v1/sandbox/permissions";
 const OAUTH_APPS_PATH = "/api/v1/sandbox/oauth_apps";
 const SCHEDULED_TASKS_PATH = "/api/v1/sandbox/scheduled_tasks";
-const ADMIN_PRINCIPALS_PATH = "/api/v1/sandbox/admin/principals";
-const ADMIN_ROLES_PATH = "/api/v1/sandbox/admin/roles";
-const ADMIN_GRANTS_PATH = "/api/v1/sandbox/admin/grants";
-const ADMIN_SECRETS_PATH = "/api/v1/sandbox/admin/secrets";
-const ADMIN_SLACK_EXTERNAL_TEAMS_PATH = "/api/v1/sandbox/admin/slack_external_teams";
+const ADMIN_PRINCIPALS_PATH = "/api/v1/console/principals";
+const ADMIN_ROLES_PATH = "/api/v1/console/roles";
+const ADMIN_GRANTS_PATH = "/api/v1/console/grants";
+const ADMIN_SECRETS_PATH = "/api/v1/console/secrets";
+const ADMIN_SLACK_EXTERNAL_TEAMS_PATH = "/api/v1/console/system_settings/slack_external_teams";
 const ADMIN_PAGE_LIMIT = 200;
 
 // Secret kinds an admin can create and edit from a sandbox, by grant key prefix.
 const ADMIN_WRITABLE_SECRET_PATHS: Record<string, string> = {
-  static: "/api/v1/sandbox/admin/static_secrets",
-  pg_dsn: "/api/v1/sandbox/admin/pg_dsn_secrets",
-  gcp_auth: "/api/v1/sandbox/admin/gcp_auth_secrets",
-  gcp_id_token: "/api/v1/sandbox/admin/gcp_id_token_secrets",
+  static: "/api/v1/console/static_secrets",
+  pg_dsn: "/api/v1/console/pg_dsn_secrets",
+  gcp_auth: "/api/v1/console/gcp_auth_secrets",
+  gcp_id_token: "/api/v1/console/gcp_id_token_secrets",
 };
 
 /** A Slack channel permission row. New rows enable every flag that was left unspecified. */
@@ -241,18 +241,16 @@ function dataArray(payload: any, label: string): any[] {
 const sandbox = "centaur-console";
 const admin = "centaur-console admin";
 
-/** A Console admin reference is an OID when it wears the OID prefix, otherwise a foreign ID. */
-function adminRefPath(collection: string, ref: string, oidPrefix: string): string {
-  if (ref.startsWith(oidPrefix)) return `${collection}/${encodeURIComponent(ref)}`;
-  return `${collection}/lookup/${encodeURIComponent(ref)}`;
-}
-
-async function adminListAll(ctx: Ctx, path: string): Promise<any[]> {
+async function adminListAll(
+  ctx: Ctx,
+  path: string,
+  extra: Record<string, string | number> = {},
+): Promise<any[]> {
   const records: any[] = [];
   let page = 1;
   for (;;) {
     const payload = await request(ctx, path, {
-      params: { page, limit: ADMIN_PAGE_LIMIT },
+      params: { ...extra, page, limit: ADMIN_PAGE_LIMIT },
       label: admin,
     });
     records.push(...dataArray(payload, admin));
@@ -262,28 +260,43 @@ async function adminListAll(ctx: Ctx, path: string): Promise<any[]> {
   }
 }
 
-async function adminPrincipalId(ctx: Ctx, principal: string): Promise<string> {
-  const record = dataObject(
-    await request(ctx, adminRefPath(ADMIN_PRINCIPALS_PATH, principal, "prn_"), { label: admin }),
-    admin,
+/**
+ * A Console admin reference is an OID when it wears the OID prefix; otherwise
+ * it is a foreign ID, which the console list finds with `q` and an exact match.
+ */
+async function adminFindRecord(
+  ctx: Ctx,
+  collection: string,
+  ref: string,
+  oidPrefix: string,
+): Promise<any> {
+  if (ref.startsWith(oidPrefix)) {
+    return dataObject(
+      await request(ctx, `${collection}/${encodeURIComponent(ref)}`, { label: admin }),
+      admin,
+    );
+  }
+  const matches = (await adminListAll(ctx, collection, { q: ref })).filter(
+    (row) => row.id === ref || row.foreign_id === ref,
   );
-  return String(record.id);
+  if (matches.length !== 1) {
+    const found = matches.length === 0 ? "no record" : "several records";
+    throw new Error(`${found} matched ${ref}; pass the OID`);
+  }
+  return matches[0];
+}
+
+async function adminPrincipalId(ctx: Ctx, principal: string): Promise<string> {
+  return String((await adminFindRecord(ctx, ADMIN_PRINCIPALS_PATH, principal, "prn_")).id);
 }
 
 async function adminRoleId(ctx: Ctx, role: string): Promise<string> {
-  const record = dataObject(
-    await request(ctx, adminRefPath(ADMIN_ROLES_PATH, role, "role_"), { label: admin }),
-    admin,
-  );
-  return String(record.id);
+  return String((await adminFindRecord(ctx, ADMIN_ROLES_PATH, role, "role_")).id);
 }
 
 /** Resolve a secret by OID, foreign ID or name; names must be unambiguous. */
 async function findSecret(ctx: Ctx, secret: string): Promise<AdminSecret> {
-  const secrets: AdminSecret[] = dataArray(
-    await request(ctx, ADMIN_SECRETS_PATH, { label: admin }),
-    admin,
-  );
+  const secrets: AdminSecret[] = await adminListAll(ctx, ADMIN_SECRETS_PATH);
   const matches = secrets.filter(
     (row) => secret === row.id || secret === row.foreign_id || secret === row.name,
   );
@@ -476,11 +489,15 @@ export async function admin_principals(
   ctx: Ctx,
 ): Promise<{ principals: Principal[] }> {
   if (args.slack_channel_id) {
-    const payload = await request(ctx, ADMIN_PRINCIPALS_PATH, {
-      params: { slack_channel_id: args.slack_channel_id },
-      label: admin,
-    });
-    return { principals: dataArray(payload, admin) };
+    const channel = args.slack_channel_id.trim().toLowerCase();
+    const records = await adminListAll(ctx, ADMIN_PRINCIPALS_PATH, { q: channel });
+    return {
+      principals: records.filter(
+        (row) =>
+          row.kind === "slack_channel" &&
+          String(row.foreign_id || "").toLowerCase().endsWith(`-${channel}`),
+      ),
+    };
   }
   return { principals: await adminListAll(ctx, ADMIN_PRINCIPALS_PATH) };
 }
@@ -503,12 +520,48 @@ export async function admin_create_principal(
   if (given.length !== 1) {
     throw new Error("pass exactly one of slack_channel_id, slack_user_id, or workflow_name");
   }
-  const [kind, key, value] = given[0];
+  const [kind, , value] = given[0];
+  const data: Record<string, unknown> = { kind };
+  if (kind === "slack_channel") {
+    const channel = String(value).trim().toUpperCase();
+    if (!/^[CG][A-Z0-9]{8,}$/.test(channel)) {
+      throw new Error("slack_channel_id must be a C... or G... channel ID");
+    }
+    data.foreign_id = `slack-channel-${channel.toLowerCase()}`;
+    data.name = `Slack Channel ${channel}`;
+    data.slack_channel_id = channel;
+    data.slack_channel_permissions = [
+      {
+        channel_id: channel,
+        upload_enabled: true,
+        download_enabled: true,
+        history_enabled: true,
+      },
+    ];
+  } else if (kind === "slack_dm") {
+    const user = String(value).trim().toUpperCase();
+    const current = dataObject(await request(ctx, PERMISSIONS_PATH, { label: sandbox }), sandbox);
+    const foreignId = String(current.principal?.foreign_id || "");
+    const match = /^slack-user-([^-]+)-/.exec(foreignId);
+    if (!match) throw new Error("the current sandbox has no Slack team to create a DM principal in");
+    const team = match[1].toUpperCase();
+    data.foreign_id = `slack-user-${team.toLowerCase()}-${user.toLowerCase()}`;
+    data.name = `Slack User ${user} (team ${team})`;
+    data.slack_user_id = user;
+    data.slack_team_id = team;
+  } else {
+    const name = String(value).trim();
+    if (!name) throw new Error("workflow_name must be a WORKFLOW_NAME");
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "x";
+    data.foreign_id = `workflow-${slug}`;
+    data.name = `Workflow ${name}`;
+    data.labels = { "managed-by": "centaur", workflow_name: name };
+  }
   return {
     principal: dataObject(
       await request(ctx, ADMIN_PRINCIPALS_PATH, {
         method: "POST",
-        data: { data: { kind, [key]: value } },
+        data: { data },
         label: admin,
       }),
       admin,
@@ -524,9 +577,11 @@ export async function admin_principal(
   args: { principal: string },
   ctx: Ctx,
 ): Promise<{ principal: Principal; roles: Role[]; grants: Grant[] }> {
-  const principal: Principal = dataObject(
-    await request(ctx, adminRefPath(ADMIN_PRINCIPALS_PATH, args.principal, "prn_"), { label: admin }),
-    admin,
+  const principal: Principal = await adminFindRecord(
+    ctx,
+    ADMIN_PRINCIPALS_PATH,
+    args.principal,
+    "prn_",
   );
   const path = `${ADMIN_PRINCIPALS_PATH}/${encodeURIComponent(principal.id)}`;
   return {
@@ -601,11 +656,13 @@ export async function admin_secrets(
   args: { query?: string },
   ctx: Ctx,
 ): Promise<{ secrets: AdminSecret[] }> {
-  const payload = await request(ctx, ADMIN_SECRETS_PATH, {
-    params: args.query ? { q: args.query } : {},
-    label: admin,
-  });
-  return { secrets: dataArray(payload, admin) };
+  return {
+    secrets: await adminListAll(
+      ctx,
+      ADMIN_SECRETS_PATH,
+      args.query ? { q: args.query } : {},
+    ),
+  };
 }
 
 /**
@@ -728,22 +785,47 @@ export async function admin_set_slack_permission(
   },
   ctx: Ctx,
 ): Promise<{ permission: SlackChannelPermission }> {
-  const data: Record<string, unknown> = { channel_id: args.channel_id };
-  for (const [key, value] of [
-    ["upload_enabled", args.upload],
-    ["download_enabled", args.download],
-    ["history_enabled", args.history],
-  ] as const) {
-    if (value !== undefined) data[key] = value;
-  }
   const principalId = await adminPrincipalId(ctx, args.principal);
-  const path = `${ADMIN_PRINCIPALS_PATH}/${encodeURIComponent(principalId)}/slack_channel_permissions`;
-  return {
-    permission: dataObject(
-      await request(ctx, path, { method: "POST", data: { data }, label: admin }),
-      admin,
-    ),
+  const principal = dataObject(
+    await request(ctx, `${ADMIN_PRINCIPALS_PATH}/${encodeURIComponent(principalId)}`, {
+      label: admin,
+    }),
+    admin,
+  );
+  const channel = String(args.channel_id).trim().toUpperCase();
+  const existing = Array.isArray(principal.slack_channel_permissions)
+    ? principal.slack_channel_permissions
+    : [];
+  const previous = existing.find(
+    (row: SlackChannelPermission) => String(row.channel_id).toUpperCase() === channel,
+  );
+  const permission: SlackChannelPermission = {
+    channel_id: channel,
+    upload_enabled: args.upload ?? previous?.upload_enabled ?? true,
+    download_enabled: args.download ?? previous?.download_enabled ?? true,
+    history_enabled: args.history ?? previous?.history_enabled ?? true,
   };
+  const rows = existing
+    .filter(
+      (row: SlackChannelPermission) => String(row.channel_id).toUpperCase() !== channel,
+    )
+    .map((row: SlackChannelPermission) => ({
+      channel_id: row.channel_id,
+      upload_enabled: row.upload_enabled,
+      download_enabled: row.download_enabled,
+      history_enabled: row.history_enabled,
+    }));
+  rows.push(permission);
+  const payload = await request(
+    ctx,
+    `${ADMIN_PRINCIPALS_PATH}/${encodeURIComponent(principalId)}/slack_channel_permissions`,
+    { method: "PUT", data: { data: { slack_channel_permissions: rows } }, label: admin },
+  );
+  const saved = dataArray(payload, admin).find(
+    (row: SlackChannelPermission) => String(row.channel_id).toUpperCase() === channel,
+  );
+  if (!saved) throw new Error(`Console did not save the ${channel} permission`);
+  return { permission: saved };
 }
 
 /**
@@ -793,7 +875,7 @@ export async function admin_set_sandbox_access(
     throw new Error("at least one sandbox capability must be provided");
   }
   const principalId = await adminPrincipalId(ctx, args.principal);
-  const path = `${ADMIN_PRINCIPALS_PATH}/${encodeURIComponent(principalId)}/sandbox_access`;
+  const path = `${ADMIN_PRINCIPALS_PATH}/${encodeURIComponent(principalId)}`;
   return {
     principal: dataObject(
       await request(ctx, path, { method: "PATCH", data: { data }, label: admin }),
@@ -802,13 +884,32 @@ export async function admin_set_sandbox_access(
   };
 }
 
+function adminTeamIds(payload: any): string[] {
+  const data = dataObject(payload, admin);
+  const ids = data.slack_external_team_ids;
+  if (!Array.isArray(ids)) throw new Error(`${admin} response did not include team ids`);
+  return ids.map(String);
+}
+
+async function adminReplaceSlackExternalTeams(
+  ctx: Ctx,
+  team_ids: string[],
+): Promise<string[]> {
+  const payload = await request(ctx, ADMIN_SLACK_EXTERNAL_TEAMS_PATH, {
+    method: "PUT",
+    data: { data: { slack_external_team_ids: team_ids } },
+    label: admin,
+  });
+  return adminTeamIds(payload);
+}
+
 /** Slack Connect workspace (T...) and Enterprise Grid org (E...) ids Centaur accepts messages from. */
 export async function admin_slack_external_teams(
   args: Record<string, never>,
   ctx: Ctx,
 ): Promise<{ team_ids: string[] }> {
   const payload = await request(ctx, ADMIN_SLACK_EXTERNAL_TEAMS_PATH, { label: admin });
-  return { team_ids: dataArray(payload, admin) };
+  return { team_ids: adminTeamIds(payload) };
 }
 
 /**
@@ -819,12 +920,15 @@ export async function admin_add_slack_external_team(
   args: { team_id: string },
   ctx: Ctx,
 ): Promise<{ team_ids: string[] }> {
-  const payload = await request(ctx, ADMIN_SLACK_EXTERNAL_TEAMS_PATH, {
-    method: "POST",
-    data: { data: { team_id: args.team_id } },
-    label: admin,
-  });
-  return { team_ids: dataArray(payload, admin) };
+  const team_id = args.team_id.trim().toUpperCase();
+  const current = adminTeamIds(
+    await request(ctx, ADMIN_SLACK_EXTERNAL_TEAMS_PATH, { label: admin }),
+  );
+  return {
+    team_ids: current.includes(team_id)
+      ? current
+      : await adminReplaceSlackExternalTeams(ctx, [...current, team_id]),
+  };
 }
 
 /**
@@ -835,9 +939,19 @@ export async function admin_remove_slack_external_team(
   args: { team_id: string },
   ctx: Ctx,
 ): Promise<{ team_ids: string[] }> {
-  const path = `${ADMIN_SLACK_EXTERNAL_TEAMS_PATH}/${encodeURIComponent(args.team_id)}`;
-  const payload = await request(ctx, path, { method: "DELETE", label: admin });
-  return { team_ids: dataArray(payload, admin) };
+  const team_id = args.team_id.trim().toUpperCase();
+  const current = adminTeamIds(
+    await request(ctx, ADMIN_SLACK_EXTERNAL_TEAMS_PATH, { label: admin }),
+  );
+  if (!current.includes(team_id)) {
+    throw new Error(`${team_id} is not an allowed Slack Connect workspace`);
+  }
+  return {
+    team_ids: await adminReplaceSlackExternalTeams(
+      ctx,
+      current.filter((id) => id !== team_id),
+    ),
+  };
 }
 
 /**

@@ -18,6 +18,8 @@ Use these as the main extension points:
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `apiRs.nodeSelector`, `apiRs.affinity`, `apiRs.tolerations` | Controls scheduling for api-rs pods, including dedicated tainted node pools. |
 | `console.nodeSelector`, `console.affinity`, `console.tolerations` | Controls scheduling for Console web pods, including dedicated tainted node pools. |
+| `console.backend` | Helm value, `rails` (default) or `apirs`. Selects which implementation serves the Console host, API, and MCP OAuth endpoints. `apirs` also requires `apiRs.console.enabled: true`. See [Cut over the Console to api-rs](/operate/console-backend-cutover). |
+| `apiRs.console.enabled` | Helm value, default `false`. Mounts the Console secrets and serves the ported Console from api-rs without changing routing. |
 | `console.worker.nodeSelector`, `console.worker.affinity`, `console.worker.tolerations` | Controls scheduling for Console background worker pods independently from the web pods. |
 | `tokenBroker.*` | token-broker, which refreshes Console broker credentials: replicas, poll interval, concurrency, scheduling, and metrics. |
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
@@ -73,6 +75,9 @@ for the operator workflow.
 | `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Console session and application signing secret. |
 | `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens, Console service tokens, and sandbox api-rs principal tokens. |
 | `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
+| `console.backend` | Helm value, default `rails`. Set to `apirs` to serve the Console from api-rs; requires `apiRs.console.enabled`. |
+| `apiRs.console.enabled` | Helm value, default `false`. Mounts the `CENTAUR_CONSOLE_*`/`CONSOLE_SESSION_SECRET` environment and serves the ported Console on the api-rs port without changing routing. |
+| `CONSOLE_SESSION_SECRET` | `secretManager.existingSecretName` when `apiRs.console.enabled` is true. | Encrypts api-rs Console session cookies and OAuth flow state. Generate once and keep it stable; rotating it signs every browser and in-flight flow out. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
 | `console.ssoEmailDomains` | Helm value. | Limits Google, Slack, or Okta SSO admission by email domain. Empty accepts any IdP-authenticated email. |
 | `console.oktaOauth.enabled` | Helm value, default `false`. | Enables Okta OIDC login for the Console. |

@@ -38,6 +38,13 @@ pub enum IronControlError {
         resource: &'static str,
         ident: String,
     },
+    /// An in-process Console call failed in a way the HTTP API would have
+    /// rendered as a 4xx (validation, a missing referenced row, or bad input).
+    #[error("iron-control in-process {operation} failed: {message}")]
+    InProcess {
+        operation: &'static str,
+        message: String,
+    },
     /// A 2xx response body did not deserialize into the expected shape.
     #[error("iron-control {path} response did not match the expected schema: {source}")]
     Decode {

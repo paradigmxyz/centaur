@@ -1,4 +1,5 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- $backend := include "centaur.consoleBackend" . }}
 {{- $secretEnv := include "centaur.secretEnvName" . }}
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $dbName := $console.database.name }}
@@ -14,6 +15,10 @@
 # ActiveRecord encryption keys, and SECRET_KEY_BASE — comes from the shared
 # infra Secret via explicit secretKeyRefs (NOT envFrom, which would leak the
 # API's ai_v2 DATABASE_URL into console's env).
+{{- /* With console.backend=apirs the Service becomes a compatibility alias for
+ the api-rs Service (port unchanged, targetPort api-rs), so clients still dialing
+ the in-cluster console URL reach the ported Console. The Rails Deployment (web
+ and worker) scales to zero and the ingress is retargeted separately. */}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -22,11 +27,19 @@ metadata:
 {{ include "centaur.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
   selector:
+{{- if eq $backend "apirs" }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 4 }}
+{{- else }}
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 4 }}
+{{- end }}
   ports:
     - name: http
       port: {{ $console.service.httpPort }}
+{{- if eq $backend "apirs" }}
+      targetPort: {{ .Values.apiRs.port }}
+{{- else }}
       targetPort: {{ $console.service.httpPort }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -35,7 +48,7 @@ metadata:
   labels:
 {{ include "centaur.componentLabels" (dict "root" . "component" "console") | nindent 4 }}
 spec:
-  replicas: {{ $console.replicaCount }}
+  replicas: {{ ternary 0 $console.replicaCount (eq $backend "apirs") }}
   selector:
     matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 6 }}

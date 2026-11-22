@@ -101,6 +101,15 @@ toolServer:
 # existing values files keep working. Prefer `console` for new configuration.
 console:
   replicaCount: 1
+  # Which implementation serves the Console host and API. `rails` (default)
+  # keeps the Rails web and worker pods. `apirs` serves the ported Console from
+  # api-rs: the console Ingress and internal Console URLs point at the api-rs
+  # Service, the `console` Service forwards to api-rs for clients with a cached
+  # in-cluster URL, and the Rails web pods scale to zero. The Rails worker keeps
+  # running because the Slack channel catalog jobs still live there. Requires
+  # apiRs.enabled and apiRs.console.enabled. See the Console backend cutover
+  # runbook before flipping it.
+  backend: rails
   # Node steering for the Console web pods. Use tolerations with a matching
   # nodeSelector to schedule onto a dedicated tainted node pool. Empty values
   # leave placement to the default scheduler.
@@ -202,11 +211,11 @@ console:
     host: ""
     tls: []
   resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs the console's background jobs —
-  # most importantly the broker-credential OAuth refresh loop that mints and
-  # refreshes the access tokens delivered inline via `token_broker` sources
-  # (e.g. the `openai-codex` brokered token). The web Puma pod runs no worker, so
-  # without this those jobs never execute.
+  # Solid Queue worker (`bin/jobs`) that runs the console's remaining background
+  # jobs — Slack channel catalog refresh and membership refresh, plus the Slack
+  # OAuth identity enrichment enqueued after a broker-credential connect. The web
+  # Puma pod runs no worker, so without this those jobs never execute. It keeps
+  # running in `console.backend=apirs` mode.
   worker:
     replicaCount: 1
     # Node steering for Console background worker pods. Configure separately
@@ -699,6 +708,23 @@ apiRs:
   # Set false when multiple Centaur instances share one console/1Password
   # Connect control plane and infra secrets are managed out of band.
   syncInfraSecrets: true
+  # Serve the Console from api-rs. Off by default: existing deployments keep the
+  # Rails Console and this flag changes nothing. When enabled, console.publicUrl
+  # is required, and the shared infra Secret (secretManager.existingSecretName)
+  # must contain the Console keys the Rails pods already use plus the new
+  # <secretManager.envPrefix>CONSOLE_SESSION_SECRET (a long random value; keep it
+  # stable, because changing it invalidates every browser session). The chart
+  # maps the existing IRON_CONTROL_AR_ENCRYPTION_* keys to the
+  # CENTAUR_CONSOLE_AR_ENCRYPTION_* names the Rust handlers read. The ported
+  # handlers write through IRON_CONTROL_DATABASE_URL, so its role needs write
+  # access (the Rails Console role already does). Google, Slack, and Okta client
+  # credentials follow console.googleOauth / console.slackOauth /
+  # console.oktaOauth. This flag only mounts the layer and serves the paths on the
+  # api-rs Service; browser traffic keeps reaching Rails until
+  # console.backend=apirs retargets the Console ingress and internal URLs. See
+  # the Console backend cutover runbook before enabling that switch.
+  console:
+    enabled: false
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.

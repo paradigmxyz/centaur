@@ -3,14 +3,16 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
-# console background job worker — runs Solid Queue (`bin/jobs`) so
-# console's enqueued jobs actually execute. The most important of these is
-# the broker-credential OAuth refresh loop, which mints and refreshes the access
-# tokens delivered inline via `token_broker` sources (e.g. the `openai-codex`
-# brokered token); the web (Puma) pod runs no worker, so without this those jobs
-# never run. The web Deployment owns database setup (create-db init + the image's
-# Rails db:prepare on boot), so this worker only processes jobs and waits for the
-# Solid Queue database to exist before starting.
+# console background job worker — runs Solid Queue (`bin/jobs`) so the
+# console's background jobs execute. That is the broker-credential OAuth refresh
+# loop, which mints and refreshes the access tokens delivered inline via
+# `token_broker` sources (e.g. the `openai-codex` brokered token), the Slack OAuth
+# identity enrichment enqueued after a broker-credential connect, and the Slack
+# channel catalog refresh and membership refresh. The web (Puma) pod runs no
+# worker, so without this those jobs never execute; the web Deployment owns
+# database setup (create-db init + the image's Rails db:prepare on boot), so this
+# worker only processes jobs and waits for the Solid Queue database to exist
+# before starting.
 #
 # It shares the web image and the same infra-Secret env (DB URL, ActiveRecord
 # encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. It uses
@@ -91,8 +93,8 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Slack channel catalog refresh jobs run in this worker, so it
-            # needs the same bot token as the web Console process.
+            # The Slack channel catalog refresh and membership jobs run in this
+            # worker, so it needs the same bot token as the web Console process.
             - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:

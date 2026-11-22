@@ -229,6 +229,86 @@ spec:
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
 {{- end }}
+{{- if .Values.apiRs.console.enabled }}
+{{- $_ := required "console.publicUrl is required when apiRs.console.enabled=true" $console.publicUrl }}
+            # Rust Console. Mount the shared Console secrets under the
+            # CENTAUR_CONSOLE_* names the ported handlers read; the Secret
+            # keeps storing them under the Rails-era keys used by console.yaml.
+            # CONSOLE_SESSION_SECRET is new: generate it in the shared Secret
+            # (never here) and keep it stable, or every browser session is lost.
+            - name: CONSOLE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCONSOLE_SESSION_SECRET" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_AR_ENCRYPTION_DETERMINISTIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED
+              value: {{ $console.passwordLoginEnabled | quote }}
+            - name: CENTAUR_CONSOLE_API_CLIENTS_ENABLED
+              value: {{ .Values.apiClients.enabled | quote }}
+{{- with $console.ssoEmailDomains }}
+            - name: CENTAUR_CONSOLE_SSO_EMAIL_DOMAINS
+              value: {{ join "," . | quote }}
+{{- end }}
+{{- if $console.googleOauth.enabled }}
+            # Google console sign-in secrets still use their legacy
+            # IRON_CONTROL_* keys in the shared Secret.
+            - name: CENTAUR_CONSOLE_GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_ID" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_GOOGLE_CLIENT_SECRET" .Values.secretManager.envPrefix }}
+{{- end }}
+{{- if $console.slackOauth.enabled }}
+            - name: CENTAUR_CONSOLE_SLACK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_ID" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_SLACK_CLIENT_SECRET" .Values.secretManager.envPrefix }}
+{{- end }}
+{{- if $console.oktaOauth.enabled }}
+            - name: CENTAUR_CONSOLE_OKTA_ISSUER
+              value: {{ required "console.oktaOauth.issuer is required when Okta OAuth is enabled" $console.oktaOauth.issuer | quote }}
+            - name: CENTAUR_CONSOLE_OKTA_TOKEN_ENDPOINT_AUTH_METHOD
+              value: {{ $console.oktaOauth.tokenEndpointAuthMethod | quote }}
+            - name: CENTAUR_CONSOLE_OKTA_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_ID" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_OKTA_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_SECRET" .Values.secretManager.envPrefix }}
+{{- end }}
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
+{{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
 {{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}

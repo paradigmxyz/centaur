@@ -1,8 +1,7 @@
 // The SPA talks only to the session-only console API under /api/v1/console
 // (CONSOLE_API_PREFIX); apiRequest refuses any other path, so it never calls
-// the bearer API. Writes send the CSRF token from GET /api/v1/console/me. A
-// 403 "csrf" (stale token after sign-in elsewhere) refreshes the token and
-// retries once.
+// the bearer API. It sends no CSRF token: the browser supplies the same-origin
+// Origin header, which the server checks exactly on every write.
 
 export type ErrorDetails = Record<string, unknown> & { reason?: string };
 
@@ -60,12 +59,6 @@ export interface RequestOptions {
 /** Every SPA request goes here; /api/v1 outside it is the bearer API. */
 export const CONSOLE_API_PREFIX = "/api/v1/console/";
 
-let csrfToken: string | null = null;
-
-export function setCsrfToken(token: string | null | undefined) {
-  csrfToken = token ?? null;
-}
-
 /** Hook for tests: where full-page redirects (login, pending) go. */
 export const navigation = {
   assign(url: string) {
@@ -93,16 +86,6 @@ export function buildUrl(path: string, query?: Record<string, QueryValue>): stri
   return qs ? `${path}?${qs}` : path;
 }
 
-async function refreshCsrfToken(): Promise<void> {
-  const response = await fetch(`${CONSOLE_API_PREFIX}me`, {
-    credentials: "same-origin",
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) return;
-  const body = (await response.json()) as { data?: { csrf_token?: string | null } };
-  setCsrfToken(body.data?.csrf_token);
-}
-
 /** The same-origin console API URL for `path`, checked after normalization ("..", encoded dots, backslashes). */
 function consoleApiUrl(path: string, query?: Record<string, QueryValue>): string {
   const url = new URL(buildUrl(path, query), window.location.origin);
@@ -112,15 +95,11 @@ function consoleApiUrl(path: string, query?: Record<string, QueryValue>): string
   return url.pathname + url.search;
 }
 
-export async function apiRequest<T>(path: string, options: RequestOptions = {}, retried = false): Promise<T> {
+export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const url = consoleApiUrl(path, options.query);
   const method = options.method ?? "GET";
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  if (method !== "GET") {
-    if (!csrfToken) await refreshCsrfToken();
-    if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
-  }
 
   const response = await fetch(url, {
     method,
@@ -151,11 +130,6 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}, 
     envelope?.details,
   );
 
-  if (error.status === 403 && error.reason === "csrf" && !retried) {
-    setCsrfToken(null);
-    await refreshCsrfToken();
-    return apiRequest<T>(path, options, true);
-  }
   if (error.status === 401) {
     navigation.assign(loginUrl());
   } else if (error.status === 403 && error.reason === "account_pending") {

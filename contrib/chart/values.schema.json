@@ -29,6 +29,7 @@
       "type": "object",
       "properties": {
         "replicaCount": { "type": "integer" },
+        "backend": { "type": "string", "enum": ["rails", "apirs"] },
         "publicUrl": { "type": "string" },
         "allowedHosts": {
           "type": "array",
@@ -455,6 +456,12 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
+        "console": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "mcpEnabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "sessionPrincipalAdmission": {

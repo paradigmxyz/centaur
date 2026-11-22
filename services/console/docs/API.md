@@ -1,14 +1,33 @@
 # iron-control API
 
-`iron-control` exposes a JSON API under `/api/v1` in three namespaces, each with exactly one credential type. No endpoint accepts more than one.
+`iron-control` exposes a JSON API under `/api/v1` in three namespaces. The console namespace accepts a session cookie or a sandbox-delegated user credential, never an API key; the other two accept exactly one credential type.
 
 | Namespace | Credential | Callers |
 |---|---|---|
 | `/api/v1/*` (this document's resource sections) | Bearer API key | Machine callers: CLIs, api-rs, provisioning scripts |
-| [`/api/v1/console/*`](#console-api) | Console session cookie (with CSRF on writes) | The operator console SPA |
+| [`/api/v1/console/*`](#console-api) | Console session cookie (Rails checks a CSRF token; the Rust port checks an exact `Origin`), or a sandbox entitlement JWT from an active admin's Slack DM; never an API key | The operator console SPA, and admin Slack DM sandboxes |
 | `/api/v1/sandbox/*` | Sandbox entitlement JWT injected by `iron-proxy` | Agents inside sandboxes |
 
 The [Console API](#console-api) is documented separately at the end. It reuses several bearer resources with console-only additions; the bearer contract never changes for it.
+
+### Rust port differences
+
+The Rust Console in api-rs serves the same contract with the round-6 cuts
+documented in `crates/centaur-api-server/src/console/README.md`:
+
+- Unsafe cookie-authenticated requests need an exact Console `Origin`; there is
+  no `X-CSRF-Token`, no hidden `authenticity_token`, and `/me` returns neither
+  `csrf_token` nor `flash`.
+- A server-rendered redirect error is `GET /login?error=<code>` instead of a
+  session flash.
+- Console updates keep only `PATCH`; `me/ssh_key` keeps `PUT`; bearer resources
+  keep `PUT`; proxies keep `PATCH`; sandbox resources keep `PATCH`; Slack
+  permission replacements keep `PUT`. Rails still accepts both verbs.
+- Skill detail returns raw `instructions` only; the SPA renders and sanitizes
+  the markdown (`content_html` is Rails-only).
+- `/up` and `/lookup/default/:foreign_id` are gone; `/lookup/:foreign_id` and
+  api-rs `/healthz` remain. The whole `/api/v1/sandbox/admin/*` family is
+  replaced by the sandbox-delegated console credential.
 
 - [Authentication](#authentication)
 - [Conventions](#conventions)
@@ -34,7 +53,7 @@ The [Console API](#console-api) is documented separately at the end. It reuses s
 - [Skills](#skills)
 - [Proxies](#proxies)
 - [Proxy sync](#proxy-sync)
-- [Console API](#console-api) (session only)
+- [Console API](#console-api)
   - [Credentials and authorization](#credentials-and-authorization)
   - [Session endpoints](#session-endpoints)
   - [Console sign-in and OAuth pages](#console-sign-in-and-oauth-pages)
@@ -1190,33 +1209,11 @@ The sandbox permissions response includes an `oauth_credentials` array with non-
 }
 ```
 
-### Sandbox Admin Permission Management
+### Sandbox-delegated console access
 
-An active admin Console user's Slack DM sandbox may create Slack channel, Slack user, and workflow principals, create and edit static, Postgres DSN, and GCP ID token secrets whose sources reference an external store, grant secrets to roles, inspect a principal's effective grants, manage its roles, direct secret grants, Slack channel permissions, and sandbox capabilities, and edit the Slack Connect allowlist with its sandbox entitlement JWT. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. Other sandboxes, including channel, Slack Connect, and Console-user sessions, receive `403`. Request and response shapes match the corresponding admin endpoints.
+An active admin Console user's Slack DM sandbox may call the [Console API](#console-api) with its sandbox entitlement JWT instead of a session cookie. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. It acts as that Console user with the same admin/active/pending rules as a session: a request without a cookie has no CSRF token or `Origin` requirement, and every other `Authorization` value (including an API key) is still `403 session_required`.
 
-| Method | Path | Notes |
-| ------ | ---- | ----- |
-| `GET` | `/api/v1/sandbox/admin/principals` | List principals. `slack_channel_id=<id>` returns only principals bound to that channel. |
-| `GET` | `/api/v1/sandbox/admin/principals/:id` | Fetch one by OID. |
-| `POST` | `/api/v1/sandbox/admin/principals` | Create a Slack channel (`data: { kind: "slack_channel", slack_channel_id }`), Slack user (`data: { kind: "slack_dm", slack_user_id }`), or workflow (`data: { kind: "workflow", workflow_name }`) principal. The foreign ID, kind, and Slack fields match what api-rs derives: `slack-channel-<channel>`, `slack-user-<team>-<user>` in the admin's workspace, or `workflow-<slugged workflow_name>` for `WORKFLOW_PRINCIPAL = True`. A new channel principal gets full Slack access to its own channel. Other kinds and DM channel IDs return `400`; invalid IDs and existing principals return `422`. |
-| `GET` | `/api/v1/sandbox/admin/principals/lookup/:foreign_id` | Fetch one by foreign ID. |
-| `GET`/`POST` | `/api/v1/sandbox/admin/static_secrets[/:id]`, `/api/v1/sandbox/admin/pg_dsn_secrets[/:id]`, `/api/v1/sandbox/admin/gcp_auth_secrets[/:id]`, `/api/v1/sandbox/admin/gcp_id_token_secrets[/:id]` | Fetch a secret by OID or create one, as in the static, Postgres DSN, GCP auth, and GCP ID token secret APIs. Inline `control_plane` and OAuth `token_broker` sources return `403`. |
-| `PATCH`/`PUT` | `/api/v1/sandbox/admin/static_secrets/:id`, `/api/v1/sandbox/admin/pg_dsn_secrets/:id`, `/api/v1/sandbox/admin/gcp_auth_secrets/:id`, `/api/v1/sandbox/admin/gcp_id_token_secrets/:id` | Update an existing secret by OID. Omitted fields, including the source, keep their current values. To switch a GCP auth secret between a `keyfile` and `credentials_provider`, send the other as `null` (and `subject: null` when leaving keyfile mode). Same source restrictions; secrets with a `token_broker` source return `403`. |
-| `GET`/`POST` | `/api/v1/sandbox/admin/principals/:principal_id/roles` | List or assign roles (`data: { role_id }`). |
-| `DELETE` | `/api/v1/sandbox/admin/principals/:principal_id/roles/:id` | Unassign a role. |
-| `GET` | `/api/v1/sandbox/admin/roles`, `/roles/:id`, `/roles/lookup/:foreign_id` | List or fetch roles. |
-| `GET` | `/api/v1/sandbox/admin/roles/:role_id/grants` | List a role's grants. |
-| `GET` | `/api/v1/sandbox/admin/principals/:principal_id/grants` | List a principal's direct grants. |
-| `GET` | `/api/v1/sandbox/admin/principals/:id/effective_grants` | List secrets the principal holds directly or through roles, paginated with `page` and `limit`. Each row has `id`, `grant_key`, `foreign_id`, `name`, `direct`, and `roles` (`id`, `foreign_id`, `name`) that grant it. |
-| `POST` | `/api/v1/sandbox/admin/grants` | Grant a secret to a principal (`data: { principal_id, <grant_key>: <secret oid> }`) or a role (`data: { role_id, <grant_key>: <secret oid> }`). A role grant reaches every holder of the role. |
-| `DELETE` | `/api/v1/sandbox/admin/grants/:id` | Revoke a principal or role grant. |
-| `GET` | `/api/v1/sandbox/admin/secrets` | List grantable secrets of every kind with `id`, `grant_key`, `foreign_id`, `name`, `description`, and `labels`. `q` filters by name or foreign ID. |
-| `POST` | `/api/v1/sandbox/admin/principals/:id/slack_channel_permissions` | Upsert one Slack channel permission (`data: { channel_id, upload_enabled, download_enabled, history_enabled }`). New permissions default omitted flags to `true`. |
-| `DELETE` | `/api/v1/sandbox/admin/principals/:id/slack_channel_permissions/:channel_id` | Remove the principal's own permission for a channel. |
-| `PATCH` | `/api/v1/sandbox/admin/principals/:id/sandbox_access` | Update only the supplied `sandbox_repo_cache` and `sandbox_*_enabled` fields. Flags must be JSON booleans; other values return `400`. |
-| `GET` | `/api/v1/sandbox/admin/slack_external_teams` | List allowed Slack Connect workspace (`T…`) and Enterprise Grid org (`E…`) ids as `data: [id, …]`. The list is stored by api-rs; if it is unreachable the request returns `503`. |
-| `POST` | `/api/v1/sandbox/admin/slack_external_teams` | Allow one id (`data: { team_id }`) and return the updated list. Adding an allowed id changes nothing. Invalid ids return `422`. |
-| `DELETE` | `/api/v1/sandbox/admin/slack_external_teams/:id` | Remove one id and return the updated list. Returns `404` if the id is not allowed. |
+The plain sandbox resources above (`permissions`, `oauth_apps`, `scheduled_tasks`, and `skills`) keep their entitlement-only behavior. There is no `/api/v1/sandbox/admin/*` namespace.
 
 ## OAuth consent flow
 
@@ -1794,17 +1791,21 @@ Notes on the proxy-sync payload, which differs from the REST representation:
 
 Everything the operator console SPA calls lives under `/api/v1/console`
 (`Api::V1::Console` controllers). These endpoints take the console session
-only and are not for machine callers: use the bearer resources above, which
-the console API never changes. Responses use the same [conventions](#conventions)
-and [error envelope](#errors).
+cookie, or a sandbox-delegated user credential, and never an API key: use the
+bearer resources above for machine callers, which the console API never
+changes. Responses use the same [conventions](#conventions) and
+[error envelope](#errors).
 
 ### Credentials and authorization
 
-- **Session only.** A request with an `Authorization` header (any scheme, even
-  alongside a valid cookie) gets `403` with `details.reason = "session_required"`;
-  it never falls back to the cookie. No session gets `401` with
-  `details.reason = "session_required"`.
-- **CSRF.** Requests other than `GET`/`HEAD` must send the session's CSRF token
+- **No API keys.** A request with an `Authorization` header gets
+  `403` with `details.reason = "session_required"`, unless it is the
+  sandbox-delegated credential described below; it never falls back to the
+  cookie. No session gets `401` with `details.reason = "session_required"`.
+- **Sandbox delegation.** A sandbox entitlement JWT from an active admin's
+  Slack DM with the bot (see [Sandbox-delegated console access](#sandbox-delegated-console-access)) acts as that admin.
+  It has no cookie, so it needs no CSRF token or `Origin`.
+- **CSRF.** Cookie-authenticated requests other than `GET`/`HEAD` must send the session's CSRF token
   (from [`GET /api/v1/console/me`](#session-endpoints)) as `X-CSRF-Token`, from a
   same-origin page. A missing or invalid token, or a cross-site `Origin`,
   returns `403` with `details.reason = "csrf"`.
@@ -1847,7 +1848,7 @@ and [error envelope](#errors).
 }
 ```
 
-`auth_method` is always `"session"`. `flash` returns, once, any
+`auth_method` is `"session"` for both a session cookie and a sandbox-delegated caller; the credential names the same Console account. `flash` returns, once, any
 `notice`/`alert` left by a redirect-based flow such as SSO or an OAuth
 callback, and is `{}` otherwise.
 

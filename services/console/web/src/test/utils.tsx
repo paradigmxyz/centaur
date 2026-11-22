@@ -6,7 +6,6 @@ import { vi } from "vitest";
 
 import type { Me } from "@/app/session";
 import { ShellContext } from "@/app/shell-context";
-import { setCsrfToken } from "@/lib/api";
 import { sharedKeys } from "@/lib/query-keys";
 
 export function adminMe(overrides: Partial<Me> = {}): Me {
@@ -14,7 +13,6 @@ export function adminMe(overrides: Partial<Me> = {}): Me {
     user: { id: "usr_admin", email: "admin@example.test", name: null, status: "active", admin: true },
     auth_method: "session",
     acting_admin: true,
-    csrf_token: "csrf-test-token",
     features: { api_clients: false, password_login: true },
     nav: {
       control: true,
@@ -31,7 +29,6 @@ export function adminMe(overrides: Partial<Me> = {}): Me {
       skills: true,
       scheduled_tasks: true,
     },
-    flash: {},
     ...overrides,
   };
 }
@@ -102,7 +99,6 @@ interface RenderRouteOptions {
 export function renderRoute(element: ReactElement, options: RenderRouteOptions = {}) {
   const path = options.path ?? "/";
   const me = options.me ?? adminMe();
-  setCsrfToken(me.csrf_token);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(sharedKeys.me, me);
   const router = createMemoryRouter(

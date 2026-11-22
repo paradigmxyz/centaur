@@ -50,6 +50,7 @@ use crate::{
     },
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
+    console_session::ConsoleSessionConfig,
     mcp::{mcp_enabled, mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_external_teams::{get_slack_external_team_ids, replace_slack_external_team_ids},
     slack_proxy::slack_proxy_router,
@@ -68,8 +69,19 @@ pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
     auth: ApiAuthConfig,
-    /// Console's database, read for API client authentication.
+    /// Console's database, read-only, for API client authentication and the
+    /// turn path.
     console_db: Option<PgPool>,
+    /// A second Console pool without the read-only default, for the ported
+    /// Console handlers. Their handlers prefer it and fall back to the
+    /// read-only pool when only that one is configured.
+    console_write_db: Option<PgPool>,
+    /// The database holding api-rs's read-only workflow run view. Production
+    /// uses the runtime pool; the Console differential harness points this at
+    /// its cloned workflow database.
+    workflow_db: Option<PgPool>,
+    /// Rust-issued Console sessions, when the console API layer is enabled.
+    console_session: Option<ConsoleSessionConfig>,
 }
 
 #[derive(Clone)]
@@ -86,12 +98,35 @@ impl AppState {
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             auth,
             console_db: None,
+            console_write_db: None,
+            workflow_db: None,
+            console_session: None,
         }
     }
 
-    /// Enables API clients, which Console stores in its database.
+    /// Enables the browser-facing Console layer. Mounted only when configured.
+    pub fn with_console_session(mut self, config: ConsoleSessionConfig) -> Self {
+        self.console_session = Some(config);
+        self
+    }
+
+    /// Enables API clients, which Console stores in its database. The pool is
+    /// the read-only one used by the turn path.
     pub fn with_console_db(mut self, pool: PgPool) -> Self {
         self.console_db = Some(pool);
+        self
+    }
+
+    /// Sets the writable pool used by the ported Console handlers.
+    pub fn with_console_write_db(mut self, pool: PgPool) -> Self {
+        self.console_write_db = Some(pool);
+        self
+    }
+
+    /// Points the Console workflow dashboard at the database publishing
+    /// `centaur_readonly_workflow_runs`. Without it the runtime pool is used.
+    pub fn with_workflow_db(mut self, pool: PgPool) -> Self {
+        self.workflow_db = Some(pool);
         self
     }
 
@@ -103,6 +138,29 @@ impl AppState {
         self.console_db.clone().ok_or_else(|| {
             ApiError::ServiceUnavailable("API clients are not configured".to_owned())
         })
+    }
+
+    pub(crate) fn console_session_db(&self) -> Result<PgPool, ApiError> {
+        self.console_write_db
+            .clone()
+            .or_else(|| self.console_db.clone())
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable("the console database is not configured".to_owned())
+            })
+    }
+
+    pub(crate) fn console_session(&self) -> Option<&ConsoleSessionConfig> {
+        self.console_session.as_ref()
+    }
+
+    /// The pool holding the published workflow run view. Production uses the
+    /// same database as the runtime; tests and the differential harness can
+    /// attach a separate one.
+    pub(crate) fn workflow_db(&self) -> Result<PgPool, ApiError> {
+        match &self.workflow_db {
+            Some(pool) => Ok(pool.clone()),
+            None => self.pool(),
+        }
     }
 
     pub fn ready(
@@ -289,6 +347,11 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .merge(protected);
+    if state.console_session().is_some() {
+        app = app
+            .merge(crate::console::router(state.clone()))
+            .fallback(crate::console::fallback);
+    }
     if mcp_enabled() {
         app = app
             .route("/mcp", post(mcp_post).get(mcp_get))
@@ -303,6 +366,19 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
     }
     let app = if state.auth().api_clients_enabled() {
         app.route("/oauth/token", post(issue_api_client_token))
+    } else {
+        app
+    };
+
+    // Both surfaces share the listener. The public Console host answers only
+    // the Console router; every other host answers api-rs plus the Console API
+    // namespaces. Keep this layer after every route is registered so it also
+    // covers `/mcp` and `/oauth/token`. See `console/host.rs`.
+    let app = if state.console_session().is_some() {
+        app.layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::console::host::route,
+        ))
     } else {
         app
     };

@@ -261,6 +261,12 @@ In-cluster Service/DNS names use the "console" component (e.g.
 `<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
 IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 *value* is derived from `centaur.consoleUrl`, so it tracks the Service name.
+
+`console.backend` selects which implementation serves the Console host and API:
+`rails` (default) keeps the Rails pods, Service, and URLs as before; `apirs`
+serves the ported Console from api-rs. `centaur.consoleBackend` validates the
+switch, and `centaur.consoleUrl` returns the implementation sandboxes and
+proxies should dial.
 */ -}}
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}
@@ -289,9 +295,35 @@ consume this helper rather than the raw values.
 {{- include "centaur.consoleName" . -}}
 {{- end -}}
 
+{{- /*
+The implementation serving the Console: `rails` (default) or `apirs`.
+`apirs` requires api-rs and its Console layer to be enabled, so the flip can
+never render an ingress or internal URL pointing at a path nothing serves.
+*/ -}}
+{{- define "centaur.consoleBackend" -}}
+{{- $console := include "centaur.consoleValues" . | fromYaml -}}
+{{- $backend := default "rails" $console.backend -}}
+{{- if not (has $backend (list "rails" "apirs")) -}}
+{{- fail (printf "console.backend must be rails or apirs (got %q)" $backend) -}}
+{{- end -}}
+{{- if eq $backend "apirs" -}}
+{{- if not .Values.apiRs.enabled -}}
+{{- fail "console.backend=apirs requires apiRs.enabled=true" -}}
+{{- end -}}
+{{- if not .Values.apiRs.console.enabled -}}
+{{- fail "console.backend=apirs requires apiRs.console.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+{{- $backend -}}
+{{- end -}}
+
 {{- define "centaur.consoleUrl" -}}
+{{- if eq (include "centaur.consoleBackend" .) "apirs" -}}
+{{- printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "api-rs")) .Values.apiRs.port -}}
+{{- else -}}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "centaur.proxySyncName" -}}

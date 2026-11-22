@@ -1,17 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api, ApiError, loginUrl, navigation, setCsrfToken } from "@/lib/api";
+import { api, ApiError, loginUrl, navigation } from "@/lib/api";
 import { apiResponse, mockApi } from "@/test/utils";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  setCsrfToken(null);
 });
 
 describe("api client", () => {
-  it("sends the CSRF token on writes but not reads", async () => {
-    setCsrfToken("tok");
+  it("sends no CSRF token on reads or writes", async () => {
     const mock = mockApi({ "GET /api/v1/console/things": { data: [] }, "POST /api/v1/console/things": { data: { id: "1" } } });
     await api.get("/api/v1/console/things", { q: "a", ids: ["x", "y"], empty: "" });
     await api.post("/api/v1/console/things", { data: { a: 1 } });
@@ -19,7 +17,7 @@ describe("api client", () => {
     const [get, post] = mock.calls();
     expect(get?.url.search).toBe("?q=a&ids%5B%5D=x&ids%5B%5D=y");
     expect(get?.headers["X-CSRF-Token"]).toBeUndefined();
-    expect(post?.headers["X-CSRF-Token"]).toBe("tok");
+    expect(post?.headers["X-CSRF-Token"]).toBeUndefined();
     expect(post?.body).toEqual({ data: { a: 1 } });
   });
 
@@ -76,18 +74,11 @@ describe("api client", () => {
     expect(loginUrl({ pathname: "/elsewhere", search: "" })).toBe("/login?return_to=%2Felsewhere");
   });
 
-  it("refreshes a stale CSRF token and retries once", async () => {
-    setCsrfToken("stale");
-    let attempts = 0;
+  it("does not retry a csrf rejection", async () => {
     const mock = mockApi({
-      "GET /api/v1/console/me": { data: { csrf_token: "fresh" } },
-      "DELETE /api/v1/console/things/1": () => {
-        attempts += 1;
-        return attempts === 1 ? apiResponse(403, { error: { message: "csrf", details: { reason: "csrf" } } }) : undefined;
-      },
+      "DELETE /api/v1/console/things/1": apiResponse(403, { error: { message: "csrf", details: { reason: "csrf" } } }),
     });
-    await api.delete("/api/v1/console/things/1");
-    const deletes = mock.calls("DELETE /api/v1/console/things/1");
-    expect(deletes.map((call) => call.headers["X-CSRF-Token"])).toEqual(["stale", "fresh"]);
+    await expect(api.delete("/api/v1/console/things/1")).rejects.toBeInstanceOf(ApiError);
+    expect(mock.calls("DELETE /api/v1/console/things/1")).toHaveLength(1);
   });
 });

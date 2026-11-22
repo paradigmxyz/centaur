@@ -32,7 +32,10 @@ spec:
       {{- with $rule.backendRefs }}
       backendRefs:
 {{- range $backend := . }}
-        - {{- if $backend.component }}
+{{- $consoleToApiRs := and $backend.component (eq $backend.component "console") (eq (include "centaur.consoleBackend" $) "apirs") }}
+        - {{- if $consoleToApiRs }}
+          name: {{ include "centaur.componentName" (dict "root" $ "component" "api-rs") }}
+          {{- else if $backend.component }}
           name: {{ include "centaur.componentName" (dict "root" $ "component" $backend.component) }}
           {{- else }}
           name: {{ $backend.name | quote }}
@@ -50,8 +53,14 @@ spec:
           {{- else }}
           group: ""
           {{- end }}
+          {{- if $consoleToApiRs }}
+          # console.backend=apirs: a route written for the Console component
+          # follows the Console host to api-rs and its port.
+          port: {{ $.Values.apiRs.port }}
+          {{- else }}
           {{- with $backend.port }}
           port: {{ . }}
+          {{- end }}
           {{- end }}
           {{- with $backend.weight }}
           weight: {{ . }}

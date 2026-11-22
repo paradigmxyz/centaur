@@ -1,6 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $ingressSourceNamespaces := default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
+{{- $consoleBackend := include "centaur.consoleBackend" . }}
 {{- $companyContext := include "centaur.companyContextValues" . | fromYaml }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -197,6 +198,15 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- if and (eq $consoleBackend "apirs") $console.ingress.enabled }}
+        # After the Console cutover the console Ingress controller forwards the
+        # Console host to api-rs, on the same port as the rest of its API.
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+{{- end }}
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -333,6 +343,18 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
     # console control plane: register principals/roles/grants and per-sandbox proxies.
+{{- if eq $consoleBackend "apirs" }}
+    # The ported Console handlers are served by api-rs itself, and
+    # IRON_CONTROL_URL points at this Service, so allow self-egress for any
+    # admin-client call that still goes over HTTP.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- else }}
     - to:
         - podSelector:
             matchLabels:
@@ -340,6 +362,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $console.service.httpPort }}
+{{- end }}
     # The workflow discovery service, which imports workflow modules for api-rs.
     - to:
         - podSelector:

@@ -2,6 +2,8 @@ mod api_clients;
 mod api_jwt;
 mod auth;
 pub mod client;
+mod console;
+mod console_session;
 mod error;
 mod mcp;
 mod routes;
@@ -13,6 +15,8 @@ pub mod types;
 
 pub use auth::{ApiAuthConfig, ApiAuthConfigError};
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
+pub use console::validate_boolean_settings;
+pub use console_session::{ConsoleSessionConfig, ConsoleSessionConfigError};
 pub use error::ApiError;
 pub use mcp::mcp_enabled;
 pub use routes::{

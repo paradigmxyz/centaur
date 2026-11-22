@@ -54,15 +54,16 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
     Keep its routes and responses stable; never add SPA
     fields, filters, or write semantics to it.
   - `/api/v1/console/*` is the console API (`Api::V1::Console`,
-    `ConsoleApiAuthentication`): the console session only, never a bearer key
-    (403 `session_required`, even alongside a cookie). Every endpoint the SPA
-    calls lives here, and nothing else does. New SPA endpoints go in
-    `Api::V1::Console::BaseController` subclasses; to serve a bearer resource
-    to the SPA, add a thin subclass of the bearer controller that includes
-    `ConsoleApiAuthentication` (like the sandbox admin API) and put any
+    `ConsoleApiAuthentication`): the console session cookie, or a
+    sandbox-delegated user credential (a sandbox entitlement JWT from an
+    active admin's Slack DM), never a bearer API key (403 `session_required`,
+    even alongside a cookie). Every endpoint the SPA calls lives here, and
+    nothing else does. New SPA endpoints go in `Api::V1::Console::BaseController`
+    subclasses; to serve a bearer resource to the SPA, add a thin subclass of
+    the bearer controller that includes `ConsoleApiAuthentication` and put any
     console-only fields, filters, or write semantics in overrides there.
-  - `/api/v1/sandbox/*` keeps its sandbox JWT schemes (including sandbox
-    admin, which subclasses bearer controllers and skips their auth).
+  - `/api/v1/sandbox/*` keeps its sandbox JWT scheme for the plain
+    per-sandbox resources.
   - A console controller reached outside `/api/v1/console`, or a bearer
     controller routed under it, fails closed (raises in development and test,
     401 in production). `test/controllers/api/v1/credential_policy_test.rb`
@@ -72,15 +73,17 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
     approval, API clients, settings, and workflow force start are console-only
     so a leaked API key cannot reach them.
   - Console writes require the session CSRF token (`X-CSRF-Token`) and a
-    same-origin `Origin`.
+    same-origin `Origin` in Rails. The Rust port replaces the token with an
+    exact `Origin` check, and the SPA no longer sends a token. A
+    sandbox-delegated caller has no cookie and is exempt from both checks.
   - Console endpoints are admin-only unless they opt in with
     `allow_active_users` (scope records with `owned_scope` /
     `require_owner_or_admin!`, which 404s for non-owners) or
     `allow_pending_users`; these exist only in the console API. Test new
     endpoints with `assert_admin_only_api` or `assert_active_user_api` (both
     check the credential the path's namespace takes) plus ownership cases.
-  - Keep proxy sync authentication, sandbox JWTs (including sandbox admin),
-    and OAuth/MCP tokens as separate trust boundaries.
+  - Keep proxy sync authentication, sandbox JWTs, and OAuth/MCP tokens as
+    separate trust boundaries.
 - In the SPA, reads use TanStack Query and a failed query renders an error
   alert, never an empty state. Writes are plain async functions in each
   feature's `api.ts` (request, then `invalidateQueries`), always to a
