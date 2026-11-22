@@ -309,7 +309,7 @@ async fn load_allowed_team_ids(
     state: &AppState,
     unavailable: &'static str,
 ) -> Result<Vec<String>, AdminError> {
-    let pool = common::pool(state)?;
+    let pool = session_db(state, unavailable)?;
     match PgSessionStore::new(pool).slack_external_team_ids().await {
         Ok(ids) => Ok(ids),
         Err(error) => {
@@ -320,6 +320,17 @@ async fn load_allowed_team_ids(
             Err(ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, unavailable).into())
         }
     }
+}
+
+/// The allowlist lives in api-rs's own database (the session store), not in
+/// Console's: Rails reached it through the Centaur API, and api-rs serves it
+/// from `AppState::pool()` (see `crate::slack_external_teams`).
+#[allow(clippy::result_large_err)] // The error is the HTTP response this handler returns.
+fn session_db(state: &AppState, unavailable: &'static str) -> Result<sqlx::PgPool, AdminError> {
+    state.pool().map_err(|error| {
+        tracing::warn!(error = %error, "console_slack_external_team_ids_store_unavailable");
+        ConsoleError::new(StatusCode::SERVICE_UNAVAILABLE, unavailable).into()
+    })
 }
 
 const CONSOLE_LOAD_UNAVAILABLE: &str =
@@ -341,7 +352,7 @@ async fn write_allowed_team_ids(
     team_ids: &[String],
     unavailable: &'static str,
 ) -> Result<Vec<String>, AdminError> {
-    let pool = common::pool(state)?;
+    let pool = session_db(state, unavailable)?;
     let ids = match normalize_slack_external_team_ids(team_ids) {
         Ok(ids) => ids,
         Err(crate::ApiError::BadRequest(message)) => {

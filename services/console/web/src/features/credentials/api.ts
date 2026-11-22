@@ -68,10 +68,10 @@ export type CredentialPayload = {
   client_secret?: string;
   scopes: string[];
   token_endpoint_headers: Record<string, string | null> | null;
-  early_refresh_fraction: string;
-  early_refresh_slack_seconds: string;
-  max_refresh_interval_seconds: string;
-  refresh_timeout_seconds: string;
+  early_refresh_fraction?: number | string;
+  early_refresh_slack_seconds?: number | string;
+  max_refresh_interval_seconds?: number | string;
+  refresh_timeout_seconds?: number | string;
   refresh_token?: string;
   username?: string;
   password?: string;

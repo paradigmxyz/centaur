@@ -88,7 +88,7 @@ const FIELDS = [
 
 const SECRET_FIELDS = ["client_secret", "refresh_token", "username", "password", "preqin_username", "api_key"] as const;
 
-function defaultValues(credential?: BrokerCredential): CredentialFormValues {
+export function defaultValues(credential?: BrokerCredential): CredentialFormValues {
   return {
     foreign_id: credential?.foreign_id ?? "",
     name: credential?.name ?? "",
@@ -140,14 +140,27 @@ export function toPayload(values: CredentialFormValues, credential?: BrokerCrede
     client_secret: values.client_secret,
     scopes: values.scopes.split(/\s+/).filter(Boolean),
     token_endpoint_headers: Object.keys(headers).length > 0 ? headers : null,
-    early_refresh_fraction: values.early_refresh_fraction,
-    early_refresh_slack_seconds: values.early_refresh_slack_seconds,
-    max_refresh_interval_seconds: values.max_refresh_interval_seconds,
-    refresh_timeout_seconds: values.refresh_timeout_seconds,
+    early_refresh_fraction: numberField(values.early_refresh_fraction),
+    early_refresh_slack_seconds: numberField(values.early_refresh_slack_seconds),
+    max_refresh_interval_seconds: numberField(values.max_refresh_interval_seconds),
+    refresh_timeout_seconds: numberField(values.refresh_timeout_seconds),
     ...grantFields,
     labels: rowsToRecord(values.labels),
   };
   return omitBlankSecrets(payload, ["client_secret", "refresh_token", "username", "password", "api_key"]) as CredentialPayload;
+}
+
+/**
+ * The refresh-policy inputs are text fields; the API takes JSON numbers. A blank
+ * field is omitted so the server default (on create) or current value (on edit)
+ * applies; text that isn't a number is sent as-is so the API's validation error
+ * shows under the field.
+ */
+function numberField(value: string): number | string | undefined {
+  const trimmed = value.trim();
+  if (trimmed === "") return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : trimmed;
 }
 
 interface CredentialFormProps {
