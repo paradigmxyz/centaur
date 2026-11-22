@@ -25,17 +25,9 @@
       }
     },
     "consoleConfig": {
-      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
-        "replicaCount": { "type": "integer" },
-        "backend": { "type": "string", "enum": ["rails", "apirs"] },
         "publicUrl": { "type": "string" },
-        "allowedHosts": {
-          "type": "array",
-          "items": { "type": "string" },
-          "uniqueItems": true
-        },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
         "oktaOauth": {
@@ -456,12 +448,6 @@
       "type": "object",
       "properties": {
         "syncInfraSecrets": { "type": "boolean" },
-        "console": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" }
-          }
-        },
         "mcpEnabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
         "sessionPrincipalAdmission": {

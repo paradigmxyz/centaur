@@ -121,10 +121,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .connect_with(connect_options)
         .await?;
-    let api_hosts = configured_hosts("CENTAUR_API_SERVER_PROXY_HOSTS", "CENTAUR_API_URL");
-    let console_host = env::var("CENTAUR_CONSOLE_URL")
+    let mut api_hosts = configured_hosts("CENTAUR_API_SERVER_PROXY_HOSTS", "CENTAUR_API_URL");
+    // The Console host is an api-rs host: both surfaces share one listener and
+    // one sandbox token, injected once per host.
+    if let Some(console_host) = env::var("CENTAUR_CONSOLE_URL")
         .ok()
-        .and_then(|url| host_from_url(&url));
+        .and_then(|url| host_from_url(&url))
+        && !api_hosts.contains(&console_host)
+    {
+        api_hosts.push(console_host);
+    }
     let state = AppState {
         ssh_targets: ssh::target_policies(env::var("CENTAUR_SSH_TARGETS").ok().as_deref())?,
         pool,
@@ -133,7 +139,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .filter(|value| !value.trim().is_empty()),
         api_hosts,
-        console_host,
         sync_cache: Arc::new(SyncCache::default()),
         metrics: metrics_handle,
     };

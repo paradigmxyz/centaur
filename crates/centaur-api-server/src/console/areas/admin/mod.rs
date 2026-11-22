@@ -13,17 +13,17 @@ mod users;
 
 use axum::Router;
 
-use crate::{AppState, console::bearer::BearerRoutes, console_session::ConsoleRoutes};
+use crate::{AppState, console::guard::GuardedRoutes};
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = users::console(routes);
     let routes = api_clients::console(routes);
     system_settings::console(routes)
 }
 
 /// Routes under `/api/v1` (bearer API; paths relative to that prefix).
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = api_keys::bearer(routes);
     proxies::bearer(routes)
 }

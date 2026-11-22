@@ -20,8 +20,8 @@ use time::PrimitiveDateTime;
 use super::common::{self, AdminError, json_ok};
 use crate::{
     AppState,
+    console::guard::GuardedRoutes,
     console::{http::ConsoleError, request::ConsoleQuery},
-    console_session::ConsoleRoutes,
 };
 
 /// `User.statuses.keys`, in the enum's declaration order.
@@ -109,13 +109,13 @@ struct UserPayloadEnvelope {
     data: UserPayload,
 }
 
-pub(super) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin("/users", get(index))
-        .admin("/users/{id}/approve", post(approve))
-        .admin("/users/{id}/disable", post(disable))
-        .admin("/users/{id}/promote", post(promote))
-        .admin("/users/{id}/demote", post(demote))
+        .console_admin("/users", get(index))
+        .console_admin("/users/{id}/approve", post(approve))
+        .console_admin("/users/{id}/disable", post(disable))
+        .console_admin("/users/{id}/promote", post(promote))
+        .console_admin("/users/{id}/demote", post(demote))
 }
 
 async fn index(

@@ -51,8 +51,8 @@ on either side of a rolling deploy accept each other's forms.
   console session cookie (`web/src/lib/api.ts` refuses any other path). It
   reads the session and nav flags from `GET /api/v1/console/me` and sends no
   CSRF token; the Rust Console checks an exact same-origin `Origin` on unsafe
-  requests. Rails still requires its own `X-CSRF-Token` until the cutover, so a
-  SPA built from this tree needs `console.backend=apirs` for writes. A `401`
+  requests. The chart runs the Console in api-rs, so a SPA built from this tree
+  is served and answered by the Rust Console. A `401`
   sends the browser to `/login?return_to=<current page>` and a pending account
   to `/pending` (full page loads); sign-out is `DELETE /api/v1/console/session`.
   See [docs/API.md](docs/API.md#console-api).
@@ -192,11 +192,15 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1` in three namespaces, each taking one of two credentials and never accepting an API key on the console paths:
+The deployed Console API is the Rust one in
+`crates/centaur-api-server/src/console/` (see its `README.md`): every credential
+maps to one capability set and every route declares the capability it requires.
+This Rails tree keeps the reference behavior, the migrations, and the worker.
+`iron-control` exposes the same JSON API under `/api/v1` in three namespaces:
 
 - `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and does not accept the console session cookie.
-- `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie, with an exact same-origin `Origin` check on writes (Rails still uses a CSRF token), or a sandbox-delegated user credential: a sandbox entitlement JWT from an active admin's Slack DM with the bot. It never accepts an API key (`403 session_required`). Endpoints are admin-only unless documented otherwise.
-- `/api/v1/sandbox/*` takes the sandbox entitlement JWT that `iron-proxy` injects for the plain per-sandbox resources.
+- `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie, with an exact same-origin `Origin` check on writes (no CSRF token), or a sandbox-delegated user credential: a sandbox token from an active admin's Slack DM with the bot. It never accepts an API key (`403 session_required`). Endpoints are admin-only unless documented otherwise.
+- `/api/v1/sandbox/*` takes the single sandbox token that `iron-proxy` injects for the plain per-sandbox resources.
 
 `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 

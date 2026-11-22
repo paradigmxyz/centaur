@@ -10,13 +10,9 @@ pub(crate) mod secrets;
 
 use axum::Router;
 
-use crate::{
-    AppState,
-    console::{bearer::BearerRoutes, sandbox::SandboxRoutes},
-    console_session::ConsoleRoutes,
-};
+use crate::{AppState, console::guard::GuardedRoutes};
 
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = principals::console(routes);
     let routes = secrets::console(routes);
     let routes = oauth::console(routes);
@@ -25,7 +21,7 @@ pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
     auth_pages::console(routes)
 }
 
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = principals::bearer(routes);
     let routes = secrets::bearer(routes);
     let routes = oauth::bearer(routes);
@@ -34,7 +30,7 @@ pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
     auth_pages::bearer(routes)
 }
 
-pub(crate) fn sandbox(routes: SandboxRoutes) -> SandboxRoutes {
+pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = oauth::sandbox(routes);
     let routes = automation::sandbox(routes);
     auth_pages::sandbox(routes)

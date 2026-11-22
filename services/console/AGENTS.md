@@ -2,10 +2,12 @@
 
 ## Role
 
-The console is a Rails application that provides the credential-control JSON
-API and serves the operator UI, a TypeScript React SPA in `web/`. It manages
-principals, roles, grants, encrypted secret records, proxies, broker
-credentials, console login, and MCP OAuth flows.
+The Console is the credential-control surface: the JSON API, the operator UI
+(a TypeScript React SPA in `web/`), principals, roles, grants, encrypted secret
+records, proxies, broker credentials, console login, and MCP OAuth flows. The
+chart now runs it in api-rs (`crates/centaur-api-server/src/console/`); this
+Rails tree is retained for the worker, the migrations, and reference behavior,
+not as a deployed API surface.
 
 Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
@@ -47,43 +49,41 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Invariants
 
-- The namespace decides the credential, and the two never mix:
-  - `/api/v1/*` is the bearer API (`Api::BaseController`): a bearer API key
-    whose owner is an active admin, on every action, exactly as for machine
-    callers before the SPA. It does not accept the console session cookie.
-    Keep its routes and responses stable; never add SPA
-    fields, filters, or write semantics to it.
-  - `/api/v1/console/*` is the console API (`Api::V1::Console`,
-    `ConsoleApiAuthentication`): the console session cookie, or a
-    sandbox-delegated user credential (a sandbox entitlement JWT from an
-    active admin's Slack DM), never a bearer API key (403 `session_required`,
-    even alongside a cookie). Every endpoint the SPA calls lives here, and
-    nothing else does. New SPA endpoints go in `Api::V1::Console::BaseController`
-    subclasses; to serve a bearer resource to the SPA, add a thin subclass of
-    the bearer controller that includes `ConsoleApiAuthentication` and put any
-    console-only fields, filters, or write semantics in overrides there.
-  - `/api/v1/sandbox/*` keeps its sandbox JWT scheme for the plain
-    per-sandbox resources.
-  - A console controller reached outside `/api/v1/console`, or a bearer
-    controller routed under it, fails closed (raises in development and test,
-    401 in production). `test/controllers/api/v1/credential_policy_test.rb`
-    sweeps every route.
-  - API keys and proxies have no console endpoints, so a browser session
-    cannot mint credentials that outlive it; admin actions such as user
-    approval, API clients, settings, and workflow force start are console-only
-    so a leaked API key cannot reach them.
-  - Console writes require the session CSRF token (`X-CSRF-Token`) and a
-    same-origin `Origin` in Rails. The Rust port replaces the token with an
-    exact `Origin` check, and the SPA no longer sends a token. A
-    sandbox-delegated caller has no cookie and is exempt from both checks.
-  - Console endpoints are admin-only unless they opt in with
-    `allow_active_users` (scope records with `owned_scope` /
-    `require_owner_or_admin!`, which 404s for non-owners) or
-    `allow_pending_users`; these exist only in the console API. Test new
-    endpoints with `assert_admin_only_api` or `assert_active_user_api` (both
-    check the credential the path's namespace takes) plus ownership cases.
-  - Keep proxy sync authentication, sandbox JWTs, and OAuth/MCP tokens as
-    separate trust boundaries.
+- The chart runs the Console only in api-rs. This Rails application stays in
+  the repository, but its HTTP API is not deployed: the Rails worker (Slack
+  channel catalog jobs) and Rails migrations still run. Rollback is reverting
+  to an older chart version, not running Rails and api-rs side by side. Do not
+  add new Rails API behavior; implement Console changes in
+  `crates/centaur-api-server/src/console/` and follow its `README.md`.
+- api-rs has one authorization model. Every credential maps to an
+  `AuthenticatedCaller` with a set of capabilities, and every route declares
+  the capability it requires (`console::guard::GuardedRoutes`, shared with
+  api-rs's own routes). The old `ConsoleRoutes`/`BearerRoutes`/`SandboxRoutes`
+  guards are gone.
+  - `/api/v1/console/*` provides the console API. A session cookie
+    authenticates the browser (`console.read` plus the account's
+    `console.admin`/`console.user`/`console.pending` level), and a delegated
+    sandbox credential acts as its linked active admin (`console.delegate`).
+    An `Authorization` header is never mixed with a cookie session. Every
+    endpoint the SPA calls lives here, and nothing else does.
+  - `/api/v1/*` outside the console and sandbox namespaces is the bearer API:
+    a Console API key whose owner is an active admin, holding `operator.api`
+    and nothing else. User approval, API clients, system settings, and workflow
+    force start are `console.admin` routes, so an API key cannot reach them.
+  - `/api/v1/sandbox/*` uses the single sandbox token from proxy-sync.
+  - A path no longer selects the accepted credential type; the route's
+    required capability does. A credential without that capability fails
+    closed. There is no unguarded way to add an authenticated route.
+  - Keep proxy sync authentication, the sandbox token, and OAuth/MCP tokens as
+    separate trust boundaries. OAuth/MCP keeps its existing protocol
+    authentication and does not use the route capability catalog.
+- Console writes require an exact same-origin `Origin` for cookie sessions.
+  There is no CSRF token; the SPA no longer sends one. A delegated sandbox
+  caller has no cookie and is exempt from the Origin check.
+- Console endpoints are admin-only unless they declare `console.user` (skills,
+  scheduled tasks, personal SSH key, integrations, scoped to the owner) or
+  `console.pending` (`/me`, `/session`). Keep the declared capability on every
+  new route; do not add a route that bypasses `GuardedRoutes`.
 - In the SPA, reads use TanStack Query and a failed query renders an error
   alert, never an empty state. Writes are plain async functions in each
   feature's `api.ts` (request, then `invalidateQueries`), always to a

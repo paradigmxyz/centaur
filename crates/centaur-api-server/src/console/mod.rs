@@ -1,13 +1,14 @@
 //! The Rust Console surface.
 //!
-//! Each ported area adds its routes through the guarded builders in this
-//! module: [`crate::console_session::ConsoleRoutes`] for the browser session
-//! API, [`bearer::BearerRoutes`] for `/api/v1`, and
-//! [`sandbox::SandboxRoutes`] for `/api/v1/sandbox`. The builders attach the
-//! credential check per route; there is no unguarded way to add one.
+//! Each ported area adds its routes through the single
+//! [`guard::GuardedRoutes`] builder: it declares the capability a route
+//! requires and attaches the unified authorization layer. The console, bearer,
+//! and sandbox mounts use the same builder; a path no longer selects which
+//! credential type is accepted.
 //!
 //! HTML pages remain server-rendered with the static `public/assets/oauth-page`
-//! files embedded in the binary. The SPA is still served by Console in Rails.
+//! files embedded in the binary. The built SPA is served from disk by
+//! `spa_files`; the chart runs no Rails web pod.
 //!
 //! This foundation lays out the builders used by later area modules; some
 //! helpers are intentionally not called until those areas arrive.
@@ -16,6 +17,7 @@
 pub(crate) mod areas;
 mod assets;
 pub(crate) mod bearer;
+pub(crate) mod guard;
 pub(crate) mod host;
 pub(crate) mod http;
 mod pages;
@@ -51,10 +53,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .merge(assets::router())
         .merge(spa_files::router())
         .nest("/api/v1/console", console_router(state.clone()))
-        .nest(
-            "/api/v1/sandbox",
-            sandbox::sandbox_router(state.clone(), sandbox::SandboxJwtConfig::from_env()),
-        )
+        .nest("/api/v1/sandbox", sandbox::sandbox_router(state.clone()))
         .nest("/api/v1", bearer::bearer_router(state))
         .layer(middleware::from_fn(reject_repeated_scalar_query))
         .layer(middleware::from_fn(default_cache_control))

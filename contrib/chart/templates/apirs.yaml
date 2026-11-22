@@ -183,6 +183,21 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
+      initContainers:
+        # api-rs registers principals and roles in the Console database during
+        # startup, and the ported Console handlers read and write it, so wait for
+        # the console-migrate Job's schema before starting. Upgrades order the Job
+        # with a pre-upgrade hook; a bundled-Postgres install runs it as an
+        # ordinary resource, and this wait provides the ordering there. The Job
+        # ends with the initial-admin bootstrap, so on that install path api-rs
+        # can still win a sub-second race against the API-key row and exit; the
+        # kubelet restarts it and the next start succeeds.
+{{ include "centaur.consoleDbWait" (dict
+  "root" .
+  "name" "wait-for-console-schema"
+  "database" $console.database.name
+  "query" "SELECT to_regclass('public.users') IS NOT NULL"
+  "message" "waiting for the Console schema (console-migrate Job)…") | nindent 8 }}
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
@@ -225,17 +240,18 @@ spec:
             - name: CENTAUR_MCP_PUBLIC_URL
               value: {{ $mcpPublicUrl | quote }}
 {{- end }}
-{{- if $console.publicUrl }}
+            # The Console is served by api-rs: the Console host (SPA, sign-in and
+            # other server-rendered pages, MCP OAuth endpoints), `/api/v1/console/*`,
+            # the bearer API `/api/v1/*`, and the sandbox API `/api/v1/sandbox/*`
+            # all answer from this listener. console.publicUrl is required: it is
+            # the origin the session cookie and unsafe-request Origin checks use,
+            # and the host that selects the Console router.
             - name: CENTAUR_CONSOLE_PUBLIC_URL
-              value: {{ $console.publicUrl | quote }}
-{{- end }}
-{{- if .Values.apiRs.console.enabled }}
-{{- $_ := required "console.publicUrl is required when apiRs.console.enabled=true" $console.publicUrl }}
-            # Rust Console. Mount the shared Console secrets under the
-            # CENTAUR_CONSOLE_* names the ported handlers read; the Secret
-            # keeps storing them under the Rails-era keys used by console.yaml.
-            # CONSOLE_SESSION_SECRET is new: generate it in the shared Secret
-            # (never here) and keep it stable, or every browser session is lost.
+              value: {{ required "console.publicUrl is required: set it to the origin users and MCP clients reach the Console at (for example https://console.example.com)" $console.publicUrl | quote }}
+            # The shared Console secrets keep their Rails-era IRON_CONTROL_* keys
+            # in the Secret and are mounted under the CENTAUR_CONSOLE_* names the
+            # ported handlers read. CONSOLE_SESSION_SECRET signs the browser
+            # session cookie: keep it stable, or every browser session is lost.
             - name: CONSOLE_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
@@ -305,9 +321,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sCENTAUR_CONSOLE_OKTA_CLIENT_SECRET" .Values.secretManager.envPrefix }}
-{{- end }}
-            - name: CENTAUR_API_URL
-              value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}

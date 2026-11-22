@@ -34,6 +34,9 @@ spec:
       targetPort: 8080
       nodePort: 30081
 ---
+# The Console is served by api-rs. The Service keeps the Console's historical
+# port (3000) so E2E_CONSOLE_URL and console.publicUrl stay
+# http://127.0.0.1:30082, and forwards it to the api-rs port.
 apiVersion: v1
 kind: Service
 metadata:
@@ -44,10 +47,10 @@ spec:
   selector:
     app.kubernetes.io/name: centaur
     app.kubernetes.io/instance: centaur
-    app.kubernetes.io/component: console
+    app.kubernetes.io/component: api-rs
   ports:
     - port: 3000
-      targetPort: 3000
+      targetPort: 8080
       nodePort: 30082
 ---
 apiVersion: networking.k8s.io/v1
@@ -60,7 +63,7 @@ spec:
     matchExpressions:
       - key: app.kubernetes.io/component
         operator: In
-        values: [postgres, api-rs, console]
+        values: [postgres, api-rs]
     matchLabels:
       app.kubernetes.io/instance: centaur
   policyTypes:
@@ -74,5 +77,3 @@ spec:
           port: 5432
         - protocol: TCP
           port: 8080
-        - protocol: TCP
-          port: 3000

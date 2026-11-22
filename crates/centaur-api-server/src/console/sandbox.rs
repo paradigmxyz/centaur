@@ -1,24 +1,25 @@
-//! Sandbox entitlement JWT authentication for `/api/v1/sandbox/*`.
+//! The single sandbox token: verification, live binding checks, and the
+//! sandbox request context.
 //!
-//! Mirrors `SandboxTokenAuthentication`: HS256 with Console's issuer/audience
-//! defaults, then the proxy -> principal binding is re-read from the database
-//! so reassigning a proxy revokes access immediately. The console guard reuses
-//! [`sandbox_admin_user`] for its second credential: a Slack DM principal in
-//! the bot's own workspace linked to an active Console admin.
+//! proxy-sync mints one token per proxy (audience `centaur-sandbox`) and
+//! iron-proxy injects it host-only for every api-rs host, including the Console
+//! host. The token replaces both the old `centaur-api` principal JWT and the
+//! sandbox entitlement JWT.
 //!
-//! Routes are added through [`SandboxRoutes`] so every route carries the token
-//! check.
+//! The signature is not the whole authorization story. Every request re-reads
+//! the proxy -> principal binding from the database, so reassigning a proxy
+//! revokes access immediately. A delegated Console credential (`console.delegate`)
+//! additionally re-checks that the principal is still a Slack DM in the bot's
+//! home workspace linked to an active Console admin.
+//!
+//! Routes are added through the unified `console::guard::GuardedRoutes`
+//! builder; this module only authenticates the credential and exposes the
+//! claims handlers need.
 
-use std::{env, fmt};
+use std::fmt;
 
-use axum::{
-    Router,
-    extract::{FromRequestParts, Request, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, request::Parts},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::MethodRouter,
-};
+use axum::Router;
+use axum::http::{HeaderMap, header::AUTHORIZATION};
 use centaur_console_db::{
     ConsoleProxy, ConsoleUser, ConsoleUserStatus, Principal, find_console_proxy, find_console_user,
     find_principal, oid, slack_bot_home_team,
@@ -27,15 +28,15 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    ApiError, AppState,
+    ApiError,
     api_jwt::jwt_signing_secret,
-    console::http::{ConsoleError, render_error},
+    auth::{
+        AuthenticatedCaller, CallerClass, Capability, SANDBOX_TOKEN_AUDIENCE, SANDBOX_TOKEN_ISSUER,
+    },
+    console::guard::GuardedRoutes,
 };
 
-const DEFAULT_AUDIENCE: &str = "centaur-console-sandbox-entitlements";
-const DEFAULT_ISSUER: &str = "centaur-console";
-/// The JWT settings Console reads from the environment. Debug hides the
-/// signing secret.
+/// The JWT settings for the sandbox token. Debug hides the signing secret.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SandboxJwtConfig {
     secret: String,
@@ -54,20 +55,13 @@ impl fmt::Debug for SandboxJwtConfig {
 }
 
 impl SandboxJwtConfig {
-    /// `CENTAUR_JWT_SIGNING_SECRET` plus the entitlement audience/issuer
-    /// overrides, with Console's defaults. No secret means the sandbox surface
-    /// cannot authenticate anything.
+    /// `CENTAUR_JWT_SIGNING_SECRET` with the single sandbox audience/issuer.
+    /// No secret means the sandbox surface cannot authenticate anything.
     pub(crate) fn from_env() -> Option<Self> {
         Self::new(
             jwt_signing_secret()?,
-            env::var("CENTAUR_SANDBOX_ENTITLEMENTS_JWT_AUDIENCE")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_AUDIENCE.to_owned()),
-            env::var("CENTAUR_SANDBOX_ENTITLEMENTS_JWT_ISSUER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_ISSUER.to_owned()),
+            SANDBOX_TOKEN_AUDIENCE,
+            SANDBOX_TOKEN_ISSUER,
         )
     }
 
@@ -83,8 +77,21 @@ impl SandboxJwtConfig {
             issuer: issuer.into(),
         })
     }
+
+    pub(crate) fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    pub(crate) fn secret(&self) -> &str {
+        &self.secret
+    }
 }
 
+/// The claims proxy-sync signs into the single sandbox token.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct SandboxClaims {
     #[serde(default, deserialize_with = "string_claim")]
@@ -98,11 +105,26 @@ pub(crate) struct SandboxClaims {
     pub(crate) sandbox_id: String,
     #[serde(default, deserialize_with = "string_claim")]
     pub(crate) proxy_id: String,
-    #[serde(default, deserialize_with = "optional_string_claim")]
-    pub(crate) principal_id: Option<String>,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
+    #[serde(default)]
+    pub(crate) slack: SandboxSlackClaims,
+    #[serde(default)]
+    pub(crate) console_delegate: bool,
     /// Ruby's JWT rejects a numeric `iat` in the future. Not required.
     #[serde(default)]
     pub(crate) iat: Option<serde_json::Value>,
+}
+
+/// The Slack channel lists embedded in the sandbox token.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct SandboxSlackClaims {
+    #[serde(default)]
+    pub(crate) upload_channels: Vec<String>,
+    #[serde(default)]
+    pub(crate) download_channels: Vec<String>,
+    #[serde(default)]
+    pub(crate) history_channels: Vec<String>,
 }
 
 fn string_claim<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -110,187 +132,133 @@ fn string_claim<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D:
     Ok(value.as_str().map(str::to_owned).unwrap_or_default())
 }
 
-fn optional_string_claim<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_str().map(str::to_owned))
-}
-
 /// What a successfully authenticated sandbox request carries to its handler.
 #[derive(Clone, Debug)]
-pub(crate) struct SandboxContext {
+pub(crate) struct SandboxBinding {
     pub(crate) proxy: ConsoleProxy,
     pub(crate) claims: SandboxClaims,
 }
 
-/// A route builder that cannot add a sandbox route without the JWT check.
-pub(crate) struct SandboxRoutes {
-    state: AppState,
-    config: Option<SandboxJwtConfig>,
-    router: Router<AppState>,
-}
+/// The historical name of [`SandboxBinding`] used by the area handlers.
+pub(crate) type SandboxContext = SandboxBinding;
 
-impl SandboxRoutes {
-    pub(crate) fn new(state: AppState, config: Option<SandboxJwtConfig>) -> Self {
-        Self {
-            state,
-            config,
-            router: Router::new(),
-        }
-    }
+impl axum::extract::FromRequestParts<crate::AppState> for SandboxBinding {
+    type Rejection = ApiError;
 
-    /// A sandbox route available to any valid entitlement token.
-    pub(crate) fn route(self, path: &str, route: MethodRouter<AppState>) -> Self {
-        self.with_access(path, route, SandboxAccess::Sandbox)
-    }
-
-    /// A route that only validates the entitlement JWT, without the
-    /// proxy -> principal binding. Rails' sandbox `oauth_apps` index does this
-    /// because it exposes only public OAuth start URLs; use it only there.
-    pub(crate) fn jwt_only(self, path: &str, route: MethodRouter<AppState>) -> Self {
-        self.with_access(path, route, SandboxAccess::JwtOnly)
-    }
-
-    fn with_access(
-        mut self,
-        path: &str,
-        route: MethodRouter<AppState>,
-        access: SandboxAccess,
-    ) -> Self {
-        let guard = SandboxGuard {
-            state: self.state.clone(),
-            config: self.config.clone(),
-            access,
-        };
-        let route = route.route_layer(middleware::from_fn_with_state(
-            guard,
-            authorize_sandbox_request,
-        ));
-        self.router = self.router.route(path, route);
-        self
-    }
-
-    pub(crate) fn into_router(self) -> Router<AppState> {
-        self.router
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &crate::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        parts.extensions.get::<Self>().cloned().ok_or_else(|| {
+            ApiError::Internal("sandbox authorization middleware did not attach context".to_owned())
+        })
     }
 }
 
-pub(crate) fn sandbox_router(
-    state: AppState,
-    config: Option<SandboxJwtConfig>,
-) -> Router<AppState> {
-    let routes = super::areas::sandbox(SandboxRoutes::new(state, config));
-    #[cfg(test)]
-    let routes = test_sandbox_routes(routes);
-    routes.into_router()
+/// The outcome of looking for a sandbox token in the request headers.
+pub(crate) enum SandboxAuthentication {
+    /// No Authorization header, or one that is not a sandbox JWT.
+    NotPresent,
+    /// A sandbox JWT that does not verify (shape, signature, audience, issuer,
+    /// expiry).
+    InvalidOrMissing,
+    /// A sandbox JWT that verifies but whose live proxy binding no longer
+    /// matches.
+    Invalid,
+    Authenticated(Box<AuthenticatedCaller>),
 }
 
-#[derive(Clone)]
-struct SandboxGuard {
-    state: AppState,
-    config: Option<SandboxJwtConfig>,
-    access: SandboxAccess,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SandboxAccess {
-    Sandbox,
-    JwtOnly,
-}
-
-async fn authorize_sandbox_request(
-    State(guard): State<SandboxGuard>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let Some(token) = bearer_token(request.headers()) else {
-        return SandboxRejection::InvalidOrMissing.into_response();
-    };
-    let Some(config) = guard.config.as_ref() else {
-        return SandboxRejection::Invalid.into_response();
-    };
-    let Some(claims) = verify_sandbox_jwt(token, config) else {
-        // `SandboxTokenAuthentication` rescues JWT verification failures with
-        // the same "invalid or missing" body as an absent token.
-        return SandboxRejection::InvalidOrMissing.into_response();
-    };
-
-    if guard.access == SandboxAccess::JwtOnly {
-        // Matching Rails' sandbox `oauth_apps` index: a valid signature,
-        // audience, and issuer are enough for this public metadata endpoint.
-        return next.run(request).await;
-    }
-
-    let pool = match guard.state.console_session_db() {
-        Ok(pool) => pool,
-        Err(error) => return error.into_response(),
-    };
-    let Some(proxy) = (match find_console_proxy(&pool, &claims.proxy_id).await {
-        Ok(proxy) => proxy,
-        Err(error) => return ApiError::Internal(error.to_string()).into_response(),
-    }) else {
-        return SandboxRejection::Invalid.into_response();
-    };
-    if !valid_proxy_binding(&proxy, &claims) {
-        return SandboxRejection::Invalid.into_response();
-    }
-
-    request
-        .extensions_mut()
-        .insert(SandboxContext { proxy, claims });
-    next.run(request).await
-}
-
-/// The console API's second credential: a sandbox entitlement JWT from a Slack
-/// DM in the bot's workspace linked to an active Console admin, acting as that
-/// admin.
+/// Verifies the request's sandbox token and performs the live checks.
 ///
-/// Returns `Ok(None)` for anything that is not such a credential, so the
-/// console guard can keep its existing rejection for API keys and invalid
-/// sandbox tokens. A valid entitlement whose binding or admin link fails is
-/// also `None`; only a database failure is an error.
-pub(crate) async fn sandbox_admin_user(
-    state: &AppState,
+/// `NotPresent` is returned for a token that is clearly not a sandbox JWT, so
+/// the unified guard can try the other bearer credential types. `Invalid` means
+/// the token verified but its binding is stale.
+pub(crate) async fn authenticate_sandbox(
+    state: &crate::AppState,
     headers: &HeaderMap,
     config: Option<SandboxJwtConfig>,
-) -> Result<Option<ConsoleUser>, ApiError> {
-    let Some(config) = config.or_else(SandboxJwtConfig::from_env) else {
-        return Ok(None);
-    };
+) -> Result<SandboxAuthentication, ApiError> {
     let Some(token) = bearer_token(headers) else {
-        return Ok(None);
+        return Ok(SandboxAuthentication::NotPresent);
     };
-    let Some(claims) = verify_sandbox_jwt(token, &config) else {
-        return Ok(None);
+    if unverified_audience(token).as_deref() != Some(SANDBOX_TOKEN_AUDIENCE) {
+        return Ok(SandboxAuthentication::NotPresent);
+    }
+    let Some(config) = config.or_else(SandboxJwtConfig::from_env) else {
+        return Ok(SandboxAuthentication::InvalidOrMissing);
+    };
+    let Some(claims) = verify_sandbox_token(token, &config) else {
+        return Ok(SandboxAuthentication::InvalidOrMissing);
     };
     let pool = state.console_session_db()?;
     let Some(proxy) = find_console_proxy(&pool, &claims.proxy_id)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?
     else {
-        return Ok(None);
+        return Ok(SandboxAuthentication::Invalid);
     };
     if !valid_proxy_binding(&proxy, &claims) {
-        return Ok(None);
+        return Ok(SandboxAuthentication::Invalid);
     }
+
+    let capabilities: Vec<Capability> = claims
+        .capabilities
+        .iter()
+        .filter_map(|name| Capability::from_str(name))
+        .filter(|capability| *capability != Capability::ConsoleDelegate)
+        .collect();
+    let mut caller = AuthenticatedCaller::new(
+        CallerClass::Principal,
+        claims.proxy_id.clone(),
+        capabilities,
+        None,
+        Some(claims.sub.clone()),
+    );
+    caller.attach_sandbox(SandboxBinding {
+        proxy: proxy.clone(),
+        claims: claims.clone(),
+    });
+
+    if claims.console_delegate {
+        // api-rs never trusts the token's delegate claim alone: re-check the
+        // linked user and the DM/home-team rule on every request.
+        if let Some(user) = delegated_admin(&pool, &proxy).await? {
+            caller.grant([
+                Capability::ConsoleDelegate,
+                Capability::ConsoleAdmin,
+                Capability::ConsoleUser,
+                Capability::ConsolePending,
+                Capability::ConsoleRead,
+            ]);
+            caller.attach_console_user(user, None);
+        }
+    }
+    Ok(SandboxAuthentication::Authenticated(Box::new(caller)))
+}
+
+/// The linked active Console admin a delegated sandbox token may act as, if the
+/// principal still passes the sandbox-admin rule.
+async fn delegated_admin(
+    pool: &sqlx::PgPool,
+    proxy: &ConsoleProxy,
+) -> Result<Option<ConsoleUser>, ApiError> {
     let Some(principal_id) = proxy.principal_id else {
         return Ok(None);
     };
-    let Some(principal) = find_principal(&pool, principal_id)
+    let Some(principal) = find_principal(pool, principal_id)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?
     else {
         return Ok(None);
     };
     let home_team = match principal.slack_team_id.as_deref() {
-        Some(team_id) => slack_bot_home_team(&pool, team_id)
+        Some(team_id) => slack_bot_home_team(pool, team_id)
             .await
             .map_err(|error| ApiError::Internal(error.to_string()))?,
         None => false,
     };
     let user = match principal.console_user_id {
-        Some(user_id) => find_console_user(&pool, user_id)
+        Some(user_id) => find_console_user(pool, user_id)
             .await
             .map_err(|error| ApiError::Internal(error.to_string()))?,
         None => None,
@@ -301,10 +269,10 @@ pub(crate) async fn sandbox_admin_user(
 }
 
 /// `CentaurJwt::Hs256.decode`: HS256 signature, expiry, audience, and issuer.
-/// Proxy-sync always sets `exp` (`centaur-proxy-sync/src/tokens.rs`), so the
-/// port requires it instead of accepting a token Ruby's JWT would verify
-/// without an expiry check.
-fn verify_sandbox_jwt(token: &str, config: &SandboxJwtConfig) -> Option<SandboxClaims> {
+pub(crate) fn verify_sandbox_token(
+    token: &str,
+    config: &SandboxJwtConfig,
+) -> Option<SandboxClaims> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 0;
     validation.validate_nbf = true;
@@ -331,7 +299,7 @@ fn verify_sandbox_jwt(token: &str, config: &SandboxJwtConfig) -> Option<SandboxC
     Some(claims)
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
     let token = header
         .strip_prefix("Bearer ")?
@@ -339,10 +307,20 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     (!token.is_empty()).then_some(token)
 }
 
+/// The `aud` claim of a JWT, before its signature is checked. Used only to pick
+/// which verifier to apply.
+fn unverified_audience(token: &str) -> Option<String> {
+    crate::api_jwt::decode_jwt_payload(token)
+        .ok()?
+        .get("aud")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn valid_proxy_binding(proxy: &ConsoleProxy, claims: &SandboxClaims) -> bool {
     let expected_principal = proxy.principal_id.map(|id| oid("prn", id));
     proxy.assigned()
-        && claims.principal_id.as_ref() == expected_principal.as_ref()
+        && claims.sub == expected_principal.unwrap_or_default()
         && proxy.name == claims.sandbox_id
 }
 
@@ -358,48 +336,22 @@ fn sandbox_admin_allowed(
         && user.is_some_and(|user| user.status == ConsoleUserStatus::Active && user.admin)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SandboxRejection {
-    InvalidOrMissing,
-    Invalid,
-}
-
-impl SandboxRejection {
-    fn error(self) -> ConsoleError {
-        match self {
-            Self::InvalidOrMissing => {
-                ConsoleError::new(StatusCode::UNAUTHORIZED, "invalid or missing sandbox token")
-            }
-            Self::Invalid => ConsoleError::new(StatusCode::UNAUTHORIZED, "invalid sandbox token"),
-        }
-    }
-}
-
-impl IntoResponse for SandboxRejection {
-    fn into_response(self) -> Response {
-        let error = self.error();
-        render_error(error.status, &error.message, error.details)
-    }
-}
-
-impl FromRequestParts<AppState> for SandboxContext {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        parts.extensions.get::<Self>().cloned().ok_or_else(|| {
-            ApiError::Internal("sandbox authorization middleware did not attach context".to_owned())
-        })
-    }
+pub(crate) fn sandbox_router(state: crate::AppState) -> Router<crate::AppState> {
+    let routes = super::areas::sandbox(GuardedRoutes::new(state));
+    #[cfg(test)]
+    let routes = test_sandbox_routes(routes);
+    routes.into_router()
 }
 
 #[cfg(test)]
-pub(crate) fn test_sandbox_routes(routes: SandboxRoutes) -> SandboxRoutes {
+pub(crate) fn test_sandbox_routes(routes: GuardedRoutes) -> GuardedRoutes {
     use axum::routing::get;
 
-    routes.route("/probe/sandbox", get(probe_sandbox))
+    routes.sandbox(
+        "/probe/sandbox",
+        get(probe_sandbox),
+        Capability::SandboxTasks,
+    )
 }
 
 #[cfg(test)]
@@ -407,13 +359,14 @@ async fn probe_sandbox(context: SandboxContext) -> axum::Json<serde_json::Value>
     axum::Json(serde_json::json!({
         "sandbox_id": context.claims.sandbox_id,
         "proxy_id": context.claims.proxy_id,
-        "principal_id": context.claims.principal_id,
+        "principal_id": context.claims.sub,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{SANDBOX_TOKEN_AUDIENCE, SANDBOX_TOKEN_ISSUER};
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde_json::json;
 
@@ -421,8 +374,8 @@ mod tests {
     fn sandbox_jwt_checks_claims_like_ruby_jwt() {
         let config = SandboxJwtConfig::new(
             "test-only-sandbox-jwt-secret",
-            "centaur-console-sandbox-entitlements",
-            "centaur-console",
+            SANDBOX_TOKEN_AUDIENCE,
+            SANDBOX_TOKEN_ISSUER,
         )
         .unwrap();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -435,66 +388,61 @@ mod tests {
             .unwrap()
         };
         let minimal = token(json!({
-            "iss": "centaur-console",
-            "aud": "centaur-console-sandbox-entitlements",
+            "iss": SANDBOX_TOKEN_ISSUER,
+            "aud": SANDBOX_TOKEN_AUDIENCE,
             "exp": now + 60,
+            "sub": "prn_1",
             "proxy_id": "prx_1",
             "sandbox_id": "sandbox",
         }));
         assert_eq!(
-            verify_sandbox_jwt(&minimal, &config).unwrap().proxy_id,
+            verify_sandbox_token(&minimal, &config).unwrap().proxy_id,
             "prx_1"
         );
-        // Proxy-sync always includes `exp`; an unsigned-lifetime token is now
-        // refused instead of passing Ruby's present-only expiry check.
         let no_expiry = token(json!({
-            "iss": "centaur-console",
-            "aud": "centaur-console-sandbox-entitlements",
+            "iss": SANDBOX_TOKEN_ISSUER,
+            "aud": SANDBOX_TOKEN_AUDIENCE,
+            "sub": "prn_1",
         }));
-        assert!(verify_sandbox_jwt(&no_expiry, &config).is_none());
-        let missing_audience = token(json!({"iss": "centaur-console", "exp": now + 60}));
-        assert!(verify_sandbox_jwt(&missing_audience, &config).is_none());
+        assert!(verify_sandbox_token(&no_expiry, &config).is_none());
+        let missing_audience = token(json!({"iss": SANDBOX_TOKEN_ISSUER, "exp": now + 60}));
+        assert!(verify_sandbox_token(&missing_audience, &config).is_none());
         let missing_issuer = token(json!({
-            "aud": "centaur-console-sandbox-entitlements",
+            "aud": SANDBOX_TOKEN_AUDIENCE,
             "exp": now + 60,
         }));
-        assert!(verify_sandbox_jwt(&missing_issuer, &config).is_none());
+        assert!(verify_sandbox_token(&missing_issuer, &config).is_none());
         let future_iat = token(json!({
-            "iss": "centaur-console",
-            "aud": "centaur-console-sandbox-entitlements",
+            "iss": SANDBOX_TOKEN_ISSUER,
+            "aud": SANDBOX_TOKEN_AUDIENCE,
             "exp": now + 60,
             "iat": now + 60,
         }));
-        assert!(verify_sandbox_jwt(&future_iat, &config).is_none());
-        // Ruby compares payload values to database values, so a non-string
-        // binding claim is a mismatch ("invalid sandbox token"), not a decode
-        // error ("invalid or missing sandbox token").
+        assert!(verify_sandbox_token(&future_iat, &config).is_none());
         let malformed_bindings = token(json!({
-            "iss": "centaur-console",
-            "aud": "centaur-console-sandbox-entitlements",
+            "iss": SANDBOX_TOKEN_ISSUER,
+            "aud": SANDBOX_TOKEN_AUDIENCE,
             "exp": now + 60,
             "sub": 7,
             "sandbox_id": false,
             "proxy_id": 9,
-            "principal_id": {"unexpected": true},
         }));
-        let claims = verify_sandbox_jwt(&malformed_bindings, &config).unwrap();
+        let claims = verify_sandbox_token(&malformed_bindings, &config).unwrap();
         assert!(claims.sub.is_empty());
         assert!(claims.sandbox_id.is_empty());
         assert!(claims.proxy_id.is_empty());
-        assert_eq!(claims.principal_id, None);
         let expired = token(json!({
-            "iss": "centaur-console",
-            "aud": "centaur-console-sandbox-entitlements",
+            "iss": SANDBOX_TOKEN_ISSUER,
+            "aud": SANDBOX_TOKEN_AUDIENCE,
             "exp": now - 1,
         }));
-        assert!(verify_sandbox_jwt(&expired, &config).is_none());
+        assert!(verify_sandbox_token(&expired, &config).is_none());
         let wrong_audience = token(json!({
-            "iss": "centaur-console",
+            "iss": SANDBOX_TOKEN_ISSUER,
             "aud": "another-audience",
             "exp": now + 60,
         }));
-        assert!(verify_sandbox_jwt(&wrong_audience, &config).is_none());
+        assert!(verify_sandbox_token(&wrong_audience, &config).is_none());
     }
 
     fn proxy(principal_id: Option<i64>) -> ConsoleProxy {
@@ -507,10 +455,12 @@ mod tests {
 
     fn claims(principal_id: Option<&str>) -> SandboxClaims {
         SandboxClaims {
-            sub: "centaur-sandbox".to_owned(),
+            sub: principal_id.unwrap_or_default().to_owned(),
             sandbox_id: "sandbox-name".to_owned(),
             proxy_id: oid("prx", 9),
-            principal_id: principal_id.map(str::to_owned),
+            capabilities: Vec::new(),
+            slack: Default::default(),
+            console_delegate: false,
             iat: None,
         }
     }
@@ -594,23 +544,14 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_error_bodies_match_console() {
-        assert_eq!(
-            SandboxRejection::InvalidOrMissing.error().message,
-            "invalid or missing sandbox token"
-        );
-        assert_eq!(
-            SandboxRejection::Invalid.error().message,
-            "invalid sandbox token"
-        );
-    }
-
-    #[test]
-    fn sandbox_config_uses_console_defaults_and_hides_the_secret() {
-        let config = SandboxJwtConfig::new("secret", DEFAULT_AUDIENCE, DEFAULT_ISSUER).unwrap();
-        assert_eq!(config.audience, DEFAULT_AUDIENCE);
-        assert_eq!(config.issuer, DEFAULT_ISSUER);
+    fn sandbox_config_uses_the_single_audience_and_hides_the_secret() {
+        let config =
+            SandboxJwtConfig::new("secret", SANDBOX_TOKEN_AUDIENCE, SANDBOX_TOKEN_ISSUER).unwrap();
+        assert_eq!(config.audience(), SANDBOX_TOKEN_AUDIENCE);
+        assert_eq!(config.issuer(), SANDBOX_TOKEN_ISSUER);
         assert!(!format!("{config:?}").contains("secret"));
-        assert!(SandboxJwtConfig::new("  ", DEFAULT_AUDIENCE, DEFAULT_ISSUER).is_none());
+        assert!(
+            SandboxJwtConfig::new("  ", SANDBOX_TOKEN_AUDIENCE, SANDBOX_TOKEN_ISSUER).is_none()
+        );
     }
 }

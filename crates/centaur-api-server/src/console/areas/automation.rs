@@ -41,87 +41,115 @@ use serde_json::{Value, json};
 use crate::{
     ApiError, AppState,
     console::{
-        bearer::BearerRoutes,
+        guard::GuardedRoutes,
         http::{ConsoleError, DataPayload},
         request::{ConsoleData, ConsoleQuery},
-        sandbox::{SandboxContext, SandboxRoutes},
+        sandbox::SandboxContext,
     },
-    console_session::ConsoleRoutes,
 };
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .active("/scheduled_tasks", get(console_index).post(console_create))
-        .active("/scheduled_tasks/new", get(console_new))
-        .active(
+        .console_user("/scheduled_tasks", get(console_index).post(console_create))
+        .console_user("/scheduled_tasks/new", get(console_new))
+        .console_user(
             "/scheduled_tasks/slack_channel_options",
             get(console_channel_options),
         )
-        .active("/scheduled_tasks/{id}/edit", get(console_edit))
-        .active(
+        .console_user("/scheduled_tasks/{id}/edit", get(console_edit))
+        .console_user(
             "/scheduled_tasks/{id}",
             axum::routing::patch(console_update).delete(console_destroy),
         )
-        .active("/scheduled_tasks/{id}/run", post(console_run))
-        .active("/skills", get(skills_index).post(skills_create))
-        .active("/skills/editor_candidates", get(skill_editor_candidates))
-        .active(
+        .console_user("/scheduled_tasks/{id}/run", post(console_run))
+        .console_user("/skills", get(skills_index).post(skills_create))
+        .console_user("/skills/editor_candidates", get(skill_editor_candidates))
+        .console_user(
             "/skills/{id}",
             get(skills_show).patch(skills_update).delete(skills_destroy),
         )
-        .active("/skills/{id}/share", post(skills_share))
-        .active("/skills/{id}/unshare", post(skills_unshare))
-        .active(
+        .console_user("/skills/{id}/share", post(skills_share))
+        .console_user("/skills/{id}/unshare", post(skills_unshare))
+        .console_user(
             "/me/ssh_key",
             get(ssh_key_show)
                 .put(ssh_key_update)
                 .delete(ssh_key_destroy),
         )
-        .active("/me/ssh_key/validate", post(ssh_key_validate))
-        .admin("/workflows", get(workflows_index))
-        .admin("/workflows/{id}", get(workflows_show))
-        .admin(
+        .console_user("/me/ssh_key/validate", post(ssh_key_validate))
+        .console_admin("/workflows", get(workflows_index))
+        .console_admin("/workflows/{id}", get(workflows_show))
+        .console_admin(
             "/workflows/{id}/runs",
             get(workflows_runs).post(workflows_create_run),
         )
 }
 
 /// Routes under `/api/v1` (bearer API; paths relative to that prefix).
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
-    routes.route("/scheduled_tasks/{id}", get(bearer_show))
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
+    routes.operator("/scheduled_tasks/{id}", get(bearer_show))
 }
 
 /// Routes under `/api/v1/sandbox` (paths relative to that prefix).
-pub(crate) fn sandbox(routes: SandboxRoutes) -> SandboxRoutes {
+pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
+    use crate::auth::Capability;
     routes
-        .route("/scheduled_tasks", get(sandbox_index).post(sandbox_create))
-        .route(
+        .sandbox(
+            "/scheduled_tasks",
+            get(sandbox_index).post(sandbox_create),
+            Capability::SandboxTasks,
+        )
+        .sandbox(
             "/scheduled_tasks/{id}",
             get(sandbox_show)
                 .patch(sandbox_update)
                 .delete(sandbox_destroy),
+            Capability::SandboxTasks,
         )
-        .route("/scheduled_tasks/{id}/run", post(sandbox_run))
-        .route("/permissions", get(sandbox_permissions_show))
-        .route(
+        .sandbox(
+            "/scheduled_tasks/{id}/run",
+            post(sandbox_run),
+            Capability::SandboxTasks,
+        )
+        .sandbox(
+            "/permissions",
+            get(sandbox_permissions_show),
+            Capability::SandboxPermissions,
+        )
+        .sandbox(
             "/skills",
             get(sandbox_skills_index).post(sandbox_skills_create),
+            Capability::SandboxSkills,
         )
-        .route("/skills/search", get(sandbox_skills_search))
-        .route(
+        .sandbox(
+            "/skills/search",
+            get(sandbox_skills_search),
+            Capability::SandboxSkills,
+        )
+        .sandbox(
             "/skills/{id}",
             get(sandbox_skills_show)
                 .patch(sandbox_skills_update)
                 .delete(sandbox_skills_destroy),
+            Capability::SandboxSkills,
         )
-        .route("/skills/{id}/share", post(sandbox_skills_share))
-        .route("/skills/{id}/unshare", post(sandbox_skills_unshare))
-        .route(
+        .sandbox(
+            "/skills/{id}/share",
+            post(sandbox_skills_share),
+            Capability::SandboxSkills,
+        )
+        .sandbox(
+            "/skills/{id}/unshare",
+            post(sandbox_skills_unshare),
+            Capability::SandboxSkills,
+        )
+        .sandbox(
             "/skills/{id}/editors",
             get(sandbox_skills_editors)
                 .post(sandbox_skills_add_editor)
                 .delete(sandbox_skills_remove_editor),
+            Capability::SandboxSkills,
         )
 }
 

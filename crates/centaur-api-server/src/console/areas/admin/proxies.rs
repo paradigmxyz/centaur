@@ -28,7 +28,7 @@ use super::common::{self, AdminError, json_created, json_ok, no_content, nullabl
 use crate::{
     AppState,
     console::{
-        bearer::{BearerRoutes, BearerUser},
+        guard::{BearerUser, GuardedRoutes},
         http::{
             ConsoleError, ListParams, ListSource, Pagination, bind, label_filters, labels_value,
             list,
@@ -147,10 +147,10 @@ struct ProxyPayloadEnvelope {
     data: ProxyPayload,
 }
 
-pub(super) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(super) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin("/proxies", get(index).post(create))
-        .admin("/proxies/{id}", get(show).patch(update).delete(destroy))
+        .operator("/proxies", get(index).post(create))
+        .operator("/proxies/{id}", get(show).patch(update).delete(destroy))
 }
 
 async fn index(

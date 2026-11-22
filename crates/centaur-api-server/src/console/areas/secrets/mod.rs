@@ -48,11 +48,10 @@ use sqlx::PgPool;
 use crate::{
     AppState,
     console::{
-        bearer::{BearerRoutes, BearerUser},
+        guard::{BearerUser, GuardedRoutes, SandboxDelegated},
         http::{ConsoleError, DataPayload, ListParams, Pagination, list_response, no_content},
         request::{ConsoleData, ConsoleQuery},
     },
-    console_session::{ConsoleRoutes, SandboxDelegated},
 };
 
 /// One kind's HTTP surface.
@@ -163,15 +162,15 @@ struct CreateRoleGrant {
 }
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = routes
-        .admin("/secrets", get(console_index))
-        .admin("/secrets/{kind}/{id}", get(console_show))
-        .admin(
+        .console_admin("/secrets", get(console_index))
+        .console_admin("/secrets/{kind}/{id}", get(console_show))
+        .console_admin(
             "/secrets/{kind}/{secret_id}/role_grants",
             get(console_role_grants).post(console_create_role_grant),
         )
-        .admin(
+        .console_admin(
             "/secrets/{kind}/{secret_id}/role_grants/{id}",
             axum::routing::delete(console_delete_role_grant),
         );
@@ -179,7 +178,7 @@ pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
 }
 
 /// Routes under `/api/v1` (bearer API; paths relative to that prefix).
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     register_kinds!(
         routes,
         bearer_kind,
@@ -321,12 +320,12 @@ async fn console_secret(
     Ok((pool, kind, secret))
 }
 
-fn console_kind<K: EditableKind>(routes: ConsoleRoutes) -> ConsoleRoutes {
+fn console_kind<K: EditableKind>(routes: GuardedRoutes) -> GuardedRoutes {
     let base = format!("/{}_secrets", K::KIND.slug());
     let item = format!("{base}/{{id}}");
     routes
-        .admin(&base, post(console_create::<K>).get(missing_route))
-        .admin(
+        .console_admin(&base, post(console_create::<K>).get(missing_route))
+        .console_admin(
             &item,
             get(console_kind_show::<K>)
                 .patch(console_update::<K>)
@@ -471,19 +470,19 @@ async fn refuse_sandbox_update(
 // Bearer
 // ---------------------------------------------------------------------------
 
-fn bearer_kind<K: SecretRoutes>(routes: BearerRoutes) -> BearerRoutes {
+fn bearer_kind<K: SecretRoutes>(routes: GuardedRoutes) -> GuardedRoutes {
     let base = format!("/{}_secrets", K::KIND.slug());
     let item = format!("{base}/{{id}}");
     let routes = routes
-        .admin(&base, get(bearer_index::<K>).post(bearer_create::<K>))
-        .admin(
+        .operator(&base, get(bearer_index::<K>).post(bearer_create::<K>))
+        .operator(
             &item,
             get(bearer_show::<K>)
                 .put(bearer_update::<K>)
                 .delete(bearer_destroy::<K>),
         );
     let lookup = format!("{base}/lookup/{{foreign_id}}");
-    routes.admin(&lookup, get(bearer_lookup::<K>))
+    routes.operator(&lookup, get(bearer_lookup::<K>))
 }
 
 async fn bearer_index<K: SecretRoutes>(

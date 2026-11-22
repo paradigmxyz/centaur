@@ -79,7 +79,6 @@ impl Fixture {
             } else {
                 vec![]
             },
-            console_host: None,
             sync_cache: Arc::new(SyncCache::default()),
             metrics: PrometheusBuilder::new().build_recorder().handle(),
         };
@@ -847,7 +846,7 @@ async fn postgres_routes_pick_the_strongest_grant_and_render_settings() {
 }
 
 #[tokio::test]
-async fn api_jwt_carries_direct_and_role_slack_permissions() {
+async fn sandbox_token_carries_direct_and_role_slack_permissions() {
     let Some(f) = Fixture::with_jwt(true).await else {
         return;
     };
@@ -862,18 +861,11 @@ async fn api_jwt_carries_direct_and_role_slack_permissions() {
     let token = f.proxy(Some(principal), None, json!({})).await;
 
     let body = f.sync(&token).await;
-    let secret = &body["secrets"][0];
+    let secrets = body["secrets"].as_array().unwrap();
+    assert_eq!(secrets.len(), 1, "one sandbox token per proxy");
+    let secret = &secrets[0];
     assert_eq!(secret["rules"], json!([{ "host": "api.internal" }]));
-    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-    validation.set_audience(&["centaur-api"]);
-    validation.set_issuer(&["centaur-console"]);
-    let claims = jsonwebtoken::decode::<Value>(
-        secret["source"]["value"].as_str().unwrap(),
-        &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET.as_bytes()),
-        &validation,
-    )
-    .unwrap()
-    .claims;
+    let claims = decode_sandbox_token(secret);
     assert_eq!(
         claims["slack"],
         json!({
@@ -882,45 +874,99 @@ async fn api_jwt_carries_direct_and_role_slack_permissions() {
             "history_channels": ["C0000000001"]
         })
     );
+    assert_eq!(claims["sub"], centaur_console_db::oid("prn", principal));
 }
 
 #[tokio::test]
-async fn sandbox_jwt_is_served_after_the_api_jwt_on_console_and_sandbox_paths() {
+async fn one_sandbox_token_is_injected_for_api_and_console_hosts() {
     let Some(mut f) = Fixture::with_jwt(true).await else {
         return;
     };
-    // The apirs Console backend serves Console and api-rs on the same host, so
-    // both JWT rules match a Console request.
-    f.state.console_host = Some("api.internal".to_owned());
+    // Both surfaces share one api-rs listener, so both hosts receive the same
+    // token and there is no second injection to order.
+    f.state.api_hosts.push("console.internal".to_owned());
     let principal = f.principal("principal").await;
     let token = f.proxy(Some(principal), None, json!({})).await;
 
     let body = f.sync(&token).await;
     let secrets = body["secrets"].as_array().unwrap();
-    assert_eq!(secrets.len(), 2);
-
-    // The API JWT comes first and stays the rule for api-rs's own routes.
-    assert_eq!(secrets[0]["rules"], json!([{ "host": "api.internal" }]));
-    // iron-proxy applies matching injections in array order and the last one
-    // wins, so the entitlement token is Authorization on Console paths too.
+    assert_eq!(secrets.len(), 1);
     assert_eq!(
-        secrets[1]["rules"],
-        json!([{
-            "host": "api.internal",
-            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
-            "paths": ["/api/v1/sandbox/*", "/api/v1/console/*"],
-        }])
+        secrets[0]["rules"],
+        json!([{ "host": "api.internal" }, { "host": "console.internal" }])
     );
+    let claims = decode_sandbox_token(&secrets[0]);
+    assert_eq!(claims["sandbox_id"], f.name("proxy"));
+    assert_eq!(
+        claims["capabilities"],
+        json!([
+            "slack.proxy",
+            "sandbox.permissions",
+            "sandbox.skills",
+            "sandbox.tasks",
+            "sandbox.oauth_apps"
+        ])
+    );
+    assert_eq!(claims["console_delegate"], false);
+}
+
+fn decode_sandbox_token(secret: &Value) -> Value {
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-    validation.set_audience(&["centaur-console-sandbox-entitlements"]);
-    let claims = jsonwebtoken::decode::<Value>(
-        secrets[1]["source"]["value"].as_str().unwrap(),
+    validation.set_audience(&[crate::tokens::SANDBOX_TOKEN_AUDIENCE]);
+    validation.set_issuer(&[crate::tokens::SANDBOX_TOKEN_ISSUER]);
+    jsonwebtoken::decode::<Value>(
+        secret["source"]["value"].as_str().unwrap(),
         &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET.as_bytes()),
         &validation,
     )
     .unwrap()
-    .claims;
-    assert_eq!(claims["sandbox_id"], f.name("proxy"));
+    .claims
+}
+
+#[tokio::test]
+async fn console_delegate_is_computed_for_a_linked_admin_slack_dm() {
+    let Some(f) = Fixture::with_jwt(true).await else {
+        return;
+    };
+    let user: i64 = sqlx::query_scalar(
+        "INSERT INTO users (email, admin, status, created_at, updated_at) \
+         VALUES ($1, true, 'active', now(), now()) RETURNING id",
+    )
+    .bind(format!("delegate-{}@example.com", f.unique))
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let principal: i64 = sqlx::query_scalar(
+        "INSERT INTO principals \
+            (foreign_id, kind, slack_team_id, console_user_id, created_by_id, created_at, updated_at) \
+         VALUES ($1, 'slack_dm', 'T-delegate', $2, $3, now(), now()) RETURNING id",
+    )
+    .bind(f.name("delegate"))
+    .bind(user)
+    .bind(f.admin)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO slack_bot_channels \
+            (team_id, channel_id, name, bot_user_id, created_at, updated_at) \
+         VALUES ('T-delegate', $1, 'general', 'U-bot', now(), now())",
+    )
+    .bind(f.name("channel"))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let token = f.proxy(Some(principal), None, json!({})).await;
+
+    let body = f.sync(&token).await;
+    let claims = decode_sandbox_token(&body["secrets"][0]);
+    assert_eq!(claims["console_delegate"], true);
+    assert!(
+        claims["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("console.delegate"))
+    );
 }
 
 #[tokio::test]

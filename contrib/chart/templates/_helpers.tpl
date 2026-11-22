@@ -260,13 +260,14 @@ templates should consume this helper rather than `.Values.console` /
 In-cluster Service/DNS names use the "console" component (e.g.
 `<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
 IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
-*value* is derived from `centaur.consoleUrl`, so it tracks the Service name.
+*value* is derived from `centaur.consoleUrl`.
 
-`console.backend` selects which implementation serves the Console host and API:
-`rails` (default) keeps the Rails pods, Service, and URLs as before; `apirs`
-serves the ported Console from api-rs. `centaur.consoleBackend` validates the
-switch, and `centaur.consoleUrl` returns the implementation sandboxes and
-proxies should dial.
+The Console is served by api-rs; the chart runs no Rails web pod. The `console`
+Service survives only as a compatibility alias (same name and port, forwarding
+to api-rs) for in-cluster clients with a cached `centaur-console:3000` URL, and
+`centaur.consoleUrl` returns the api-rs Service URL. The Rails worker still runs
+for the Slack channel catalog jobs, and a migration Job runs the Rails schema
+migrations (see console-migrate.yaml).
 */ -}}
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}
@@ -291,39 +292,56 @@ consume this helper rather than the raw values.
 {{- include "centaur.componentName" (dict "root" . "component" "console") -}}
 {{- end -}}
 
-{{- define "centaur.consoleHost" -}}
-{{- include "centaur.consoleName" . -}}
+{{- /*
+The in-cluster Console URL. The Console is served by api-rs, so this is always
+the api-rs Service: sandboxes, iron-proxy, proxy-sync, and api-rs itself
+(`IRON_CONTROL_URL`) dial it. The Console is part of api-rs, so a deployment with
+apiRs.enabled=false has none; fail rather than render a URL nothing answers.
+*/ -}}
+{{- define "centaur.consoleUrl" -}}
+{{- if not .Values.apiRs.enabled -}}
+{{- fail "the Console is served by api-rs: this chart requires apiRs.enabled=true" -}}
+{{- end -}}
+{{- printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "api-rs")) .Values.apiRs.port -}}
 {{- end -}}
 
 {{- /*
-The implementation serving the Console: `rails` (default) or `apirs`.
-`apirs` requires api-rs and its Console layer to be enabled, so the flip can
-never render an ingress or internal URL pointing at a path nothing serves.
-*/ -}}
-{{- define "centaur.consoleBackend" -}}
-{{- $console := include "centaur.consoleValues" . | fromYaml -}}
-{{- $backend := default "rails" $console.backend -}}
-{{- if not (has $backend (list "rails" "apirs")) -}}
-{{- fail (printf "console.backend must be rails or apirs (got %q)" $backend) -}}
-{{- end -}}
-{{- if eq $backend "apirs" -}}
-{{- if not .Values.apiRs.enabled -}}
-{{- fail "console.backend=apirs requires apiRs.enabled=true" -}}
-{{- end -}}
-{{- if not .Values.apiRs.console.enabled -}}
-{{- fail "console.backend=apirs requires apiRs.console.enabled=true" -}}
-{{- end -}}
-{{- end -}}
-{{- $backend -}}
-{{- end -}}
+Init container that blocks on a psql predicate against a Console database.
+Console-database clients use it so they start only after the console-migrate Job
+has applied the schema: on upgrades Helm runs the Job as a pre-upgrade hook
+(already ordered), and on a bundled-Postgres install the Job is an ordinary
+resource, so the wait provides the ordering there.
 
-{{- define "centaur.consoleUrl" -}}
-{{- if eq (include "centaur.consoleBackend" .) "apirs" -}}
-{{- printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "api-rs")) .Values.apiRs.port -}}
-{{- else -}}
-{{- $console := include "centaur.consoleValues" . | fromYaml -}}
-{{- printf "http://%s:%v" (include "centaur.consoleHost" .) $console.service.httpPort -}}
-{{- end -}}
+Params: root, name (container name), database (PGDATABASE), query (SQL returning
+t for ready), message (log line while waiting). It connects through
+IRON_CONTROL_DATABASE_URL, which carries no database path, so PGDATABASE selects
+the logical database.
+*/ -}}
+{{- define "centaur.consoleDbWait" -}}
+{{- $root := .root -}}
+- name: {{ .name }}
+  image: {{ printf "%s:%s" $root.Values.postgres.image.repository $root.Values.postgres.image.tag | quote }}
+  imagePullPolicy: {{ $root.Values.postgres.image.pullPolicy }}
+  command:
+    - /bin/sh
+    - -ec
+    - |
+      until [ "$(psql "$CONSOLE_DATABASE_URL" -tAc "{{ .query }}")" = "t" ]; do
+        echo "{{ .message }}"
+        sleep 2
+      done
+  env:
+    - name: CONSOLE_DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "centaur.secretEnvName" $root }}
+          key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $root.Values.secretManager.envPrefix }}
+    - name: PGDATABASE
+      value: {{ .database | quote }}
+  securityContext:
+{{ toYaml $root.Values.containerSecurityContext | nindent 4 }}
+    seccompProfile:
+      type: RuntimeDefault
 {{- end -}}
 
 {{- define "centaur.proxySyncName" -}}

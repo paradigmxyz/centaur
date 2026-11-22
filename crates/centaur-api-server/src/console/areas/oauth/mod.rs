@@ -53,46 +53,44 @@ use sqlx::PgPool;
 use crate::{
     AppState,
     console::{
-        bearer::BearerRoutes,
+        guard::GuardedRoutes,
         http::{ConsoleError, DataPayload},
-        sandbox::SandboxRoutes,
     },
-    console_session::ConsoleRoutes,
 };
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin(
+        .console_admin(
             "/oauth_apps",
             get(apps::console_index).post(apps::console_create),
         )
-        .admin(
+        .console_admin(
             "/oauth_apps/{id}",
             get(apps::console_show)
                 .patch(apps::console_update)
                 .delete(apps::console_destroy),
         )
-        .admin(
+        .console_admin(
             "/oauth_apps/{id}/credentials",
             get(apps::console_credentials),
         )
-        .admin(
+        .console_admin(
             "/oauth_apps/{id}/provider_details",
             get(apps::console_provider_details),
         )
-        .admin("/oauth_apps/presets/{provider}", post(apps::console_preset))
-        .admin("/oauth_providers", get(apps::console_providers))
-        .active("/integrations", get(apps::console_integrations))
-        .active(
+        .console_admin("/oauth_apps/presets/{provider}", post(apps::console_preset))
+        .console_admin("/oauth_providers", get(apps::console_providers))
+        .console_user("/integrations", get(apps::console_integrations))
+        .console_user(
             "/integrations/connections/{id}",
             delete(apps::console_disconnect),
         )
-        .admin(
+        .console_admin(
             "/broker_credentials",
             get(credentials::console_index).post(credentials::console_create),
         )
-        .admin(
+        .console_admin(
             "/broker_credentials/{id}",
             get(credentials::console_show)
                 .patch(credentials::console_update)
@@ -101,28 +99,28 @@ pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
 }
 
 /// Routes under `/api/v1` (bearer API; paths relative to that prefix).
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin(
+        .operator(
             "/oauth_apps",
             get(apps::bearer_index).post(apps::bearer_create),
         )
-        .admin("/oauth_apps/lookup/{slug}", get(apps::bearer_lookup))
-        .admin(
+        .operator("/oauth_apps/lookup/{slug}", get(apps::bearer_lookup))
+        .operator(
             "/oauth_apps/{id}",
             get(apps::bearer_show)
                 .put(apps::bearer_update)
                 .delete(apps::bearer_destroy),
         )
-        .admin(
+        .operator(
             "/broker_credentials",
             get(credentials::bearer_index).post(credentials::bearer_create),
         )
-        .admin(
+        .operator(
             "/broker_credentials/lookup/{foreign_id}",
             get(credentials::bearer_lookup),
         )
-        .admin(
+        .operator(
             "/broker_credentials/{id}",
             get(credentials::bearer_show)
                 .put(credentials::bearer_update)
@@ -131,10 +129,14 @@ pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
 }
 
 /// Routes under `/api/v1/sandbox` (paths relative to that prefix).
-pub(crate) fn sandbox(routes: SandboxRoutes) -> SandboxRoutes {
-    // Rails' sandbox `oauth_apps` index validates only the entitlement JWT,
-    // because the listed start URLs are public OAuth entrypoints.
-    routes.jwt_only("/oauth_apps", get(apps::sandbox_index))
+pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
+    // The single sandbox token now performs the same live proxy binding check
+    // on every sandbox route, including this one.
+    routes.sandbox(
+        "/oauth_apps",
+        get(apps::sandbox_index),
+        crate::auth::Capability::SandboxOauthApps,
+    )
 }
 
 /// Server-rendered pages and other top-level routes (absolute paths).

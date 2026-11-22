@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     ApiError,
-    api_jwt::{bearer_token, verify_console_jwt},
+    console::sandbox::{SandboxJwtConfig, bearer_token, verify_sandbox_token},
     routes::{AppState, non_empty_env, positive_env_u64},
 };
 
@@ -1754,8 +1754,22 @@ fn slack_rate_limit_retry_delay(retry_count: u32, retry_after: Option<u64>) -> D
 }
 
 fn authorize_slack_file_proxy(headers: &HeaderMap) -> Result<SlackFileProxyClaims, ApiError> {
-    let token = bearer_token(headers)?;
-    verify_console_jwt(token)
+    // The unified guard has already authenticated and live-checked the sandbox
+    // token; this only re-reads the Slack channel lists the handlers scope to.
+    let token = bearer_token(headers)
+        .ok_or_else(|| ApiError::Unauthorized("missing bearer token".to_owned()))?;
+    let config = SandboxJwtConfig::from_env().ok_or_else(|| {
+        ApiError::ServiceUnavailable("CENTAUR_JWT_SIGNING_SECRET is not configured".to_owned())
+    })?;
+    let claims = verify_sandbox_token(token, &config)
+        .ok_or_else(|| ApiError::Unauthorized("invalid JWT".to_owned()))?;
+    Ok(SlackFileProxyClaims {
+        slack: SlackProxyClaims {
+            upload_channels: claims.slack.upload_channels,
+            download_channels: claims.slack.download_channels,
+            history_channels: claims.slack.history_channels,
+        },
+    })
 }
 
 enum SlackChannelPermission {
@@ -2208,9 +2222,9 @@ mod tests {
         let token = test_jwt(
             b"secret",
             json!({
-                "iss": "centaur-console",
-                "sub": "user_123",
-                "aud": "centaur-api",
+                "iss": crate::auth::SANDBOX_TOKEN_ISSUER,
+                "sub": "prn_123",
+                "aud": crate::auth::SANDBOX_TOKEN_AUDIENCE,
                 "iat": 1_700_000_000i64,
                 "exp": 4_102_444_800i64,
                 "slack": {
@@ -2220,13 +2234,13 @@ mod tests {
                 }
             }),
         );
-        let claims = crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
-            &token,
-            b"secret",
-            "centaur-api",
-            "centaur-console",
+        let config = SandboxJwtConfig::new(
+            "secret",
+            crate::auth::SANDBOX_TOKEN_AUDIENCE,
+            crate::auth::SANDBOX_TOKEN_ISSUER,
         )
         .unwrap();
+        let claims = verify_sandbox_token(&token, &config).unwrap();
         assert_eq!(claims.slack.upload_channels, ["C123456789"]);
         assert_eq!(claims.slack.download_channels, ["C987654321"]);
         assert_eq!(claims.slack.history_channels, ["C111111111"]);
@@ -3226,9 +3240,9 @@ mod tests {
         let token = test_jwt(
             b"secret",
             json!({
-                "iss": "centaur-console",
-                "sub": "user_123",
-                "aud": "centaur-api",
+                "iss": crate::auth::SANDBOX_TOKEN_ISSUER,
+                "sub": "prn_123",
+                "aud": crate::auth::SANDBOX_TOKEN_AUDIENCE,
                 "iat": 1_700_000_000i64,
                 "exp": 4_102_444_800i64,
                 "slack": {
@@ -3254,9 +3268,9 @@ mod tests {
         let token = test_jwt(
             b"secret",
             json!({
-                "iss": "centaur-console",
-                "sub": "user_123",
-                "aud": "centaur-api",
+                "iss": crate::auth::SANDBOX_TOKEN_ISSUER,
+                "sub": "prn_123",
+                "aud": crate::auth::SANDBOX_TOKEN_AUDIENCE,
                 "iat": 1i64,
                 "exp": 1i64,
                 "slack": {
@@ -3312,7 +3326,7 @@ mod tests {
             json!({
                 "iss": "centaur-console",
                 "sub": "user_123",
-                "aud": ["other-api", "centaur-api"],
+                "aud": ["other-api", crate::auth::SANDBOX_TOKEN_AUDIENCE],
                 "iat": 1_700_000_000i64,
                 "exp": 4_102_444_800i64,
                 "slack": {
@@ -3321,13 +3335,13 @@ mod tests {
                 }
             }),
         );
-        let claims = crate::api_jwt::verify_hs256_jwt::<SlackFileProxyClaims>(
-            &token,
-            b"secret",
-            "centaur-api",
-            "centaur-console",
+        let config = SandboxJwtConfig::new(
+            "secret",
+            crate::auth::SANDBOX_TOKEN_AUDIENCE,
+            crate::auth::SANDBOX_TOKEN_ISSUER,
         )
         .unwrap();
+        let claims = verify_sandbox_token(&token, &config).unwrap();
         assert_eq!(claims.slack.upload_channels, ["C123456789"]);
         assert_eq!(claims.slack.download_channels, ["C123456789"]);
     }

@@ -193,7 +193,7 @@ Direct administrative API calls need a short-lived Console service token. Mint
 one from the running Console instead of storing a separate static key:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
   bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
 ```
 

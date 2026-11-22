@@ -18,13 +18,12 @@ use std::{env, path::PathBuf};
 use crate::{
     AppState,
     console::{
-        bearer::BearerRoutes,
+        guard::GuardedRoutes,
         http::{ConsoleError, json_not_found},
         return_path,
-        sandbox::SandboxRoutes,
         session_cookie::ConsoleSession,
     },
-    console_session::{ConsoleRoutes, ConsoleSessionConfig},
+    console_session::ConsoleSessionConfig,
 };
 use axum::{
     Router,
@@ -82,17 +81,17 @@ const SERVICE_WORKER_JS: &str =
     include_str!("../../../../../services/console/config/pwa/service-worker.js");
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
 }
 
 /// Routes under `/api/v1` (bearer API; paths relative to that prefix).
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     routes
 }
 
 /// Routes under `/api/v1/sandbox` (paths relative to that prefix).
-pub(crate) fn sandbox(routes: SandboxRoutes) -> SandboxRoutes {
+pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
     routes
 }
 

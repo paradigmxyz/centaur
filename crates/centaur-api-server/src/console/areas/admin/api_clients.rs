@@ -32,8 +32,8 @@ use super::common::{
 };
 use crate::{
     AppState,
+    console::guard::GuardedRoutes,
     console::{http::ConsoleError, request::ConsoleBody, request::ConsoleData},
-    console_session::ConsoleRoutes,
 };
 
 /// `ApiClient::SCOPES`.
@@ -201,22 +201,22 @@ struct LinkPayloadEnvelope {
     data: LinkPayload,
 }
 
-pub(super) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     if !crate::console::api_clients_enabled() {
         return routes;
     }
     routes
-        .admin("/api_clients", get(index).post(create))
-        .admin("/api_clients/{id}", get(show).patch(update).delete(destroy))
-        .admin("/api_clients/{id}/rotate_secret", post(rotate_secret))
-        .admin("/api_clients/{id}/disable", post(disable))
-        .admin("/api_clients/{id}/enable", post(enable))
-        .admin("/api_clients/{id}/principals", post(attach_principal))
-        .admin(
+        .console_admin("/api_clients", get(index).post(create))
+        .console_admin("/api_clients/{id}", get(show).patch(update).delete(destroy))
+        .console_admin("/api_clients/{id}/rotate_secret", post(rotate_secret))
+        .console_admin("/api_clients/{id}/disable", post(disable))
+        .console_admin("/api_clients/{id}/enable", post(enable))
+        .console_admin("/api_clients/{id}/principals", post(attach_principal))
+        .console_admin(
             "/api_clients/{id}/principals/{link_id}",
             delete(detach_principal),
         )
-        .admin(
+        .console_admin(
             "/api_clients/{id}/principals/{link_id}/default",
             post(make_default_principal),
         )

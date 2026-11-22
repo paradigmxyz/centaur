@@ -44,14 +44,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     AppState,
     console::{
-        bearer::{BearerRoutes, BearerUser},
+        guard::{BearerUser, GuardedRoutes},
         http::{
             ConsoleError, DataPayload, ListParams, ListSource, Pagination, bind, created_data,
             json_data, labels_value, list_response, list_rows, no_content,
         },
         request::{ConsoleData, ConsoleQuery},
     },
-    console_session::ConsoleRoutes,
 };
 
 const PRINCIPAL_LIST_FROM: &str = "FROM principals \
@@ -182,117 +181,117 @@ enum OwnerKind {
 }
 
 /// Routes under `/api/v1/console` (paths relative to that prefix).
-pub(crate) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin(
+        .console_admin(
             "/principals",
             get(console_list_principals).post(console_create_principal),
         )
-        .admin(
+        .console_admin(
             "/principals/{id}",
             get(console_show_principal)
                 .patch(console_update_principal)
                 .delete(console_delete_principal),
         )
-        .admin(
+        .console_admin(
             "/principals/{id}/roles",
             get(console_principal_roles).post(console_assign_role),
         )
-        .admin(
+        .console_admin(
             "/principals/{principal_id}/roles/{id}",
             delete(console_remove_role),
         )
-        .admin("/principals/{id}/grants", get(console_principal_grants))
-        .admin(
+        .console_admin("/principals/{id}/grants", get(console_principal_grants))
+        .console_admin(
             "/principals/{id}/effective_grants",
             get(console_effective_grants),
         )
-        .admin(
+        .console_admin(
             "/principals/{id}/slack_channel_permissions",
             put(console_replace_principal_permissions),
         )
-        .admin(
+        .console_admin(
             "/principals/{id}/slack_channel_permissions/{channel_id}",
             delete(console_destroy_principal_permission),
         )
-        .admin("/roles", get(console_list_roles).post(console_create_role))
-        .admin(
+        .console_admin("/roles", get(console_list_roles).post(console_create_role))
+        .console_admin(
             "/roles/{id}",
             get(console_show_role)
                 .patch(console_update_role)
                 .delete(console_delete_role),
         )
-        .admin("/roles/{role_id}/grants", get(console_role_grants))
-        .admin(
+        .console_admin("/roles/{role_id}/grants", get(console_role_grants))
+        .console_admin(
             "/roles/{id}/slack_channel_permissions",
             put(console_replace_role_permissions),
         )
-        .admin(
+        .console_admin(
             "/roles/{id}/slack_channel_permissions/{channel_id}",
             delete(console_destroy_role_permission),
         )
-        .admin("/grants", post(console_create_grant))
-        .admin(
+        .console_admin("/grants", post(console_create_grant))
+        .console_admin(
             "/grants/{id}",
             get(console_show_grant).delete(console_destroy_grant),
         )
-        .admin("/slack_channels", get(console_slack_channels))
+        .console_admin("/slack_channels", get(console_slack_channels))
 }
 
 /// Routes under `/api/v1` (bearer API; paths relative to that prefix).
-pub(crate) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(crate) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin(
+        .operator(
             "/principals",
             get(bearer_list_principals).post(bearer_create_principal),
         )
-        .admin(
+        .operator(
             "/principals/lookup/{foreign_id}",
             get(bearer_lookup_principal),
         )
-        .admin(
+        .operator(
             "/principals/lookup/{foreign_id}/effective_config",
             get(bearer_lookup_effective_config),
         )
-        .admin(
+        .operator(
             "/principals/{id}",
             get(bearer_show_principal).put(bearer_update_principal),
         )
-        .admin(
+        .operator(
             "/principals/{id}/effective_config",
             get(bearer_effective_config),
         )
-        .admin(
+        .operator(
             "/principals/{id}/slack_channel_permissions",
             post(bearer_upsert_principal_permission),
         )
-        .admin(
+        .operator(
             "/principals/{principal_id}/roles",
             get(bearer_principal_roles).post(bearer_assign_role),
         )
-        .admin(
+        .operator(
             "/principals/{principal_id}/roles/{id}",
             delete(bearer_remove_role),
         )
-        .admin(
+        .operator(
             "/principals/{principal_id}/grants",
             get(bearer_principal_grants),
         )
-        .admin("/roles", get(bearer_list_roles).post(bearer_create_role))
-        .admin("/roles/lookup/{foreign_id}", get(bearer_lookup_role))
-        .admin(
+        .operator("/roles", get(bearer_list_roles).post(bearer_create_role))
+        .operator("/roles/lookup/{foreign_id}", get(bearer_lookup_role))
+        .operator(
             "/roles/{id}",
             get(bearer_show_role)
                 .put(bearer_update_role)
                 .delete(bearer_delete_role),
         )
-        .admin(
+        .operator(
             "/roles/{id}/slack_channel_permissions",
             post(bearer_upsert_role_permission),
         )
-        .admin("/roles/{role_id}/grants", get(bearer_role_grants))
-        .admin("/grants", post(bearer_create_grant))
-        .admin(
+        .operator("/roles/{role_id}/grants", get(bearer_role_grants))
+        .operator("/grants", post(bearer_create_grant))
+        .operator(
             "/grants/{id}",
             get(bearer_show_grant).delete(bearer_destroy_grant),
         )

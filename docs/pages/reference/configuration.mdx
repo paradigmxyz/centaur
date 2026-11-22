@@ -17,10 +17,8 @@ Use these as the main extension points:
 | `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `apiRs.nodeSelector`, `apiRs.affinity`, `apiRs.tolerations` | Controls scheduling for api-rs pods, including dedicated tainted node pools. |
-| `console.nodeSelector`, `console.affinity`, `console.tolerations` | Controls scheduling for Console web pods, including dedicated tainted node pools. |
-| `console.backend` | Helm value, `rails` (default) or `apirs`. Selects which implementation serves the Console host, API, and MCP OAuth endpoints. `apirs` also requires `apiRs.console.enabled: true`. See [Cut over the Console to api-rs](/operate/console-backend-cutover). |
-| `apiRs.console.enabled` | Helm value, default `false`. Mounts the Console secrets and serves the ported Console from api-rs without changing routing. |
-| `console.worker.nodeSelector`, `console.worker.affinity`, `console.worker.tolerations` | Controls scheduling for Console background worker pods independently from the web pods. |
+| `console.publicUrl` | Required. The Console origin users and MCP clients reach. api-rs serves the Console, so this also selects the Console host. See [Console runs in api-rs](/operate/console-backend-cutover). |
+| `console.worker.nodeSelector`, `console.worker.affinity`, `console.worker.tolerations` | Controls scheduling for the Console background worker pods (the Rails process that runs the Slack channel catalog jobs). |
 | `tokenBroker.*` | token-broker, which refreshes Console broker credentials: replicas, poll interval, concurrency, scheduling, and metrics. |
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
@@ -72,12 +70,10 @@ for the operator workflow.
 | `IRON_CONTROL_INITIAL_USER_EMAIL`, `IRON_CONTROL_INITIAL_USER_PASSWORD` | `secretManager.existingSecretName`; local bootstrap generates defaults when absent. | Creates the initial Console admin when no user exists. |
 | `IRON_CONTROL_INITIAL_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Admin API key used by api-rs and `centaur-perms`. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`, `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`, `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | `secretManager.existingSecretName`; local bootstrap generates them when absent. | Encrypts credential material at rest. Keep these stable after first boot. |
-| `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Console session and application signing secret. |
-| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens, Console service tokens, and sandbox api-rs principal tokens. |
-| `console.publicUrl` | Helm value. | Public Console origin used for links and MCP authorization metadata. |
-| `console.backend` | Helm value, default `rails`. Set to `apirs` to serve the Console from api-rs; requires `apiRs.console.enabled`. |
-| `apiRs.console.enabled` | Helm value, default `false`. Mounts the `CENTAUR_CONSOLE_*`/`CONSOLE_SESSION_SECRET` environment and serves the ported Console on the api-rs port without changing routing. |
-| `CONSOLE_SESSION_SECRET` | `secretManager.existingSecretName` when `apiRs.console.enabled` is true. | Encrypts api-rs Console session cookies and OAuth flow state. Generate once and keep it stable; rotating it signs every browser and in-flight flow out. |
+| `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Rails application signing secret for the Console worker and migration Job. |
+| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens and Console service tokens, and the single `centaur-sandbox` token proxy-sync mints for each sandbox. |
+| `console.publicUrl` | Helm value, required. | Public Console origin: used for links and MCP authorization metadata, and as the api-rs session-cookie and unsafe-request Origin check and the host that selects the Console router. |
+| `CONSOLE_SESSION_SECRET` | `secretManager.existingSecretName`, key `<secretManager.envPrefix>CONSOLE_SESSION_SECRET`. | Signs api-rs Console session cookies. Generate once and keep it stable; rotating it signs every browser and in-flight flow out. Required. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
 | `console.ssoEmailDomains` | Helm value. | Limits Google, Slack, or Okta SSO admission by email domain. Empty accepts any IdP-authenticated email. |
 | `console.oktaOauth.enabled` | Helm value, default `false`. | Enables Okta OIDC login for the Console. |
@@ -288,7 +284,7 @@ Sandbox entrypoint and wrappers:
 | `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `CENTAUR_CODEMODE_CONNECTORS` | Chart-rendered from `overlays.sources[*].connectorsSubdir` (default `connectors`) through `SESSION_SANDBOX_EXTRA_ENV`, appended to the image's `/opt/centaur/connectors` in source order. | Ordered connector roots for the Code Mode sandbox process; a later root shadows earlier ones, and missing roots are skipped. |
-| `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `companyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API that the `company_context` Code Mode connector and the `slack search` command call through the sandbox proxy, which injects the principal API JWT. Unset disables both. |
+| `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `companyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API that the `company_context` Code Mode connector and the `slack search` command call through the sandbox proxy, which injects the sandbox token. Unset disables both. |
 | `AGENT_REPO`, `AGENT_PERSONA` | Runtime assignment metadata. | Workspace repo clone and persona prompt. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Sandbox entrypoint or `sandbox.extraEnv`. | Google ADC path; entrypoint creates a local stub when unset. |
 | `CODEX_API_KEY`, `CODEX_HOME`, `CODEX_CONTINUE_THREAD_ID` | `sandbox.extraEnv` or runtime resume. | Codex auth/config/resume behavior. |

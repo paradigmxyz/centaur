@@ -14,6 +14,11 @@ pub(crate) async fn load_proxy(
                 p.requester_principal_assigned_at AT TIME ZONE 'UTC' AS requester_principal_assigned_at, \
                 pr.sync_config_cache_version AS principal_cache_version, \
                 to_jsonb(pr) AS principal, u.email AS console_user_email, u.id AS console_user_id, \
+                COALESCE(u.admin, false) AS console_user_admin, u.status AS console_user_status, \
+                EXISTS ( \
+                    SELECT 1 FROM slack_bot_channels sb \
+                    WHERE sb.team_id = pr.slack_team_id \
+                ) AS slack_bot_home_team, \
                 EXISTS ( \
                     SELECT 1 FROM grants rg JOIN static_secrets rs ON rs.id = rg.static_secret_id \
                     JOIN broker_credentials rb ON rb.id = rs.broker_credential_id \
@@ -52,6 +57,9 @@ pub(crate) async fn load_proxy(
         principal: row.get("principal"),
         console_user_email: row.get("console_user_email"),
         console_user_id: row.get("console_user_id"),
+        console_user_admin: row.get("console_user_admin"),
+        console_user_status: row.get("console_user_status"),
+        slack_bot_home_team: row.get("slack_bot_home_team"),
         slack_history_channel_ids: row.get("slack_history_channel_ids"),
         has_owner_only_grant: row.get("has_owner_only_grant"),
     }))

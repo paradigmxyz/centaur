@@ -3,21 +3,19 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
-# console background job worker — runs Solid Queue (`bin/jobs`) so the
-# console's background jobs execute. That is the broker-credential OAuth refresh
-# loop, which mints and refreshes the access tokens delivered inline via
-# `token_broker` sources (e.g. the `openai-codex` brokered token), the Slack OAuth
-# identity enrichment enqueued after a broker-credential connect, and the Slack
-# channel catalog refresh and membership refresh. The web (Puma) pod runs no
-# worker, so without this those jobs never execute; the web Deployment owns
-# database setup (create-db init + the image's Rails db:prepare on boot), so this
-# worker only processes jobs and waits for the Solid Queue database to exist
-# before starting.
+# console background job worker — runs Solid Queue (`bin/jobs`) for the Console
+# jobs that still live in Rails: the Slack channel catalog refresh and membership
+# refresh. The Console itself is served by api-rs, so this worker and the
+# console-migrate Job are the only Rails processes left; broker-credential OAuth
+# refresh, which the Console used to own, runs in api-rs's token-broker.
 #
-# It shares the web image and the same infra-Secret env (DB URL, ActiveRecord
-# encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. It uses
-# its own `console-worker` component label so it is NOT selected by the
-# console Service (which load-balances HTTP to the web pods).
+# It shares the Console image and the same infra-Secret env (DB URL, ActiveRecord
+# encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. Its
+# Rails boot also runs the Console bootstrap initializer
+# (config/initializers/bootstrap.rb); the console-migrate Job runs it explicitly
+# too, so the initial admin exists even when this worker is scaled to zero. It
+# uses its own `console-worker` component label so the compatibility `console`
+# Service (which selects api-rs) never routes traffic to it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,34 +41,15 @@ spec:
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" $console.worker "indent" 6) }}
       initContainers:
-        # Wait for the Solid Queue database (created by the web pod's Rails
-        # db:prepare) so a cold start does not crash-loop before it exists.
-        # Read-only and idempotent; connects as the admin (ai_v2) DSN.
-        - name: wait-for-queue-db
-          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              until [ "$(psql "$ADMIN_DATABASE_URL" -tAc \
-                "SELECT 1 FROM pg_database WHERE datname = '$QUEUE_DB_NAME'")" = "1" ]; do
-                echo "waiting for database $QUEUE_DB_NAME to exist…"
-                sleep 2
-              done
-          env:
-            - name: ADMIN_DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretEnv }}
-                  key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Rails 8 names the Solid Queue database "<primary>_queue".
-            - name: QUEUE_DB_NAME
-              value: {{ printf "%s_queue" $console.database.name | quote }}
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-            seccompProfile:
-              type: RuntimeDefault
+        # Wait for the Solid Queue schema (applied by the console-migrate Job) so a
+        # cold start does not crash-loop before the queue tables exist. Read-only
+        # and idempotent; connects through the Console database URL.
+{{ include "centaur.consoleDbWait" (dict
+  "root" .
+  "name" "wait-for-queue-db"
+  "database" (printf "%s_queue" $console.database.name)
+  "query" "SELECT to_regclass('public.solid_queue_jobs') IS NOT NULL"
+  "message" "waiting for the Solid Queue schema (console-migrate Job)…") | nindent 8 }}
       containers:
         - name: console-worker
           image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}

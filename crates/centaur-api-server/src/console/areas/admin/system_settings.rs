@@ -20,8 +20,8 @@ use time::PrimitiveDateTime;
 use super::common::{self, AdminError, json_ok, nullable_field};
 use crate::{
     AppState,
+    console::guard::GuardedRoutes,
     console::{http::ConsoleError, request::ConsoleData},
-    console_session::ConsoleRoutes,
     slack_external_teams::normalize_slack_external_team_ids,
 };
 
@@ -120,10 +120,10 @@ struct SlackExternalTeamIds {
     slack_external_team_ids: Vec<String>,
 }
 
-pub(super) fn console(routes: ConsoleRoutes) -> ConsoleRoutes {
+pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin("/system_settings", get(show).patch(update))
-        .admin(
+        .console_admin("/system_settings", get(show).patch(update))
+        .console_admin(
             "/system_settings/slack_external_teams",
             get(slack_external_teams).put(replace_slack_external_teams),
         )

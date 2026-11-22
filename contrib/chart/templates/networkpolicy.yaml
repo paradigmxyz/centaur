@@ -1,7 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $ingressSourceNamespaces := default .Values.networkPolicy.ingressControllerNamespaces .Values.networkPolicy.ingressSourceNamespaces }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- $consoleBackend := include "centaur.consoleBackend" . }}
 {{- $companyContext := include "centaur.companyContextValues" . | fromYaml }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -88,9 +87,14 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
+        # The Rails Console worker (bin/jobs) reaches the app + queue DBs.
         - podSelector:
             matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
+        # The Console schema-migration Job (db:prepare + bootstrap).
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-migrate") | nindent 14 }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
@@ -104,10 +108,6 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 14 }}
 {{- end }}
-        # console Solid Queue worker (bin/jobs) reaches the app + queue DBs.
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
         # iron-proxy pods forward the tool-server sidecar's pool to Postgres
         # (the sidecar reaches the core DB through the per-sandbox proxy, not
         # directly), so the proxy must be allowed to connect.
@@ -185,11 +185,8 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-        # Console pages call api-rs for admin-backed views such as ETLs.
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-        # Console background jobs call api-rs for sync ingestion/checkpoints.
+        # The Rails Console worker's jobs call api-rs for sync
+        # ingestion/checkpoints.
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
@@ -198,9 +195,9 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if and (eq $consoleBackend "apirs") $console.ingress.enabled }}
-        # After the Console cutover the console Ingress controller forwards the
-        # Console host to api-rs, on the same port as the rest of its API.
+{{- if $console.ingress.enabled }}
+        # The Console Ingress controller forwards the Console public host to
+        # api-rs, on the same port as the rest of its API.
 {{- range $ingressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:
@@ -342,11 +339,11 @@ spec:
           port: {{ .Values.ironProxy.service.pgPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
-    # console control plane: register principals/roles/grants and per-sandbox proxies.
-{{- if eq $consoleBackend "apirs" }}
-    # The ported Console handlers are served by api-rs itself, and
+    # console control plane: register principals/roles/grants and per-sandbox
+    # proxies. The Console handlers are served by api-rs itself and
     # IRON_CONTROL_URL points at this Service, so allow self-egress for any
-    # admin-client call that still goes over HTTP.
+    # admin-client call that still goes over HTTP (centaur-perms, the HTTP client
+    # path).
     - to:
         - podSelector:
             matchLabels:
@@ -354,15 +351,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
-{{- else }}
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ $console.service.httpPort }}
-{{- end }}
     # The workflow discovery service, which imports workflow modules for api-rs.
     - to:
         - podSelector:

@@ -1166,7 +1166,12 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty()).then_some(token)
 }
 
-/// Verifies the principal API JWTs the Console mints for api-rs.
+/// Verifies the principal JWTs a sandbox presents on the query endpoint.
+///
+/// The single `centaur-sandbox` token (minted by proxy-sync) replaced the
+/// old `centaur-api` principal JWT; both are accepted through the rollout so a
+/// proxy holding a token minted before the upgrade keeps working until its next
+/// sync.
 pub struct JwtVerifier {
     key: DecodingKey,
     validation: Validation,
@@ -1183,7 +1188,7 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::HS256);
         validation.leeway = JWT_LEEWAY_SECONDS;
         validation.validate_nbf = true;
-        validation.set_audience(&["centaur-api"]);
+        validation.set_audience(&["centaur-sandbox", "centaur-api"]);
         validation.set_issuer(&["centaur-console"]);
         validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
         Self {
@@ -1365,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_accepts_only_console_principal_api_tokens() {
+    fn verifier_accepts_the_sandbox_and_legacy_principal_audiences() {
         let now = Utc::now().timestamp();
         let claims = |overrides: Value| {
             let mut claims = json!({
@@ -1384,6 +1389,13 @@ mod tests {
         let verifier = verifier();
         assert_eq!(
             verifier.principal_id(&token("secret", claims(json!({})))),
+            Some(1)
+        );
+        assert_eq!(
+            verifier.principal_id(&token(
+                "secret",
+                claims(json!({ "aud": "centaur-sandbox" }))
+            )),
             Some(1)
         );
         for rejected in [

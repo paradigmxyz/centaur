@@ -25,7 +25,8 @@ use crate::{
     ApiAuthConfig, AppState, build_router_with_app_state,
     console::{
         bearer::bearer_router,
-        sandbox::{SandboxJwtConfig, SandboxRoutes, test_sandbox_routes},
+        guard::GuardedRoutes,
+        sandbox::{SandboxJwtConfig, test_sandbox_routes},
     },
     console_session::ConsoleSessionConfig,
 };
@@ -200,6 +201,19 @@ fn request(method: Method, uri: &str, headers: &[(&str, &str)], body: Body) -> R
 
 async fn send(app: &Router, request: Request<Body>) -> Response {
     app.clone().oneshot(request).await.unwrap()
+}
+
+async fn send_console_roles(app: &Router, auth: &str) -> Response {
+    send(
+        app,
+        request(
+            Method::GET,
+            "/api/v1/console/roles",
+            &[("authorization", auth)],
+            Body::empty(),
+        ),
+    )
+    .await
 }
 
 fn cookie(response: &Response) -> Option<String> {
@@ -909,14 +923,25 @@ fn sandbox_token(secret: &str, claims: &Value) -> String {
 
 fn sandbox_claims(proxy_id: &str, sandbox_id: &str, principal_id: &str, now: i64) -> Value {
     json!({
-        "iss": "centaur-console",
-        "aud": "centaur-console-sandbox-entitlements",
-        "sub": "centaur-sandbox",
+        "iss": crate::auth::SANDBOX_TOKEN_ISSUER,
+        "aud": crate::auth::SANDBOX_TOKEN_AUDIENCE,
+        "sub": principal_id,
         "iat": now,
         "exp": now + 3600,
         "sandbox_id": sandbox_id,
         "proxy_id": proxy_id,
-        "principal_id": principal_id,
+        "capabilities": [
+            "sessions.read",
+            "workflows.read",
+            "workflows.write",
+            "sandbox.permissions",
+            "sandbox.skills",
+            "sandbox.tasks",
+            "sandbox.oauth_apps",
+            "console.delegate",
+        ],
+        "slack": {"upload_channels": [], "download_channels": [], "history_channels": []},
+        "console_delegate": true,
     })
 }
 
@@ -939,23 +964,27 @@ async fn console_session_db_sandbox_token_checks_proxy_binding_and_admin() {
     .await
     .unwrap();
 
+    let sandbox_jwt = SandboxJwtConfig::new(
+        JWT_SECRET,
+        crate::auth::SANDBOX_TOKEN_AUDIENCE,
+        crate::auth::SANDBOX_TOKEN_ISSUER,
+    )
+    .unwrap();
     let state = AppState::unready(ApiAuthConfig::testing("test-secret"))
-        .with_console_write_db(fixture.pool.clone());
+        .with_console_write_db(fixture.pool.clone())
+        .with_console_session(
+            ConsoleSessionConfig::from_settings(
+                Some(SESSION_SECRET),
+                Some("https://console.example.test"),
+            )
+            .unwrap()
+            .unwrap()
+            .with_sandbox_jwt(sandbox_jwt),
+        );
     let app = Router::new()
         .nest(
             "/api/v1/sandbox",
-            test_sandbox_routes(SandboxRoutes::new(
-                state.clone(),
-                Some(
-                    SandboxJwtConfig::new(
-                        JWT_SECRET,
-                        "centaur-console-sandbox-entitlements",
-                        "centaur-console",
-                    )
-                    .unwrap(),
-                ),
-            ))
-            .into_router(),
+            test_sandbox_routes(GuardedRoutes::new(state.clone())).into_router(),
         )
         .with_state(state);
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -1069,8 +1098,8 @@ async fn console_session_db_sandbox_admin_jwt_acts_as_console_user() {
             .with_sandbox_jwt(
                 SandboxJwtConfig::new(
                     JWT_SECRET,
-                    "centaur-console-sandbox-entitlements",
-                    "centaur-console",
+                    crate::auth::SANDBOX_TOKEN_AUDIENCE,
+                    crate::auth::SANDBOX_TOKEN_ISSUER,
                 )
                 .unwrap(),
             ),
@@ -1249,7 +1278,39 @@ async fn console_session_db_sandbox_admin_jwt_acts_as_console_user() {
         "session_required"
     );
 
-    // A valid entitlement for a non-DM principal is not a console credential.
+    // The session-only admin actions are not part of `operator.api`: the same
+    // API key cannot read system settings or approve users.
+    for path in [
+        "/api/v1/console/system_settings",
+        &format!(
+            "/api/v1/console/users/{}/approve",
+            oid("usr", fixture.admin)
+        ),
+    ] {
+        let method = if path.ends_with("/approve") {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        let response = send(
+            &app,
+            request(
+                method,
+                path,
+                &[("authorization", &format!("Bearer {api_key}"))],
+                Body::empty(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(
+            json_body(response).await["error"]["details"]["reason"],
+            "session_required",
+            "{path}"
+        );
+    }
+
+    // A valid sandbox token for a non-DM principal is not a console credential.
     let channel_principal = fixture
         .principal("slack_channel", Some("T-console-home"), fixture.admin)
         .await;
@@ -1316,6 +1377,106 @@ async fn console_session_db_sandbox_admin_jwt_acts_as_console_user() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn console_session_db_sandbox_delegate_is_rechecked_live() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let principal = fixture
+        .principal("slack_dm", Some("T-console-home"), fixture.admin)
+        .await;
+    let (proxy_id, sandbox_name) = fixture.proxy(principal).await;
+    sqlx::query(
+        "INSERT INTO slack_bot_channels \
+            (team_id, channel_id, name, bot_user_id, created_at, updated_at) \
+         VALUES ('T-console-home', $1, 'general', 'U-bot', now(), now())",
+    )
+    .bind(fixture.name("channel"))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let state = AppState::unready(ApiAuthConfig::testing("test-secret"))
+        .with_console_db(fixture.pool.clone())
+        .with_console_write_db(fixture.pool.clone())
+        .with_console_session(
+            ConsoleSessionConfig::from_settings(
+                Some(SESSION_SECRET),
+                Some("https://console.example.test"),
+            )
+            .unwrap()
+            .unwrap()
+            .with_sandbox_jwt(
+                SandboxJwtConfig::new(
+                    JWT_SECRET,
+                    crate::auth::SANDBOX_TOKEN_AUDIENCE,
+                    crate::auth::SANDBOX_TOKEN_ISSUER,
+                )
+                .unwrap(),
+            ),
+        );
+    let app = build_router_with_app_state(state);
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let token = sandbox_token(
+        JWT_SECRET,
+        &sandbox_claims(
+            &oid("prx", proxy_id),
+            &sandbox_name,
+            &oid("prn", principal),
+            now,
+        ),
+    );
+    let auth = format!("Bearer {token}");
+
+    let response = send_console_roles(&app, &auth).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Demoting the linked admin revokes the delegated Console capability on the
+    // next request even though the token still verifies.
+    sqlx::query("UPDATE users SET admin = false WHERE id = $1")
+        .bind(fixture.admin)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let response = send_console_roles(&app, &auth).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_body(response).await["error"]["details"]["reason"],
+        "session_required"
+    );
+
+    // Re-promoting but disabling the account does the same.
+    sqlx::query("UPDATE users SET admin = true, status = 'disabled' WHERE id = $1")
+        .bind(fixture.admin)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let response = send_console_roles(&app, &auth).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // The proxy binding is re-read too: reassigning it invalidates the token.
+    sqlx::query("UPDATE users SET status = 'active' WHERE id = $1")
+        .bind(fixture.admin)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let other = fixture
+        .principal("other_dm", Some("T-console-home"), fixture.admin)
+        .await;
+    sqlx::query("UPDATE proxies SET principal_id = $1 WHERE id = $2")
+        .bind(other)
+        .bind(proxy_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let response = send_console_roles(&app, &auth).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_body(response).await["error"]["details"]["reason"],
+        "session_required"
+    );
 }
 
 /// The workflow runtime's in-process force-start path, against a real

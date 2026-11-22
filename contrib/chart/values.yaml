@@ -100,35 +100,29 @@ toolServer:
 # on top of these `console` defaults (see the `centaur.consoleValues` helper), so
 # existing values files keep working. Prefer `console` for new configuration.
 console:
-  replicaCount: 1
-  # Which implementation serves the Console host and API. `rails` (default)
-  # keeps the Rails web and worker pods. `apirs` serves the ported Console from
-  # api-rs: the console Ingress and internal Console URLs point at the api-rs
-  # Service, the `console` Service forwards to api-rs for clients with a cached
-  # in-cluster URL, and the Rails web pods scale to zero. The Rails worker keeps
-  # running because the Slack channel catalog jobs still live there. Requires
-  # apiRs.enabled and apiRs.console.enabled. See the Console backend cutover
-  # runbook before flipping it.
-  backend: rails
-  # Node steering for the Console web pods. Use tolerations with a matching
-  # nodeSelector to schedule onto a dedicated tainted node pool. Empty values
-  # leave placement to the default scheduler.
-  nodeSelector: {}
-  #   workload: centaur-control-plane
-  affinity: {}
-  tolerations: []
-  # - key: centaur.ai/control-plane
-  #   operator: Exists
-  #   effect: NoSchedule
-  # Public URL users reach in a browser (e.g. https://console.example.com), used
-  # as CENTAUR_CONSOLE_PUBLIC_URL. Set this when console is exposed behind
-  # Tailscale/Ingress so MCP OAuth issuer metadata and JWT validation agree.
-  publicUrl: ""
-  # Additional exact Host headers accepted by Rails Host Authorization. Use for
-  # service DNS names that differ from the chart's short in-cluster URL;
-  # publicUrl and the short service host are already included.
-  allowedHosts: []
-  # Optional Sentry DSN for Console web requests and background jobs. Empty by
+  # The Console is served by api-rs: there is no implementation switch. The
+  # chart runs no Rails web pod; the `console` Service is only a compatibility
+  # alias (same name and port, forwarding to api-rs) for in-cluster clients with
+  # a cached `centaur-console:3000` URL. The Rails worker still runs the Slack
+  # channel catalog jobs, and a Helm hook Job applies the Rails schema
+  # migrations and the initial-admin bootstrap. See
+  # docs/pages/operate/console-backend-cutover.mdx.
+  #
+  # The shared infra Secret must hold
+  # <secretManager.envPrefix>CONSOLE_SESSION_SECRET (the api-rs session-cookie
+  # key) plus the existing IRON_CONTROL_* Console keys.
+  #
+  # The origin users and MCP clients reach the Console at, rendered as
+  # CENTAUR_CONSOLE_PUBLIC_URL. It is the origin the session cookie and
+  # unsafe-request Origin checks use, and the host that selects the Console
+  # router on api-rs, so it must match the browser URL exactly (scheme, host, and
+  # port when non-default). Required whenever apiRs.enabled=true: rendering fails
+  # with a clear message if it is empty. The default is the local port-forward
+  # the docs use (`kubectl port-forward -n centaur
+  # service/centaur-centaur-console 3000:3000`); set your real origin in every
+  # deployed environment (for example https://console.example.com).
+  publicUrl: "http://localhost:3000"
+  # Optional Sentry DSN for the Rails Console worker's background jobs. Empty by
   # default, so the Sentry SDK remains disabled unless explicitly configured.
   sentryDsn: ""
   # Break-glass email/password login. Disable when console is reachable from
@@ -143,19 +137,23 @@ console:
     # Default Always: the image is published under the mutable `latest` tag, so
     # IfNotPresent would pin pods to whatever digest a node already cached.
     pullPolicy: Always
+  # RAILS_ENV for the two remaining Rails processes: the migration Job and the
+  # worker.
   railsEnv: production
   database:
-    # Logical DB created on the bundled Postgres by the create-db init
-    # container. Must match the primary connection's `database:` in the image's
-    # database.yml — the connection URL carries no database path, so Rails
-    # resolves the name from there.
+    # Logical DB created on the bundled Postgres by the console-migrate Job's
+    # create-db init container, and the database the Console handlers use. Must
+    # match the primary connection's `database:` in the image's database.yml —
+    # the connection URL carries no database path, so each process resolves the
+    # name from here.
     name: iron_control_production
   # Google as an OAuth identity provider for console sign-in (and the
   # broker-credential refresh loop). Off by default — not every deployment uses
   # Google to log in. When enabled, the IRON_CONTROL_GOOGLE_CLIENT_ID and
   # IRON_CONTROL_GOOGLE_CLIENT_SECRET env vars are sourced from the shared infra
   # Secret (keys <secretManager.envPrefix>IRON_CONTROL_GOOGLE_CLIENT_ID /
-  # _SECRET), which must exist or the console pods CreateContainerConfigError.
+  # _SECRET), which must exist or the api-rs Console container fails with
+  # CreateContainerConfigError.
   googleOauth:
     enabled: false
   # Slack as an OIDC identity provider for console sign-in. Off by default —
@@ -163,8 +161,9 @@ console:
   # CENTAUR_CONSOLE_SLACK_CLIENT_ID and CENTAUR_CONSOLE_SLACK_CLIENT_SECRET
   # env vars are sourced from the shared infra Secret (keys
   # <secretManager.envPrefix>CENTAUR_CONSOLE_SLACK_CLIENT_ID / _SECRET), which
-  # must exist or the console pods CreateContainerConfigError. This is the
-  # Sign-in-with-Slack OIDC app (scopes openid/email/profile, redirect URL
+  # must exist or the api-rs Console container fails with
+  # CreateContainerConfigError. This is the Sign-in-with-Slack OIDC app (scopes
+  # openid/email/profile, redirect URL
   # <publicUrl>/auth/slack/callback) — not the DB-managed Slack OAuth app the
   # bot and company-context service use.
   slackOauth:
@@ -192,8 +191,8 @@ console:
   # tls. Mirrors the top-level `ingress` block (which is wired to the
   # Slackbot). Add the controller's namespace to
   # networkPolicy.ingressControllerNamespaces so its pods can reach the
-  # console; the console NetworkPolicy admits those namespaces when
-  # this is enabled.
+  # Console; the api-rs NetworkPolicy admits those namespaces on the api-rs port
+  # when this is enabled.
   #
   # Tailscale operator example (serves https://console.<tailnet>.ts.net):
   #   className: tailscale
@@ -210,16 +209,17 @@ console:
     # host.
     host: ""
     tls: []
+  # Resources for the console-migrate Job (`bin/rails db:prepare` plus the
+  # bootstrap). Short-lived; leave empty for the namespace defaults.
   resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs the console's remaining background
-  # jobs — Slack channel catalog refresh and membership refresh, plus the Slack
-  # OAuth identity enrichment enqueued after a broker-credential connect. The web
-  # Puma pod runs no worker, so without this those jobs never execute. It keeps
-  # running in `console.backend=apirs` mode.
+  # Solid Queue worker (`bin/jobs`) that runs the Console jobs that still live in
+  # Rails: the Slack channel catalog refresh and membership refresh. Without it
+  # those jobs never execute. It shares the Console image with the migration Job
+  # and boots Rails, so it also runs the Console bootstrap initializer.
   worker:
     replicaCount: 1
-    # Node steering for Console background worker pods. Configure separately
-    # from the web pods when workers run on a different node pool.
+    # Node steering for Console background worker pods. The migration Job and
+    # api-rs follow apiRs' scheduling instead.
     nodeSelector: {}
     affinity: {}
     tolerations: []
@@ -708,23 +708,6 @@ apiRs:
   # Set false when multiple Centaur instances share one console/1Password
   # Connect control plane and infra secrets are managed out of band.
   syncInfraSecrets: true
-  # Serve the Console from api-rs. Off by default: existing deployments keep the
-  # Rails Console and this flag changes nothing. When enabled, console.publicUrl
-  # is required, and the shared infra Secret (secretManager.existingSecretName)
-  # must contain the Console keys the Rails pods already use plus the new
-  # <secretManager.envPrefix>CONSOLE_SESSION_SECRET (a long random value; keep it
-  # stable, because changing it invalidates every browser session). The chart
-  # maps the existing IRON_CONTROL_AR_ENCRYPTION_* keys to the
-  # CENTAUR_CONSOLE_AR_ENCRYPTION_* names the Rust handlers read. The ported
-  # handlers write through IRON_CONTROL_DATABASE_URL, so its role needs write
-  # access (the Rails Console role already does). Google, Slack, and Okta client
-  # credentials follow console.googleOauth / console.slackOauth /
-  # console.oktaOauth. This flag only mounts the layer and serves the paths on the
-  # api-rs Service; browser traffic keeps reaching Rails until
-  # console.backend=apirs retargets the Console ingress and internal URLs. See
-  # the Console backend cutover runbook before enabling that switch.
-  console:
-    enabled: false
   # Workflow enablement policy. Production defaults to all workflows enabled.
   # Set workflowEnableMode: allowlist in staging and list allowed workflow names
   # in workflowAllowedNames as a comma/whitespace-separated string.

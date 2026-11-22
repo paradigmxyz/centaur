@@ -11,33 +11,74 @@ use crate::{
     api_jwt::{
         API_JWT_AUDIENCE, CONSOLE_JWT_ISSUER, bearer_token, decode_jwt_payload, verify_hs256_jwt,
     },
+    console::sandbox::SandboxBinding,
+    console::session_cookie::ConsoleSession,
 };
+use centaur_console_db::ConsoleUser;
 
 const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
 const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
+/// Audience of the single sandbox token proxy-sync mints. Distinct from
+/// [`API_JWT_AUDIENCE`] so neither kind of token can be read as the other.
+pub(crate) const SANDBOX_TOKEN_AUDIENCE: &str = "centaur-sandbox";
+/// Issuer of the sandbox token. Proxy-sync signs it as Console, matching the
+/// credentials it replaced.
+pub(crate) const SANDBOX_TOKEN_ISSUER: &str = "centaur-console";
 /// Issuer of the access tokens api-rs mints for API clients. Distinct from
 /// Console's issuer so neither kind of token can be read as the other.
 pub(crate) const API_CLIENT_TOKEN_ISSUER: &str = "centaur-api-rs";
 const API_CLIENT_TOKEN_USE: &str = "api_client";
 pub(crate) const API_CLIENT_TOKEN_TTL_SECONDS: i64 = 60 * 60;
 
+/// The capability catalog. Every credential resolves to a set of these and
+/// every route declares the one it requires (see `console::guard`).
+///
+/// Some capabilities imply weaker ones on the same surface: a Console admin
+/// also satisfies an active-user route, an active user also satisfies a
+/// pending-user route, and a sandbox-delegated admin satisfies every Console
+/// level. Ordering and names are the contract used by token claims and the
+/// documentation table in `console/README.md`.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Capability {
+    // api-rs session, sandbox, workflow, and Slack routes.
     SessionsRead,
     SessionsWrite,
+    /// Releasing a session's sandbox. API clients, the static admin key, and
+    /// Console's service JWT hold it; ingress keys do not.
+    SessionsSandboxRelease,
     SandboxesDrain,
     WorkflowsRead,
     WorkflowsWrite,
     WorkflowsEvents,
     WorkflowsActions,
+    /// The Slack proxy. The sandbox token's channel lists scope it.
+    SlackProxy,
     SlackExternalTeamsRead,
     SlackExternalTeamsWrite,
+    // Console session API.
+    ConsoleRead,
+    ConsolePending,
+    ConsoleUser,
+    ConsoleAdmin,
+    // The bearer operator API under `/api/v1`.
+    OperatorApi,
+    // The sandbox API under `/api/v1/sandbox`.
+    SandboxPermissions,
+    SandboxSkills,
+    SandboxTasks,
+    SandboxOauthApps,
+    // A sandbox credential that may act as the linked active Console admin.
+    ConsoleDelegate,
 }
 
 impl Capability {
-    const ALL: [Self; 9] = [
+    /// Every capability an api-rs service credential (the static admin key or
+    /// Console's service JWT) holds. It deliberately excludes the Console
+    /// session, operator, sandbox, and Slack proxy surfaces.
+    pub(crate) const API_RS: [Self; 10] = [
         Self::SessionsRead,
         Self::SessionsWrite,
+        Self::SessionsSandboxRelease,
         Self::SandboxesDrain,
         Self::WorkflowsRead,
         Self::WorkflowsWrite,
@@ -47,14 +88,134 @@ impl Capability {
         Self::SlackExternalTeamsWrite,
     ];
 
-    /// The capability an API client OAuth scope grants.
-    pub(crate) fn from_api_client_scope(scope: &str) -> Option<Self> {
+    /// The capabilities an API client OAuth scope grants.
+    pub(crate) fn from_api_client_scope(scope: &str) -> &'static [Self] {
         match scope {
-            "sessions:read" => Some(Self::SessionsRead),
-            "sessions:write" => Some(Self::SessionsWrite),
-            _ => None,
+            "sessions:read" => &[Self::SessionsRead],
+            "sessions:write" => &[Self::SessionsWrite, Self::SessionsSandboxRelease],
+            _ => &[],
         }
     }
+
+    /// The wire name used in the sandbox token's `capabilities` claim.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionsRead => "sessions.read",
+            Self::SessionsWrite => "sessions.write",
+            Self::SessionsSandboxRelease => "sessions.sandbox_release",
+            Self::SandboxesDrain => "sandboxes.drain",
+            Self::WorkflowsRead => "workflows.read",
+            Self::WorkflowsWrite => "workflows.write",
+            Self::WorkflowsEvents => "workflows.events",
+            Self::WorkflowsActions => "workflows.actions",
+            Self::SlackProxy => "slack.proxy",
+            Self::SlackExternalTeamsRead => "slack_external_teams.read",
+            Self::SlackExternalTeamsWrite => "slack_external_teams.write",
+            Self::ConsoleRead => "console.read",
+            Self::ConsolePending => "console.pending",
+            Self::ConsoleUser => "console.user",
+            Self::ConsoleAdmin => "console.admin",
+            Self::OperatorApi => "operator.api",
+            Self::SandboxPermissions => "sandbox.permissions",
+            Self::SandboxSkills => "sandbox.skills",
+            Self::SandboxTasks => "sandbox.tasks",
+            Self::SandboxOauthApps => "sandbox.oauth_apps",
+            Self::ConsoleDelegate => "console.delegate",
+        }
+    }
+
+    /// Parses a sandbox token capability name. Unknown names are ignored so a
+    /// newer proxy-sync can add one without breaking an older api-rs.
+    pub(crate) fn from_str(name: &str) -> Option<Self> {
+        const ALL: [Capability; 21] = [
+            Capability::SessionsRead,
+            Capability::SessionsWrite,
+            Capability::SessionsSandboxRelease,
+            Capability::SandboxesDrain,
+            Capability::WorkflowsRead,
+            Capability::WorkflowsWrite,
+            Capability::WorkflowsEvents,
+            Capability::WorkflowsActions,
+            Capability::SlackProxy,
+            Capability::SlackExternalTeamsRead,
+            Capability::SlackExternalTeamsWrite,
+            Capability::ConsoleRead,
+            Capability::ConsolePending,
+            Capability::ConsoleUser,
+            Capability::ConsoleAdmin,
+            Capability::OperatorApi,
+            Capability::SandboxPermissions,
+            Capability::SandboxSkills,
+            Capability::SandboxTasks,
+            Capability::SandboxOauthApps,
+            Capability::ConsoleDelegate,
+        ];
+        ALL.into_iter()
+            .find(|capability| capability.as_str() == name)
+    }
+
+    /// Whether holding `self` also grants `other`.
+    pub(crate) const fn implies(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::ConsoleDelegate, Self::ConsoleAdmin)
+                | (Self::ConsoleDelegate, Self::ConsoleUser)
+                | (Self::ConsoleDelegate, Self::ConsolePending)
+                | (Self::ConsoleDelegate, Self::ConsoleRead)
+                | (Self::ConsoleAdmin, Self::ConsoleUser)
+                | (Self::ConsoleAdmin, Self::ConsolePending)
+                | (Self::ConsoleAdmin, Self::ConsoleRead)
+                | (Self::ConsoleUser, Self::ConsolePending)
+                | (Self::ConsoleUser, Self::ConsoleRead)
+                | (Self::ConsolePending, Self::ConsoleRead)
+        )
+    }
+
+    /// Whether a caller holding `self` satisfies a route that requires
+    /// `required`.
+    pub(crate) fn satisfies(self, required: Self) -> bool {
+        self == required || self.implies(required)
+    }
+
+    /// The surface whose error envelope a route requiring this capability
+    /// answers. The surface only selects unauthenticated/forbidden response
+    /// wording; every surface accepts every credential the caller holds.
+    pub(crate) const fn surface(self) -> Surface {
+        match self {
+            Self::ConsoleRead
+            | Self::ConsolePending
+            | Self::ConsoleUser
+            | Self::ConsoleAdmin
+            | Self::ConsoleDelegate => Surface::Console,
+            Self::OperatorApi => Surface::Bearer,
+            Self::SandboxPermissions
+            | Self::SandboxSkills
+            | Self::SandboxTasks
+            | Self::SandboxOauthApps => Surface::Sandbox,
+            Self::SessionsRead
+            | Self::SessionsWrite
+            | Self::SessionsSandboxRelease
+            | Self::SandboxesDrain
+            | Self::WorkflowsRead
+            | Self::WorkflowsWrite
+            | Self::WorkflowsEvents
+            | Self::WorkflowsActions
+            | Self::SlackProxy
+            | Self::SlackExternalTeamsRead
+            | Self::SlackExternalTeamsWrite => Surface::ApiRs,
+        }
+    }
+}
+
+/// The credential surface whose rejection body a route answers. It is derived
+/// from the route's required capability, not from its path: a path no longer
+/// implies which credential type is accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Surface {
+    ApiRs,
+    Console,
+    Bearer,
+    Sandbox,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +247,15 @@ pub(crate) struct AuthenticatedCaller {
     platform_prefixes: Option<&'static [&'static str]>,
     principal_subject: Option<String>,
     api_client_token: Option<ApiClientToken>,
+    /// The effective Console user: a cookie session's user or the linked admin
+    /// a delegated sandbox token acts as.
+    console_user: Option<ConsoleUser>,
+    /// The cookie session a handler may rotate in its response.
+    console_session: Option<ConsoleSession>,
+    /// The `api_keys` row a bearer credential resolved.
+    bearer_api_key: Option<i64>,
+    /// The proxy binding and sandbox claims of a sandbox credential.
+    sandbox: Option<SandboxBinding>,
 }
 
 /// What an API client access token says about its validity.
@@ -99,6 +269,28 @@ pub(crate) struct ApiClientToken {
 }
 
 impl AuthenticatedCaller {
+    /// Builds a caller from a verified credential's identity and capabilities.
+    pub(crate) fn new(
+        class: CallerClass,
+        identity: impl Into<String>,
+        capabilities: impl IntoIterator<Item = Capability>,
+        platform_prefixes: Option<&'static [&'static str]>,
+        principal_subject: Option<String>,
+    ) -> Self {
+        Self {
+            class,
+            identity: identity.into(),
+            capabilities: capabilities.into_iter().collect(),
+            platform_prefixes,
+            principal_subject,
+            api_client_token: None,
+            console_user: None,
+            console_session: None,
+            bearer_api_key: None,
+            sandbox: None,
+        }
+    }
+
     pub(crate) fn api_client_token(&self) -> Option<&ApiClientToken> {
         self.api_client_token.as_ref()
     }
@@ -109,7 +301,54 @@ impl AuthenticatedCaller {
     }
 
     pub(crate) fn has_capability(&self, capability: Capability) -> bool {
-        self.capabilities.contains(&capability)
+        self.capabilities
+            .iter()
+            .any(|granted| granted.satisfies(capability))
+    }
+
+    /// Adds capabilities a credential's non-token context grants.
+    pub(crate) fn grant(&mut self, capabilities: impl IntoIterator<Item = Capability>) {
+        self.capabilities.extend(capabilities);
+    }
+
+    pub(crate) fn attach_console_user(
+        &mut self,
+        user: ConsoleUser,
+        session: Option<ConsoleSession>,
+    ) {
+        self.identity = user.email.clone();
+        self.console_user = Some(user);
+        self.console_session = session;
+    }
+
+    pub(crate) fn attach_bearer_api_key(&mut self, id: i64, owner: ConsoleUser) {
+        self.identity = owner.email.clone();
+        self.console_user = Some(owner);
+        self.bearer_api_key = Some(id);
+    }
+
+    pub(crate) fn attach_sandbox(&mut self, binding: SandboxBinding) {
+        self.sandbox = Some(binding);
+    }
+
+    pub(crate) fn console_user(&self) -> Option<&ConsoleUser> {
+        self.console_user.as_ref()
+    }
+
+    pub(crate) fn console_session(&self) -> Option<&ConsoleSession> {
+        self.console_session.as_ref()
+    }
+
+    pub(crate) fn bearer_api_key(&self) -> Option<i64> {
+        self.bearer_api_key
+    }
+
+    pub(crate) fn sandbox(&self) -> Option<&SandboxBinding> {
+        self.sandbox.as_ref()
+    }
+
+    pub(crate) fn is_sandbox_delegated(&self) -> bool {
+        self.has_capability(Capability::ConsoleDelegate)
     }
 
     pub(crate) const fn class(&self) -> CallerClass {
@@ -154,7 +393,7 @@ impl ApiAuthConfig {
                 STATIC_ADMIN_IDENTITY,
                 CallerClass::Admin,
                 token,
-                Capability::ALL,
+                Capability::API_RS,
                 None,
             ));
         }
@@ -279,45 +518,22 @@ impl ApiAuthConfig {
                 Ok(AuthenticatedCaller {
                     class: CallerClass::Console,
                     identity: subject,
-                    capabilities: Capability::ALL.into_iter().collect(),
+                    capabilities: Capability::API_RS.into_iter().collect(),
                     platform_prefixes: None,
                     principal_subject: None,
                     api_client_token: None,
+                    console_user: None,
+                    console_session: None,
+                    bearer_api_key: None,
+                    sandbox: None,
                 })
             }
             Some(ApiJwtTokenUse::ConsoleService) => Err(ApiError::Unauthorized(
                 "invalid Console service token subject".to_owned(),
             )),
-            None => {
-                let mut capabilities = BTreeSet::new();
-                match claims.capabilities {
-                    Some(jwt_capabilities) => {
-                        if jwt_capabilities.sessions_read {
-                            capabilities.insert(Capability::SessionsRead);
-                        }
-                        if jwt_capabilities.workflows_read {
-                            capabilities.insert(Capability::WorkflowsRead);
-                        }
-                        if jwt_capabilities.workflows_write {
-                            capabilities.insert(Capability::WorkflowsWrite);
-                        }
-                    }
-                    // Tokens minted before capability claims were deployed had
-                    // session read access. Preserve that access during rolling
-                    // upgrades; new tokens always carry the explicit object.
-                    None => {
-                        capabilities.insert(Capability::SessionsRead);
-                    }
-                }
-                Ok(AuthenticatedCaller {
-                    class: CallerClass::Principal,
-                    identity: subject.clone(),
-                    capabilities,
-                    platform_prefixes: None,
-                    principal_subject: Some(subject),
-                    api_client_token: None,
-                })
-            }
+            None => Err(ApiError::Unauthorized(
+                "invalid token use for this audience".to_owned(),
+            )),
         }
     }
 }
@@ -373,7 +589,8 @@ impl ApiAuthConfig {
             capabilities: claims
                 .scope
                 .split_whitespace()
-                .filter_map(Capability::from_api_client_scope)
+                .flat_map(Capability::from_api_client_scope)
+                .copied()
                 .collect(),
             platform_prefixes: None,
             principal_subject: None,
@@ -381,6 +598,10 @@ impl ApiAuthConfig {
                 secret_fingerprint: claims.secret_fingerprint,
                 expires_at: claims.exp,
             }),
+            console_user: None,
+            console_session: None,
+            bearer_api_key: None,
+            sandbox: None,
         })
     }
 }
@@ -417,17 +638,6 @@ pub enum ApiAuthConfigError {
 struct ApiJwtClaims {
     sub: String,
     token_use: Option<ApiJwtTokenUse>,
-    capabilities: Option<ApiJwtCapabilities>,
-}
-
-#[derive(Deserialize)]
-struct ApiJwtCapabilities {
-    #[serde(default)]
-    sessions_read: bool,
-    #[serde(default)]
-    workflows_read: bool,
-    #[serde(default)]
-    workflows_write: bool,
 }
 
 #[derive(Deserialize)]
@@ -502,6 +712,10 @@ fn static_caller(
             platform_prefixes,
             principal_subject: None,
             api_client_token: None,
+            console_user: None,
+            console_session: None,
+            bearer_api_key: None,
+            sandbox: None,
         },
     }
 }
@@ -574,7 +788,7 @@ mod tests {
                 STATIC_ADMIN_IDENTITY,
                 CallerClass::Admin,
                 "admin-key".to_owned(),
-                Capability::ALL,
+                Capability::API_RS,
                 None,
             )]),
             jwt_secret: Arc::from("jwt-secret"),
@@ -587,7 +801,7 @@ mod tests {
         assert_eq!(caller.class(), CallerClass::Admin);
         assert_eq!(caller.identity(), STATIC_ADMIN_IDENTITY);
         assert!(
-            Capability::ALL
+            Capability::API_RS
                 .into_iter()
                 .all(|capability| caller.has_capability(capability))
         );
@@ -621,65 +835,6 @@ mod tests {
             auth.authenticate(&headers),
             Err(ApiError::Unauthorized(_))
         ));
-    }
-
-    #[test]
-    fn authenticates_legacy_principal_jwt_with_session_read_capability() {
-        let auth = ApiAuthConfig::testing("jwt-secret");
-        let token = encode(
-            &Header::new(Algorithm::HS256),
-            &json!({
-                "iss": "centaur-console",
-                "sub": "prn_test",
-                "aud": "centaur-api",
-                "iat": 1_700_000_000i64,
-                "exp": 4_102_444_800i64,
-            }),
-            &EncodingKey::from_secret(b"jwt-secret"),
-        )
-        .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-
-        let caller = auth.authenticate(&headers).unwrap();
-        assert_eq!(caller.principal_subject(), Some("prn_test"));
-        assert!(caller.has_capability(Capability::SessionsRead));
-        assert!(!caller.has_capability(Capability::SessionsWrite));
-    }
-
-    #[test]
-    fn authenticates_principal_jwt_with_explicit_capabilities() {
-        let auth = ApiAuthConfig::testing("jwt-secret");
-        let token = encode(
-            &Header::new(Algorithm::HS256),
-            &json!({
-                "iss": "centaur-console",
-                "sub": "prn_test",
-                "aud": "centaur-api",
-                "iat": 1_700_000_000i64,
-                "exp": 4_102_444_800i64,
-                "capabilities": {
-                    "sessions_read": false,
-                    "workflows_read": true,
-                    "workflows_write": true,
-                },
-            }),
-            &EncodingKey::from_secret(b"jwt-secret"),
-        )
-        .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-
-        let caller = auth.authenticate(&headers).unwrap();
-        assert!(!caller.has_capability(Capability::SessionsRead));
-        assert!(caller.has_capability(Capability::WorkflowsRead));
-        assert!(caller.has_capability(Capability::WorkflowsWrite));
     }
 
     fn bearer(token: &str) -> HeaderMap {

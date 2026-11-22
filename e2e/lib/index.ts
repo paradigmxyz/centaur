@@ -548,8 +548,14 @@ export const scheduledTasks = {
   }
 }
 
+/**
+ * Runs a Rails snippet in the Console worker, the Rails process the chart still
+ * runs (api-rs serves the Console itself). The worker shares the Console image,
+ * the database env, and the ActiveRecord encryption keys with the migration Job,
+ * and its boot also runs the Console bootstrap initializer.
+ */
 async function consoleRunner(script: string): Promise<string> {
-  return kubectl({}, 'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', script)
+  return kubectl({}, 'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', script)
 }
 
 function consoleResult(out: string): any {
@@ -577,7 +583,7 @@ export const apiClients = {
     })
     const out = await kubectl(
       {},
-      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', `
+      'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', `
         params = JSON.parse(${JSON.stringify(params)})
         admin = User.where(admin: true).order(:id).first or raise "no admin user"
         principal = Principal.new(kind: "unknown", foreign_id: params["name"], name: params["name"], created_by: admin)
@@ -596,7 +602,7 @@ export const apiClients = {
   async rotate(client: ApiClient): Promise<ApiClient> {
     const out = await kubectl(
       {},
-      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner', `
+      'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', `
         client = ApiClient.find_by_oid!(${JSON.stringify(client.clientId)})
         client.rotate_secret!
         puts "E2E_API_CLIENT_SECRET " + client.secret`
@@ -608,7 +614,7 @@ export const apiClients = {
   async disable(client: ApiClient): Promise<void> {
     await kubectl(
       {},
-      'exec', `deploy/${release}-centaur-console`, '--', 'bin/rails', 'runner',
+      'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner',
       `ApiClient.find_by_oid!(${JSON.stringify(client.clientId)}).update!(disabled_at: Time.current)`
     )
   },

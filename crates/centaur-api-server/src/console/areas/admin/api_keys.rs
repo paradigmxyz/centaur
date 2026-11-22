@@ -27,7 +27,7 @@ use super::common::{self, AdminError, json_created, json_ok, no_content};
 use crate::{
     AppState,
     console::{
-        bearer::{BearerApiKey, BearerRoutes, BearerUser},
+        guard::{BearerApiKey, BearerUser, GuardedRoutes},
         http::{ConsoleError, ListParams, ListSource, bind, list},
         request::ConsoleData,
     },
@@ -85,10 +85,10 @@ fn payload(key: &ApiKeyRow) -> ApiKeyPayload {
     ApiKeyPayload::from(key)
 }
 
-pub(super) fn bearer(routes: BearerRoutes) -> BearerRoutes {
+pub(super) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
     routes
-        .admin("/api_keys", get(index).post(create))
-        .admin("/api_keys/{id}", get(show).delete(destroy))
+        .operator("/api_keys", get(index).post(create))
+        .operator("/api_keys/{id}", get(show).delete(destroy))
 }
 
 async fn index(

@@ -55,9 +55,12 @@ proxySync:
       path: /events/events
       username: dev
 
-# The test runner calls the console API through its NodePort (test-access.yaml).
+# The test runner reaches the Console (served by api-rs) through its NodePort
+# (test-access.yaml). console.publicUrl is the browser origin the session cookie
+# and unsafe-request Origin checks use, and the host that selects the Console
+# router on api-rs, so it must match the NodePort URL exactly.
 console:
-  allowedHosts: [127.0.0.1]
+  publicUrl: http://127.0.0.1:30082
 
 slackbotv2:
   extraEnv:

@@ -1,212 +1,96 @@
 ---
-title: Cut over the Console to api-rs
-description: Move the Console host, API, and MCP OAuth endpoints from the Rails pods to api-rs with the chart's console.backend switch, and roll back safely.
+title: Upgrade to the api-rs Console
+description: What changes when the chart moves the Console to api-rs, how to verify the upgrade, and how to roll back.
 ---
 
-# Cut over the Console to api-rs
+# Upgrade to the api-rs Console
 
-The Console can be served by either implementation:
+The Console runs in api-rs. There is no implementation flag: upgrading to this
+chart version moves the Console host, its JSON API, the operator SPA, the MCP
+OAuth endpoints, and the bearer and sandbox APIs from the Rails pods to api-rs.
+URLs do not change.
 
-- `rails` (default): the Rails web and Solid Queue worker pods serve the Console,
-  its JSON API, and the MCP OAuth endpoints.
-- `apirs`: api-rs serves the same paths from its in-process Console layer. The
-  chart retargets the Console ingress, HTTPRoutes, and the in-cluster Console URL
-  to the api-rs Service, forwards the legacy `console` Service to api-rs, and
-  scales the Rails web and worker pods to zero.
+What the chart still runs from `services/console`:
 
-Both implementations read and write the same Console database, so the switch
-changes routing and the serving process, not the data. `console.backend=apirs`
-requires `apiRs.enabled=true` and `apiRs.console.enabled=true`; the chart fails
-to render otherwise.
+- the console-migrate Job, which owns the Console schema (`bin/rails db:prepare`)
+  and the initial-admin bootstrap, as a pre-upgrade Helm hook;
+- the Solid Queue worker, which runs the Slack channel catalog and membership
+  refresh jobs;
+- the `console` Service, now a compatibility alias forwarding its historical
+  `console:3000` URL to api-rs, so in-cluster clients with a cached URL keep
+  working.
 
-:::warning
-Rails background jobs are not part of the ported Console yet. Flipping to
-`apirs` scales the Solid Queue worker to zero, so broker-credential refresh,
-Slack/Google Docs sync, scheduled-task jobs, and other enqueued work pause until
-you flip back to `rails`. Schedule the cutover accordingly.
-:::
+Rollback is `helm rollback` to the previous chart revision. The Console schema is
+unchanged by the upgrade (the same Rails migrations run either way), so the
+rollback is data-safe.
 
-## Prerequisites
+## Before upgrading
 
-1. **A writable Console database role.** api-rs writes through
-   `IRON_CONTROL_DATABASE_URL` (and `IRON_CONTROL_DATABASE_NAME` when the URL has
-   no database path). The role must be able to `SELECT`, `INSERT`, `UPDATE`, and
-   `DELETE` in the Console database and use its sequences. Verify before the
-   flip:
+1. **`console.publicUrl` must be the real browser origin.** api-rs uses it as the
+   session-cookie and unsafe-request Origin, and as the host that selects the
+   Console router, so it must match the URL users and MCP clients load (scheme,
+   host, and port when non-default). The chart fails to render without it.
+2. **`<secretManager.envPrefix>CONSOLE_SESSION_SECRET` must exist** in
+   `secretManager.existingSecretName`. The chart renders it into api-rs and the
+   pod fails to start without it. Generate it once and keep it stable — every
+   rotation signs all browsers out. `contrib/scripts/bootstrap-k8s-secrets.sh`
+   generates it when absent for local stacks.
+3. **Keep the existing Console secrets.** api-rs reads the same
+   `IRON_CONTROL_AR_ENCRYPTION_*`, `IRON_CONTROL_DATABASE_URL`,
+   `IRON_CONTROL_INITIAL_API_KEY`, and `CENTAUR_JWT_SIGNING_SECRET` keys and maps
+   them to the `CENTAUR_CONSOLE_*` names the Rust handlers read. Do not rotate
+   them during the upgrade, or stored credentials cannot be decrypted.
+4. **The Console database role needs write access.** api-rs writes through
+   `IRON_CONTROL_DATABASE_URL` (plus `IRON_CONTROL_DATABASE_NAME` when the URL
+   has no database path).
+5. **Use an api-rs image that contains the Console**, including the built SPA.
+   The image sets `CENTAUR_CONSOLE_SPA_SHELL`, `CENTAUR_CONSOLE_SPA_ASSETS`, and
+   `CENTAUR_CONSOLE_PUBLIC_ROOT`; override them through `apiRs.extraEnv` only if
+   your image places the files elsewhere.
 
-   ```bash
-   psql "$IRON_CONTROL_DATABASE_URL" -c 'SELECT 1 FROM users LIMIT 1'
-   psql "$IRON_CONTROL_DATABASE_URL" -c 'BEGIN; UPDATE settings SET updated_at = updated_at WHERE false; ROLLBACK;'
-   ```
-
-2. **`CONSOLE_SESSION_SECRET` in the shared infra Secret** under
-   `<secretManager.envPrefix>CONSOLE_SESSION_SECRET`. This is a new key, not one
-   the Rails pods use. Generate it once with `openssl rand -base64 48` and keep
-   it stable: rotating it invalidates every browser session and every in-flight
-   OAuth flow.
-
-3. **The existing ActiveRecord encryption keys stay in place.** api-rs reads the
-   Rails-era `<prefix>IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`,
-   `_DETERMINISTIC_KEY`, and `_KEY_DERIVATION_SALT` keys and maps them to the
-   `CENTAUR_CONSOLE_AR_ENCRYPTION_*` environment variables. Do not rotate or
-   recreate them during the cutover, or stored secrets and credentials cannot be
-   decrypted.
-
-4. **A Console public URL and matching IdP registrations.** `console.publicUrl`
-   must be the origin users and MCP clients reach (for example
-   `https://console.example.com`). Google, Slack, and Okta redirect URIs must
-   already use that origin; the cutover does not change them.
-
-5. **A Console-capable api-rs image.** Build api-rs from the commit that contains
-   the Console port, including the built SPA. The api-rs Dockerfile builds
-   `services/console/web`, copies the shell to
-   `/app/services/console/spa-shell/index.html`, the hashed assets to
-   `/app/services/console/public/spa/assets` (without source maps), and the root
-   public files the shell, manifest, and service worker fetch. It sets
-   `CENTAUR_CONSOLE_SPA_SHELL`, `CENTAUR_CONSOLE_SPA_ASSETS`, and
-   `CENTAUR_CONSOLE_PUBLIC_ROOT` accordingly. If your image places them
-   elsewhere, override those three variables through `apiRs.extraEnv` before
-   flipping. Without them the login pages work but the post-login SPA returns
-   its not-built response.
-
-6. **IdP secrets already used by the Rails Console.** The same shared Secret
-   keys are mapped to the `CENTAUR_CONSOLE_*` names api-rs reads. Do not remove
-   the Rails-era keys during the cutover.
-
-## Pre-cutover check
-
-Turn on the api-rs Console layer while Rails still owns the host:
-
-```yaml
-apiRs:
-  console:
-    enabled: true
-```
-
-Run `helm upgrade`, then smoke test api-rs directly through a port-forward. The
-ingress still points at Rails, so browser traffic is unaffected:
-
-```bash
-kubectl port-forward -n <namespace> svc/<release>-centaur-api-rs 8080:8080
-curl -sS http://127.0.0.1:8080/login | head
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/api/v1/console/me
-```
-
-Expect the sign-in page and a `401` (or `403`) JSON envelope from the console
-API, not a `404`. Check the api-rs pod logs for a missing-secret or
-database-connection error before continuing.
-
-## Flip
-
-```yaml
-console:
-  backend: apirs
-  publicUrl: https://console.example.com
-apiRs:
-  console:
-    enabled: true
-```
-
-Apply and watch the rollout:
+## Upgrade
 
 ```bash
 helm upgrade <release> contrib/chart -n <namespace> -f your-values.yaml
 kubectl rollout status deploy/<release>-centaur-api-rs -n <namespace>
-kubectl get deploy -n <namespace> -l app.kubernetes.io/component=console
+kubectl get pods -n <namespace> -l app.kubernetes.io/component=console-migrate
 kubectl get deploy -n <namespace> -l app.kubernetes.io/component=console-worker
 ```
 
-What changes when the switch is on:
+Helm runs the console-migrate Job before it updates the release, so the schema
+and the initial admin exist before api-rs and the worker start. api-rs,
+proxy-sync, token-broker, and the worker also wait for the Console schema in an
+init container, which is what orders a first install on the bundled Postgres.
 
-- The Console Ingress and any `httpRoutes` backend written with
-  `component: console` point at the api-rs Service and its port.
-- The in-cluster Console URL used by api-rs, proxy-sync, sandboxes, and
-  iron-proxy (`IRON_CONTROL_URL` / `CENTAUR_CONSOLE_URL`) becomes the api-rs
-  Service URL.
-- The `console` Service keeps its name and port but forwards to api-rs, so a
-  sandbox or script with a cached `console:3000` URL still reaches the ported
-  Console. The Rails web and worker Deployments scale to zero.
-- The api-rs NetworkPolicy admits the Console ingress-controller namespaces and
-  iron-proxy pods on the api-rs port.
+Then verify:
 
-## Verification
-
-1. **Routing.** The Ingress backend names the api-rs Service and port, and the
-   `console` Service endpoints resolve to api-rs pods:
-
-   ```bash
-   kubectl describe ingress <release>-centaur-console -n <namespace>
-   kubectl get endpoints <release>-centaur-console -n <namespace>
-   kubectl get pods -n <namespace> -l app.kubernetes.io/component=console
-   ```
-
-   The old Rails pods should be terminating or gone, and no `console-worker`
-   pod should be running.
-
-2. **Browser and API.** Sign in through the public URL. Confirm the SPA loads,
-   the signed-in user is correct, and an admin page such as Principals or
-   Settings reads and writes successfully. Confirm a write from the SPA succeeds
-   (it sends no CSRF token; the browser's same-origin `Origin` is the check)
-   and that sign-out clears the browser session.
-
-3. **MCP login, both clients.** Add the Console public URL as a remote MCP
-   server in a real Claude client and in a real ChatGPT client. Complete the
-   login and consent in each, then list tools from each client. A successful
-   OAuth callback that never lists tools is not proof of usable access.
-
-4. **One OAuth consent per provider.** For each configured identity provider
-   (Google, Slack, Okta), complete one interactive OAuth consent from the
-   Console. Confirm the callback stores the credential and that a subsequent
-   token use succeeds; a connected UI state alone is not proof.
-
-5. **Broker credentials.** Trigger a broker-credential refresh or a tool call
-   that uses one, and confirm it succeeds. Remember that the Rails worker is
-   stopped, so any scheduled refresh cadence is paused during the cutover.
-
-6. **Logs.** Check api-rs for `500`, `session_required`, CSRF, and database
-   errors during the verification window. Expect the Rails-specific
-   Solid Queue job logs to stop.
+1. **Browser.** Sign in at the Console public URL. The SPA must load, the
+   signed-in user must be correct, and an admin page must read and write.
+2. **MCP login.** Add the Console URL as a remote MCP server in your clients and
+   complete login and consent in each. An OAuth callback that never lists tools
+   is not proof of usable access.
+3. **One interactive consent per configured IdP** (Google, Slack, Okta), then a
+   token use that exercises the stored credential.
+4. **Worker.** Confirm the Slack channel catalog and membership refresh jobs
+   still run (`kubectl logs deploy/<release>-centaur-console-worker`).
 
 ## Rollback
 
-Set the switch back and apply:
-
-```yaml
-console:
-  backend: rails
-```
-
-Keep `apiRs.console.enabled: true` during rollback; it only mounts the api-rs
-Console layer and does not route traffic. The chart restores the original
-Console ingress, internal URL, Service selector, and Rails replica counts. Then:
-
 ```bash
+helm rollback <release> <previous-revision> -n <namespace>
 kubectl rollout status deploy/<release>-centaur-console -n <namespace>
 kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
-kubectl get endpoints <release>-centaur-console -n <namespace>
 ```
 
-Verify sign-in, one SPA read/write, and the same MCP client login before
-declaring the rollback complete.
+The previous revision restores the Rails web Deployment, the Ingress, and the
+internal URL. The schema is the same one both implementations use, so no data
+migration is needed.
 
-## Expected one-time failures
+## Expected one-time effects
 
-- **Every browser is signed out once.** The Rails and Rust session cookies are
-  different formats under the same cookie name, so each user signs in again
-  after the flip and again after a rollback.
+- **Every browser signs in once more.** The Rails and api-rs session cookies are
+  different formats under the same cookie name, so sessions do not carry over —
+  in either direction.
 - **In-flight OAuth flows fail.** A flow started on one implementation must
-  finish there: the state/PKCE envelope is not interchangeable. Users in the
-  middle of an MCP consent or broker OAuth callback see an invalid-state error
-  and retry. Drain active consents before flipping when that is practical.
-- **A form rendered by the port before a rollback is rejected by Rails.** The
-  port's server-rendered sign-in and OAuth forms carry no `authenticity_token`
-  and rely on an exact `Origin`; Rails still requires its token, so reload any
-  form rendered by api-rs and submitted after a rollback. A Rails form
-  submitted to api-rs is accepted (the token is ignored) when `Origin`
-  matches.
-- **Warm or in-flight sandboxes may briefly use the old Console URL.** The
-  `console` Service forwards to api-rs to cover a cached in-cluster URL, but a
-  sandbox whose per-sandbox proxy policy was rendered before the flip can still
-  fail entitlement syncs until it is replaced. New sandboxes use the api-rs URL.
-- **Background work is paused.** Rails jobs do not run while
-  `console.backend=apirs`; restore `rails` to resume them.
+  finish there; users in the middle of an MCP consent or a broker OAuth callback
+  see an invalid-state error and retry.

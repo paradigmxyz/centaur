@@ -1,9 +1,10 @@
 # Rust Console layer
 
 This tree is the foundation for moving the Rails Console (`services/console`)
-into api-rs. It provides the session cookie, the credential guards, the shared
-JSON/error helpers, and the sign-in/logout pages. Later area ports add routes
-through the builders here; they do not reimplement authentication.
+into api-rs. It provides the session cookie, the unified credential/capability
+guard, the shared JSON/error helpers, and the sign-in/logout pages. Later area
+ports add routes through the builder here; they do not reimplement
+authentication.
 
 The layer is mounted only when **both** `CONSOLE_SESSION_SECRET` and
 `CENTAUR_CONSOLE_PUBLIC_URL` are configured. `CENTAUR_CONSOLE_PUBLIC_URL`
@@ -16,6 +17,7 @@ When disabled, these paths fall through to the rest of api-rs exactly as before.
 | --- | --- |
 | `mod.rs` | Mount point, environment switches, JSON 404 fallback, host routing. |
 | `host.rs` | Console-host vs internal-host path split (see "Host routing"). |
+| `guard.rs` | The single route builder and authorization layer (see "Authorization"). |
 | `session_cookie.rs` | AES-256-GCM stateless session cookie. |
 | `return_path.rs` | Port of `ConsoleReturnPath.safe` for post-login redirects. |
 | `http.rs` | Error envelope, JSON 404, `{"data": ...}` envelopes, pagination, label filters, lists, origin. |
@@ -25,12 +27,11 @@ When disabled, these paths fall through to the rest of api-rs exactly as before.
 | `pages.rs` | Server-rendered `/login`, `/pending`, `/logout`. |
 | `tests_db.rs` | DB-backed integration tests for the shipped routers. |
 
-`console_session.rs` (one level up) owns `ConsoleSessionConfig`,
-`ConsoleRoutes`, and the `/api/v1/console` guard. The console guard accepts the
-session cookie or a sandbox-delegated user credential (an entitlement JWT from
-an active Console admin's Slack DM that passes the sandbox-admin rule), and
-never an API key. `bearer.rs` and `sandbox.rs` own the other two credential
-schemes.
+`console_session.rs` (one level up) owns `ConsoleSessionConfig` and the
+`/me`/`/session` shell endpoints. `bearer.rs`, `sandbox.rs`, and `guard.rs`
+share the single authorization model described below; `bearer.rs` is only the
+`/api/v1` mount point, and `sandbox.rs` owns the sandbox token verification and
+live binding checks.
 
 ## Host routing
 
@@ -40,8 +41,8 @@ case-insensitively. It reads `Host` only; api-rs also uses `X-Forwarded-Host`
 when it builds absolute OAuth metadata URLs, but that header never selects the
 router. A missing or unparseable `Host` is not the Console host.
 
-Host routing is not where authorization happens. The credential guards in the
-next sections still verify every credential and decide access. The one extra
+Host routing is not where authorization happens. The unified guard in the next
+section still verifies every credential and decides access. The one extra
 routing rule is that the cookie console API is not exposed on an internal host:
 a `/api/v1/console/*` request without an `Authorization` header is a 404 before
 the guard runs. A delegated JWT carries `Authorization`, so it reaches the same
@@ -52,10 +53,10 @@ guard as on the public host.
 | SPA shell, PWA, root public files | `/`, `/console/*`, other browser navigations, `/manifest`, `/manifest.json`, `/service-worker`, `/service-worker.js`, `/icon.svg`, `/launch` | Console session cookie when signed in | yes | 404 |
 | Server-rendered pages | `/login`, `/logout`, `/pending`, `/auth/*`, `/oauth/:slug/{start,callback}`, `/mcp/oauth/*`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | form/session cookie | yes | 404 |
 | OAuth page assets | `/assets/oauth-page/*` | none | yes | 404 |
-| Console API | `/api/v1/console/*` | Console session cookie **or** sandbox-delegated user JWT | yes | sandbox-delegated JWT only; a cookie-only request is 404 |
-| Bearer API | the rest of `/api/v1/*` | API key whose owner is an active admin | yes | yes |
-| Sandbox API | `/api/v1/sandbox/*` | sandbox entitlement JWT | yes | yes |
-| api-rs session, sandbox, Slack, workflow, scheduled-task, admin, and webhook routes | `/api/session/*`, `/api/sandboxes/*`, `/api/slack/*`, `/api/workflows/*`, `/api/scheduled-tasks/*`, `/api/admin/*`, `/api/webhooks/*` | each api-rs guard | 404 | yes |
+| Console API | `/api/v1/console/*` | `console.*` capability: session cookie, delegated sandbox token, or another credential that holds it | yes | credential-bearing requests only; a cookie-only request is 404 |
+| Bearer API | the rest of `/api/v1/*` | `operator.api`: Console API key whose owner is an active admin | yes | yes |
+| Sandbox API | `/api/v1/sandbox/*` | `sandbox.*` capability from the single sandbox token | yes | yes |
+| api-rs session, sandbox, Slack, workflow, scheduled-task, admin, and webhook routes | `/api/session/*`, `/api/sandboxes/*`, `/api/slack/*`, `/api/workflows/*`, `/api/scheduled-tasks/*`, `/api/admin/*`, `/api/webhooks/*` | the capability each route declares | 404 | yes |
 | Health and metrics | `/healthz`, `/readyz`, `/metrics` | none | 404 | yes |
 | MCP server and protected-resource metadata | `/mcp`, `/.well-known/oauth-protected-resource[/mcp]` | MCP auth | 404 | yes |
 | API-client token issuance | `/oauth/token` | API client | 404 | yes |
@@ -65,9 +66,9 @@ Consequences worth keeping:
 - In-cluster services (iron-proxy, bots, `centaur-perms`, the connectors) reach
 the Console API through the internal Service name, so they get `/api/v1/*` on a
 non-Console host. Browser sessions do not: the SPA shell, server pages, and a
-cookie-authenticated `/api/v1/console/*` answer 404 there. A sandbox-delegated
-JWT still works on both hosts because it carries its own `Authorization`
-header and no cookie.
+cookie-authenticated `/api/v1/console/*` answer 404 there. A sandbox token still
+works on both hosts because it carries its own `Authorization` header and no
+cookie.
 - The Kubernetes probes connect to the pod IP, not the public Console host, so
 `/healthz` and `/readyz` being absent on the Console host is intentional. A
 reverse proxy in front of the public host must not retarget probes at it. The
@@ -77,61 +78,126 @@ probes `/login` for readiness for the same reason.
 middleware is mounted and the listener serves exactly the api-rs routes it did
 before the port.
 
-## Adding an API route
+## Authorization
 
-Console session routes must use `ConsoleRoutes`. There is no unguarded
-`Router::route` path:
+Every credential resolves to an `AuthenticatedCaller`: an identity plus a set
+of `auth::Capability` values. Every route declares the one capability it
+requires. `console::guard::GuardedRoutes` is the only route builder and the
+only enforcement layer, replacing the old `ConsoleRoutes`, `BearerRoutes`, and
+`SandboxRoutes` guards and api-rs's `route_access` table. There is no unguarded
+`Router::route` path for an authenticated API namespace.
+
+The route's capability selects the unauthenticated/forbidden error envelope
+(`Capability::surface`). The path does **not** select which credential type is
+accepted: on any guarded route the guard tries the single sandbox token, a
+Console API key, api-rs's static/service credentials, and (on a Console route,
+when no `Authorization` header is present) the Console session cookie.
+
+### Capability catalog
+
+| Capability | Grants | Surface |
+| --- | --- | --- |
+| `sessions.read` / `sessions.write` | api-rs session reads/writes | api-rs |
+| `sessions.sandbox_release` | `DELETE /api/session/:key/sandbox` (API clients and service credentials; never an ingress key) | api-rs |
+| `sandboxes.drain` | sandbox drain and session pause | api-rs |
+| `workflows.read` / `workflows.write` / `workflows.events` / `workflows.actions` | the workflow, scheduled-task, and Slack-button routes | api-rs |
+| `slack.proxy` | `/api/slack/*`, scoped by the sandbox token's channel lists | api-rs |
+| `slack_external_teams.read` / `.write` | the Slack Connect allowlist | api-rs |
+| `console.read` | any enabled Console account | Console |
+| `console.pending` | `/me` and `/session`, including pending accounts | Console |
+| `console.user` | skills, scheduled tasks, personal SSH key, integrations for an active user | Console |
+| `console.admin` | everything else under `/api/v1/console` | Console |
+| `operator.api` | `/api/v1/*` outside the console and sandbox namespaces | Bearer |
+| `sandbox.permissions` / `sandbox.skills` / `sandbox.tasks` / `sandbox.oauth_apps` | the matching `/api/v1/sandbox/*` resources | Sandbox |
+| `console.delegate` | a sandbox credential acting as its linked active Console admin | Console |
+
+`console.admin` implies `console.user`, `console.user` implies
+`console.pending`, and `console.pending` implies `console.read`;
+`console.delegate` implies every Console level. Nothing else implies another
+capability.
+
+### Credential -> capability
+
+| Credential | Identity | Capabilities |
+| --- | --- | --- |
+| Console session cookie | the user | `console.read`, plus `console.admin`/`console.user`/`console.pending` for the account level |
+| Console API key | the key owner (must be an active admin) | `operator.api` |
+| Sandbox token | the principal (`sub`), acting as the proxy's sandbox | the principal's sandbox flags, `slack.proxy`, the four `sandbox.*`, and `console.delegate` when the live admin link holds |
+| Static admin key (`CENTAUR_APIRS_ADMIN_API_KEY`) | `api-rs-admin` | every api-rs capability (`Capability::API_RS`) |
+| Console service JWT | `centaur-console` | `Capability::API_RS` |
+| Ingress key | the bot | `sessions.read`/`sessions.write`, `workflows.events`, and for slackbot `workflows.actions`/`slack_external_teams.read`; platform-prefix scoped |
+| API client token | the API client | its live scopes: `sessions.read` and `sessions.write` (+ `sessions.sandbox_release`) |
+| MCP OAuth token | the MCP principal | unchanged; `/mcp` is its own protocol boundary and does not use this route catalog |
+
+Operator (`operator.api`) is deliberately narrower than a Console session: user
+approval, API clients, system settings, and workflow force start stay
+`console.admin` routes, so a leaked API key cannot reach them. A bearer key on
+a Console route therefore gets Console's `403 session_required`, not admin
+access.
+
+### Sandbox token
+
+proxy-sync mints one token per assigned proxy and iron-proxy injects it once as
+`Authorization: Bearer ...` with a host-only rule for every api-rs host,
+including the Console host. There is no second token and no rule-order
+dependency. Claims:
+
+```json
+{
+  "iss": "centaur-console",
+  "aud": "centaur-sandbox",
+  "iat": 1700000000,
+  "exp": 1700259200,
+  "sub": "prn_...",
+  "sandbox_id": "<proxy name>",
+  "proxy_id": "prx_...",
+  "capabilities": ["sessions.read", "workflows.read", "slack.proxy",
+                   "sandbox.permissions", "sandbox.skills", "sandbox.tasks",
+                   "sandbox.oauth_apps", "console.delegate"],
+  "slack": {"upload_channels": [], "download_channels": [], "history_channels": []},
+  "console_delegate": true
+}
+```
+
+Signatures, `aud`, `iss`, and `exp` are checked on every request. The token is
+never trusted alone: the guard re-reads the proxy -> principal binding (assigned,
+same name, same principal) and, for `console.delegate`, re-checks that the
+principal is still a Slack DM in the bot's home workspace linked to an active
+Console admin. Reassigning a proxy or demoting/disabling the admin revokes
+access on the next request. Sandbox secret writes keep their restriction: no
+`control_plane`/`token_broker` sources, no editing OAuth-backed secrets, and no
+secret deletes.
+
+### Adding a route
 
 ```rust
-let routes = ConsoleRoutes::new(state)
-    .admin("/principals", get(list).post(create)) // default, explicit
-    .active("/integrations", get(list))
-    .pending("/me", get(me));
+let routes = GuardedRoutes::new(state)
+    .console_admin("/principals", get(list).post(create)) // default level
+    .console_user("/integrations", get(list))
+    .console_pending("/me", get(me));
 routes.into_router()
 ```
 
-Use `admin` for admin-only endpoints, `active` for any active account, and
-`pending` only for endpoints that pending accounts may reach. The guard checks,
-in order:
+Use `console_admin` for admin-only endpoints, `console_user` for any active
+account, `console_pending` only for endpoints pending accounts may reach,
+`operator` for the bearer API, and `sandbox(path, route, capability)` for a
+sandbox resource. api-rs's own routes (`routes.rs`) use `methods(path, route,
+[(Method, Capability), ...])` when one path's methods differ, and
+`merge_guarded(router, capability)` for a nested family.
 
-1. an `Authorization` header is present: a sandbox entitlement JWT for a Slack
-   DM principal linked to an active Console admin acts as that user, with no
-   cookie, Origin, or CSRF token; anything else, including an API key, gets 403
-   `session_required`
-2. a valid session cookie and existing user -> 401 `session_required`
-3. `status = disabled` -> 401 `account_disabled` and clears the cookie
-4. pending account without `allow_pending` -> 403 `account_pending`
-5. unsafe method without an `Origin` exactly equal to the Console public origin
-   -> 403 `csrf` (no token; a missing, `null`, or different Origin is refused,
-   and `Referer` is never a fallback)
-6. admin route without an admin -> 403 `admin_required`
-
-The sandbox-delegated credential gets the same account and access-level checks
-as a session, but never falls back to a cookie.
+The Console cookie guard keeps Console's browser rules in order: a disabled
+account is rejected and its cookie reset; an unsafe method must carry an
+`Origin` exactly equal to the Console public origin; an `Authorization` header
+is never mixed with a cookie session. Pending accounts get `console.read` +
+`console.pending`, so an admin route answers `403 account_pending` before any
+Origin check (as before), and an active non-admin on an admin route answers
+`403 admin_required`.
 
 Error bodies are `{"error":{"message":...,"details":{"reason":...}}}`; use
-`ConsoleError` in `http.rs` rather than building a new shape.
-
-The bearer API under `/api/v1` uses `BearerRoutes` (`bearer.rs`). It hashes the
-presented token with SHA-256, requires an active user, and then an admin. Its
-error bodies are `invalid or missing API key` (401) and `API key owner is not an
-admin` (403). The console and bearer namespaces are separate nested routers, so
-a console route can never reach the bearer guard (or the reverse); a router test
-pins that, and the bearer guard no longer carries an unreachable
-credential-namespace branch. Add machine
-endpoints with `BearerRoutes::admin`. Handlers that need the authenticated
-credential itself extract `BearerApiKey` (the `api_keys` row id the guard
-resolved); never re-hash the `Authorization` header to find it.
-
-Sandbox routes use `SandboxRoutes` (`sandbox.rs`): `route` validates the HS256
-entitlement JWT and proxy/principal binding, and `jwt_only` skips the binding for
-the public OAuth app index. The JWT must carry `exp` (proxy-sync always sets
-it); issuer, audience, and signature checks stay on. There is no sandbox-admin
-route family: the console guard reuses `sandbox_admin_user` for that identity.
-Keep the issuer/audience environment variables and defaults unchanged.
-
-Each builder attaches its guard as a per-route layer and defaults to the
-strictest policy, so a route cannot be added without a credential check.
+`ConsoleError` in `http.rs` rather than building a new shape. The bearer and
+sandbox surfaces keep their previous bodies (`invalid or missing API key` /
+`invalid (or missing) sandbox token`); the unified guard picks the envelope from
+the route's required capability, not from the URL.
 
 ## Session cookie and Origin
 
@@ -778,10 +844,12 @@ cargo test --locked -p centaur-api-server console_session
 
 The DB tests drive the real routers (`build_router_with_app_state`,
 `bearer_router`, `sandbox_router`) and cover login -> `/me` -> CSRF write ->
-logout, disabled/pending accounts, bearer owner states, sandbox proxy checks,
-and the sandbox-admin credential on console routes. Unit tests in `host.rs` and
-`console::tests` pin the public/internal path split and the credential each
-side accepts. The workspace CI run skips the `console_session_db_` tests
+logout, disabled/pending accounts, bearer owner states, the single sandbox
+token and its live proxy binding, the delegated Console credential, and the
+sandbox secret-write restriction. Unit tests in `host.rs`, `console::tests`,
+`console::guard`, and `auth.rs` pin the public/internal path split, the
+capability catalog and its implication hierarchy, and the credential ->
+capability sets. The workspace CI run skips the `console_session_db_` tests
 because it does not load the Console schema; the schema-backed job runs them
 explicitly.
 
