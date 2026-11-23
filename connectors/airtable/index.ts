@@ -201,6 +201,27 @@ const recordsPath = (base_id: string, table: string): string =>
 
 const tablesPath = (base_id: string): string => `${META_URL}/bases/${seg(base_id)}/tables`;
 
+/** Find a table in the base schema by ID or (case-sensitive, then case-insensitive) name, or throw. */
+async function resolveTable(ctx: Ctx, base_id: string, table: string): Promise<AirtableTable> {
+  const wanted = table.trim();
+  const body = await request(ctx, "schema", "GET", tablesPath(base_id));
+  const tables = (body?.tables ?? []) as AirtableTable[];
+  const found =
+    tables.find((item) => item.id === wanted || item.name === wanted) ??
+    tables.find((item) => String(item.name ?? "").toLowerCase() === wanted.toLowerCase());
+  if (!found) throw new Error(`Airtable table not found in base ${base_id}: ${table}`);
+  return found;
+}
+
+/** The meta API's field endpoints take IDs only; look the table up when given a name. */
+async function tableId(ctx: Ctx, base_id: string, table: string): Promise<string> {
+  const wanted = table.trim();
+  return /^tbl[A-Za-z0-9]+$/.test(wanted) ? wanted : (await resolveTable(ctx, base_id, wanted)).id;
+}
+
+const fieldsPath = (base_id: string, table_id: string): string =>
+  `${tablesPath(base_id)}/${seg(table_id)}/fields`;
+
 /** Split an Airtable URL into its IDs (no network call). */
 function parseUrl(url: string): ParsedUrl {
   const match = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)([^?#]*)/.exec(url.trim());
@@ -696,6 +717,72 @@ export async function create_table(
   };
   if (args.description !== undefined) body.description = args.description;
   return { table: await request(ctx, "create table", "POST", tablesPath(args.base_id), body) };
+}
+
+/**
+ * Add a field (column) to a table. `table` is a table ID or name; `type` is an Airtable field type
+ * (singleLineText, multilineText, number, checkbox, date, singleSelect, multipleSelects,
+ * multipleRecordLinks, url, email, ...); `options` is that type's configuration, e.g.
+ * `{ choices: [{ name: "Open" }, { name: "Done" }] }` for singleSelect or `{ precision: 0 }` for
+ * number (see https://airtable.com/developers/web/api/field-model). Computed types (formula,
+ * rollup, lookup, autoNumber, ...) cannot be created through the API. Needs the
+ * `schema.bases:write` scope. Returns the new field with its generated `id`.
+ */
+export async function create_field(
+  args: { base_id: string; table: string; name: string; type: string; description?: string; options?: unknown },
+  ctx: Ctx,
+): Promise<{ table_id: string; field: AirtableField }> {
+  if (!args.name.trim()) throw new Error("Field name must not be empty.");
+  if (!args.type.trim()) throw new Error("Field type must not be empty.");
+  const table_id = await tableId(ctx, args.base_id, args.table);
+  const body: { [field: string]: unknown } = { name: args.name, type: args.type };
+  if (args.description !== undefined) body.description = args.description;
+  if (args.options !== undefined) body.options = args.options;
+  const field = await request(ctx, "create field", "POST", fieldsPath(args.base_id, table_id), body);
+  return { table_id, field };
+}
+
+/**
+ * Rename a field and/or change its description. `table` is a table ID or name; `field` is a field ID
+ * (`fld…`) or its current name. Airtable's API cannot change a field's type or options, and has no
+ * endpoint to delete a field: removal must be done in the Airtable UI. Needs the
+ * `schema.bases:write` scope.
+ */
+export async function update_field(
+  args: { base_id: string; table: string; field: string; name?: string; description?: string },
+  ctx: Ctx,
+): Promise<{ table_id: string; field: AirtableField }> {
+  if (args.name === undefined && args.description === undefined) {
+    throw new Error("Provide a new name and/or description.");
+  }
+  if (args.name !== undefined && !args.name.trim()) throw new Error("Field name must not be empty.");
+  const wanted = args.field.trim();
+  let table_id: string;
+  let field_id: string;
+  if (/^fld[A-Za-z0-9]+$/.test(wanted)) {
+    table_id = await tableId(ctx, args.base_id, args.table);
+    field_id = wanted;
+  } else {
+    const table = await resolveTable(ctx, args.base_id, args.table);
+    const fields = table.fields ?? [];
+    const found =
+      fields.find((item) => item.name === wanted) ??
+      fields.find((item) => item.name.toLowerCase() === wanted.toLowerCase());
+    if (!found?.id) throw new Error(`Airtable field not found in table ${table.name}: ${args.field}`);
+    table_id = table.id;
+    field_id = found.id;
+  }
+  const body: { [field: string]: unknown } = {};
+  if (args.name !== undefined) body.name = args.name;
+  if (args.description !== undefined) body.description = args.description;
+  const field = await request(
+    ctx,
+    "update field",
+    "PATCH",
+    `${fieldsPath(args.base_id, table_id)}/${seg(field_id)}`,
+    body,
+  );
+  return { table_id, field };
 }
 
 /**
