@@ -49,11 +49,9 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Invariants
 
-- The chart runs the Console only in api-rs. This Rails application stays in
-  the repository, but its HTTP API is not deployed: the Rails worker (Slack
-  channel catalog jobs) and Rails migrations still run. Rollback is reverting
-  to an older chart version, not running Rails and api-rs side by side. Do not
-  add new Rails API behavior; implement Console changes in
+- The chart runs no Rails: api-rs serves the Console and owns its schema. This
+  Rails application stays in the repository only until it is deleted. Do not
+  add Rails behavior; implement Console changes in
   `crates/centaur-api-server/src/console/` and follow its `README.md`.
 - api-rs has one authorization model. Every credential maps to an
   `AuthenticatedCaller` with a set of capabilities, and every route declares
