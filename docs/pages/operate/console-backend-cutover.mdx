@@ -30,20 +30,16 @@ rollback is data-safe.
    session-cookie and unsafe-request Origin, and as the host that selects the
    Console router, so it must match the URL users and MCP clients load (scheme,
    host, and port when non-default). The chart fails to render without it.
-2. **`<secretManager.envPrefix>CONSOLE_SESSION_SECRET` must exist** in
-   `secretManager.existingSecretName`. The chart renders it into api-rs and the
-   pod fails to start without it. Generate it once and keep it stable — every
-   rotation signs all browsers out. `contrib/scripts/bootstrap-k8s-secrets.sh`
-   generates it when absent for local stacks.
-3. **Keep the existing Console secrets.** api-rs reads the same
+2. **Keep the existing Console secrets.** api-rs reads the same
    `IRON_CONTROL_AR_ENCRYPTION_*`, `IRON_CONTROL_DATABASE_URL`,
-   `IRON_CONTROL_INITIAL_API_KEY`, and `CENTAUR_JWT_SIGNING_SECRET` keys and maps
+   `IRON_CONTROL_INITIAL_API_KEY`, `IRON_CONTROL_SECRET_KEY_BASE` (its session
+   keys are derived from it), and `CENTAUR_JWT_SIGNING_SECRET` keys and maps
    them to the `CENTAUR_CONSOLE_*` names the Rust handlers read. Do not rotate
    them during the upgrade, or stored credentials cannot be decrypted.
-4. **The Console database role needs write access.** api-rs writes through
+3. **The Console database role needs write access.** api-rs writes through
    `IRON_CONTROL_DATABASE_URL` (plus `IRON_CONTROL_DATABASE_NAME` when the URL
    has no database path).
-5. **Use an api-rs image that contains the Console**, including the built SPA.
+4. **Use an api-rs image that contains the Console**, including the built SPA.
    The image sets `CENTAUR_CONSOLE_SPA_SHELL`, `CENTAUR_CONSOLE_SPA_ASSETS`, and
    `CENTAUR_CONSOLE_PUBLIC_ROOT`; override them through `apiRs.extraEnv` only if
    your image places the files elsewhere.
@@ -97,7 +93,7 @@ previous chart version with the previous values instead.
 - **Every browser signs in once more.** The Rails and api-rs session cookies are
   different formats under the same cookie name, so sessions do not carry over
   between implementations. api-rs sessions issued before a rollback work again
-  after rolling forward, as long as `CONSOLE_SESSION_SECRET` is unchanged.
+  after rolling forward, as long as `IRON_CONTROL_SECRET_KEY_BASE` is unchanged.
 - **In-flight OAuth flows fail.** A flow started on one implementation must
   finish there; users in the middle of an MCP consent or a broker OAuth callback
   see an invalid-state error and retry.

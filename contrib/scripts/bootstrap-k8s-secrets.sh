@@ -3,10 +3,6 @@ set -euo pipefail
 
 NAMESPACE="centaur"
 FORCE=0
-# Prefix for the Console session-cookie key, matching secretManager.envPrefix in
-# the chart values. The chart default is empty, which is what the other generated
-# keys assume; set SECRET_ENV_PREFIX when your values file sets a prefix.
-SECRET_ENV_PREFIX="${SECRET_ENV_PREFIX:-}"
 
 usage() {
   cat <<'EOF'
@@ -79,11 +75,8 @@ Console bootstrap:
                                Rails resolves db names from its database.yml)
   IRON_CONTROL_INITIAL_USER_EMAIL
                                initial admin email (default admin@centaur.local)
-  SECRET_ENV_PREFIX            secretManager.envPrefix your values file uses
-                               (default empty); applied to the session key below
-  The initial password, API key, the three ActiveRecord encryption keys,
-  SECRET_KEY_BASE, and CONSOLE_SESSION_SECRET (the api-rs Console session-cookie
-  key) are auto-generated when absent (never rotated in place).
+  The initial password, API key, the three ActiveRecord encryption keys, and
+  SECRET_KEY_BASE are auto-generated when absent (never rotated in place).
 
 Note: harness access-token modes (sandbox.codexAuthMode / claudeCodeAuthMode
 set to access_token) also need a console broker credential (openai-codex /
@@ -274,12 +267,6 @@ if secret_exists centaur-infra-env; then
   if ! secret_key_present CENTAUR_JWT_SIGNING_SECRET; then
     patch_data+=("\"CENTAUR_JWT_SIGNING_SECRET\":\"$(printf '%s%s' "$(rand_hex)" "$(rand_hex)" | base64 | tr -d '\n')\"")
   fi
-  # api-rs signs the Console browser session cookie with this. Generated once and
-  # never rotated: a new value signs every browser out and aborts in-flight OAuth
-  # flows.
-  if ! secret_key_present "${SECRET_ENV_PREFIX}CONSOLE_SESSION_SECRET"; then
-    patch_data+=("\"${SECRET_ENV_PREFIX}CONSOLE_SESSION_SECRET\":\"$(printf '%s%s' "$(rand_hex)" "$(rand_hex)" | base64 | tr -d '\n')\"")
-  fi
   # Linear bot credentials. Set whenever present so the OAuth token can be
   # rotated; the api-rs bearer is generated once and kept stable.
   if [[ -n "${LINEAR_ACCESS_TOKEN:-}" ]]; then
@@ -336,7 +323,6 @@ else
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(rand_hex)"
     --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
     --from-literal=CENTAUR_JWT_SIGNING_SECRET="$(rand_hex)$(rand_hex)"
-    --from-literal="${SECRET_ENV_PREFIX}CONSOLE_SESSION_SECRET=$(rand_hex)$(rand_hex)"
   )
   if [[ -n "${DISCORD_BOT_TOKEN:-}" ]]; then
     secret_args+=(

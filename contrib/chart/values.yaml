@@ -104,13 +104,12 @@ console:
   # chart runs no Rails web pod; the `console` Service is only a compatibility
   # alias (same name and port, forwarding to api-rs) for in-cluster clients with
   # a cached `centaur-console:3000` URL. The Rails worker still runs the Slack
-  # channel catalog jobs, and a Helm hook Job applies the Rails schema
+  # channel catalog jobs and, in its init containers, applies the Rails schema
   # migrations and the initial-admin bootstrap. See
   # docs/pages/operate/console-backend-cutover.mdx.
   #
-  # The shared infra Secret must hold
-  # <secretManager.envPrefix>CONSOLE_SESSION_SECRET (the api-rs session-cookie
-  # key) plus the existing IRON_CONTROL_* Console keys.
+  # api-rs reads the existing IRON_CONTROL_* Console keys from the shared infra
+  # Secret; its session-cookie key is derived from IRON_CONTROL_SECRET_KEY_BASE.
   #
   # The origin users and MCP clients reach the Console at, rendered as
   # CENTAUR_CONSOLE_PUBLIC_URL. It is the origin the session cookie and

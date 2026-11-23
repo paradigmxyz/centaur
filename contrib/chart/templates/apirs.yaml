@@ -248,13 +248,16 @@ spec:
               value: {{ required "console.publicUrl is required: set it to the origin users and MCP clients reach the Console at (for example https://console.example.com)" $console.publicUrl | quote }}
             # The shared Console secrets keep their Rails-era IRON_CONTROL_* keys
             # in the Secret and are mounted under the CENTAUR_CONSOLE_* names the
-            # ported handlers read. CONSOLE_SESSION_SECRET signs the browser
-            # session cookie: keep it stable, or every browser session is lost.
+            # ported handlers read. CONSOLE_SESSION_SECRET is the input api-rs
+            # derives its session-cookie and SSO keys from; it reuses the Console's
+            # existing Rails secret_key_base. api-rs derives with its own PBKDF2
+            # labels, so its keys are independent of the ones Rails derives from
+            # the same value. Rotating it signs every browser out.
             - name: CONSOLE_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sCONSOLE_SESSION_SECRET" .Values.secretManager.envPrefix }}
+                  key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" .Values.secretManager.envPrefix }}
             - name: CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY
               valueFrom:
                 secretKeyRef:
