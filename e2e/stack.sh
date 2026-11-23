@@ -306,7 +306,7 @@ run_tests() {
   export E2E_SLACK_URL=http://127.0.0.1:30443
   export E2E_MODEL_URL=http://127.0.0.1:30080
   export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
-  # The Console database (console.database.name), created by api-rs.
+  # The Console database (console.database.name), created by the bundled Postgres on first boot.
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   # The key api-rs administers the console with.

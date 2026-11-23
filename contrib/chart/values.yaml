@@ -89,9 +89,10 @@ toolServer:
 # console — control plane (formerly "iron-control") for authenticated API
 # access + encrypted secret storage, served by api-rs. The console is a required
 # chart component. Uses a dedicated `iron_control_production` database on the
-# bundled Postgres (its own logical DB, with its own migration history); an
-# api-rs init container creates the DB idempotently, and api-rs migrates it and
-# bootstraps the initial admin at startup (`apiRs.runMigrations`).
+# bundled Postgres (its own logical DB, with its own migration history). The
+# bundled server creates it on first boot; on an external server, create it
+# before installing. api-rs migrates it and bootstraps the initial admin on
+# every start.
 # DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
 # keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
 # elsewhere to use an external DB.
@@ -128,10 +129,10 @@ console:
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
   database:
-    # Logical DB created on the bundled Postgres by api-rs's
-    # create-console-db init container, and the database the Console handlers
-    # use. The connection URL carries no database path, so each process
-    # resolves the name from here.
+    # Logical DB the Console handlers use. The bundled Postgres creates it when
+    # it initializes an empty data directory; changing the name later does not
+    # create the new one. The connection URL carries no database path, so each
+    # process resolves the name from here.
     name: iron_control_production
   # Google as an OAuth identity provider for console sign-in (and the
   # broker-credential refresh loop). Off by default — not every deployment uses

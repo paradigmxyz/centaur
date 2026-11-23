@@ -15,6 +15,20 @@
 {{- fail "externalDatabase.textSearch is set but postgres.enabled=true; the bundled Postgres always uses paradedb" }}
 {{- end }}
 {{- if .Values.postgres.enabled }}
+{{- $console := include "centaur.consoleValues" . | fromYaml }}
+# First-boot provisioning for the bundled server: the image runs these scripts
+# once, when it initializes an empty data directory. The Console database lives
+# here because nothing at runtime creates databases; api-rs only migrates it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "postgres-init") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
+data:
+  20-centaur-console-db.sql: |
+    CREATE DATABASE {{ $console.database.name | quote }};
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -88,12 +102,20 @@ spec:
               {{- with .Values.postgres.persistence.subPath }}
               subPath: {{ . | quote }}
               {{- end }}
+            # One file, so the image's own init scripts stay in place.
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d/20-centaur-console-db.sql
+              subPath: 20-centaur-console-db.sql
+              readOnly: true
             {{- if .Values.postgres.sharedMemory.enabled }}
             - name: shared-memory
               mountPath: /dev/shm
             {{- end }}
-      {{- if .Values.postgres.sharedMemory.enabled }}
       volumes:
+        - name: init
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "postgres-init") }}
+      {{- if .Values.postgres.sharedMemory.enabled }}
         - name: shared-memory
           emptyDir:
             medium: Memory

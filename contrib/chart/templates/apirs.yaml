@@ -183,47 +183,6 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
-      initContainers:
-        # api-rs owns the Console schema: on every start it applies
-        # the Console migrations and bootstraps the initial admin before it
-        # registers principals there. The database must exist first, so create
-        # it idempotently on the bundled Postgres.
-        - name: create-console-db
-          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              # Wait until Postgres accepts connections. A still-starting Postgres
-              # — or a Service with no ready endpoint yet, which is also the case
-              # on a bundled-Postgres install — surfaces as connection refused;
-              # retry rather than failing (and crash-looping) the pod.
-              until psql "$ADMIN_DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1; do
-                echo "waiting for postgres to accept connections..."
-                sleep 2
-              done
-              # Create each database idempotently.
-              for db in $DB_NAMES; do
-                exists=$(psql "$ADMIN_DATABASE_URL" -tAc \
-                  "SELECT 1 FROM pg_database WHERE datname = '$db'")
-                if [ "$exists" != "1" ]; then
-                  echo "creating database $db"
-                  psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE \"$db\"" || true
-                fi
-              done
-          env:
-            - name: ADMIN_DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
-            - name: DB_NAMES
-              value: {{ $console.database.name | quote }}
-          securityContext:
-{{ toYaml .Values.containerSecurityContext | nindent 12 }}
-            seccompProfile:
-              type: RuntimeDefault
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}

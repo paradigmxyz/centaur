@@ -74,8 +74,8 @@ helm upgrade <release> contrib/chart -n <namespace> -f your-values.yaml
 kubectl rollout status deploy/<release>-centaur-api-rs -n <namespace>
 ```
 
-An api-rs init container creates the Console database (bundled Postgres). api-rs
-then migrates it and creates the initial admin before it registers principals.
+The Console database already exists: the previous release created it. api-rs
+migrates it and creates the initial admin before it registers principals.
 proxy-sync and token-broker wait for the Console schema in their own init
 containers. The upgrade deletes the Rails worker Deployment.
 

@@ -556,10 +556,13 @@ The server needs:
 - A migrating user that can create extensions and roles. Migrations create
   cluster-wide roles such as `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
   migrates at startup, or the user passed to `centaur-api-server migrate` below.
-  api-rs also creates the Console database with the `DATABASE_URL` user. The RDS
-  master user and the Cloud SQL `postgres` user can do all of this. With a less
-  privileged user, have an administrator create the `vector` and `uuid-ossp`
-  extensions and the Console database listed below first.
+  The RDS master user and the Cloud SQL `postgres` user can do all of this. With
+  a less privileged user, have an administrator create the `vector` and
+  `uuid-ossp` extensions first.
+- The Console database (`iron_control_production` below), created before the
+  first install. Nothing in the chart creates it on an external server. Make
+  the `IRON_CONTROL_DATABASE_URL` user its owner, or grant that user `CREATE` on
+  its `public` schema: api-rs creates the Console tables as that user.
 - Enough connections. api-rs opens up to 500 connections under load, and the
   bundled server allows 500.
 
@@ -568,7 +571,7 @@ The deployment uses these databases on the server:
 | Database | Used by | Connection |
 | --- | --- | --- |
 | Any name, for example `centaur` | api-rs, Slackbot, workflows, and the company-context service | `DATABASE_URL`, including the database name. |
-| `iron_control_production` | The Console, served by api-rs; proxy-sync and token-broker read it too | `IRON_CONTROL_DATABASE_URL` without a database name; each process selects the database itself. An api-rs init container creates it if missing, with the `DATABASE_URL` credentials. |
+| `iron_control_production` | The Console, served by api-rs; proxy-sync and token-broker read it too | `IRON_CONTROL_DATABASE_URL` without a database name; each process selects the database itself. Create it before installing; api-rs migrates it. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
