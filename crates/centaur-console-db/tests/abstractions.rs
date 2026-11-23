@@ -1,8 +1,8 @@
 //! Tests for the shared Console abstractions against a Postgres database with
 //! Console's schema.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. Each test inserts uniquely named rows, so tests can
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
+//! `cargo run -p centaur-console-db --example migrate -- <url>`. Each test inserts uniquely named rows, so tests can
 //! share one database and run in parallel.
 
 use centaur_console_db::areas::secrets::SecretKind;

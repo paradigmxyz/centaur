@@ -87,11 +87,6 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-        # The Rails Console worker (schema migrations + bin/jobs) reaches the
-        # app and queue DBs.
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
         - podSelector:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
@@ -182,11 +177,6 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-        # The Rails Console worker's jobs call api-rs for sync
-        # ingestion/checkpoints.
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "console-worker") | nindent 14 }}
         # Sandboxes reach authenticated api-rs routes through their paired
         # iron-proxy; sandbox pods never connect to api-rs directly.
         - podSelector:

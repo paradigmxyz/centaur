@@ -1,4 +1,5 @@
-//! Request and response types for the iron-control admin API.
+//! Request and response types for the Console's principal, role, secret,
+//! grant, and proxy resources, shared by api-rs and `centaur-perms`.
 //!
 //! iron-control wraps every request and single-resource response in a
 //! ``{ "data": ... }`` envelope; [`DataEnvelope`] handles both directions.
@@ -15,12 +16,12 @@ use serde_json::Value;
 /// The ``{ "data": T }`` envelope used for request bodies and single-resource
 /// responses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct DataEnvelope<T> {
+pub struct DataEnvelope<T> {
     pub data: T,
 }
 
 impl<T> DataEnvelope<T> {
-    pub(crate) fn new(data: T) -> Self {
+    pub fn new(data: T) -> Self {
         Self { data }
     }
 }

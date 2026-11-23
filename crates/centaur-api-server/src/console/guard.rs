@@ -259,8 +259,8 @@ async fn authorize(State(guard): State<RouteGuard>, request: Request, next: Next
 }
 
 /// Browsers never bring an `Authorization` header; everything here is a
-/// machine credential. The sandbox token is tried first because it shares an
-/// issuer with the Console service JWT but has its own audience.
+/// machine credential. The sandbox token, a Console-issued JWT with its own
+/// audience, is tried first.
 async fn authorize_bearer(
     guard: RouteGuard,
     mut request: Request,
@@ -320,7 +320,7 @@ async fn authorize_bearer(
         }
     }
 
-    // api-rs's static admin key, API client tokens, and Console's service JWT.
+    // api-rs's static admin key and API client tokens.
     match guard.state.auth().authenticate(request.headers()) {
         Ok(mut caller) => {
             if caller.class() == CallerClass::ApiClient {

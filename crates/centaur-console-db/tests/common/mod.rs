@@ -1,7 +1,7 @@
 //! The shared bootstrap for the database-backed Console tests.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. Without the variable the tests skip locally and fail
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
+//! `cargo run -p centaur-console-db --example migrate -- <url>`. Without the variable the tests skip locally and fail
 //! in CI. Each test inserts uniquely named rows, so tests can share one database
 //! and run in parallel; the fixtures that seed those rows stay per file.
 

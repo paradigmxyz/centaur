@@ -382,11 +382,6 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             [(Method::POST, Capability::WorkflowsEvents)],
         )
         .methods(
-            "/api/scheduled-tasks/{task_id}/runs",
-            post(crate::scheduled_tasks::run_scheduled_task),
-            [(Method::POST, Capability::WorkflowsWrite)],
-        )
-        .methods(
             "/api/workflows/actions/invoke",
             post(invoke_workflow_button),
             [(Method::POST, Capability::WorkflowsActions)],

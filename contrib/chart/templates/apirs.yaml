@@ -183,19 +183,6 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
-      initContainers:
-        # api-rs registers principals and roles in the Console database during
-        # startup, and the ported Console handlers read and write it, so wait for
-        # the schema the Console worker's init containers apply before starting.
-        # The worker bootstraps the initial admin right after the schema, so on a
-        # fresh install api-rs can win a sub-second race against the API-key row
-        # and exit; the kubelet restarts it and the next start succeeds.
-{{ include "centaur.consoleDbWait" (dict
-  "root" .
-  "name" "wait-for-console-schema"
-  "database" $console.database.name
-  "query" "SELECT to_regclass('public.users') IS NOT NULL"
-  "message" "waiting for the Console schema (Console worker)…") | nindent 8 }}
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
@@ -325,6 +312,19 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+            # The initial Console admin, created when the Console database has no
+            # operators. Operators create their API keys on the Console's API Keys
+            # page; api-rs itself writes as the Console system user.
+            - name: CENTAUR_CONSOLE_INITIAL_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_EMAIL" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_INITIAL_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_PASSWORD" .Values.secretManager.envPrefix }}
 {{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
             - name: DATABASE_TEXT_SEARCH
               value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
@@ -672,11 +672,6 @@ copies in source order (later roots shadow earlier ones). */}}
               value: {{ include "centaur.consoleUrl" . | quote }}
             - name: IRON_CONTROL_PROXY_SYNC_URL
               value: {{ include "centaur.proxySyncUrl" . | quote }}
-            - name: IRON_CONTROL_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
             # Principals and their effective config are read from the console
             # database directly, in read-only sessions. The scheduled-task
             # scheduler also claims and updates scheduled_tasks rows there.

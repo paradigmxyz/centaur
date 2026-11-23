@@ -86,13 +86,15 @@ toolServer:
     existingSecretName: ""
     secretKey: token
 
-# console — Rails control plane (formerly "iron-control") for authenticated API
-# access + encrypted secret storage. The console is a required chart component.
-# Uses a dedicated `iron_control_production` database on the bundled Postgres
-# (its own logical DB so its Rails schema_migrations table never collides with
-# the API's migration table); an init container creates the DB idempotently.
-# DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
-# keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
+# console — control plane (formerly "iron-control") for authenticated API
+# access + encrypted secret storage, served by api-rs. The console is a required
+# chart component. Uses a dedicated `iron_control_production` database on the
+# bundled Postgres (its own logical DB, with its own migration history). The
+# bundled server creates it on first boot; on an external server, create it
+# before installing. api-rs migrates it and bootstraps the initial admin on
+# every start.
+# DATABASE_URL, the bootstrap login, and the ActiveRecord encryption keys are
+# injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
 # elsewhere to use an external DB.
 #
 # Backwards compatibility: this block used to be named `ironControl`. That key is
@@ -103,10 +105,9 @@ console:
   # The Console is served by api-rs: there is no implementation switch. The
   # chart runs no Rails web pod; the `console` Service is only a compatibility
   # alias (same name and port, forwarding to api-rs) for in-cluster clients with
-  # a cached `centaur-console:3000` URL. The Rails worker still runs the Slack
-  # channel catalog jobs and, in its init containers, applies the Rails schema
-  # migrations and the initial-admin bootstrap. See
-  # docs/pages/operate/console-backend-cutover.mdx.
+  # a cached `centaur-console:3000` URL. The chart runs no Rails process: api-rs
+  # owns the Console schema, the initial-admin bootstrap, and the Slack channel
+  # catalog refresh.
   #
   # api-rs reads the existing IRON_CONTROL_* Console keys from the shared infra
   # Secret; its session-cookie key is derived from IRON_CONTROL_SECRET_KEY_BASE.
@@ -121,29 +122,17 @@ console:
   # service/centaur-centaur-console 3000:3000`); set your real origin in every
   # deployed environment (for example https://console.example.com).
   publicUrl: "http://localhost:3000"
-  # Optional Sentry DSN for the Rails Console worker's background jobs. Empty by
-  # default, so the Sentry SDK remains disabled unless explicitly configured.
-  sentryDsn: ""
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
-  image:
-    repository: centaur-console
-    tag: latest
-    # Default Always: the image is published under the mutable `latest` tag, so
-    # IfNotPresent would pin pods to whatever digest a node already cached.
-    pullPolicy: Always
-  # RAILS_ENV for the Rails worker (schema migrations and Slack catalog jobs).
-  railsEnv: production
   database:
-    # Logical DB created on the bundled Postgres by the Console worker's
-    # create-db init container, and the database the Console handlers use. Must
-    # match the primary connection's `database:` in the image's database.yml —
-    # the connection URL carries no database path, so each process resolves the
-    # name from here.
+    # Logical DB the Console handlers use. The bundled Postgres creates it when
+    # it initializes an empty data directory; changing the name later does not
+    # create the new one. The connection URL carries no database path, so each
+    # process resolves the name from here.
     name: iron_control_production
   # Google as an OAuth identity provider for console sign-in (and the
   # broker-credential refresh loop). Off by default — not every deployment uses
@@ -207,20 +196,6 @@ console:
     # host.
     host: ""
     tls: []
-  # Resources for the worker's migrate init container (`bin/rails db:prepare`
-  # plus the bootstrap). Leave empty for the namespace defaults.
-  resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs the Console jobs that still live in
-  # Rails: the Slack channel catalog refresh and membership refresh. Without it
-  # those jobs never execute. Its init containers also own the Console schema
-  # (create-db, `db:prepare`, bootstrap), so it must run at least one replica.
-  worker:
-    replicaCount: 1
-    # Node steering for Console background worker pods.
-    nodeSelector: {}
-    affinity: {}
-    tolerations: []
-    resources: {}
 
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).
@@ -655,6 +630,8 @@ apiRs:
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
+  # Apply the session database migrations at startup. (The Console database
+  # always migrates at startup, whatever this is set to.)
   runMigrations: true
   # Controls whether a missing automatically derived session principal may be
   # created. "preapproved" admits only principals already present in the

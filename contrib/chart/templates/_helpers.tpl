@@ -245,7 +245,7 @@ chart-managed workloads.
 {{- end -}}
 
 {{- /*
-console — Rails control plane (formerly "iron-control") for authenticated API
+console — control plane (formerly "iron-control"), served by api-rs, for authenticated API
 access and encrypted secret storage. Required in-cluster ClusterIP Service.
 
 Backwards compatibility: the canonical values key is `console`; `ironControl` is
@@ -258,16 +258,15 @@ templates should consume this helper rather than `.Values.console` /
 `.Values.ironControl` directly.
 
 In-cluster Service/DNS names use the "console" component (e.g.
-`<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
-IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
-*value* is derived from `centaur.consoleUrl`.
+`<release>-centaur-console`). The api-rs-facing env var stays IRON_CONTROL_URL
+(its name is hardcoded in the Rust binaries); the URL *value* is derived from
+`centaur.consoleUrl`.
 
 The Console is served by api-rs; the chart runs no Rails web pod. The `console`
 Service survives only as a compatibility alias (same name and port, forwarding
 to api-rs) for in-cluster clients with a cached `centaur-console:3000` URL, and
-`centaur.consoleUrl` returns the api-rs Service URL. The Rails worker still runs
-for the Slack channel catalog jobs and runs the Rails schema migrations in its
-init containers (see console-worker.yaml).
+`centaur.consoleUrl` returns the api-rs Service URL. The chart runs no Rails
+process: api-rs also owns the Console schema and the Slack channel catalog.
 */ -}}
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}
@@ -307,8 +306,8 @@ apiRs.enabled=false has none; fail rather than render a URL nothing answers.
 
 {{- /*
 Init container that blocks on a psql predicate against a Console database.
-Console-database clients use it so they start only after the Console worker's
-init containers have applied the schema.
+Console-database clients use it so they start only after api-rs has applied
+the schema.
 
 Params: root, name (container name), database (PGDATABASE), query (SQL returning
 t for ready), message (log line while waiting). It connects through

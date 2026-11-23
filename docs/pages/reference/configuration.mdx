@@ -17,8 +17,7 @@ Use these as the main extension points:
 | `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `apiRs.nodeSelector`, `apiRs.affinity`, `apiRs.tolerations` | Controls scheduling for api-rs pods, including dedicated tainted node pools. |
-| `console.publicUrl` | Required. The Console origin users and MCP clients reach. api-rs serves the Console, so this also selects the Console host. See [Console runs in api-rs](/operate/console-backend-cutover). |
-| `console.worker.nodeSelector`, `console.worker.affinity`, `console.worker.tolerations` | Controls scheduling for the Console background worker pods (the Rails process that runs the Slack channel catalog jobs). |
+| `console.publicUrl` | Required. The Console origin users and MCP clients reach. api-rs serves the Console, so this also selects the Console host. |
 | `tokenBroker.*` | token-broker, which refreshes Console broker credentials: replicas, poll interval, concurrency, scheduling, and metrics. |
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
@@ -68,10 +67,9 @@ for the operator workflow.
 | --- | --- | --- |
 | `IRON_CONTROL_DATABASE_URL` | `secretManager.existingSecretName`. | Console database connection. Required by api-rs, which reads principals and their effective config through it in read-only sessions. Keep it separate from the api-rs logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL`, `IRON_CONTROL_INITIAL_USER_PASSWORD` | `secretManager.existingSecretName`; local bootstrap generates defaults when absent. | Creates the initial Console admin when no user exists. |
-| `IRON_CONTROL_INITIAL_API_KEY` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Admin API key used by api-rs and `centaur-perms`. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY`, `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY`, `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | `secretManager.existingSecretName`; local bootstrap generates them when absent. | Encrypts credential material at rest. Keep these stable after first boot. |
-| `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Rails application signing secret for the Console worker; api-rs also derives its Console session keys from it. |
-| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens and Console service tokens, and the single `centaur-sandbox` token proxy-sync mints for each sandbox. |
+| `IRON_CONTROL_SECRET_KEY_BASE` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | The input api-rs derives its Console session keys from (via `CONSOLE_SESSION_SECRET`). Rails, which the chart no longer runs, used it as its application signing secret. |
+| `CENTAUR_JWT_SIGNING_SECRET` | `secretManager.existingSecretName`; local bootstrap generates it when absent. | Signs Console-issued MCP tokens, API client access tokens, and the single `centaur-sandbox` token proxy-sync mints for each sandbox. |
 | `console.publicUrl` | Helm value, required. | Public Console origin: used for links and MCP authorization metadata, and as the api-rs session-cookie and unsafe-request Origin check and the host that selects the Console router. |
 | `CONSOLE_SESSION_SECRET` | The chart sets it from `<secretManager.envPrefix>IRON_CONTROL_SECRET_KEY_BASE`; nothing to add to the Secret. | The input api-rs derives its Console session-cookie and SSO keys from (PBKDF2 with its own labels, independent of the keys Rails derives). Rotating it signs every browser and in-flight flow out. |
 | `console.passwordLoginEnabled` | Helm value, default `true`. | Enables the break-glass email and password login. Disable after SSO is configured for a public Console. |
@@ -82,7 +80,7 @@ for the operator workflow.
 | `CENTAUR_CONSOLE_OKTA_CLIENT_ID`, `CENTAUR_CONSOLE_OKTA_CLIENT_SECRET` | `secretManager.existingSecretName` when Okta login is enabled. | Okta OIDC web application credentials. |
 | `apiClients.enabled`, `CENTAUR_API_CLIENTS_ENABLED`, `CENTAUR_CONSOLE_API_CLIENTS_ENABLED` | Helm value, default `false`. | Enables [API clients](/operate/api-clients): the Console's **API Clients** page and api-rs `/oauth/token`. Off, api-rs also rejects API client tokens. |
 | `apiRs.syncInfraSecrets`, `IRON_CONTROL_SYNC_INFRA_SECRETS` | Helm value, default `true`. | Upserts the shared `infra` role and its harness/platform secrets. Set false only when another process owns that shared Console state. |
-| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Chart-rendered for api-rs; operator shell for `centaur-perms`. | Connects the runtime or CLI to the Console. |
+| `IRON_CONTROL_URL`, `IRON_CONTROL_API_KEY` | Operator shell for `centaur-perms`; the chart renders `IRON_CONTROL_URL` for api-rs. | For `centaur-perms`, the Console API and an operator key. api-rs uses only the URL, as the Console address it hands sandboxes: it writes the Console database directly, as the Console system user (`system@centaur.invalid`). |
 
 Default roles and default sandbox capabilities are stored in the Console, not
 as Helm values. Configure them in **System Settings** before new principals are

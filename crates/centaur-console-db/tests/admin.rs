@@ -1,7 +1,7 @@
 //! DB-backed tests for the admin area's converted queries and writes.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. Each test inserts uniquely named rows, so tests can
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
+//! `cargo run -p centaur-console-db --example migrate -- <url>`. Each test inserts uniquely named rows, so tests can
 //! share one database and run in parallel.
 
 use centaur_console_db::areas::admin::{
@@ -419,4 +419,38 @@ async fn system_settings_write_only_when_a_value_changes() {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn the_system_user_is_hidden_from_operators() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let system = centaur_console_db::system_user_id(&fixture.pool)
+        .await
+        .unwrap();
+
+    let listed = admin_users(&fixture.pool, None).await.unwrap();
+    assert!(listed.iter().all(|user| user.id != system));
+    // Every user action loads its target through `admin_user`, so none can
+    // reach the system user.
+    assert!(admin_user(&fixture.pool, system).await.unwrap().is_none());
+    let candidates = centaur_console_db::areas::automation::skill_editor_candidates(
+        &fixture.pool,
+        fixture.admin,
+        Some("centaur.invalid"),
+    )
+    .await
+    .unwrap();
+    assert!(candidates.is_empty());
+    assert!(
+        centaur_console_db::areas::automation::resolve_editor_user(
+            &fixture.pool,
+            centaur_console_db::SYSTEM_USER_EMAIL,
+            false
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
 }

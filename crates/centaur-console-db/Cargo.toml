@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 active-record-encryption = { path = "../active-record-encryption" }
 base64.workspace = true
+bcrypt = "0.19"
 chrono.workspace = true
 chrono-tz.workspace = true
 garde.workspace = true

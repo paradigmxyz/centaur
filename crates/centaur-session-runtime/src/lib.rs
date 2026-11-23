@@ -8887,12 +8887,10 @@ mod adoption_tests {
         }
 
         async fn get_principal(&self, principal: &str) -> Result<Principal, IronControlError> {
-            Err(IronControlError::Status {
-                method: "GET".to_owned(),
-                path: format!("/api/v1/principals/{principal}"),
-                status: 503,
-                body: "unavailable".to_owned(),
-            })
+            let _ = principal;
+            Err(IronControlError::ConsoleDb(
+                centaur_console_db::Error::Database(sqlx::Error::PoolTimedOut),
+            ))
         }
     }
 
@@ -10775,12 +10773,6 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
-    fn requester_test_registrar(base_url: String) -> SessionRegistrar {
-        SessionRegistrar::new(centaur_iron_control::IronControlClient::new(
-            base_url, "test-key",
-        ))
-    }
-
     fn runtime_with_registrar(
         store: &PgSessionStore,
         backend: Arc<MockBackend>,
@@ -10821,19 +10813,18 @@ mod adoption_tests {
         let Some(store) = test_store().await else {
             return;
         };
+        let Some((registrar, console)) = console_registrar().await else {
+            return;
+        };
         let _serial = TEST_LOCK.lock().await;
-        let (base_url, requests, server) = spawn_execute_iron_control_stub().await;
-        let thread_key = ThreadKey::parse(format!(
-            "linear:issue-{}:s:sess-1",
-            uuid::Uuid::new_v4().simple()
-        ))
-        .unwrap();
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let slack_user = format!("U{}", unique[..10].to_uppercase());
+        let thread_key = ThreadKey::parse(format!("linear:issue-{unique}:s:sess-1")).unwrap();
 
         let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
         let (io, _stdout, _stdin) = mock_io();
         backend.push_io(io).await;
-        let runtime =
-            runtime_with_registrar(&store, backend.clone(), requester_test_registrar(base_url));
+        let runtime = runtime_with_registrar(&store, backend.clone(), registrar);
 
         runtime
             .create_or_get_session(
@@ -10849,7 +10840,7 @@ mod adoption_tests {
         let execution = execute_with_metadata(
             &runtime,
             &thread_key,
-            json!({"slack_user_id": "U1", "slack_team_id": "T123"}),
+            json!({"slack_user_id": slack_user, "slack_team_id": "T123"}),
         )
         .await;
         store
@@ -10859,92 +10850,35 @@ mod adoption_tests {
 
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert_eq!(spec.iron_control_requester_principal, None);
-        assert!(
-            !requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|request| request.contains("slack-user")),
+        let slack_requesters: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM principals WHERE slack_user_id = $1")
+                .bind(&slack_user)
+                .fetch_one(&console)
+                .await
+                .unwrap();
+        assert_eq!(
+            slack_requesters, 0,
             "non-Slack executes must not upsert a Slack requester principal"
         );
-        server.abort();
         reset_test_store(&store).await;
     }
 
-    /// Minimal raw-TCP iron-control stub for execute-level requester tests:
-    /// principal lookups 404 (every upsert is a create), upserts return an OID
-    /// derived from the foreign id (``prn_<foreign_id>``) so assertions can
-    /// name the expected binding, and OID lookups echo the principal back.
-    async fn spawn_execute_iron_control_stub() -> (
-        String,
-        Arc<std::sync::Mutex<Vec<String>>>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        use tokio::io::AsyncReadExt;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let seen = requests.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut request = Vec::new();
-                let mut buf = [0u8; 1024];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    match stream.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => request.extend_from_slice(&buf[..read]),
-                    }
-                }
-                let request = String::from_utf8_lossy(&request);
-                let first_line = request.lines().next().unwrap_or_default();
-                let mut parts = first_line.split_whitespace();
-                let method = parts.next().unwrap_or_default();
-                let path = parts.next().unwrap_or_default();
-                seen.lock().unwrap().push(format!("{method} {path}"));
-                let (status_line, body) = execute_iron_control_stub_response(method, path);
-                let response = format!(
-                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len(),
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            }
-        });
-        (base_url, requests, handle)
-    }
-
-    fn execute_iron_control_stub_response(method: &str, path: &str) -> (&'static str, String) {
-        fn principal_body(id: &str, foreign_id: &str) -> String {
-            format!(
-                r#"{{"data":{{"id":"{id}","namespace":"default","foreign_id":"{foreign_id}","name":"stub","labels":{{}}}}}}"#
-            )
-        }
-        match method {
-            "GET" if path.starts_with("/api/v1/principals/lookup/") => {
-                ("404 Not Found", r#"{"error":"not found"}"#.to_owned())
-            }
-            "GET" if path.starts_with("/api/v1/principals/prn_") => {
-                let id = path.rsplit('/').next().unwrap_or_default();
-                ("200 OK", principal_body(id, "stub"))
-            }
-            "PUT" if path.starts_with("/api/v1/principals/") => {
-                let foreign_id = path.rsplit('/').next().unwrap_or_default();
-                (
-                    "200 OK",
-                    principal_body(&format!("prn_{foreign_id}"), foreign_id),
-                )
-            }
-            "POST" if path.ends_with("/slack_channel_permissions") => {
-                ("200 OK", r#"{"data":{"ok":true}}"#.to_owned())
-            }
-            _ => (
-                "500 Internal Server Error",
-                r#"{"error":"unexpected"}"#.to_owned(),
-            ),
-        }
+    /// A real registrar on the Console test database. Without
+    /// `CONSOLE_DB_TEST_DATABASE_URL` the test skips locally and fails in CI.
+    async fn console_registrar() -> Option<(SessionRegistrar, sqlx::PgPool)> {
+        let Ok(url) = std::env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
+            );
+            eprintln!("skipping: CONSOLE_DB_TEST_DATABASE_URL not set");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to the Console test database");
+        let client = centaur_iron_control::IronControlClient::new(pool.clone());
+        Some((SessionRegistrar::new(client), pool))
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -12596,7 +12530,10 @@ mod adoption_tests {
         assert_eq!(failed.execution_id, execution.execution_id);
         assert_eq!(failed.status, ExecutionStatus::Failed);
         let error = failed.error.expect("failure recorded");
-        assert!(error.contains("503"), "unexpected error: {error}");
+        assert!(
+            error.contains("pool timed out"),
+            "unexpected error: {error}"
+        );
         assert_eq!(
             backend.opens(),
             0,

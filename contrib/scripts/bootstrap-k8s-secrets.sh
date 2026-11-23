@@ -75,8 +75,9 @@ Console bootstrap:
                                Rails resolves db names from its database.yml)
   IRON_CONTROL_INITIAL_USER_EMAIL
                                initial admin email (default admin@centaur.local)
-  The initial password, API key, the three ActiveRecord encryption keys, and
+  The initial password, the three ActiveRecord encryption keys, and
   SECRET_KEY_BASE are auto-generated when absent (never rotated in place).
+  Operator API keys are created on the Console's API Keys page.
 
 Note: harness access-token modes (sandbox.codexAuthMode / claudeCodeAuthMode
 set to access_token) also need a console broker credential (openai-codex /
@@ -249,9 +250,6 @@ if secret_exists centaur-infra-env; then
   if ! secret_key_present IRON_CONTROL_INITIAL_USER_PASSWORD; then
     patch_data+=("\"IRON_CONTROL_INITIAL_USER_PASSWORD\":\"$(rand_hex | base64 | tr -d '\n')\"")
   fi
-  if ! secret_key_present IRON_CONTROL_INITIAL_API_KEY; then
-    patch_data+=("\"IRON_CONTROL_INITIAL_API_KEY\":\"$(printf 'iak_%s' "$(rand_hex)" | base64 | tr -d '\n')\"")
-  fi
   if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY; then
     patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
   fi
@@ -317,7 +315,6 @@ else
     --from-literal=IRON_CONTROL_DATABASE_URL="$IRON_CONTROL_DATABASE_URL"
     --from-literal=IRON_CONTROL_INITIAL_USER_EMAIL="$IRON_CONTROL_INITIAL_USER_EMAIL"
     --from-literal=IRON_CONTROL_INITIAL_USER_PASSWORD="$(rand_hex)"
-    --from-literal=IRON_CONTROL_INITIAL_API_KEY="iak_$(rand_hex)"
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY="$(rand_hex)"
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY="$(rand_hex)"
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(rand_hex)"

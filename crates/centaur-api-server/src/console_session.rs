@@ -197,6 +197,7 @@ async fn console_me(
                 "oauth_apps": admin,
                 "users": admin,
                 "api_clients": admin && api_clients_enabled,
+                "api_keys": admin && !delegated,
                 "settings": admin,
                 "workflows": admin,
                 "integrations": active,

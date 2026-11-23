@@ -79,6 +79,7 @@ jobs:
             '^crates/centaur-session-sqlx/migrations/' \
             '^crates/centaur-session-sqlx/search-migrations/' \
             '^services/console/db/migrate/' \
+            '^crates/centaur-console-db/migrations/' \
             '^\.github/scripts/check-migration-order\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_checks \
@@ -110,6 +111,7 @@ jobs:
             '^Cargo\.(toml|lock)$' \
             '^crates/active-record-encryption/' \
             '^crates/centaur-token-broker/' \
+            '^crates/centaur-console-db/' \
             '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -327,22 +329,10 @@ jobs:
       - name: Start test database
         run: .github/scripts/start-test-postgres.sh proxy-sync-test-postgres 5432 proxy_sync_test pgvector
 
-      - name: Install Console packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
       # proxy-sync reads Console's tables directly, so its integration tests
-      # run against the schema Console currently ships.
-      - name: Load Console schema
-        working-directory: services/console
-        env:
-          RAILS_ENV: test
-          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proxy_sync_test
-        run: bin/rails db:prepare
+      # run against the schema api-rs migrates.
+      - name: Migrate Console schema
+        run: cargo run --locked -p centaur-console-db --example migrate -- postgresql://postgres:postgres@localhost:5432/proxy_sync_test
 
       - name: Test Console database crate
         env:
@@ -384,13 +374,9 @@ jobs:
           bundler-cache: true
 
       # token-broker reads and writes Console's tables directly, so its
-      # integration tests run against the schema Console currently ships.
-      - name: Load Console schema
-        working-directory: services/console
-        env:
-          RAILS_ENV: test
-          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
-        run: bin/rails db:prepare
+      # integration tests run against the schema api-rs migrates.
+      - name: Migrate Console schema
+        run: cargo run --locked -p centaur-console-db --example migrate -- postgresql://postgres:postgres@localhost:5432/token_broker_test
 
       - name: Test
         env:
@@ -431,13 +417,13 @@ jobs:
           working-directory: services/console
           bundler-cache: true
 
-      # api-rs serves the Console from Console's tables, so its Console tests
-      # run against the schema Console currently ships.
-      - name: Load Console schema
+      # Rails still carries db/schema.rb until its migrations are deleted;
+      # load it as the reference the api-rs baseline must match.
+      - name: Load Rails Console schema
         working-directory: services/console
         env:
           RAILS_ENV: test
-          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/console_test
+          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/console_rails
         run: bin/rails db:prepare
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -447,6 +433,29 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # api-rs serves the Console from Console's tables, so its Console tests
+      # run against the schema api-rs migrates. template0 keeps the ParadeDB
+      # image's demo extensions out of it, as Rails' test databases do.
+      - name: Migrate Console schema
+        run: |
+          docker exec centaur-api-test-postgres createdb -U postgres --template template0 console_test
+          cargo run --locked -p centaur-console-db --example migrate -- postgresql://postgres:postgres@localhost:5432/console_test
+
+      # The baseline migration must stay the schema Rails left behind. Later
+      # api-rs migrations change only the api-rs side, so load the baseline
+      # alone for the comparison.
+      - name: Compare Console baseline with Rails
+        run: |
+          docker exec centaur-api-test-postgres createdb -U postgres --template template0 console_baseline
+          docker exec -i centaur-api-test-postgres psql -q -v ON_ERROR_STOP=1 -U postgres -d console_baseline \
+            < crates/centaur-console-db/migrations/0001_baseline.sql
+          dump() {
+            docker exec centaur-api-test-postgres pg_dump -U postgres --schema-only \
+              --no-owner --no-privileges --no-comments "$1" \
+              | grep -vE '^\\(un)?restrict '
+          }
+          diff -u <(dump console_rails) <(dump console_baseline)
 
       - name: Test Absurd SDK
         env:

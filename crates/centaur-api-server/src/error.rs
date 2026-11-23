@@ -161,6 +161,12 @@ pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     message
 }
 
+impl From<centaur_console_db::Error> for ApiError {
+    fn from(error: centaur_console_db::Error) -> Self {
+        Self::Internal(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

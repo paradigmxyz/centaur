@@ -171,6 +171,10 @@ pub async fn link_or_provision_user(
         if !valid_console_email(email_value) {
             return Err(crate::Error::InvalidData("Email is invalid".to_owned()));
         }
+        // The system user api-rs writes as never signs in.
+        if email_value.eq_ignore_ascii_case(crate::SYSTEM_USER_EMAIL) {
+            return Err(crate::Error::InvalidData("Email is reserved".to_owned()));
+        }
         let linkable = if identity.email_verified {
             match email.as_deref() {
                 Some(email) => {

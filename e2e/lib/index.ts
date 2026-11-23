@@ -94,6 +94,8 @@ const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
 const consoleUrl = required('E2E_CONSOLE_URL')
 const consoleApiKey = required('E2E_CONSOLE_API_KEY')
+const consoleAdminEmail = required('E2E_CONSOLE_ADMIN_EMAIL')
+const consoleAdminPassword = required('E2E_CONSOLE_ADMIN_PASSWORD')
 const logDir = required('E2E_LOG_DIR')
 const kindNode = required('E2E_KIND_NODE')
 const workflowDir = required('E2E_WORKFLOW_DIR')
@@ -459,50 +461,43 @@ export const scheduledTasks = {
    */
   async create(options: { prompt: string; channel: Channel; cron: string | null; as?: SlackUser }): Promise<ScheduledTask> {
     const user = options.as ?? USER
-    const params = JSON.stringify({
-      name: `e2e-${randomUUID().slice(0, 8)}`,
-      prompt: options.prompt,
-      cron: options.cron,
-      email: user.email,
-      user_name: user.displayName,
-      slack_user_id: user.id,
-      team_id: user.teamId,
-      channel: options.channel.id,
-      channel_name: options.channel.name,
-      bot_user_id: BOT.userId
+    const name = `e2e-${randomUUID().slice(0, 8)}`
+    // The author's Console account, Slack identity, and the channel the bot
+    // is in, as Slack sign-in and the channel catalog would have left them.
+    // Concurrent tests share them, so every write is an idempotent upsert.
+    const digest = await Bun.password.hash(AUTHOR_PASSWORD, { algorithm: 'bcrypt', cost: 4 })
+    const [account] = await ironControlDb`
+      insert into users (email, name, status, password_digest, created_at, updated_at)
+      values (${user.email}, ${user.displayName}, 'active', ${digest},
+              now() at time zone 'UTC', now() at time zone 'UTC')
+      on conflict (email) do update set status = 'active', password_digest = excluded.password_digest,
+        updated_at = excluded.updated_at
+      returning id`
+    await ironControlDb`
+      insert into user_identities (user_id, provider, subject, team_id, created_at, updated_at)
+      values (${account.id}, 'slack', ${user.id}, ${user.teamId}, now() at time zone 'UTC', now() at time zone 'UTC')
+      on conflict (provider, subject) do nothing`
+    await ironControlDb`
+      insert into slack_bot_channels (team_id, channel_id, bot_user_id, name, private, active, archived,
+                                      created_at, updated_at)
+      values (${user.teamId}, ${options.channel.id}, ${BOT.userId}, ${options.channel.name}, false, true, false,
+              now() at time zone 'UTC', now() at time zone 'UTC')
+      on conflict (team_id, channel_id) do update set bot_user_id = excluded.bot_user_id, name = excluded.name,
+        private = false, active = true, archived = false, updated_at = excluded.updated_at`
+    const session = await consoleSession(user.email, AUTHOR_PASSWORD)
+    const { data } = await session.ok('POST', '/api/v1/console/scheduled_tasks', {
+      data: {
+        name,
+        prompt: options.prompt,
+        delivery_mode: 'channel',
+        delivery_channel: options.channel.id,
+        schedule_preset: options.cron ? 'cron' : 'manual',
+        cron_expression: options.cron ?? ''
+      }
     })
-    const out = await consoleRunner(`
-      params = JSON.parse(${JSON.stringify(params)})
-      # Concurrent tests share the user, identity, and channel; whichever loses
-      # the race to create one finds the winner's row on retry. Each step
-      # retries on its own: a shared budget runs out when one process loses
-      # all three races in a row.
-      upsert = lambda do |&step|
-        attempts = 0
-        begin
-          step.call
-        rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique
-          attempts += 1
-          retry if attempts < 3
-          raise
-        end
-      end
-      user = upsert.call { User.find_or_create_by!(email: params["email"]) { |u| u.name = params["user_name"] } }
-      user.update!(status: "active") unless user.active?
-      upsert.call do
-        user.user_identities.find_or_create_by!(provider: "slack", subject: params["slack_user_id"]) do |identity|
-          identity.team_id = params["team_id"]
-        end
-      end
-      upsert.call do
-        SlackBotChannel.find_or_initialize_by(team_id: params["team_id"], channel_id: params["channel"]).update!(
-          bot_user_id: params["bot_user_id"], name: params["channel_name"], private: false, active: true, archived: false
-        )
-      end
-      task = ScheduledTask.create!(author: user, name: params["name"], prompt: params["prompt"],
-                                   delivery_channel: params["channel"], cron_expression: params["cron"])
-      puts "E2E_RESULT " + { id: task.id }.to_json`)
-    const { id } = consoleResult(out)
+    const [row] = await ironControlDb`select id from scheduled_tasks where name = ${name}`
+    const id = Number(row.id)
+    taskAuthors.set(id, { oid: data.id, email: user.email })
     return scheduledTasks.get(id)
   },
   async get(id: number): Promise<ScheduledTask> {
@@ -513,10 +508,11 @@ export const scheduledTasks = {
         last_run_at at time zone 'UTC' as last_run_at, last_run_id, last_error
       from scheduled_tasks where id = ${id}`
     if (!row) throw new Error(`scheduled task ${id} does not exist`)
-    const oid = consoleResult(await consoleRunner(`puts "E2E_RESULT " + ScheduledTask.find(${id}).oid.to_json`))
+    const author = taskAuthors.get(id)
+    if (!author) throw new Error(`scheduled task ${id} was not created by these tests`)
     return {
       id: Number(row.id),
-      oid,
+      oid: author.oid,
       enabled: row.enabled,
       nextRunAt: row.next_run_at,
       lastEnqueuedAt: row.last_enqueued_at,
@@ -527,41 +523,76 @@ export const scheduledTasks = {
   },
   /** Runs the task now, as its author pressing "Run now" in Console. */
   async runNow(task: ScheduledTask): Promise<ScheduledTaskRun> {
-    const out = await consoleRunner(`
-      task = ScheduledTask.find(${task.id})
-      result =
-        begin
-          { started: true, runId: ScheduledTaskRunner.call(task)["run_id"] }
-        rescue CentaurApiClient::Error => e
-          { started: false, status: e.status, message: e.message }
-        end
-      puts "E2E_RESULT " + result.to_json`)
-    return consoleResult(out)
+    const session = await authorSession(task)
+    const { status, body } = await session.request('POST', `/api/v1/console/scheduled_tasks/${task.oid}/run`)
+    if (status === 202) return { started: true, runId: body.data.run_id }
+    return { started: false, status, message: body?.error?.message }
   },
   /** The author turns the task off in Console. */
   async disable(task: ScheduledTask): Promise<void> {
-    await consoleRunner(`ScheduledTask.find(${task.id}).update!(enabled: false)`)
+    const session = await authorSession(task)
+    await session.ok('PATCH', `/api/v1/console/scheduled_tasks/${task.oid}`, { data: { enabled: false } })
   },
   /** The bot leaves the channel, as Console's channel catalog would record it. */
   async botLeaves(channel: Channel): Promise<void> {
-    await consoleRunner(`SlackBotChannel.where(channel_id: ${JSON.stringify(channel.id)}).update_all(active: false)`)
+    await ironControlDb`
+      update slack_bot_channels set active = false, updated_at = now() at time zone 'UTC'
+      where channel_id = ${channel.id}`
   }
 }
 
-/**
- * Runs a Rails snippet in the Console worker, the Rails process the chart still
- * runs (api-rs serves the Console itself). The worker shares the Console image,
- * the database env, and the ActiveRecord encryption keys, and it applies the
- * Console schema and bootstrap in its init containers.
- */
-async function consoleRunner(script: string): Promise<string> {
-  return kubectl({}, 'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', script)
+/** The password e2e gives scheduled-task authors, who otherwise sign in with Slack. */
+const AUTHOR_PASSWORD = 'e2e-scheduled-task-author'
+/** Each task these tests created: its Console id and its author. */
+const taskAuthors = new Map<number, { oid: string; email: string }>()
+
+async function authorSession(task: ScheduledTask) {
+  const author = taskAuthors.get(task.id)
+  if (!author) throw new Error(`scheduled task ${task.id} was not created by these tests`)
+  return consoleSession(author.email, AUTHOR_PASSWORD)
 }
 
-function consoleResult(out: string): any {
-  const line = out.split('\n').find(line => line.startsWith('E2E_RESULT '))
-  if (!line) throw new Error(`the console printed no result: ${out}`)
-  return JSON.parse(line.slice('E2E_RESULT '.length))
+/**
+ * A Console browser session: signs in through the password form, then calls
+ * the Console API with the session cookie and the Console origin, as the SPA
+ * does.
+ */
+async function consoleSession(email: string, password: string) {
+  const login = await fetch(`${consoleUrl}/login`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { origin: consoleUrl, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ email, password })
+  })
+  const cookie = login.headers
+    .getSetCookie()
+    .map(header => header.split(';')[0])
+    .join('; ')
+  if (login.status !== 302 && login.status !== 303) throw new Error(`Console sign-in failed: ${login.status}`)
+  if (!cookie) throw new Error('Console sign-in set no session cookie')
+  const session = {
+    async request(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+      const response = await fetch(`${consoleUrl}${path}`, {
+        method,
+        headers: { cookie, origin: consoleUrl, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
+      })
+      const text = await response.text()
+      let payload: unknown = text
+      try {
+        payload = text ? JSON.parse(text) : undefined
+      } catch {
+        // Non-JSON bodies stay text.
+      }
+      return { status: response.status, body: payload }
+    },
+    async ok(method: string, path: string, body?: unknown): Promise<any> {
+      const { status, body: payload } = await session.request(method, path, body)
+      if (status < 200 || status > 299) throw new Error(`${method} ${path} failed: ${status} ${JSON.stringify(payload)}`)
+      return payload
+    }
+  }
+  return session
 }
 
 /** An API client an operator created in the console, with its one dedicated principal. */
@@ -577,46 +608,26 @@ export type SessionEvent = { event: string; data: string }
  */
 export const apiClients = {
   async create(options: { scopes?: string[] } = {}): Promise<ApiClient> {
-    const params = JSON.stringify({
-      name: `e2e-${randomUUID().slice(0, 8)}`,
-      scopes: options.scopes ?? ['sessions:read', 'sessions:write']
+    const name = `e2e-${randomUUID().slice(0, 8)}`
+    // The client's dedicated principal, with the default sandbox capabilities.
+    const { data: principal } = await ironControl.api.ok('POST', '/api/v1/principals', {
+      data: { kind: 'unknown', foreign_id: name, name }
     })
-    const out = await kubectl(
-      {},
-      'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', `
-        params = JSON.parse(${JSON.stringify(params)})
-        admin = User.where(admin: true).order(:id).first or raise "no admin user"
-        principal = Principal.new(kind: "unknown", foreign_id: params["name"], name: params["name"], created_by: admin)
-        principal.apply_default_sandbox_capabilities!
-        principal.save!
-        client = ApiClient.create!(name: params["name"], scopes: params["scopes"], created_by: admin)
-        client.attach_principal!(principal)
-        puts "E2E_API_CLIENT " + { clientId: client.oid, secret: client.secret, principalId: principal.oid,
-                                   principalForeignId: principal.foreign_id }.to_json`
-    )
-    const line = out.split('\n').find(line => line.startsWith('E2E_API_CLIENT '))
-    if (!line) throw new Error('creating an API client printed no result')
-    return JSON.parse(line.slice('E2E_API_CLIENT '.length))
+    const admin = await consoleSession(consoleAdminEmail, consoleAdminPassword)
+    const { data: client } = await admin.ok('POST', '/api/v1/console/api_clients', {
+      data: { name, scopes: options.scopes ?? ['sessions:read', 'sessions:write'], principal: principal.id }
+    })
+    return { clientId: client.id, secret: client.secret, principalId: principal.id, principalForeignId: name }
   },
   /** Rotates the client's secret; returns the client with its new secret. */
   async rotate(client: ApiClient): Promise<ApiClient> {
-    const out = await kubectl(
-      {},
-      'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner', `
-        client = ApiClient.find_by_oid!(${JSON.stringify(client.clientId)})
-        client.rotate_secret!
-        puts "E2E_API_CLIENT_SECRET " + client.secret`
-    )
-    const line = out.split('\n').find(line => line.startsWith('E2E_API_CLIENT_SECRET '))
-    if (!line) throw new Error('rotating the API client secret printed no secret')
-    return { ...client, secret: line.slice('E2E_API_CLIENT_SECRET '.length) }
+    const admin = await consoleSession(consoleAdminEmail, consoleAdminPassword)
+    const { data } = await admin.ok('POST', `/api/v1/console/api_clients/${client.clientId}/rotate_secret`)
+    return { ...client, secret: data.secret }
   },
   async disable(client: ApiClient): Promise<void> {
-    await kubectl(
-      {},
-      'exec', `deploy/${release}-centaur-console-worker`, '--', 'bin/rails', 'runner',
-      `ApiClient.find_by_oid!(${JSON.stringify(client.clientId)}).update!(disabled_at: Time.current)`
-    )
+    const admin = await consoleSession(consoleAdminEmail, consoleAdminPassword)
+    await admin.ok('POST', `/api/v1/console/api_clients/${client.clientId}/disable`)
   },
   /** The client credentials token exchange, authenticating with HTTP Basic. */
   async token(client: ApiClient, scope?: string): Promise<{ status: number; body: any }> {

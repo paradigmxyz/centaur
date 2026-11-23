@@ -78,12 +78,11 @@ component. Add these keys to the same infra Secret:
 | `IRON_CONTROL_DATABASE_URL` | Console database, also read by api-rs and proxy-sync | May use the bundled Postgres server. Keep the Console in its own logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL` | Initial Console admin | Used only to create the first user when no user exists. |
 | `IRON_CONTROL_INITIAL_USER_PASSWORD` | Initial Console admin | Minimum 12 characters. Use a generated break-glass password. |
-| `IRON_CONTROL_INITIAL_API_KEY` | api-rs and `centaur-perms` | Must be `iak_` followed by 64 lowercase hexadecimal characters. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY` | Console encryption at rest | Generate a long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_SECRET_KEY_BASE` | Console sessions and signing | Generate at least 64 random bytes. |
-| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP, Console service, and sandbox api-rs tokens | Generate at least 64 random bytes. Console mints its own purpose-bound service JWT from this existing signing secret. |
+| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP tokens, API client access tokens, and sandbox api-rs tokens | Generate at least 64 random bytes. |
 
 The bootstrap user is created only when the Console has no users. Do not rotate
 the ActiveRecord encryption keys as an ordinary credential rotation: existing
@@ -556,10 +555,13 @@ The server needs:
 - A migrating user that can create extensions and roles. Migrations create
   cluster-wide roles such as `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
   migrates at startup, or the user passed to `centaur-api-server migrate` below.
-  The Console also creates its databases with the `DATABASE_URL` user. The RDS
-  master user and the Cloud SQL `postgres` user can do all of this. With a less
-  privileged user, have an administrator create the `vector` and `uuid-ossp`
-  extensions and the Console databases listed below first.
+  The RDS master user and the Cloud SQL `postgres` user can do all of this. With
+  a less privileged user, have an administrator create the `vector` and
+  `uuid-ossp` extensions first.
+- The Console database (`iron_control_production` below), created before the
+  first install. Nothing in the chart creates it on an external server. Make
+  the `IRON_CONTROL_DATABASE_URL` user its owner, or grant that user `CREATE` on
+  its `public` schema: api-rs creates the Console tables as that user.
 - Enough connections. api-rs opens up to 500 connections under load, and the
   bundled server allows 500.
 
@@ -568,7 +570,7 @@ The deployment uses these databases on the server:
 | Database | Used by | Connection |
 | --- | --- | --- |
 | Any name, for example `centaur` | api-rs, Slackbot, workflows, and the company-context service | `DATABASE_URL`, including the database name. |
-| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+| `iron_control_production` | The Console, served by api-rs; proxy-sync and token-broker read it too | `IRON_CONTROL_DATABASE_URL` without a database name; each process selects the database itself. Create it before installing; api-rs migrates it. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
@@ -642,6 +644,11 @@ subcommand also reads a passfile (`~/.pgpass`). Rerunning it is a no-op. When
 migrations run this way, set `apiRs.runMigrations: false` so api-rs starts with
 a user that does not need to create roles or extensions.
 
+The Console database (`iron_control_production`) is separate: api-rs migrates it
+on every start, whatever `apiRs.runMigrations` says, through
+`IRON_CONTROL_DATABASE_URL`, then creates the initial Console admin if the
+Console has no users.
+
 A database keeps the backend it was first migrated with; there is no in-place
 switch. Migrations, at startup or through `centaur-api-server migrate`, fail if
 the configured backend later disagrees.
@@ -677,38 +684,7 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
   curl -fsS http://localhost:8080/readyz | jq
 ```
 
-Run one agent turn from inside the api-rs deployment:
-
-```bash
-THREAD_KEY=cli:production-smoke-codex
-THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
-# api-rs serves the Console; the Rails worker is the process that still boots
-# Rails, so run the runner there.
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
-
-SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"harness_type":"codex","on_harness_conflict":"restart"}')
-
-kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/messages" \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","parts":[{"type":"text","text":"Reply with exactly PONG."}]}]}'
-
-EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/execute" \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"input_lines":["{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}}"]}')
-EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
-
-kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -N \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  "http://localhost:8080/api/session/${THREAD_PATH}/events?execution_id=${EXECUTION_ID}&after_event_id=0"
-```
-
-Then run the same prompt through Slack:
+Then mention the bot in Slack with:
 
 ```text
 reply with exactly PONG

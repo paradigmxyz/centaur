@@ -619,9 +619,9 @@ mod tests {
         let pool = sqlx::PgPool::connect_lazy("postgres://user:pass@127.0.0.1:1/unused")
             .expect("lazy pool");
         let mut runtime = SessionRuntime::new(
-            PgSessionStore::new(pool),
+            PgSessionStore::new(pool.clone()),
             crate::SandboxRuntime::backend(backend, base_spec()),
-            SessionRegistrar::new(IronControlClient::new("http://unused", "unused")),
+            SessionRegistrar::new(IronControlClient::new(pool)),
         )
         .with_codemode(CODEMODE_IMAGE);
         runtime

@@ -23,6 +23,7 @@ export function adminMe(overrides: Partial<Me> = {}): Me {
       oauth_apps: true,
       users: true,
       api_clients: false,
+      api_keys: true,
       settings: true,
       workflows: true,
       integrations: true,

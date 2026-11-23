@@ -189,10 +189,12 @@ impl PrincipalDraft {
         else {
             return Ok(());
         };
-        self.console_user_id = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
-            .bind(email.to_lowercase())
-            .fetch_optional(conn)
-            .await?;
+        self.console_user_id =
+            sqlx::query_scalar("SELECT id FROM users WHERE email = $1 AND email <> $2")
+                .bind(email.to_lowercase())
+                .bind(crate::SYSTEM_USER_EMAIL)
+                .fetch_optional(conn)
+                .await?;
         Ok(())
     }
 

@@ -2061,13 +2061,14 @@ pub async fn skill_editor_candidates(
 ) -> Result<Vec<SkillUser>> {
     Ok(sqlx::query_as(
         "SELECT id, email, name, status FROM users \
-         WHERE status = 'active' AND id <> $1 \
+         WHERE status = 'active' AND id <> $1 AND email <> $3 \
            AND ($2::text IS NULL OR lower(email) LIKE $2 \
                 OR lower(coalesce(name, '')) LIKE $2) \
          ORDER BY email ASC",
     )
     .bind(user_id)
     .bind(query.map(|query| format!("%{}%", escape_like(&query.to_lowercase()))))
+    .bind(crate::SYSTEM_USER_EMAIL)
     .fetch_all(pool)
     .await?)
 }
@@ -2306,9 +2307,11 @@ async fn resolve_editors(
         .filter_map(|reference| model::User::decode_oid(reference))
         .collect();
     let rows: Vec<SkillUser> = sqlx::query_as(
-        "SELECT id, email, name, status FROM users WHERE id = ANY($1) AND status = 'active'",
+        "SELECT id, email, name, status FROM users \
+         WHERE id = ANY($1) AND status = 'active' AND email <> $2",
     )
     .bind(&ids)
+    .bind(crate::SYSTEM_USER_EMAIL)
     .fetch_all(&mut *executor)
     .await?;
     let mut users: Vec<SkillUser> = Vec::new();
@@ -2618,7 +2621,7 @@ pub async fn resolve_editor_user(
             .fetch_optional(pool)
             .await?
     };
-    let Some(user) = user else {
+    let Some(user) = user.filter(|user| user.email != crate::SYSTEM_USER_EMAIL) else {
         return Ok(None);
     };
     if active_only && user.status != "active" {

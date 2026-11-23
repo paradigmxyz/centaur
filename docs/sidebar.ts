@@ -18,7 +18,6 @@ export const sidebar = [
       { text: 'Expose Slackbot with Tailscale Funnel', link: '/operate/tailscale-funnel' },
       { text: 'SSH access', link: '/operate/ssh' },
       { text: 'API Clients', link: '/operate/api-clients' },
-      { text: 'Upgrade to the api-rs Console', link: '/operate/console-backend-cutover' },
     ],
   },
   {

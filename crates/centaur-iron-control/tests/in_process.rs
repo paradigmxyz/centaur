@@ -1,8 +1,6 @@
-//! DB-backed coverage for the in-process iron-control path.
-//!
-//! The test drives the same [`IronControlClient`] callers use, with the
-//! writable Console pool configured, and asserts the writes land through
-//! `centaur_console_db` (including grants, invalidation, and effective config).
+//! DB-backed coverage for [`IronControlClient`] and [`SessionRegistrar`]: the
+//! writes land through `centaur_console_db` (including grants, invalidation,
+//! and effective config).
 //! Without `CONSOLE_DB_TEST_DATABASE_URL` it skips locally and fails in CI,
 //! matching the rest of the Console database tests.
 
@@ -11,10 +9,11 @@ use std::env;
 
 use centaur_iron_control::{
     AwsAuthSecretInput, GcpAuthSecretInput, GcpIdTokenSecretInput, GrantSecret, Grantee,
-    IdentityInput, IronControlClient, OAuthTokenSecretInput, PgDsnSecretInput, PrincipalInput,
-    ReplaceConfig, RequestRule, SecretSource, SlackChannelPermissionInput, StaticSecretInput,
+    IdentityInput, IronControlClient, IronControlError, OAuthTokenSecretInput, PgDsnSecretInput,
+    PrincipalInput, ReplaceConfig, RequestRule, SecretSource, SessionRegistrar,
+    SlackChannelPermissionInput, StaticSecretInput,
 };
-use sha2::{Digest, Sha256};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -42,46 +41,13 @@ fn unique() -> String {
     hex::encode(bytes)
 }
 
-async fn insert_user(pool: &PgPool, email: &str) -> i64 {
-    sqlx::query_scalar(
-        "INSERT INTO users (email, admin, status, created_at, updated_at) \
-         VALUES ($1, true, 'active', now(), now()) RETURNING id",
-    )
-    .bind(email)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-async fn insert_api_key(pool: &PgPool, user_id: i64, token: &str) {
-    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
-    sqlx::query(
-        "INSERT INTO api_keys (name, token_hash, user_id, created_at, updated_at) \
-         VALUES ($1, $2, $3, now(), now())",
-    )
-    .bind(format!("in-process-{token_hash}"))
-    .bind(&token_hash)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn in_process_client_writes_principal_proxy_and_effective_config() {
     let Some(pool) = test_pool().await else {
         return;
     };
     let unique = unique();
-    let token = format!("iak_{unique}");
-    let admin = insert_user(&pool, &format!("in-process-{unique}@example.com")).await;
-    insert_api_key(&pool, admin, &token).await;
-
-    // The URL is deliberately unreachable: every successful call below proves
-    // it did not use the HTTP admin API.
-    let client =
-        IronControlClient::new("http://127.0.0.1:1", &token).with_console_write_db(pool.clone());
-    assert!(client.is_in_process());
+    let client = IronControlClient::new(pool.clone());
 
     let principal_input = PrincipalInput {
         foreign_id: format!("in-process-principal-{unique}"),
@@ -98,6 +64,16 @@ async fn in_process_client_writes_principal_proxy_and_effective_config() {
         .await
         .expect("upsert principal in-process");
     assert!(principal.id.starts_with("prn_"));
+    // api-rs writes as the Console system user, never as an operator.
+    let created_by: String = sqlx::query_scalar(
+        "SELECT u.email FROM principals p JOIN users u ON u.id = p.created_by_id \
+         WHERE p.foreign_id = $1",
+    )
+    .bind(&principal_input.foreign_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(created_by, centaur_console_db::SYSTEM_USER_EMAIL);
     assert_eq!(
         principal.foreign_id.as_deref(),
         Some(principal_input.foreign_id.as_str())
@@ -108,7 +84,7 @@ async fn in_process_client_writes_principal_proxy_and_effective_config() {
     );
 
     // A second refresh must resolve the same row rather than erroring or
-    // creating a duplicate through the unreachable HTTP URL.
+    // creating a duplicate.
     let refreshed = client
         .refresh_principal(&principal_input)
         .await
@@ -261,11 +237,7 @@ async fn in_process_client_upserts_every_secret_kind_the_registrar_uses() {
         return;
     };
     let unique = unique();
-    let token = format!("iak_{unique}");
-    let admin = insert_user(&pool, &format!("in-process-secrets-{unique}@example.com")).await;
-    insert_api_key(&pool, admin, &token).await;
-    let client =
-        IronControlClient::new("http://127.0.0.1:1", &token).with_console_write_db(pool.clone());
+    let client = IronControlClient::new(pool.clone());
     let rules = vec![RequestRule::host("api.example.com")];
 
     let oauth = client
@@ -365,28 +337,181 @@ async fn in_process_client_upserts_every_secret_kind_the_registrar_uses() {
         .expect("upsert AWS auth secret in-process");
     assert!(aws.id.starts_with("aas_"));
 
-    for (collection, oid) in [
-        ("oauth_token_secrets", oauth.id),
-        ("gcp_auth_secrets", gcp_auth.id),
-        ("gcp_id_token_secrets", gcp_id.id),
-        ("pg_dsn_secrets", pg.id),
-        ("aws_auth_secrets", aws.id),
+    for (table, record) in [
+        ("oauth_token_secrets", &oauth),
+        ("gcp_auth_secrets", &gcp_auth),
+        ("gcp_id_token_secrets", &gcp_id),
+        ("pg_dsn_secrets", &pg),
+        ("aws_auth_secrets", &aws),
     ] {
-        let found = client
-            .get_secret(collection, &oid)
-            .await
-            .unwrap_or_else(|error| panic!("read {collection} {oid}: {error}"));
-        assert_eq!(found.id, oid);
-        let listed = client
-            .list_secrets(
-                collection,
-                &[("managed-by".to_owned(), "centaur".to_owned())],
-            )
-            .await
-            .unwrap_or_else(|error| panic!("list {collection}: {error}"));
-        assert!(
-            listed.iter().all(|secret| secret.id != oid),
-            "these test secrets carry no managed-by label"
-        );
+        let foreign_id = record
+            .foreign_id
+            .as_deref()
+            .expect("upserts carry a foreign_id");
+        let stored: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE foreign_id = $1"
+        ))
+        .bind(foreign_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, 1, "{table} {foreign_id} was written once");
     }
+}
+
+/// A registrar, and unique Slack team/user/channel IDs.
+async fn registrar(pool: &PgPool) -> (SessionRegistrar, IronControlClient, [String; 3]) {
+    let unique = unique();
+    let client = IronControlClient::new(pool.clone());
+    let suffix = unique[..8].to_uppercase();
+    let ids = [
+        format!("T{suffix}"),
+        format!("U{suffix}"),
+        format!("C{suffix}"),
+    ];
+    (SessionRegistrar::new(client.clone()), client, ids)
+}
+
+async fn principal_row(pool: &PgPool, foreign_id: &str) -> Option<(String, Option<String>, Value)> {
+    sqlx::query_as("SELECT id::text, slack_email, labels FROM principals WHERE foreign_id = $1")
+        .bind(foreign_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn preapproved_session_rejects_a_missing_principal_without_writing() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let (registrar, _, [team, user, channel]) = registrar(&pool).await;
+    let foreign_id = format!(
+        "slack-channel-{}-{}",
+        team.to_lowercase(),
+        channel.to_lowercase()
+    );
+
+    let error = registrar
+        .resolve_session(
+            &format!("slack:{team}:{channel}:1773364194.179929"),
+            Some(&json!({ "slack_user_id": user, "slack_team_id": team })),
+            false,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        IronControlError::SessionPrincipalNotPreapproved { foreign_id: ref missing }
+            if *missing == foreign_id
+    ));
+    assert!(
+        principal_row(&pool, &foreign_id).await.is_none(),
+        "preapproved admission must not create the principal"
+    );
+}
+
+#[tokio::test]
+async fn existing_dm_principal_refreshes_its_permission() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let (registrar, client, [team, user, _]) = registrar(&pool).await;
+    let dm = format!("D{}", &user[1..]);
+    let foreign_id = format!("slack-user-{}-{}", team.to_lowercase(), user.to_lowercase());
+    let existing = client
+        .upsert_principal(&PrincipalInput {
+            foreign_id: foreign_id.clone(),
+            name: "Existing DM user".to_owned(),
+            labels: BTreeMap::new(),
+            kind: Some("slack_dm".to_owned()),
+            slack_user_id: Some(user.clone()),
+            slack_channel_id: None,
+            slack_team_id: Some(team.clone()),
+            slack_email: None,
+        })
+        .await
+        .expect("create the DM principal");
+
+    let record = registrar
+        .register_session(
+            &format!("slack:{team}:{dm}:1773364194.179929"),
+            Some(&json!({ "slack_user_id": user, "slack_team_id": team })),
+        )
+        .await
+        .expect("register DM session");
+
+    assert_eq!(record.id, existing.id);
+    let permission: (bool, bool, bool) = sqlx::query_as(
+        "SELECT p.upload_enabled, p.download_enabled, p.history_enabled \
+         FROM slack_channel_permissions p JOIN principals pr ON pr.id = p.principal_id \
+         WHERE pr.foreign_id = $1 AND p.channel_id = $2",
+    )
+    .bind(&foreign_id)
+    .bind(&dm)
+    .fetch_one(&pool)
+    .await
+    .expect("the DM permission is written on the principal");
+    assert_eq!(permission, (true, true, true));
+}
+
+#[tokio::test]
+async fn unknown_console_requester_is_an_error_not_an_omitted_requester() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let (registrar, _, _) = registrar(&pool).await;
+
+    let error = registrar
+        .register_requester(
+            "console:9f1b7a3c-2d4e-4f6a-8b0c-1d2e3f4a5b6c",
+            Some(&json!({ "requester_principal_foreign_id": format!("console-user-ghost-{}", unique()) })),
+        )
+        .await
+        .expect_err("a console requester the console never provisioned must fail");
+
+    assert!(error.is_not_found(), "{error:?}");
+}
+
+#[tokio::test]
+async fn channel_requester_upsert_keeps_existing_labels_and_sets_email() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let (registrar, client, [team, user, channel]) = registrar(&pool).await;
+    let foreign_id = format!("slack-user-{}-{}", team.to_lowercase(), user.to_lowercase());
+    let existing = client
+        .upsert_principal(&PrincipalInput {
+            foreign_id: foreign_id.clone(),
+            name: "Existing requester".to_owned(),
+            labels: BTreeMap::from([("team".to_owned(), "finance".to_owned())]),
+            kind: Some("slack_dm".to_owned()),
+            slack_user_id: Some(user.clone()),
+            slack_channel_id: None,
+            slack_team_id: Some(team.clone()),
+            slack_email: None,
+        })
+        .await
+        .expect("create the requester principal");
+
+    let requester = registrar
+        .register_requester(
+            &format!("slack:{team}:{channel}:1773364194.179929"),
+            Some(&json!({
+                "slack_user_id": user,
+                "slack_team_id": team,
+                "slack_home_team_id": team,
+                "slack_user_email": " ada@example.com "
+            })),
+        )
+        .await
+        .expect("register requester")
+        .expect("home-team channel requester resolves");
+
+    assert_eq!(requester.id, existing.id);
+    let (_, email, labels) = principal_row(&pool, &foreign_id).await.unwrap();
+    assert_eq!(email.as_deref(), Some("ada@example.com"));
+    assert_eq!(labels["team"], "finance");
+    assert_eq!(labels["managed-by"], "centaur");
 }

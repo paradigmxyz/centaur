@@ -12,9 +12,8 @@
 # Mode connectors in connectors/ fall back to exactly that URL when the sandbox
 # does not set CENTAUR_CONSOLE_URL. New wiring should use centaur.consoleUrl.
 #
-# The Console database schema is owned by the Rails migrations, applied by the
-# Rails worker's init containers (templates/console-worker.yaml), which also runs
-# the Slack channel catalog jobs.
+# api-rs also owns the Console database schema (crates/centaur-console-db/
+# migrations) and refreshes the Slack channel catalog.
 apiVersion: v1
 kind: Service
 metadata:

@@ -5,9 +5,9 @@
 The Console is the credential-control surface: the JSON API, the operator UI
 (a TypeScript React SPA in `web/`), principals, roles, grants, encrypted secret
 records, proxies, broker credentials, console login, and MCP OAuth flows. The
-chart now runs it in api-rs (`crates/centaur-api-server/src/console/`); this
-Rails tree is retained for the worker, the migrations, and reference behavior,
-not as a deployed API surface.
+chart now runs it in api-rs (`crates/centaur-api-server/src/console/`) and runs
+no Rails process at all; this Rails tree is retained only as reference behavior
+until it is removed.
 
 Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
@@ -49,11 +49,9 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
 
 ## Invariants
 
-- The chart runs the Console only in api-rs. This Rails application stays in
-  the repository, but its HTTP API is not deployed: the Rails worker (Slack
-  channel catalog jobs) and Rails migrations still run. Rollback is reverting
-  to an older chart version, not running Rails and api-rs side by side. Do not
-  add new Rails API behavior; implement Console changes in
+- The chart runs no Rails: api-rs serves the Console and owns its schema. This
+  Rails application stays in the repository only until it is deleted. Do not
+  add Rails behavior; implement Console changes in
   `crates/centaur-api-server/src/console/` and follow its `README.md`.
 - api-rs has one authorization model. Every credential maps to an
   `AuthenticatedCaller` with a set of capabilities, and every route declares
@@ -103,8 +101,11 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   reconciliation. A connected UI state alone is not proof of usable access.
 - Put business logic in models or `app/services`, keep controllers thin, and
   preserve JSON error and pagination contracts.
-- Generate migrations with Rails and commit the resulting `db/schema.rb` change.
-  Do not hand-edit the schema dump.
+- api-rs owns the Console schema. Add schema changes as SQLx migrations in
+  `crates/centaur-console-db/migrations`, never under `db/migrate`; a test fails
+  when the two disagree. `db/migrate` and `db/schema.rb` remain only for the
+  Rails test suite and are frozen at the baseline. The chart no longer runs any
+  Rails process; the Slack channel catalog jobs moved to api-rs.
 - Use local fixtures or synthetic snapshots for UI work; do not make tests
   depend on a remote database.
 

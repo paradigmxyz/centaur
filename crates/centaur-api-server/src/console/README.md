@@ -124,7 +124,6 @@ capability.
 | Console API key | the key owner (must be an active admin) | `operator.api` |
 | Sandbox token | the principal (`sub`), acting as the proxy's sandbox | the principal's sandbox flags, `slack.proxy`, the four `sandbox.*`, and `console.delegate` when the live admin link holds |
 | Static admin key (`CENTAUR_APIRS_ADMIN_API_KEY`) | `api-rs-admin` | every api-rs capability (`Capability::API_RS`) |
-| Console service JWT | `centaur-console` | `Capability::API_RS` |
 | Ingress key | the bot | `sessions.read`/`sessions.write`, `workflows.events`, and for slackbot `workflows.actions`/`slack_external_teams.read`; platform-prefix scoped |
 | API client token | the API client | its live scopes: `sessions.read` and `sessions.write` (+ `sessions.sandbox_release`) |
 | MCP OAuth token | the MCP principal | unchanged; `/mcp` is its own protocol boundary and does not use this route catalog |
@@ -830,11 +829,11 @@ use. Do not add SSO routes through an unguarded router.
 Unit tests do not need a database. DB-backed tests use
 `CONSOLE_DB_TEST_DATABASE_URL` (the same variable as
 `centaur-console-db/tests`). They skip locally when it is unset and panic under
-`CI`, so a CI misconfiguration cannot silently skip them. Prepare the schema
-from `services/console`:
+`CI`, so a CI misconfiguration cannot silently skip them. Migrate an empty
+database first:
 
 ```bash
-RAILS_ENV=test CENTAUR_CONSOLE_DATABASE_URL=postgresql://... bin/rails db:prepare
+cargo run -p centaur-console-db --example migrate -- postgresql://...
 cargo test --locked -p centaur-api-server console_session
 ```
 
@@ -849,16 +848,14 @@ capability sets. The workspace CI run skips the `console_session_db_` tests
 because it does not load the Console schema; the schema-backed job runs them
 explicitly.
 
-## In-process iron-control calls
+## iron-control calls
 
-When api-rs serves the Console (`CONSOLE_SESSION_SECRET` and
-`CENTAUR_CONSOLE_PUBLIC_URL` are set), `IronControlClient` runs in-process
-against the writable Console pool. `Args::set_console_in_process` selects that
-mode at startup, and `IronControlClient::with_console_write_db` carries the
-pool. The calls resolve to the same `centaur_console_db` functions the Console
-handlers use, so validation, reconciliation, cache invalidation, and timestamps
-match the HTTP API.
-
-Without the Rust Console, and in the external `centaur-perms` CLI, the client
-keeps using the bearer HTTP admin API. That path remains only for deployments
-where Rails still owns the Console; delete it at cutover.
+`IronControlClient` (session, warm-pool, workflow, and infra-role
+registration) writes the Console database directly through the writable Console
+pool, so api-rs requires `IRON_CONTROL_DATABASE_URL`. The calls resolve to the
+same `centaur_console_db` functions the Console handlers use, so validation,
+reconciliation, cache invalidation, and timestamps match the Console API.
+Writes are attributed to the Console system user
+(`centaur_console_db::SYSTEM_USER_EMAIL`), created on first use; it cannot sign
+in and has no API keys. Only the external `centaur-perms` CLI calls the bearer
+API.

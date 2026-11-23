@@ -16,6 +16,7 @@ use crate::console::guard::GuardedRoutes;
 /// Routes under `/api/v1/console` (paths relative to that prefix).
 pub(crate) fn console(routes: GuardedRoutes) -> GuardedRoutes {
     let routes = users::console(routes);
+    let routes = api_keys::console(routes);
     let routes = api_clients::console(routes);
     system_settings::console(routes)
 }

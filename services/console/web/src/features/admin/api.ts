@@ -49,6 +49,38 @@ export async function runUserAction(queryClient: QueryClient, user: ConsoleUser,
   }
 }
 
+/** One of the signed-in admin's bearer API keys; `token` only on create. */
+export interface ApiKey {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type IssuedApiKey = ApiKey & { token: string };
+
+const apiKeysBase = "/api/v1/console/api_keys";
+
+export function useApiKeys() {
+  return useQuery({
+    queryKey: adminKeys.list({ resource: "api_keys" }),
+    queryFn: ({ signal }) => api.get<{ data: ApiKey[] }>(apiKeysBase, { limit: "200" }, signal),
+    select: (body) => body.data,
+  });
+}
+
+/** The new key with its token, which is shown once and never cached. */
+export async function createApiKey(queryClient: QueryClient, name: string) {
+  const body = await api.post<DataEnvelope<IssuedApiKey>>(apiKeysBase, { data: { name } });
+  await queryClient.invalidateQueries({ queryKey: adminKeys.list({ resource: "api_keys" }) });
+  return body.data;
+}
+
+export async function revokeApiKey(queryClient: QueryClient, id: string) {
+  await api.delete(`${apiKeysBase}/${id}`);
+  await queryClient.invalidateQueries({ queryKey: adminKeys.list({ resource: "api_keys" }) });
+}
+
 export const API_CLIENT_SCOPES = ["sessions:read", "sessions:write"] as const;
 
 export interface ApiClientPrincipalLink {

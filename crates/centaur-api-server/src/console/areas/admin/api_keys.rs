@@ -1,6 +1,9 @@
-//! Bearer `/api/v1/api_keys`: the caller's own API keys.
+//! The caller's own API keys: bearer `/api/v1/api_keys`, and
+//! `/api/v1/console/api_keys` for a signed-in admin, which is how the first
+//! key is made when the bootstrap configured none.
 //!
-//! The key used for the request cannot revoke itself.
+//! The key used for a bearer request cannot revoke itself. A sandbox acting
+//! for an admin cannot manage keys: a key outlives the delegation.
 //!
 //! This resource is the Console abstractions' reference slice: the response is a
 //! typed [`ApiKeyPayload`], the list goes through `http::list`, validation
@@ -9,10 +12,13 @@
 use std::collections::HashMap;
 
 use axum::{
+    Extension,
     extract::{Path, Query, State},
+    http::StatusCode,
     response::Response,
-    routing::get,
+    routing::{delete, get},
 };
+use centaur_console_db::ConsoleUser;
 use centaur_console_db::areas::admin::{
     API_KEY_LIST_FROM, API_KEY_LIST_ORDER, API_KEY_LIST_SELECT, ApiKeyRow, api_key, create_api_key,
     soft_delete_api_key,
@@ -26,7 +32,7 @@ use super::common::{self, json_ok};
 use crate::{
     AppState,
     console::{
-        guard::{BearerApiKey, BearerUser, GuardedRoutes},
+        guard::{BearerApiKey, BearerUser, GuardedRoutes, SandboxDelegated},
         http::{
             ConsoleError, ListParams, ListSource, bind, created_data, json_data, list, no_content,
         },
@@ -87,22 +93,82 @@ pub(super) fn bearer(routes: GuardedRoutes) -> GuardedRoutes {
         .operator("/api_keys/{id}", get(show).delete(destroy))
 }
 
+/// Routes under `/api/v1/console` (paths relative to that prefix).
+pub(super) fn console(routes: GuardedRoutes) -> GuardedRoutes {
+    routes
+        .console_admin("/api_keys", get(console_index).post(console_create))
+        .console_admin("/api_keys/{id}", delete(console_destroy))
+}
+
 async fn index(
     State(state): State<AppState>,
     user: BearerUser,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
-    let params = ListParams::from_query(&query)?;
-    let pool = common::pool(&state)?;
+    list_keys(&state, user.0.id, &query).await
+}
+
+async fn list_keys(
+    state: &AppState,
+    user_id: i64,
+    query: &HashMap<String, String>,
+) -> Result<Response, ConsoleError> {
+    let params = ListParams::from_query(query)?;
+    let pool = common::pool(state)?;
     let body = list::<ApiKeyRow, ApiKeyPayload, _, _>(
         &pool,
         &params,
         KEY_LIST,
-        |arguments| bind(arguments, user.0.id),
+        |arguments| bind(arguments, user_id),
         payload,
     )
     .await?;
     Ok(json_ok(body))
+}
+
+/// Keys are managed only from the admin's own browser session.
+fn session_only(delegated: Option<Extension<SandboxDelegated>>) -> Result<(), ConsoleError> {
+    match delegated {
+        Some(_) => Err(ConsoleError::new(
+            StatusCode::FORBIDDEN,
+            "API keys can only be managed from a signed-in browser session",
+        )),
+        None => Ok(()),
+    }
+}
+
+async fn console_index(
+    State(state): State<AppState>,
+    delegated: Option<Extension<SandboxDelegated>>,
+    user: ConsoleUser,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Response, ConsoleError> {
+    session_only(delegated)?;
+    // A signed-in admin's own keys are never for a shared cache.
+    Ok(common::no_store(list_keys(&state, user.id, &query).await?))
+}
+
+async fn console_create(
+    State(state): State<AppState>,
+    delegated: Option<Extension<SandboxDelegated>>,
+    user: ConsoleUser,
+    ConsoleData(data): ConsoleData<CreateApiKey>,
+) -> Result<Response, ConsoleError> {
+    session_only(delegated)?;
+    issue_key(&state, user.id, data).await
+}
+
+async fn console_destroy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    delegated: Option<Extension<SandboxDelegated>>,
+    user: ConsoleUser,
+) -> Result<Response, ConsoleError> {
+    session_only(delegated)?;
+    let pool = common::pool(&state)?;
+    let key = load(&pool, user.id, &id).await?;
+    soft_delete_api_key(&pool, key.id).await?;
+    Ok(no_content())
 }
 
 async fn show(
@@ -120,15 +186,23 @@ async fn create(
     user: BearerUser,
     ConsoleData(data): ConsoleData<CreateApiKey>,
 ) -> Result<Response, ConsoleError> {
-    let pool = common::pool(&state)?;
+    issue_key(&state, user.0.id, data).await
+}
+
+async fn issue_key(
+    state: &AppState,
+    user_id: i64,
+    data: CreateApiKey,
+) -> Result<Response, ConsoleError> {
+    let pool = common::pool(state)?;
     data.validate_fields()?;
     let name = data.name.unwrap_or_default();
     let token = common::issue_token(TOKEN_PREFIX);
-    let key = create_api_key(&pool, user.0.id, &name, &common::token_digest(&token)).await?;
+    let key = create_api_key(&pool, user_id, &name, &common::token_digest(&token)).await?;
     // The freshly minted token is the only field the listing never renders.
     let mut payload = payload(&key);
     payload.token = Some(token);
-    Ok(created_data(payload))
+    Ok(common::no_store(created_data(payload)))
 }
 
 async fn destroy(

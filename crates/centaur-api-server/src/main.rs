@@ -3,7 +3,8 @@ mod args;
 
 use centaur_api_server::{
     ApiAuthConfig, AppState, build_router_with_app_state, partition_slack_external_team_ids,
-    spawn_scheduled_task_scheduler, warm_slack_public_channel_cache,
+    spawn_scheduled_task_scheduler, spawn_slack_channel_catalog_refresh,
+    warm_slack_public_channel_cache,
 };
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
@@ -32,13 +33,10 @@ async fn main() -> Result<(), ServerError> {
         return result;
     }
 
-    let mut args = Args::parse();
+    let args = Args::parse();
     info!(enabled = centaur_api_server::mcp_enabled(), "MCP endpoint");
     let api_auth = ApiAuthConfig::from_env()?;
     let console_session = args.console_session_config()?;
-    // When api-rs serves the Console, iron-control calls go straight to the
-    // Console database instead of over the bearer API.
-    args.set_console_in_process(console_session.is_some());
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(
         bind_addr = %args.server.bind_addr,
@@ -101,6 +99,32 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     Ok(())
 }
 
+/// api-rs owns Console's schema: migrate it on every start, then create the
+/// initial operator on a database with no users. Both must finish before
+/// anything below registers principals in it. Unlike the session database,
+/// the Console migrates regardless of `RUN_MIGRATIONS`: its migrations need
+/// only the Console role, which owns its tables, and there is no other way to
+/// apply them.
+async fn prepare_console_db(args: &Args) -> Result<(), ServerError> {
+    let Some(pool) = args.console_write_db() else {
+        return Ok(());
+    };
+    centaur_console_db::migrate(&pool).await?;
+    info!("Console database migrations applied");
+    let Some(admin) = args.console_initial_admin() else {
+        return Ok(());
+    };
+    match centaur_console_db::bootstrap_initial_admin(&pool, &admin).await? {
+        centaur_console_db::Bootstrap::Existing => {}
+        centaur_console_db::Bootstrap::Created { user_id } => info!(
+            user_id,
+            email = %admin.email.trim().to_lowercase(),
+            "created the initial Console admin"
+        ),
+    }
+    Ok(())
+}
+
 async fn install_agent_sandbox_crds(args: InstallAgentSandboxCrdsArgs) -> Result<(), ServerError> {
     let client = kube::Client::try_default().await?;
     centaur_sandbox_agent_k8s::install_agent_sandbox_crds(&client, &args.stop_deployments).await?;
@@ -138,6 +162,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if args.server.run_migrations {
         store.run_migrations(args.server.text_search).await?;
     }
+    prepare_console_db(&args).await?;
     if let Some(raw) = args.server.legacy_slack_external_org_allowlist.as_deref() {
         seed_legacy_slack_external_team_ids(&store, raw).await;
     }
@@ -186,6 +211,10 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     match args.console_db() {
         Some(console_db) => spawn_scheduled_task_scheduler(console_db, workflows.clone()),
         None => warn!("Console database is not configured; scheduled tasks will not run"),
+    }
+    // api-rs keeps the Console's Slack channel catalog current.
+    if let Some(console_db) = args.console_write_db() {
+        spawn_slack_channel_catalog_refresh(console_db);
     }
     let workflows = Some(workflows);
 
@@ -268,6 +297,8 @@ pub(crate) enum ServerError {
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(transparent)]
     IronControlRegister(#[from] centaur_iron_control::RegisterError),
+    #[error(transparent)]
+    ConsoleSetup(#[from] centaur_console_db::SetupError),
     #[error(transparent)]
     Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]

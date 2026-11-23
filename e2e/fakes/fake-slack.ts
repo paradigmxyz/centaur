@@ -98,6 +98,11 @@ function handle(method: string, actor: Actor, body: Record<string, unknown>) {
       const user = USERS.find(candidate => candidate.id === str(body.users).split(',')[0])
       return user ? { ok: true, channel: dmChannel(user) } : { ok: false, error: 'user_not_found' }
     }
+    case 'conversations.members':
+      // The fixture's channels are public, and everyone in the fixture is in them.
+      return conversation(channel)
+        ? { ok: true, members: [BOT.userId, ...USERS.map(user => user.id)], response_metadata: { next_cursor: '' } }
+        : { ok: false, error: 'channel_not_found' }
     case 'conversations.info': {
       const known = conversation(channel)
       return known ? { ok: true, channel: known } : { ok: false, error: 'channel_not_found' }
