@@ -684,37 +684,7 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
   curl -fsS http://localhost:8080/readyz | jq
 ```
 
-Run one agent turn from inside the api-rs deployment:
-
-```bash
-THREAD_KEY=cli:production-smoke-codex
-THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
-# The api-rs admin key (CENTAUR_APIRS_ADMIN_API_KEY in the infra Secret).
-CENTAUR_API_TOKEN=$(kubectl get secret -n centaur-system centaur-infra-env \
-  -o jsonpath='{.data.CENTAUR_APIRS_ADMIN_API_KEY}' | base64 -d)
-
-SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"harness_type":"codex","on_harness_conflict":"restart"}')
-
-kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/messages" \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","parts":[{"type":"text","text":"Reply with exactly PONG."}]}]}'
-
-EXECUTE=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}/execute" \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"input_lines":["{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG.\"}]}}"]}')
-EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
-
-kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -N \
-  -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \
-  "http://localhost:8080/api/session/${THREAD_PATH}/events?execution_id=${EXECUTION_ID}&after_event_id=0"
-```
-
-Then run the same prompt through Slack:
+Then mention the bot in Slack with:
 
 ```text
 reply with exactly PONG
