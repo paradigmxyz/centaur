@@ -1006,6 +1006,10 @@ async fn console_session_db_admin_manages_own_api_keys_from_a_session() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
     let listed = json_body(response).await;
     let keys = listed["data"].as_array().unwrap();
     assert!(keys.iter().any(|key| key["id"] == id.as_str()));

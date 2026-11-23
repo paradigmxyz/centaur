@@ -40,8 +40,8 @@ pub(crate) enum Capability {
     // api-rs session, sandbox, workflow, and Slack routes.
     SessionsRead,
     SessionsWrite,
-    /// Releasing a session's sandbox. API clients, the static admin key, and
-    /// Console's service JWT hold it; ingress keys do not.
+    /// Releasing a session's sandbox. API clients and the static admin key
+    /// hold it; ingress keys do not.
     SessionsSandboxRelease,
     SandboxesDrain,
     WorkflowsRead,
@@ -69,9 +69,8 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
-    /// Every capability an api-rs service credential (the static admin key or
-    /// Console's service JWT) holds. It deliberately excludes the Console
-    /// session, operator, sandbox, and Slack proxy surfaces.
+    /// Every capability the static admin key holds. It deliberately excludes
+    /// the Console session, operator, sandbox, and Slack proxy surfaces.
     pub(crate) const API_RS: [Self; 10] = [
         Self::SessionsRead,
         Self::SessionsWrite,

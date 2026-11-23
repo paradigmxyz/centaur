@@ -144,7 +144,8 @@ async fn console_index(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ConsoleError> {
     session_only(delegated)?;
-    list_keys(&state, user.id, &query).await
+    // A signed-in admin's own keys are never for a shared cache.
+    Ok(common::no_store(list_keys(&state, user.id, &query).await?))
 }
 
 async fn console_create(

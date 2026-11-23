@@ -93,8 +93,8 @@ toolServer:
 # bundled server creates it on first boot; on an external server, create it
 # before installing. api-rs migrates it and bootstraps the initial admin on
 # every start.
-# DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
-# keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
+# DATABASE_URL, the bootstrap login, and the ActiveRecord encryption keys are
+# injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
 # elsewhere to use an external DB.
 #
 # Backwards compatibility: this block used to be named `ironControl`. That key is

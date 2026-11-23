@@ -124,7 +124,6 @@ capability.
 | Console API key | the key owner (must be an active admin) | `operator.api` |
 | Sandbox token | the principal (`sub`), acting as the proxy's sandbox | the principal's sandbox flags, `slack.proxy`, the four `sandbox.*`, and `console.delegate` when the live admin link holds |
 | Static admin key (`CENTAUR_APIRS_ADMIN_API_KEY`) | `api-rs-admin` | every api-rs capability (`Capability::API_RS`) |
-| Console service JWT | `centaur-console` | `Capability::API_RS` |
 | Ingress key | the bot | `sessions.read`/`sessions.write`, `workflows.events`, and for slackbot `workflows.actions`/`slack_external_teams.read`; platform-prefix scoped |
 | API client token | the API client | its live scopes: `sessions.read` and `sessions.write` (+ `sessions.sandbox_release`) |
 | MCP OAuth token | the MCP principal | unchanged; `/mcp` is its own protocol boundary and does not use this route catalog |

@@ -82,7 +82,7 @@ component. Add these keys to the same infra Secret:
 | `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_SECRET_KEY_BASE` | Console sessions and signing | Generate at least 64 random bytes. |
-| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP, Console service, and sandbox api-rs tokens | Generate at least 64 random bytes. Console mints its own purpose-bound service JWT from this existing signing secret. |
+| `CENTAUR_JWT_SIGNING_SECRET` | Console-issued MCP tokens, API client access tokens, and sandbox api-rs tokens | Generate at least 64 random bytes. |
 
 The bootstrap user is created only when the Console has no users. Do not rotate
 the ActiveRecord encryption keys as an ordinary credential rotation: existing
