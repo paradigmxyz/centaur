@@ -28,8 +28,8 @@ use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 
 use super::write::{
-    Document, Pending, SourceDraft, foreign_id_taken, resolve_brokers, resolve_target, run_write,
-    stored_plaintexts,
+    AwsAuthParent, Document, HmacParent, OauthTokenParent, ParentRow, Pending, SourceDraft,
+    SshKeyParent, foreign_id_taken, resolve_brokers, resolve_target, run_write, stored_plaintexts,
 };
 use super::{
     BearerRequest, Errors, ForeignIdValue, RuleDocument, SecretKind, SecretRow, WriteError,
@@ -352,30 +352,14 @@ impl Document {
     }
 }
 
-/// The base attributes every kind carries, with the column default for an
-/// omitted field (replace semantics).
-fn base_attributes(
-    name: Option<String>,
-    description: Option<String>,
-    labels: Option<BTreeMap<String, Value>>,
-) -> Map<String, Value> {
-    let mut base = Map::new();
-    base.insert("name".to_owned(), json!(name));
-    base.insert("description".to_owned(), json!(description));
-    base.insert("labels".to_owned(), json!(labels.unwrap_or_default()));
-    base
-}
-
 fn aws_auth_document(request: AwsAuthRequest, existing: Option<&SecretRow>) -> Document {
-    let mut base = base_attributes(request.name, request.description, request.labels);
-    base.insert(
-        "allowed_regions".to_owned(),
-        json!(request.allowed_regions.unwrap_or_default()),
-    );
-    base.insert(
-        "allowed_services".to_owned(),
-        json!(request.allowed_services.unwrap_or_default()),
-    );
+    let parent = ParentRow::AwsAuth(AwsAuthParent {
+        name: request.name,
+        description: request.description,
+        labels: json!(request.labels.unwrap_or_default()),
+        allowed_regions: json!(request.allowed_regions.unwrap_or_default()),
+        allowed_services: json!(request.allowed_services.unwrap_or_default()),
+    });
     let sources = [
         ("access_key_id", request.access_key_id),
         ("secret_access_key", request.secret_access_key),
@@ -393,7 +377,7 @@ fn aws_auth_document(request: AwsAuthRequest, existing: Option<&SecretRow>) -> D
     .collect();
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        parent: base,
+        parent,
         sources,
         rules: parse_rules(request.rules.unwrap_or_default()),
         private_key_error: None,
@@ -401,20 +385,17 @@ fn aws_auth_document(request: AwsAuthRequest, existing: Option<&SecretRow>) -> D
 }
 
 fn oauth_token_document(request: OauthTokenRequest, existing: Option<&SecretRow>) -> Document {
-    let mut base = base_attributes(request.name, request.description, request.labels);
-    for (key, value) in [
-        ("grant", request.grant),
-        ("token_endpoint", request.token_endpoint),
-        ("audience", request.audience),
-        ("header", request.header),
-        ("value_prefix", request.value_prefix),
-    ] {
-        base.insert(key.to_owned(), json!(value));
-    }
-    base.insert(
-        "scopes".to_owned(),
-        json!(request.scopes.unwrap_or_default()),
-    );
+    let parent = ParentRow::OauthToken(OauthTokenParent {
+        name: request.name,
+        description: request.description,
+        labels: json!(request.labels.unwrap_or_default()),
+        grant: request.grant,
+        token_endpoint: request.token_endpoint,
+        audience: request.audience,
+        header: request.header,
+        value_prefix: request.value_prefix,
+        scopes: json!(request.scopes.unwrap_or_default()),
+    });
     let mut sources = role_sources(request.credentials, "credential_field");
     sources.extend(role_sources(
         request.token_endpoint_headers,
@@ -422,7 +403,7 @@ fn oauth_token_document(request: OauthTokenRequest, existing: Option<&SecretRow>
     ));
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        parent: base,
+        parent,
         sources,
         rules: parse_rules(request.rules.unwrap_or_default()),
         private_key_error: None,
@@ -430,26 +411,17 @@ fn oauth_token_document(request: OauthTokenRequest, existing: Option<&SecretRow>
 }
 
 fn hmac_document(request: HmacRequest, existing: Option<&SecretRow>) -> Document {
-    let mut base = base_attributes(request.name, request.description, request.labels);
-    for (key, value) in [
-        ("timestamp_format", request.timestamp_format),
-        ("signature_algorithm", request.signature_algorithm),
-        ("signature_key_encoding", request.signature_key_encoding),
-        (
-            "signature_output_encoding",
-            request.signature_output_encoding,
-        ),
-        ("signature_message", request.signature_message),
-    ] {
-        base.insert(key.to_owned(), json!(value));
-    }
-    base.insert(
-        "allow_chunked_body".to_owned(),
-        json!(request.allow_chunked_body.unwrap_or(false)),
-    );
-    base.insert(
-        "headers".to_owned(),
-        Value::Array(
+    let parent = ParentRow::Hmac(HmacParent {
+        name: request.name,
+        description: request.description,
+        labels: json!(request.labels.unwrap_or_default()),
+        timestamp_format: request.timestamp_format,
+        signature_algorithm: request.signature_algorithm,
+        signature_key_encoding: request.signature_key_encoding,
+        signature_output_encoding: request.signature_output_encoding,
+        signature_message: request.signature_message,
+        allow_chunked_body: request.allow_chunked_body.unwrap_or(false),
+        headers: Value::Array(
             request
                 .headers
                 .unwrap_or_default()
@@ -457,10 +429,10 @@ fn hmac_document(request: HmacRequest, existing: Option<&SecretRow>) -> Document
                 .map(header_value)
                 .collect(),
         ),
-    );
+    });
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        parent: base,
+        parent,
         sources: role_sources(request.credentials, "credential_field"),
         rules: parse_rules(request.rules.unwrap_or_default()),
         private_key_error: None,
@@ -470,15 +442,12 @@ fn hmac_document(request: HmacRequest, existing: Option<&SecretRow>) -> Document
 fn ssh_key_document(request: SshKeyRequest, existing: Option<&SecretRow>) -> Document {
     // `SshKeySecret` normalizes both attributes: the name is stripped and the
     // public key keeps only "<type> <base64>" (comments are labels).
-    let mut base = base_attributes(
-        request.name.map(|name| name.trim().to_owned()),
-        request.description,
-        request.labels,
-    );
-    base.insert(
-        "public_key".to_owned(),
-        json!(normalize_public_key(request.public_key)),
-    );
+    let mut parent = SshKeyParent {
+        name: request.name.map(|name| name.trim().to_owned()),
+        description: request.description,
+        labels: json!(request.labels.unwrap_or_default()),
+        public_key: normalize_public_key(request.public_key),
+    };
 
     let mut sources = Vec::new();
     let mut private_key_error = None;
@@ -487,7 +456,7 @@ fn ssh_key_document(request: SshKeyRequest, existing: Option<&SecretRow>) -> Doc
         if draft.source_type.as_deref() == Some("control_plane") {
             // An inline key's public key is derived, and its value is stored
             // normalized.
-            base.remove("public_key");
+            parent.public_key = None;
             if let Some(secret) = draft
                 .secret
                 .as_deref()
@@ -496,9 +465,7 @@ fn ssh_key_document(request: SshKeyRequest, existing: Option<&SecretRow>) -> Doc
                 draft.secret = Some(normalize_private_key(secret));
             }
             match derive_public_key(draft.secret.as_deref().unwrap_or_default()) {
-                Ok(public_key) => {
-                    base.insert("public_key".to_owned(), json!(public_key));
-                }
+                Ok(public_key) => parent.public_key = Some(public_key),
                 Err(message) => private_key_error = Some(message),
             }
         }
@@ -507,7 +474,7 @@ fn ssh_key_document(request: SshKeyRequest, existing: Option<&SecretRow>) -> Doc
 
     Document {
         foreign_id: parse_foreign_id(request.foreign_id, existing),
-        parent: base,
+        parent: ParentRow::SshKey(parent),
         sources,
         rules: Vec::new(),
         private_key_error,
@@ -580,8 +547,18 @@ fn normalize_public_key(value: Option<String>) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 impl Document {
-    fn text(&self, key: &str) -> Option<&str> {
-        self.parent.get(key).and_then(Value::as_str)
+    fn grant(&self) -> Option<&str> {
+        match &self.parent {
+            ParentRow::OauthToken(parent) => parent.grant.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn public_key(&self) -> Option<&str> {
+        match &self.parent {
+            ParentRow::SshKey(parent) => parent.public_key.as_deref(),
+            _ => None,
+        }
     }
 
     /// The typed request's field rules plus the merged, database-backed and
@@ -593,7 +570,7 @@ impl Document {
         request: &BearerRequest,
     ) -> Errors {
         let context = MoreValidation {
-            grant: self.text("grant").map(str::to_owned),
+            grant: self.grant().map(str::to_owned),
             private_key_error: self.private_key_error.clone(),
         };
         let mut errors = match request {
@@ -613,7 +590,7 @@ impl Document {
                 // An inline control-plane key derives the public key, so the
                 // merged document's value is the one that must be supported.
                 let mut request = request.clone();
-                request.public_key = self.text("public_key").map(str::to_owned);
+                request.public_key = self.public_key().map(str::to_owned);
                 request
                     .validate_fields_with(&context)
                     .err()
@@ -805,7 +782,7 @@ impl Document {
     }
 
     fn oauth_token_errors(&self, errors: &mut Errors) {
-        let grant = self.text("grant");
+        let grant = self.grant();
         if let Some(grant) = grant
             && let Some((required, optional)) = oauth_grant_fields(grant)
         {
@@ -912,9 +889,16 @@ mod db_tests {
     use serde_json::json;
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
-    use super::{BearerRequest, OauthTokenRequest, SshKeyRequest, write_secret};
+    use super::{
+        AwsAuthRequest, BearerRequest, HmacRequest, OauthTokenRequest, SshKeyRequest, write_secret,
+    };
+    use crate::areas::secrets::write::{
+        AwsAuthParent, GcpAuthParent, GcpIdTokenParent, HmacParent, OauthTokenParent, ParentRow,
+        PgDsnParent, SshKeyParent, StaticParent,
+    };
     use crate::areas::secrets::{
-        SecretFields, SecretKind, WriteTarget, decrypt, delete_secret, find_secret,
+        SecretFields, SecretKind, WriteDocument, WriteOptions, WriteTarget, decrypt, delete_secret,
+        find_secret,
     };
 
     /// The typed request an SSH key write deserializes to.
@@ -933,6 +917,15 @@ lGH7Zg4i/TJnXyPb7G9VAAAACGRpZmYtb25lAQIDBAU=\n\
 -----END OPENSSH PRIVATE KEY-----\n";
     const PUBLIC_KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINsAzqBdL7PmH5cJ0W7QaQlllGH7Zg4i/TJnXyPb7G9V";
+    const PRIVATE_KEY_2: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+QyNTUxOQAAACDoVZzA88VJKXcdwesgNsr6BPcXL9goZkMYLJ7NDcqVxAAAAJAmMtnzJjLZ\n\
+8wAAAAtzc2gtZWQyNTUxOQAAACDoVZzA88VJKXcdwesgNsr6BPcXL9goZkMYLJ7NDcqVxA\n\
+AAAECrMSzVG6Cr7yM069kwaaMtntHcjfI/9ETZwo67w6E2eOhVnMDzxUkpdx3B6yA2yvoE\n\
+9xcv2ChmQxgsns0NypXEAAAACXJvdW5kdHJpcAECAwQ=\n\
+-----END OPENSSH PRIVATE KEY-----\n";
+    const PUBLIC_KEY_2: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOhVnMDzxUkpdx3B6yA2yvoE9xcv2ChmQxgsns0NypXE";
 
     async fn database() -> Option<PgPool> {
         let Ok(url) = std::env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
@@ -984,6 +977,433 @@ lGH7Zg4i/TJnXyPb7G9VAAAACGRpZmYtb25lAQIDBAU=\n\
 
     fn suffix() -> u64 {
         rand::random()
+    }
+
+    #[derive(Clone, Copy)]
+    enum Phase {
+        Create,
+        Update,
+    }
+
+    impl Phase {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Create => "create",
+                Self::Update => "update",
+            }
+        }
+    }
+
+    fn value(prefix: &str, phase: Phase) -> String {
+        format!("{prefix}-{}", phase.label())
+    }
+
+    fn labels(phase: Phase) -> serde_json::Value {
+        json!({ "stage": value("label", phase), "team": value("team", phase) })
+    }
+
+    fn list(prefix: &str, phase: Phase) -> serde_json::Value {
+        json!([value(prefix, phase)])
+    }
+
+    fn source(prefix: &str, phase: Phase) -> serde_json::Value {
+        json!({ "source_type": "env", "config": { "var": value(prefix, phase) } })
+    }
+
+    fn body(kind: SecretKind, phase: Phase, suffix: u64) -> serde_json::Value {
+        let foreign_id = format!("round-trip-{}-{suffix}", kind.slug());
+        let name = value("name", phase);
+        let description = value("description", phase);
+        let labels = labels(phase);
+        match kind {
+            SecretKind::Static => match phase {
+                Phase::Create => json!({
+                    "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                    "kind": "custom", "inject_config": { "header": value("header", phase) },
+                }),
+                Phase::Update => json!({
+                    "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                    "kind": "github_token",
+                    "replace_config": { "proxy_value": "GITHUB_TOKEN", "match_headers": ["Authorization"] },
+                    "rules": [{ "host": "api.github.com" }],
+                }),
+            },
+            SecretKind::PgDsn => json!({
+                "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                "database": value("database", phase), "role": value("role", phase),
+                "settings": [{ "name": "search_path", "value": value("setting", phase) }],
+                "dsn": source("pg-dsn", phase),
+            }),
+            SecretKind::GcpAuth => match phase {
+                Phase::Create => json!({
+                    "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                    "credentials_provider": { "type": "workload_identity" },
+                    "scopes": list("scope", phase),
+                }),
+                Phase::Update => json!({
+                    "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                    "keyfile": source("gcp-key", phase),
+                    "subject": value("subject", phase),
+                    "scopes": list("scope", phase),
+                }),
+            },
+            SecretKind::GcpIdToken => json!({
+                "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                "audience": value("audience", phase),
+                "header": match phase {
+                    Phase::Create => "authorization",
+                    Phase::Update => "x-serverless-authorization",
+                },
+                "keyfile": source("gcp-id-key", phase),
+                "rules": [{ "host": value("host", phase) }],
+            }),
+            SecretKind::AwsAuth => json!({
+                "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                "allowed_regions": list("region", phase),
+                "allowed_services": list("service", phase),
+                "access_key_id": source("aws-access", phase),
+                "secret_access_key": source("aws-secret", phase),
+                "session_token": source("aws-session", phase),
+                "rules": [{ "host": value("host", phase), "http_methods": ["GET"] }],
+            }),
+            SecretKind::OauthToken => {
+                let (grant, credentials) = match phase {
+                    Phase::Create => (
+                        "refresh_token",
+                        json!({
+                            "refresh_token": source("oauth-refresh", phase),
+                            "client_id": source("oauth-client", phase),
+                            "client_secret": source("oauth-client-secret", phase),
+                        }),
+                    ),
+                    Phase::Update => (
+                        "password",
+                        json!({
+                            "username": source("oauth-user", phase),
+                            "password": source("oauth-password", phase),
+                            "client_id": source("oauth-client", phase),
+                            "client_secret": source("oauth-client-secret", phase),
+                        }),
+                    ),
+                };
+                json!({
+                    "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                    "grant": grant,
+                    "token_endpoint": value("token-endpoint", phase),
+                    "audience": value("oauth-audience", phase),
+                    "header": match phase {
+                        Phase::Create => "authorization",
+                        Phase::Update => "x-custom-authorization",
+                    },
+                    "value_prefix": value("prefix", phase),
+                    "scopes": list("oauth-scope", phase),
+                    "credentials": credentials,
+                    "token_endpoint_headers": { "x-endpoint": source("oauth-endpoint", phase) },
+                    "rules": [{ "host": value("host", phase) }],
+                })
+            }
+            SecretKind::Hmac => json!({
+                "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                "timestamp_format": "unix_seconds",
+                "signature_algorithm": match phase { Phase::Create => "sha256", Phase::Update => "sha512" },
+                "signature_key_encoding": match phase { Phase::Create => "raw", Phase::Update => "base64" },
+                "signature_output_encoding": match phase { Phase::Create => "base64", Phase::Update => "hex" },
+                "signature_message": value("message", phase),
+                "allow_chunked_body": matches!(phase, Phase::Create),
+                "headers": [{ "name": value("signed-header", phase), "value": value("signed-value", phase) }],
+                "credentials": { "secret": source("hmac-secret", phase) },
+                "rules": [{ "host": value("host", phase) }],
+            }),
+            SecretKind::SshKey => json!({
+                "foreign_id": foreign_id, "name": name, "description": description, "labels": labels,
+                "private_key": {
+                    "source_type": "control_plane",
+                    "secret": match phase { Phase::Create => PRIVATE_KEY, Phase::Update => PRIVATE_KEY_2 },
+                },
+            }),
+        }
+    }
+
+    fn request(kind: SecretKind, phase: Phase, suffix: u64) -> WriteDocument {
+        let body = body(kind, phase, suffix);
+        match kind {
+            SecretKind::Static
+            | SecretKind::PgDsn
+            | SecretKind::GcpAuth
+            | SecretKind::GcpIdToken => {
+                WriteDocument::Console(serde_json::from_value(body).expect("console request"))
+            }
+            SecretKind::AwsAuth => WriteDocument::from(
+                serde_json::from_value::<AwsAuthRequest>(body).expect("aws request"),
+            ),
+            SecretKind::OauthToken => WriteDocument::from(
+                serde_json::from_value::<OauthTokenRequest>(body).expect("oauth request"),
+            ),
+            SecretKind::Hmac => WriteDocument::from(
+                serde_json::from_value::<HmacRequest>(body).expect("hmac request"),
+            ),
+            SecretKind::SshKey => WriteDocument::from(
+                serde_json::from_value::<SshKeyRequest>(body).expect("ssh request"),
+            ),
+        }
+    }
+
+    fn parent(kind: SecretKind, phase: Phase) -> ParentRow {
+        let name = Some(value("name", phase));
+        let description = Some(value("description", phase));
+        let labels = labels(phase);
+        match kind {
+            SecretKind::Static => ParentRow::Static(match phase {
+                Phase::Create => StaticParent {
+                    name,
+                    description,
+                    labels,
+                    kind: Some("custom".to_owned()),
+                    inject_config: json!({ "header": value("header", phase) }),
+                    replace_config: serde_json::Value::Null,
+                },
+                Phase::Update => StaticParent {
+                    name,
+                    description,
+                    labels,
+                    kind: Some("github_token".to_owned()),
+                    inject_config: serde_json::Value::Null,
+                    replace_config: json!({
+                        "proxy_value": "GITHUB_TOKEN",
+                        "match_headers": ["Authorization"],
+                        "require": false,
+                    }),
+                },
+            }),
+            SecretKind::PgDsn => ParentRow::PgDsn(PgDsnParent {
+                name,
+                description,
+                database: Some(value("database", phase)),
+                role: Some(value("role", phase)),
+                labels,
+                settings: json!([{ "name": "search_path", "value": value("setting", phase) }]),
+            }),
+            SecretKind::GcpAuth => ParentRow::GcpAuth(match phase {
+                Phase::Create => GcpAuthParent {
+                    name,
+                    description,
+                    subject: None,
+                    labels,
+                    credentials_provider: json!({ "type": "workload_identity" }),
+                    scopes: list("scope", phase),
+                },
+                Phase::Update => GcpAuthParent {
+                    name,
+                    description,
+                    subject: Some(value("subject", phase)),
+                    labels,
+                    credentials_provider: serde_json::Value::Null,
+                    scopes: list("scope", phase),
+                },
+            }),
+            SecretKind::GcpIdToken => ParentRow::GcpIdToken(GcpIdTokenParent {
+                name,
+                description,
+                audience: Some(value("audience", phase)),
+                header: Some(
+                    match phase {
+                        Phase::Create => "authorization",
+                        Phase::Update => "x-serverless-authorization",
+                    }
+                    .to_owned(),
+                ),
+                labels,
+            }),
+            SecretKind::AwsAuth => ParentRow::AwsAuth(AwsAuthParent {
+                name,
+                description,
+                labels,
+                allowed_regions: list("region", phase),
+                allowed_services: list("service", phase),
+            }),
+            SecretKind::OauthToken => ParentRow::OauthToken(OauthTokenParent {
+                name,
+                description,
+                labels,
+                grant: Some(
+                    match phase {
+                        Phase::Create => "refresh_token",
+                        Phase::Update => "password",
+                    }
+                    .to_owned(),
+                ),
+                token_endpoint: Some(value("token-endpoint", phase)),
+                audience: Some(value("oauth-audience", phase)),
+                header: Some(
+                    match phase {
+                        Phase::Create => "authorization",
+                        Phase::Update => "x-custom-authorization",
+                    }
+                    .to_owned(),
+                ),
+                value_prefix: Some(value("prefix", phase)),
+                scopes: list("oauth-scope", phase),
+            }),
+            SecretKind::Hmac => ParentRow::Hmac(HmacParent {
+                name,
+                description,
+                labels,
+                timestamp_format: Some("unix_seconds".to_owned()),
+                signature_algorithm: Some(
+                    match phase {
+                        Phase::Create => "sha256",
+                        Phase::Update => "sha512",
+                    }
+                    .to_owned(),
+                ),
+                signature_key_encoding: Some(
+                    match phase {
+                        Phase::Create => "raw",
+                        Phase::Update => "base64",
+                    }
+                    .to_owned(),
+                ),
+                signature_output_encoding: Some(
+                    match phase {
+                        Phase::Create => "base64",
+                        Phase::Update => "hex",
+                    }
+                    .to_owned(),
+                ),
+                signature_message: Some(value("message", phase)),
+                allow_chunked_body: matches!(phase, Phase::Create),
+                headers: json!([{
+                    "name": value("signed-header", phase),
+                    "value": value("signed-value", phase),
+                }]),
+            }),
+            SecretKind::SshKey => ParentRow::SshKey(SshKeyParent {
+                name,
+                description,
+                labels,
+                public_key: Some(
+                    match phase {
+                        Phase::Create => PUBLIC_KEY,
+                        Phase::Update => PUBLIC_KEY_2,
+                    }
+                    .to_owned(),
+                ),
+            }),
+        }
+    }
+
+    async fn principal(pool: &PgPool, operator_id: i64) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO principals (foreign_id, name, kind, labels, created_by_id, created_at, updated_at) \
+             VALUES ($1, 'Round trip', 'slack_dm', '{}', $2, now(), now()) RETURNING id",
+        )
+        .bind(format!("round-trip-principal-{}", suffix()))
+        .bind(operator_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert principal")
+    }
+
+    /// Every kind's parent row is written and read back through both its DB row
+    /// and the loaded [`SecretRow`] the Console payloads render. Each expected
+    /// parent is an explicit struct literal, so a new kind or parent field is a
+    /// compile error until this test covers it.
+    #[tokio::test]
+    async fn every_kind_round_trips_every_parent_field() {
+        let Some(pool) = database().await else {
+            return;
+        };
+        let admin = operator(&pool).await;
+        for kind in SecretKind::ALL {
+            let suffix = suffix();
+            let created = crate::areas::secrets::write_secret(
+                &pool,
+                kind,
+                WriteTarget::New,
+                request(kind, Phase::Create, suffix),
+                Some(admin),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("create {kind:?}: {error:?}"));
+            assert_eq!(
+                ParentRow::from_secret_row(&created.row),
+                parent(kind, Phase::Create),
+                "create {kind:?}"
+            );
+
+            let oid = created.row.oid();
+            let updated = crate::areas::secrets::write_secret(
+                &pool,
+                kind,
+                WriteTarget::Oid(oid.clone()),
+                request(kind, Phase::Update, suffix),
+                Some(admin),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("update {kind:?}: {error:?}"));
+            assert_eq!(
+                ParentRow::from_secret_row(&updated.row),
+                parent(kind, Phase::Update),
+                "update {kind:?}"
+            );
+
+            // A grant makes the cache bump observable: an unchanged replay must
+            // neither bump `updated_at` nor touch the principal's version.
+            let principal_id = principal(&pool, admin).await;
+            sqlx::query(&format!(
+                "INSERT INTO grants ({}, principal_id, priority, created_by_id, created_at, updated_at) \
+                 VALUES ($1, $2, 0, $3, now(), now())",
+                kind.grant_column()
+            ))
+            .bind(updated.row.id)
+            .bind(principal_id)
+            .bind(admin)
+            .execute(&pool)
+            .await
+            .expect("insert grant");
+            let version_before: i64 = sqlx::query_scalar(
+                "SELECT sync_config_cache_version FROM principals WHERE id = $1",
+            )
+            .bind(principal_id)
+            .fetch_one(&pool)
+            .await
+            .expect("cache version");
+
+            let replay = crate::areas::secrets::write_secret(
+                &pool,
+                kind,
+                WriteTarget::Oid(oid),
+                request(kind, Phase::Update, suffix),
+                Some(admin),
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("replay {kind:?}: {error:?}"));
+            assert!(!replay.created);
+            assert_eq!(
+                replay.row.updated_at, updated.row.updated_at,
+                "replay {kind:?} updated_at"
+            );
+            let version_after: i64 = sqlx::query_scalar(
+                "SELECT sync_config_cache_version FROM principals WHERE id = $1",
+            )
+            .bind(principal_id)
+            .fetch_one(&pool)
+            .await
+            .expect("cache version");
+            assert_eq!(version_after, version_before, "replay {kind:?} cache bump");
+
+            delete_secret(&pool, kind, updated.row.id)
+                .await
+                .expect("delete");
+            sqlx::query("DELETE FROM principals WHERE id = $1")
+                .bind(principal_id)
+                .execute(&pool)
+                .await
+                .expect("delete principal");
+        }
     }
 
     fn oauth_token_request(grant: &str) -> BearerRequest {

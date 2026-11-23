@@ -1,8 +1,9 @@
 //! Write paths for grantable secrets.
 //!
 //! Every kind is written by one pipeline. The kind's API layer builds one
-//! [`Document`] — the parent columns the kind stores, its sources and rules, and
-//! the identity — so the writer only does what every kind does:
+//! [`Document`] — a typed [`ParentRow`] for the columns the kind stores, its
+//! sources and rules, and the identity — so the writer only does what every
+//! kind does:
 //!
 //! 1. resolve the target (creating it, or locking the existing row) and decrypt
 //!    the stored inline values;
@@ -22,7 +23,7 @@
 //! module owns the writer they share, the deletes, and the secret-scoped role
 //! grants.
 
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use sqlx::query::Query;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgArguments};
 
@@ -47,9 +48,9 @@ pub struct WriteResult {
 #[derive(Debug)]
 pub(super) struct Document {
     pub foreign_id: ForeignIdValue,
-    /// The parent attributes by column, without `foreign_id` and `created_by_id`,
+    /// The parent row's typed columns, without `foreign_id` and `created_by_id`,
     /// which the writer adds.
-    pub parent: Map<String, Value>,
+    pub parent: ParentRow,
     pub sources: Vec<SourceDraft>,
     pub rules: Vec<RuleDocument>,
     /// The inline SSH key parsing error, reported on `private_key`.
@@ -58,7 +59,7 @@ pub(super) struct Document {
 
 /// One credential source of the document, with the role columns the owning
 /// model requires.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct SourceDraft {
     pub role: Option<String>,
     pub role_kind: Option<String>,
@@ -81,18 +82,6 @@ impl SourceDraft {
             broker_credential_id: None,
             broker_resolved: true,
         }
-    }
-
-    /// The stored-document JSON the replacement comparison uses.
-    fn json(&self) -> Value {
-        json!({
-            "source_type": self.source_type.clone().unwrap_or_default(),
-            "config": self.config,
-            "secret": self.secret,
-            "role": self.role,
-            "role_kind": self.role_kind,
-            "broker_credential_id": self.broker_credential_id,
-        })
     }
 
     /// `SecretSource` validation errors. The bearer-only kinds render
@@ -283,8 +272,8 @@ pub(super) async fn run_write(
     operator_id: Option<i64>,
     family: Family,
 ) -> std::result::Result<WriteResult, WriteError> {
-    let unchanged = existing
-        .is_some_and(|row| equivalent(kind, row, &pending.existing_plain, &pending.document));
+    let unchanged =
+        existing.is_some_and(|row| equivalent(row, &pending.existing_plain, &pending.document));
     if unchanged && family == Family::Bearer {
         // An unchanged document keeps the nested rows, the cache versions, and
         // the id sequences untouched.
@@ -494,137 +483,276 @@ fn source_key(kind: SecretKind) -> &'static str {
 // The parent row
 // ---------------------------------------------------------------------------
 
-/// How a parent column stores its value.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Column {
-    Text,
-    Json,
-    Bool,
+/// Binds a typed parent field as its column type. A JSON `null` is a SQL NULL.
+trait BindField {
+    fn bind_field<'q>(
+        self,
+        query: Query<'q, Postgres, PgArguments>,
+    ) -> Query<'q, Postgres, PgArguments>;
 }
 
-/// The parent columns of each kind in bind order. `foreign_id` and
-/// `created_by_id` are written separately.
-fn parent_columns(kind: SecretKind) -> &'static [(&'static str, Column)] {
-    match kind {
-        SecretKind::Static => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("labels", Column::Json),
-            ("kind", Column::Text),
-            ("inject_config", Column::Json),
-            ("replace_config", Column::Json),
-        ],
-        SecretKind::PgDsn => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("database", Column::Text),
-            ("role", Column::Text),
-            ("labels", Column::Json),
-            ("settings", Column::Json),
-        ],
-        SecretKind::GcpAuth => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("subject", Column::Text),
-            ("labels", Column::Json),
-            ("credentials_provider", Column::Json),
-            ("scopes", Column::Json),
-        ],
-        SecretKind::GcpIdToken => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("audience", Column::Text),
-            ("header", Column::Text),
-            ("labels", Column::Json),
-        ],
-        SecretKind::AwsAuth => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("labels", Column::Json),
-            ("allowed_regions", Column::Json),
-            ("allowed_services", Column::Json),
-        ],
-        SecretKind::OauthToken => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("labels", Column::Json),
-            ("grant", Column::Text),
-            ("token_endpoint", Column::Text),
-            ("audience", Column::Text),
-            ("header", Column::Text),
-            ("value_prefix", Column::Text),
-            ("scopes", Column::Json),
-        ],
-        SecretKind::Hmac => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("labels", Column::Json),
-            ("timestamp_format", Column::Text),
-            ("signature_algorithm", Column::Text),
-            ("signature_key_encoding", Column::Text),
-            ("signature_output_encoding", Column::Text),
-            ("signature_message", Column::Text),
-            ("allow_chunked_body", Column::Bool),
-            ("headers", Column::Json),
-        ],
-        SecretKind::SshKey => &[
-            ("name", Column::Text),
-            ("description", Column::Text),
-            ("labels", Column::Json),
-            ("public_key", Column::Text),
-        ],
+impl BindField for Option<String> {
+    fn bind_field<'q>(
+        self,
+        query: Query<'q, Postgres, PgArguments>,
+    ) -> Query<'q, Postgres, PgArguments> {
+        query.bind(self)
     }
 }
 
-/// A JSON parent value: the absent key is `null`.
-fn json_value(parent: &Map<String, Value>, column: &str) -> Value {
-    parent.get(column).cloned().unwrap_or(Value::Null)
-}
-
-/// One parent column's value, bound as its column type.
-enum Bind {
-    Text(Option<String>),
-    Json(Value),
-    Bool(bool),
-}
-
-fn parent_binds(kind: SecretKind, parent: &Map<String, Value>) -> Vec<Bind> {
-    parent_columns(kind)
-        .iter()
-        .map(|(column, storage)| match storage {
-            Column::Text => Bind::Text(
-                parent
-                    .get(*column)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            ),
-            Column::Json => Bind::Json(json_value(parent, column)),
-            Column::Bool => Bind::Bool(
-                parent
-                    .get(*column)
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            ),
-        })
-        .collect()
-}
-
-fn bind_all<'q>(
-    mut query: Query<'q, Postgres, PgArguments>,
-    binds: Vec<Bind>,
-) -> Query<'q, Postgres, PgArguments> {
-    for bind in binds {
-        query = match bind {
-            Bind::Text(value) => query.bind(value),
-            Bind::Json(value) => query.bind((!value.is_null()).then_some(value)),
-            Bind::Bool(value) => query.bind(value),
-        };
+impl BindField for Value {
+    fn bind_field<'q>(
+        self,
+        query: Query<'q, Postgres, PgArguments>,
+    ) -> Query<'q, Postgres, PgArguments> {
+        query.bind((!self.is_null()).then_some(self))
     }
-    query
 }
 
-/// Inserts or updates the parent row, from the kind's column list. The Console
-/// SPA leaves an unchanged row alone; the bearer API rewrites it, and writes a
+impl BindField for bool {
+    fn bind_field<'q>(
+        self,
+        query: Query<'q, Postgres, PgArguments>,
+    ) -> Query<'q, Postgres, PgArguments> {
+        query.bind(self)
+    }
+}
+
+/// The parent columns of every kind. Each field is named once: the macro derives
+/// the INSERT/UPDATE column list with `stringify!` and binds the fields in the
+/// same order, so a column cannot be misspelled relative to its value.
+macro_rules! parent_rows {
+    (
+        $(
+            $variant:ident => $struct:ident {
+                $( $field:ident: $ty:ty ),* $(,)?
+            }
+        ),* $(,)?
+    ) => {
+        #[derive(Clone, Debug, PartialEq)]
+        pub(super) enum ParentRow {
+            $( $variant($struct), )*
+        }
+
+        $(
+            #[derive(Clone, Debug, PartialEq)]
+            pub(super) struct $struct {
+                $( pub(super) $field: $ty, )*
+            }
+
+            impl $struct {
+                const COLUMNS: &'static [&'static str] = &[$(stringify!($field)),*];
+
+                fn bind<'q>(
+                    self,
+                    mut query: Query<'q, Postgres, PgArguments>,
+                ) -> Query<'q, Postgres, PgArguments> {
+                    $( query = BindField::bind_field(self.$field, query); )*
+                    query
+                }
+            }
+        )*
+
+        impl ParentRow {
+            pub(super) fn columns(&self) -> &'static [&'static str] {
+                match self {
+                    $( Self::$variant(_) => $struct::COLUMNS, )*
+                }
+            }
+
+            pub(super) fn bind<'q>(
+                self,
+                query: Query<'q, Postgres, PgArguments>,
+            ) -> Query<'q, Postgres, PgArguments> {
+                match self {
+                    $( Self::$variant(row) => row.bind(query), )*
+                }
+            }
+        }
+    };
+}
+
+parent_rows! {
+    Static => StaticParent {
+        name: Option<String>,
+        description: Option<String>,
+        labels: Value,
+        kind: Option<String>,
+        inject_config: Value,
+        replace_config: Value,
+    },
+    PgDsn => PgDsnParent {
+        name: Option<String>,
+        description: Option<String>,
+        database: Option<String>,
+        role: Option<String>,
+        labels: Value,
+        settings: Value,
+    },
+    GcpAuth => GcpAuthParent {
+        name: Option<String>,
+        description: Option<String>,
+        subject: Option<String>,
+        labels: Value,
+        credentials_provider: Value,
+        scopes: Value,
+    },
+    GcpIdToken => GcpIdTokenParent {
+        name: Option<String>,
+        description: Option<String>,
+        audience: Option<String>,
+        header: Option<String>,
+        labels: Value,
+    },
+    AwsAuth => AwsAuthParent {
+        name: Option<String>,
+        description: Option<String>,
+        labels: Value,
+        allowed_regions: Value,
+        allowed_services: Value,
+    },
+    OauthToken => OauthTokenParent {
+        name: Option<String>,
+        description: Option<String>,
+        labels: Value,
+        grant: Option<String>,
+        token_endpoint: Option<String>,
+        audience: Option<String>,
+        header: Option<String>,
+        value_prefix: Option<String>,
+        scopes: Value,
+    },
+    Hmac => HmacParent {
+        name: Option<String>,
+        description: Option<String>,
+        labels: Value,
+        timestamp_format: Option<String>,
+        signature_algorithm: Option<String>,
+        signature_key_encoding: Option<String>,
+        signature_output_encoding: Option<String>,
+        signature_message: Option<String>,
+        allow_chunked_body: bool,
+        headers: Value,
+    },
+    SshKey => SshKeyParent {
+        name: Option<String>,
+        description: Option<String>,
+        labels: Value,
+        public_key: Option<String>,
+    },
+}
+
+impl ParentRow {
+    /// The same struct built from a stored row, for the `PartialEq` unchanged
+    /// check. Both sides name each field once, so they cannot drift.
+    pub(super) fn from_secret_row(row: &SecretRow) -> Self {
+        let name = row.name.clone();
+        let description = row.description.clone();
+        let labels = row.labels.clone();
+        match &row.fields {
+            SecretFields::Static {
+                kind,
+                inject_config,
+                replace_config,
+            } => Self::Static(StaticParent {
+                name,
+                description,
+                labels,
+                kind: Some(kind.clone()),
+                inject_config: inject_config.clone(),
+                replace_config: replace_config.clone(),
+            }),
+            SecretFields::PgDsn {
+                database,
+                role,
+                settings,
+            } => Self::PgDsn(PgDsnParent {
+                name,
+                description,
+                database: Some(database.clone()),
+                role: role.clone(),
+                labels,
+                settings: settings.clone(),
+            }),
+            SecretFields::GcpAuth {
+                credentials_provider,
+                subject,
+                scopes,
+            } => Self::GcpAuth(GcpAuthParent {
+                name,
+                description,
+                subject: subject.clone(),
+                labels,
+                credentials_provider: credentials_provider.clone(),
+                scopes: scopes.clone(),
+            }),
+            SecretFields::GcpIdToken { audience, header } => Self::GcpIdToken(GcpIdTokenParent {
+                name,
+                description,
+                audience: Some(audience.clone()),
+                header: header.clone(),
+                labels,
+            }),
+            SecretFields::AwsAuth {
+                allowed_regions,
+                allowed_services,
+            } => Self::AwsAuth(AwsAuthParent {
+                name,
+                description,
+                labels,
+                allowed_regions: allowed_regions.clone(),
+                allowed_services: allowed_services.clone(),
+            }),
+            SecretFields::OauthToken {
+                grant,
+                token_endpoint,
+                audience,
+                scopes,
+                header,
+                value_prefix,
+            } => Self::OauthToken(OauthTokenParent {
+                name,
+                description,
+                labels,
+                grant: Some(grant.clone()),
+                token_endpoint: Some(token_endpoint.clone()),
+                audience: audience.clone(),
+                header: header.clone(),
+                value_prefix: value_prefix.clone(),
+                scopes: scopes.clone(),
+            }),
+            SecretFields::Hmac {
+                timestamp_format,
+                signature_algorithm,
+                signature_key_encoding,
+                signature_output_encoding,
+                signature_message,
+                headers,
+                allow_chunked_body,
+            } => Self::Hmac(HmacParent {
+                name,
+                description,
+                labels,
+                timestamp_format: Some(timestamp_format.clone()),
+                signature_algorithm: Some(signature_algorithm.clone()),
+                signature_key_encoding: Some(signature_key_encoding.clone()),
+                signature_output_encoding: Some(signature_output_encoding.clone()),
+                signature_message: Some(signature_message.clone()),
+                allow_chunked_body: *allow_chunked_body,
+                headers: headers.clone(),
+            }),
+            SecretFields::SshKey { public_key } => Self::SshKey(SshKeyParent {
+                name,
+                description,
+                labels,
+                public_key: Some(public_key.clone()),
+            }),
+        }
+    }
+}
+
+/// Inserts or updates the parent row from its typed columns. The Console SPA
+/// leaves an unchanged row alone; the bearer API rewrites it, and writes a
 /// supplied foreign id without a second `updated_at` bump.
 async fn persist_parent(
     transaction: &mut Transaction<'_, Postgres>,
@@ -640,16 +768,16 @@ async fn persist_parent(
     };
     let Some(existing) = existing else {
         let mut columns = vec!["foreign_id"];
-        columns.extend(parent_columns(kind).iter().map(|(column, _)| *column));
+        columns.extend(document.parent.columns());
         columns.push("created_by_id");
         let sql = write::insert_returning_sql(kind.table(), &columns, "id");
-        let row = bind_all(
-            sqlx::query(&sql).bind(foreign_id),
-            parent_binds(kind, &document.parent),
-        )
-        .bind(operator_id)
-        .fetch_one(&mut **transaction)
-        .await?;
+        let row = document
+            .parent
+            .clone()
+            .bind(sqlx::query(&sql).bind(foreign_id))
+            .bind(operator_id)
+            .fetch_one(&mut **transaction)
+            .await?;
         return Ok(row.get("id"));
     };
 
@@ -658,18 +786,15 @@ async fn persist_parent(
         ForeignIdValue::Omitted => false,
     };
     if family == Family::Console {
-        if !foreign_changed && parent_matches(kind, &document.parent, existing) {
+        if !foreign_changed && parent_matches(&document.parent, existing) {
             return Ok(existing.id);
         }
-        let mut columns: Vec<&str> = parent_columns(kind)
-            .iter()
-            .map(|(column, _)| *column)
-            .collect();
+        let mut columns: Vec<&str> = document.parent.columns().to_vec();
         if foreign_changed {
             columns.push("foreign_id");
         }
         let sql = write::update_sql(kind.table(), &columns);
-        let mut query = bind_all(sqlx::query(&sql), parent_binds(kind, &document.parent));
+        let mut query = document.parent.clone().bind(sqlx::query(&sql));
         if foreign_changed {
             query = query.bind(foreign_id);
         }
@@ -677,12 +802,12 @@ async fn persist_parent(
         return Ok(existing.id);
     }
 
-    let columns: Vec<&str> = parent_columns(kind)
-        .iter()
-        .map(|(column, _)| *column)
-        .collect();
+    let columns: Vec<&str> = document.parent.columns().to_vec();
     let sql = write::update_sql(kind.table(), &columns);
-    bind_all(sqlx::query(&sql), parent_binds(kind, &document.parent))
+    document
+        .parent
+        .clone()
+        .bind(sqlx::query(&sql))
         .bind(existing.id)
         .execute(&mut **transaction)
         .await?;
@@ -790,7 +915,6 @@ async fn replace_nested(
 /// rules are unchanged. Nested records are compared as sorted documents, so the
 /// order they were stored in does not matter.
 fn equivalent(
-    kind: SecretKind,
     existing: &SecretRow,
     existing_plain: &[Option<String>],
     document: &Document,
@@ -800,16 +924,14 @@ fn equivalent(
     {
         return false;
     }
-    parent_matches(kind, &document.parent, existing)
+    parent_matches(&document.parent, existing)
         && sources_match(&existing.sources, existing_plain, &document.sources)
         && rules_match(&existing.rules, &document.rules)
 }
 
 /// Every parent column the kind stores equals the stored value.
-fn parent_matches(kind: SecretKind, parent: &Map<String, Value>, existing: &SecretRow) -> bool {
-    parent_columns(kind)
-        .iter()
-        .all(|(column, _)| stored_value(kind, existing, column) == json_value(parent, column))
+fn parent_matches(parent: &ParentRow, existing: &SecretRow) -> bool {
+    *parent == ParentRow::from_secret_row(existing)
 }
 
 fn sources_match(
@@ -820,23 +942,33 @@ fn sources_match(
     if existing.len() != sources.len() {
         return false;
     }
-    let mut stored: Vec<Value> = existing
+    let mut stored: Vec<SourceDraft> = existing
         .iter()
         .zip(existing_plain)
-        .map(|(source, plain)| {
-            json!({
-                "source_type": source.source_type,
-                "config": source.config,
-                "secret": plain,
-                "role": source.role,
-                "role_kind": source.role_kind,
-                "broker_credential_id": source.broker_credential_id,
-            })
+        .map(|(source, plain)| SourceDraft {
+            role: source.role.clone(),
+            role_kind: source.role_kind.clone(),
+            source_type: Some(source.source_type.clone()),
+            secret: plain.clone(),
+            config: source.config.clone(),
+            broker_credential_id: source.broker_credential_id,
+            broker_resolved: true,
         })
         .collect();
-    let mut draft: Vec<Value> = sources.iter().map(SourceDraft::json).collect();
-    sort_documents(&mut stored);
-    sort_documents(&mut draft);
+    // The stored bind turns an absent source type into the empty string, so
+    // normalize the draft the same way. `broker_resolved` is a validation
+    // side effect, not a stored column, so it does not participate.
+    let mut draft: Vec<SourceDraft> = sources
+        .iter()
+        .cloned()
+        .map(|mut source| {
+            source.source_type = Some(source.source_type.unwrap_or_default());
+            source.broker_resolved = true;
+            source
+        })
+        .collect();
+    stored.sort_by(|left, right| left.role.cmp(&right.role));
+    draft.sort_by(|left, right| left.role.cmp(&right.role));
     stored == draft
 }
 
@@ -844,199 +976,20 @@ fn rules_match(existing: &[RuleRow], rules: &[RuleDocument]) -> bool {
     if existing.len() != rules.len() {
         return false;
     }
-    let mut stored: Vec<Value> = existing
+    let mut stored: Vec<RuleDocument> = existing
         .iter()
-        .map(|rule| {
-            rule_json(
-                rule.position,
-                &rule.host,
-                &rule.cidr,
-                &rule.http_methods,
-                &rule.paths,
-            )
+        .map(|rule| RuleDocument {
+            host: rule.host.clone(),
+            cidr: rule.cidr.clone(),
+            position: rule.position,
+            http_methods: rule.http_methods.clone(),
+            paths: rule.paths.clone(),
         })
         .collect();
-    let mut draft: Vec<Value> = rules
-        .iter()
-        .map(|rule| {
-            rule_json(
-                rule.position,
-                &rule.host,
-                &rule.cidr,
-                &rule.http_methods,
-                &rule.paths,
-            )
-        })
-        .collect();
-    sort_documents(&mut stored);
-    sort_documents(&mut draft);
+    let mut draft = rules.to_vec();
+    stored.sort_by_key(|rule| rule.position);
+    draft.sort_by_key(|rule| rule.position);
     stored == draft
-}
-
-fn rule_json(
-    position: i32,
-    host: &Option<String>,
-    cidr: &Option<String>,
-    http_methods: &Value,
-    paths: &Value,
-) -> Value {
-    json!({
-        "position": position,
-        "host": host,
-        "cidr": cidr,
-        "http_methods": http_methods,
-        "paths": paths,
-    })
-}
-
-/// `SyncConfigReplacement.documents`: sort by role then position, both of which
-/// already distinguish every record of one secret.
-fn sort_documents(documents: &mut [Value]) {
-    documents.sort_by(|left, right| {
-        let key = |document: &Value| {
-            (
-                document
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                document
-                    .get("position")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-            )
-        };
-        key(left).cmp(&key(right))
-    });
-}
-
-/// A stored parent attribute by column.
-fn stored_value(kind: SecretKind, row: &SecretRow, column: &str) -> Value {
-    match column {
-        "name" => json!(row.name),
-        "description" => json!(row.description),
-        "labels" => row.labels.clone(),
-        _ => match (&row.fields, kind, column) {
-            (SecretFields::Static { kind, .. }, SecretKind::Static, "kind") => json!(kind),
-            (SecretFields::Static { inject_config, .. }, SecretKind::Static, "inject_config") => {
-                inject_config.clone()
-            }
-            (SecretFields::Static { replace_config, .. }, SecretKind::Static, "replace_config") => {
-                replace_config.clone()
-            }
-            (SecretFields::PgDsn { database, .. }, SecretKind::PgDsn, "database") => {
-                json!(database)
-            }
-            (SecretFields::PgDsn { role, .. }, SecretKind::PgDsn, "role") => json!(role),
-            (SecretFields::PgDsn { settings, .. }, SecretKind::PgDsn, "settings") => {
-                settings.clone()
-            }
-            (
-                SecretFields::GcpAuth {
-                    credentials_provider,
-                    ..
-                },
-                SecretKind::GcpAuth,
-                "credentials_provider",
-            ) => credentials_provider.clone(),
-            (SecretFields::GcpAuth { subject, .. }, SecretKind::GcpAuth, "subject") => {
-                json!(subject)
-            }
-            (SecretFields::GcpAuth { scopes, .. }, SecretKind::GcpAuth, "scopes") => scopes.clone(),
-            (SecretFields::GcpIdToken { audience, .. }, SecretKind::GcpIdToken, "audience") => {
-                json!(audience)
-            }
-            (SecretFields::GcpIdToken { header, .. }, SecretKind::GcpIdToken, "header") => {
-                json!(header)
-            }
-            (
-                SecretFields::AwsAuth {
-                    allowed_regions, ..
-                },
-                SecretKind::AwsAuth,
-                "allowed_regions",
-            ) => allowed_regions.clone(),
-            (
-                SecretFields::AwsAuth {
-                    allowed_services, ..
-                },
-                SecretKind::AwsAuth,
-                "allowed_services",
-            ) => allowed_services.clone(),
-            (SecretFields::OauthToken { grant, .. }, SecretKind::OauthToken, "grant") => {
-                json!(grant)
-            }
-            (
-                SecretFields::OauthToken { token_endpoint, .. },
-                SecretKind::OauthToken,
-                "token_endpoint",
-            ) => json!(token_endpoint),
-            (SecretFields::OauthToken { audience, .. }, SecretKind::OauthToken, "audience") => {
-                json!(audience)
-            }
-            (SecretFields::OauthToken { header, .. }, SecretKind::OauthToken, "header") => {
-                json!(header)
-            }
-            (
-                SecretFields::OauthToken { value_prefix, .. },
-                SecretKind::OauthToken,
-                "value_prefix",
-            ) => json!(value_prefix),
-            (SecretFields::OauthToken { scopes, .. }, SecretKind::OauthToken, "scopes") => {
-                scopes.clone()
-            }
-            (
-                SecretFields::Hmac {
-                    timestamp_format, ..
-                },
-                SecretKind::Hmac,
-                "timestamp_format",
-            ) => json!(timestamp_format),
-            (
-                SecretFields::Hmac {
-                    signature_algorithm,
-                    ..
-                },
-                SecretKind::Hmac,
-                "signature_algorithm",
-            ) => json!(signature_algorithm),
-            (
-                SecretFields::Hmac {
-                    signature_key_encoding,
-                    ..
-                },
-                SecretKind::Hmac,
-                "signature_key_encoding",
-            ) => json!(signature_key_encoding),
-            (
-                SecretFields::Hmac {
-                    signature_output_encoding,
-                    ..
-                },
-                SecretKind::Hmac,
-                "signature_output_encoding",
-            ) => json!(signature_output_encoding),
-            (
-                SecretFields::Hmac {
-                    signature_message, ..
-                },
-                SecretKind::Hmac,
-                "signature_message",
-            ) => json!(signature_message),
-            (
-                SecretFields::Hmac {
-                    allow_chunked_body, ..
-                },
-                SecretKind::Hmac,
-                "allow_chunked_body",
-            ) => json!(allow_chunked_body),
-            (SecretFields::Hmac { headers, .. }, SecretKind::Hmac, "headers") => headers.clone(),
-            (SecretFields::SshKey { public_key }, SecretKind::SshKey, "public_key") => {
-                json!(public_key)
-            }
-            _ => Value::Null,
-        },
-    }
 }
 
 /// `destroy!`: cascades to the secret's sources, rules, and grants. Rails'

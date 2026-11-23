@@ -27,6 +27,7 @@ use serde_json::{Map, Number, Value, json};
 use crate::validation::ValidateFields;
 use crate::{Error, Result};
 
+use super::write::{GcpAuthParent, GcpIdTokenParent, ParentRow, PgDsnParent, StaticParent};
 use super::{SecretFields, SecretKind, SecretRow};
 
 /// A write failure the API layer turns into the matching HTTP error.
@@ -1565,11 +1566,10 @@ impl Document {
         kind: SecretKind,
         sources: Vec<super::write::SourceDraft>,
     ) -> super::write::Document {
-        let mut parent = Map::new();
-        parent.insert("name".to_owned(), json!(self.name));
-        parent.insert("description".to_owned(), json!(self.description));
-        parent.insert("labels".to_owned(), self.labels);
-        match (&self.fields, kind) {
+        let name = self.name;
+        let description = self.description;
+        let labels = self.labels;
+        let parent = match (self.fields, kind) {
             (
                 DocumentFields::Static {
                     kind,
@@ -1577,14 +1577,14 @@ impl Document {
                     replace_config,
                 },
                 SecretKind::Static,
-            ) => {
-                parent.insert(
-                    "kind".to_owned(),
-                    json!(kind.clone().unwrap_or_else(|| "custom".to_owned())),
-                );
-                parent.insert("inject_config".to_owned(), inject_config.clone());
-                parent.insert("replace_config".to_owned(), replace_config.clone());
-            }
+            ) => ParentRow::Static(StaticParent {
+                name,
+                description,
+                labels,
+                kind: Some(kind.unwrap_or_else(|| "custom".to_owned())),
+                inject_config,
+                replace_config,
+            }),
             (
                 DocumentFields::PgDsn {
                     database,
@@ -1592,11 +1592,14 @@ impl Document {
                     settings,
                 },
                 SecretKind::PgDsn,
-            ) => {
-                parent.insert("database".to_owned(), json!(database));
-                parent.insert("role".to_owned(), json!(role));
-                parent.insert("settings".to_owned(), settings.clone());
-            }
+            ) => ParentRow::PgDsn(PgDsnParent {
+                name,
+                description,
+                database,
+                role,
+                labels,
+                settings,
+            }),
             (
                 DocumentFields::GcpAuth {
                     credentials_provider,
@@ -1604,20 +1607,25 @@ impl Document {
                     scopes,
                 },
                 SecretKind::GcpAuth,
-            ) => {
-                parent.insert(
-                    "credentials_provider".to_owned(),
-                    credentials_provider.clone(),
-                );
-                parent.insert("subject".to_owned(), json!(subject));
-                parent.insert("scopes".to_owned(), scopes.clone());
-            }
+            ) => ParentRow::GcpAuth(GcpAuthParent {
+                name,
+                description,
+                subject,
+                labels,
+                credentials_provider,
+                scopes,
+            }),
             (DocumentFields::GcpIdToken { audience, header }, SecretKind::GcpIdToken) => {
-                parent.insert("audience".to_owned(), json!(audience));
-                parent.insert("header".to_owned(), json!(header));
+                ParentRow::GcpIdToken(GcpIdTokenParent {
+                    name,
+                    description,
+                    audience,
+                    header,
+                    labels,
+                })
             }
-            _ => {}
-        }
+            (fields, _) => unreachable!("kind selects the parent fields: {fields:?}"),
+        };
         super::write::Document {
             foreign_id: self.foreign_id,
             parent,
