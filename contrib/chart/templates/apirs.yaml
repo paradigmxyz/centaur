@@ -186,9 +186,8 @@ spec:
       initContainers:
         # api-rs owns the Console schema: at startup (RUN_MIGRATIONS) it applies
         # the Console migrations and bootstraps the initial admin before it
-        # registers principals there. The databases must exist first, so create
-        # them idempotently on the bundled Postgres: the Console's own, and the
-        # Solid Cache/Queue/Cable databases the Console worker prepares.
+        # registers principals there. The database must exist first, so create
+        # it idempotently on the bundled Postgres.
         - name: create-console-db
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
@@ -219,10 +218,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
-            # Primary + Solid Cache/Queue/Cable, matching the Console worker's
-            # config/database.yml.
             - name: DB_NAMES
-              value: {{ printf "%s %s_cache %s_queue %s_cable" $console.database.name $console.database.name $console.database.name $console.database.name | quote }}
+              value: {{ $console.database.name | quote }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             seccompProfile:

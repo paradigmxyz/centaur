@@ -230,8 +230,8 @@ Expected paths include:
 You can also inspect the api-rs session context for a thread:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
+  centaur-api-server console-service-token)
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
 curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" \
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq

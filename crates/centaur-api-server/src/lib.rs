@@ -8,12 +8,13 @@ mod error;
 mod mcp;
 mod routes;
 mod scheduled_tasks;
+mod slack_channel_catalog;
 mod slack_external_teams;
 mod slack_proxy;
 mod tool_discovery;
 pub mod types;
 
-pub use auth::{ApiAuthConfig, ApiAuthConfigError};
+pub use auth::{ApiAuthConfig, ApiAuthConfigError, console_service_token};
 pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
 pub use console::validate_boolean_settings;
 pub use console_session::{ConsoleSessionConfig, ConsoleSessionConfigError};
@@ -24,6 +25,7 @@ pub use routes::{
     build_router_with_session_and_workflow_runtime, build_router_with_session_runtime,
 };
 pub use scheduled_tasks::spawn_scheduled_task_scheduler;
+pub use slack_channel_catalog::spawn_slack_channel_catalog_refresh;
 pub use slack_external_teams::partition_slack_external_team_ids;
 pub use tool_discovery::{
     DiscoveredToolProxyFragment, ToolDiscoveryConfig, ToolDiscoveryError,

@@ -10,14 +10,15 @@ chart version moves the Console host, its JSON API, the operator SPA, the MCP
 OAuth endpoints, and the bearer and sandbox APIs from the Rails pods to api-rs.
 URLs do not change.
 
-What the chart still runs from `services/console`:
+The chart runs nothing from `services/console`. api-rs also owns the Console
+schema, the initial-admin bootstrap, and the Slack channel catalog refresh that
+the Rails worker used to run. The `console` Service remains as a compatibility
+alias forwarding its historical `console:3000` URL to api-rs, so in-cluster
+clients with a cached URL keep working.
 
-- the Solid Queue worker, which runs the Slack channel catalog and membership
-  refresh jobs and prepares its own Solid Cache/Queue/Cable databases. It must
-  run at least one replica;
-- the `console` Service, now a compatibility alias forwarding its historical
-  `console:3000` URL to api-rs, so in-cluster clients with a cached URL keep
-  working.
+The Rails worker's Solid Cache, Queue, and Cable databases
+(`<console.database.name>_cache`, `_queue`, `_cable`) are no longer used. The
+upgrade leaves them in place; drop them once you no longer need to roll back.
 
 Rollback is `helm rollback` to the previous chart revision. The Console schema is
 unchanged by the upgrade, so the rollback is data-safe (see
@@ -37,6 +38,15 @@ migrations, or has ones it does not know. In that case, upgrade through the
 previous chart release first, whose worker still runs `bin/rails db:prepare`.
 The Rails `schema_migrations` table stays in place, and a fresh database records
 every Rails version in it, so a rolled-back worker finds nothing to migrate.
+
+## Slack channel catalog
+
+api-rs keeps the catalog the Console's channel pickers and Slack delivery checks
+read (`slack_bot_channels`) current when a Slack bot token is configured
+(`CENTAUR_CONSOLE_SLACK_BOT_TOKEN`, or `SLACK_BOT_TOKEN`). Every ten minutes it
+refreshes the channel list once it is an hour old, and the members of up to 100
+channels whose membership is a day old. Advisory locks keep each refresh to one
+api-rs replica at a time.
 
 ## Before upgrading
 
@@ -63,14 +73,12 @@ every Rails version in it, so a rolled-back worker finds nothing to migrate.
 ```bash
 helm upgrade <release> contrib/chart -n <namespace> -f your-values.yaml
 kubectl rollout status deploy/<release>-centaur-api-rs -n <namespace>
-kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
 ```
 
-An api-rs init container creates the databases (bundled Postgres). api-rs then
-migrates the Console database and creates the initial admin before it registers
-principals. The worker, proxy-sync, and token-broker wait for the Console schema
-in their own init containers; the worker then prepares only its Solid
-Cache/Queue/Cable databases.
+An api-rs init container creates the Console database (bundled Postgres). api-rs
+then migrates it and creates the initial admin before it registers principals.
+proxy-sync and token-broker wait for the Console schema in their own init
+containers. The upgrade deletes the Rails worker Deployment.
 
 Then verify:
 
@@ -81,15 +89,15 @@ Then verify:
    is not proof of usable access.
 3. **One interactive consent per configured IdP** (Google, Slack, Okta), then a
    token use that exercises the stored credential.
-4. **Worker.** Confirm the Slack channel catalog and membership refresh jobs
-   still run (`kubectl logs deploy/<release>-centaur-console-worker`).
+4. **Slack channel catalog.** With a Slack bot token configured, the api-rs log
+   shows `refreshed the Slack channel catalog` shortly after startup, and the
+   Console's channel pickers list the bot's channels.
 
 ## Rollback
 
 ```bash
 helm rollback <release> <previous-revision> -n <namespace>
 kubectl rollout status deploy/<release>-centaur-console -n <namespace>
-kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
 ```
 
 The previous revision restores the Rails web Deployment, the Ingress, and the

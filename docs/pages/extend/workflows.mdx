@@ -190,11 +190,11 @@ instead of rebinding it.
 ## Run a workflow
 
 Direct administrative API calls need a short-lived Console service token. Mint
-one from the running Console instead of storing a separate static key:
+one in a running api-rs pod instead of storing a separate static key:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
+  centaur-api-server console-service-token)
 ```
 
 Create a run through the API:

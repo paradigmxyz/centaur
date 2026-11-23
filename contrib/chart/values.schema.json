@@ -28,8 +28,6 @@
       "type": "object",
       "properties": {
         "publicUrl": { "type": "string" },
-        "sentryDsn": { "type": "string" },
-        "railsEnv": { "type": "string" },
         "oktaOauth": {
           "type": "object",
           "properties": {
@@ -83,16 +81,7 @@
             "host": { "type": "string" },
             "tls": { "type": "array" }
           }
-        },
-        "worker": {
-          "allOf": [{ "$ref": "#/definitions/podScheduling" }],
-          "type": "object",
-          "properties": {
-            "replicaCount": { "type": "integer" },
-            "resources": { "type": "object" }
-          }
-        },
-        "resources": { "type": "object" }
+        }
       }
     }
   },

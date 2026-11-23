@@ -47,7 +47,7 @@ after changing values and wait for the application to become `Synced` and
 
 ## 2. Keep secrets available to all new consumers
 
-api-rs, slackbotv2, the Console worker, and sandbox pods may not read exactly the same
+api-rs, slackbotv2, and sandbox pods may not read exactly the same
 environment variable names as the legacy Python API. During migration, verify
 that each new workload receives the required secrets through the configured
 Kubernetes Secret or secret manager integration.
@@ -57,7 +57,6 @@ Common checks:
 ```bash
 kubectl -n centaur exec deploy/centaur-api-rs -- env | grep -E 'DATABASE_URL|IRON_CONTROL|OP_CONNECT|SLACK|OPENAI|ANTHROPIC'
 kubectl -n centaur exec deploy/centaur-slackbotv2 -- env | grep -E 'SLACK|CENTAUR|API'
-kubectl -n centaur exec deploy/centaur-console-worker -- env | grep -E 'DATABASE_URL|OP_CONNECT|IRON_CONTROL'
 ```
 
 After patching a Secret, restart every workload that consumes it:
@@ -65,8 +64,7 @@ After patching a Secret, restart every workload that consumes it:
 ```bash
 kubectl -n centaur rollout restart \
   deploy/centaur-api-rs \
-  deploy/centaur-slackbotv2 \
-  deploy/centaur-console-worker
+  deploy/centaur-slackbotv2
 ```
 
 ## 3. Route sandbox tool calls locally when needed

@@ -556,10 +556,10 @@ The server needs:
 - A migrating user that can create extensions and roles. Migrations create
   cluster-wide roles such as `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
   migrates at startup, or the user passed to `centaur-api-server migrate` below.
-  api-rs also creates the Console databases with the `DATABASE_URL` user. The RDS
+  api-rs also creates the Console database with the `DATABASE_URL` user. The RDS
   master user and the Cloud SQL `postgres` user can do all of this. With a less
   privileged user, have an administrator create the `vector` and `uuid-ossp`
-  extensions and the Console databases listed below first.
+  extensions and the Console database listed below first.
 - Enough connections. api-rs opens up to 500 connections under load, and the
   bundled server allows 500.
 
@@ -568,7 +568,7 @@ The deployment uses these databases on the server:
 | Database | Used by | Connection |
 | --- | --- | --- |
 | Any name, for example `centaur` | api-rs, Slackbot, workflows, and the company-context service | `DATABASE_URL`, including the database name. |
-| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; each process selects the database itself. An api-rs init container creates missing databases with the `DATABASE_URL` credentials. |
+| `iron_control_production` | The Console, served by api-rs; proxy-sync and token-broker read it too | `IRON_CONTROL_DATABASE_URL` without a database name; each process selects the database itself. An api-rs init container creates it if missing, with the `DATABASE_URL` credentials. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
@@ -686,10 +686,9 @@ Run one agent turn from inside the api-rs deployment:
 ```bash
 THREAD_KEY=cli:production-smoke-codex
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
-# api-rs serves the Console; the Rails worker is the process that still boots
-# Rails, so run the runner there.
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+# A one-hour Console service token, signed by api-rs.
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
+  centaur-api-server console-service-token)
 
 SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \
   -H "Authorization: Bearer ${CENTAUR_API_TOKEN}" \

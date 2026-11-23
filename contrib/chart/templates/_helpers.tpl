@@ -245,7 +245,7 @@ chart-managed workloads.
 {{- end -}}
 
 {{- /*
-console — Rails control plane (formerly "iron-control") for authenticated API
+console — control plane (formerly "iron-control"), served by api-rs, for authenticated API
 access and encrypted secret storage. Required in-cluster ClusterIP Service.
 
 Backwards compatibility: the canonical values key is `console`; `ironControl` is
@@ -265,9 +265,8 @@ IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
 The Console is served by api-rs; the chart runs no Rails web pod. The `console`
 Service survives only as a compatibility alias (same name and port, forwarding
 to api-rs) for in-cluster clients with a cached `centaur-console:3000` URL, and
-`centaur.consoleUrl` returns the api-rs Service URL. The Rails worker still runs
-for the Slack channel catalog jobs and runs the Rails schema migrations in its
-init containers (see console-worker.yaml).
+`centaur.consoleUrl` returns the api-rs Service URL. The chart runs no Rails
+process: api-rs also owns the Console schema and the Slack channel catalog.
 */ -}}
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}

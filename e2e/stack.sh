@@ -63,7 +63,7 @@ case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox console:console)
+IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
@@ -198,20 +198,25 @@ admit_external_team() {
 }
 
 # Stores the subscription access tokens as token-broker would after a refresh.
-# Without a refresh token token-broker never tries to refresh them. The Console
-# itself is served by api-rs, so the Rails worker is the only Rails process left;
-# it shares the image, the DB env, and the ActiveRecord encryption keys, so
-# `bin/rails runner` runs there.
+# Without a refresh token token-broker never tries to refresh them. api-rs
+# creates the Console schema at startup, then exits until these credentials
+# exist, so wait for the schema and write them straight into the Console
+# database, encrypted with the release's Active Record keys.
+# A key of the release's infra Secret.
+infra_secret() {
+  kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath="{.data.$1}" | base64 -d
+}
+
 seed_broker_credentials() {
-  local console="deploy/${RELEASE}-centaur-console-worker"
-  until kubectl -n "$NAMESPACE" get "$console" > /dev/null 2>&1; do sleep 2; done
-  kubectl -n "$NAMESPACE" rollout status "$console" --timeout=15m
-  kubectl -n "$NAMESPACE" exec "$console" -- bin/rails runner "
-    { 'openai-codex' => '$CODEX_ACCESS_TOKEN', 'anthropic-claude' => '$CLAUDE_ACCESS_TOKEN' }.each do |id, token|
-      BrokerCredential.find_or_initialize_by(foreign_id: id).update!(
-        token_endpoint: 'https://oauth.invalid/token', client_id: 'centaur-e2e',
-        access_token: token, last_refresh: Time.current, expires_at: 1.year.from_now)
-    end"
+  local postgres="statefulset/${RELEASE}-centaur-postgres"
+  local psql=(kubectl -n "$NAMESPACE" exec -i "$postgres" -- psql -U tempo -d iron_control_production -v ON_ERROR_STOP=1 -qtA)
+  until [[ "$("${psql[@]}" -c "SELECT to_regclass('public.broker_credentials') IS NOT NULL" 2> /dev/null)" == t ]]; do
+    sleep 2
+  done
+  E2E_AR_PRIMARY_KEY="$(infra_secret IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY)" \
+  E2E_AR_SALT="$(infra_secret IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT)" \
+  CODEX_ACCESS_TOKEN="$CODEX_ACCESS_TOKEN" CLAUDE_ACCESS_TOKEN="$CLAUDE_ACCESS_TOKEN" \
+    bun e2e/infra/broker-credentials-sql.ts | "${psql[@]}"
   # Skip the crash-loop backoff api-rs built up while it waited.
   kubectl -n "$NAMESPACE" delete pod -l app.kubernetes.io/component=api-rs --wait=false > /dev/null
 }
@@ -301,12 +306,16 @@ run_tests() {
   export E2E_SLACK_URL=http://127.0.0.1:30443
   export E2E_MODEL_URL=http://127.0.0.1:30080
   export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
-  # The console names its database after the Rails environment (console.database.name, created by the Console worker).
+  # The Console database (console.database.name), created by api-rs.
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   # The key api-rs administers the console with.
   E2E_CONSOLE_API_KEY="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_API_KEY}' | base64 -d)"
   export E2E_CONSOLE_URL=http://127.0.0.1:30082 E2E_CONSOLE_API_KEY
+  # The Console's bootstrap admin, for the session API (API clients).
+  E2E_CONSOLE_ADMIN_EMAIL="$(infra_secret IRON_CONTROL_INITIAL_USER_EMAIL)"
+  E2E_CONSOLE_ADMIN_PASSWORD="$(infra_secret IRON_CONTROL_INITIAL_USER_PASSWORD)"
+  export E2E_CONSOLE_ADMIN_EMAIL E2E_CONSOLE_ADMIN_PASSWORD
   # The private key the SSH gateway authorizes, for tests to store and grant.
   E2E_SSH_PRIVATE_KEY="$(kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key -o jsonpath='{.data.id_ed25519}' | base64 -d)"
   export E2E_SSH_PRIVATE_KEY

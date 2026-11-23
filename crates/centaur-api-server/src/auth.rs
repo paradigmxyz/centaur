@@ -18,6 +18,31 @@ use centaur_console_db::ConsoleUser;
 
 const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
 const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
+
+/// Lifetime of a token from [`console_service_token`] (Rails'
+/// `ApiServer::Jwt::DEFAULT_TTL_SECONDS`).
+const CONSOLE_SERVICE_TOKEN_TTL_SECS: i64 = 60 * 60;
+
+/// A short-lived Console service token (`ApiServer::Jwt.encode_for_console_service`):
+/// it authenticates as the `console` caller with every capability, for an
+/// operator's direct API calls. `now` is seconds since the Unix epoch.
+pub fn console_service_token(
+    signing_secret: &str,
+    now: i64,
+) -> Result<String, jsonwebtoken::errors::Error> {
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &serde_json::json!({
+            "iss": "centaur-console",
+            "sub": "centaur-console",
+            "aud": "centaur-api",
+            "iat": now,
+            "exp": now + CONSOLE_SERVICE_TOKEN_TTL_SECS,
+            "token_use": "console_service",
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(signing_secret.as_bytes()),
+    )
+}
 /// Audience of the single sandbox token proxy-sync mints. Distinct from
 /// [`API_JWT_AUDIENCE`] so neither kind of token can be read as the other.
 pub(crate) const SANDBOX_TOKEN_AUDIENCE: &str = "centaur-sandbox";
@@ -779,6 +804,31 @@ mod tests {
         let caller = auth.authenticate(&headers).unwrap();
         assert_eq!(caller.class(), CallerClass::Console);
         assert!(caller.has_capability(Capability::WorkflowsWrite));
+    }
+
+    #[test]
+    fn minted_console_service_tokens_authenticate_as_the_console() {
+        let auth = ApiAuthConfig::testing("jwt-secret");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let token = console_service_token("jwt-secret", now).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let caller = auth.authenticate(&headers).unwrap();
+        assert_eq!(caller.class(), CallerClass::Console);
+
+        let expired =
+            console_service_token("jwt-secret", now - 2 * CONSOLE_SERVICE_TOKEN_TTL_SECS).unwrap();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {expired}").parse().unwrap(),
+        );
+        assert!(auth.authenticate(&headers).is_err());
     }
 
     #[test]

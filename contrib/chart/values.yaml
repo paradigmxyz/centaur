@@ -104,10 +104,9 @@ console:
   # The Console is served by api-rs: there is no implementation switch. The
   # chart runs no Rails web pod; the `console` Service is only a compatibility
   # alias (same name and port, forwarding to api-rs) for in-cluster clients with
-  # a cached `centaur-console:3000` URL. The Rails worker still runs the Slack
-  # channel catalog jobs and, in its init containers, applies the Rails schema
-  # migrations and the initial-admin bootstrap. See
-  # docs/pages/operate/console-backend-cutover.mdx.
+  # a cached `centaur-console:3000` URL. The chart runs no Rails process: api-rs
+  # owns the Console schema, the initial-admin bootstrap, and the Slack channel
+  # catalog refresh. See docs/pages/operate/console-backend-cutover.mdx.
   #
   # api-rs reads the existing IRON_CONTROL_* Console keys from the shared infra
   # Secret; its session-cookie key is derived from IRON_CONTROL_SECRET_KEY_BASE.
@@ -122,29 +121,17 @@ console:
   # service/centaur-centaur-console 3000:3000`); set your real origin in every
   # deployed environment (for example https://console.example.com).
   publicUrl: "http://localhost:3000"
-  # Optional Sentry DSN for the Rails Console worker's background jobs. Empty by
-  # default, so the Sentry SDK remains disabled unless explicitly configured.
-  sentryDsn: ""
   # Break-glass email/password login. Disable when console is reachable from
   # the public internet and SSO is configured.
   passwordLoginEnabled: true
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
-  image:
-    repository: centaur-console
-    tag: latest
-    # Default Always: the image is published under the mutable `latest` tag, so
-    # IfNotPresent would pin pods to whatever digest a node already cached.
-    pullPolicy: Always
-  # RAILS_ENV for the Rails worker (Slack catalog jobs).
-  railsEnv: production
   database:
     # Logical DB created on the bundled Postgres by api-rs's
-    # create-console-db init container, and the database the Console handlers use. Must
-    # match the primary connection's `database:` in the image's database.yml —
-    # the connection URL carries no database path, so each process resolves the
-    # name from here.
+    # create-console-db init container, and the database the Console handlers
+    # use. The connection URL carries no database path, so each process
+    # resolves the name from here.
     name: iron_control_production
   # Google as an OAuth identity provider for console sign-in (and the
   # broker-credential refresh loop). Off by default — not every deployment uses
@@ -208,21 +195,6 @@ console:
     # host.
     host: ""
     tls: []
-  # Resources for the worker's prepare-job-dbs init container (`bin/rails
-  # db:prepare` for the Solid Cache/Queue/Cable databases). Leave empty for the
-  # namespace defaults.
-  resources: {}
-  # Solid Queue worker (`bin/jobs`) that runs the Console jobs that still live in
-  # Rails: the Slack channel catalog refresh and membership refresh. Without it
-  # those jobs never execute, so it must run at least one replica. The Console
-  # schema itself belongs to api-rs.
-  worker:
-    replicaCount: 1
-    # Node steering for Console background worker pods.
-    nodeSelector: {}
-    affinity: {}
-    tolerations: []
-    resources: {}
 
 # Values for the upstream 1Password Connect subchart
 # (https://github.com/1Password/connect-helm-charts/tree/main/charts/connect).

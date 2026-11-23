@@ -25,6 +25,7 @@ mod principals;
 mod sandbox;
 pub mod scheduled_tasks;
 mod setup_error;
+pub mod slack_bot_channels;
 pub mod ssh_key;
 mod ssh_keys;
 pub mod timestamp;

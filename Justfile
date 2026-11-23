@@ -35,7 +35,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-codemode _build-token-broker _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent _build-console; do
+      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-codemode _build-token-broker _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -59,7 +59,6 @@ _build-all-sequential:
     just _build-githubbot
     just _build-teamsbot
     just _build-agent
-    just _build-console
 
 build-one service:
     #!/usr/bin/env bash
@@ -122,8 +121,10 @@ _build-agent:
 _build-workflow-python:
     just _build-agent
 
-# The console builds from the repo root so its SPA can use the pnpm workspace
-# lockfile; services/console/Dockerfile.dockerignore limits the context.
+# The Rails console image, which the chart no longer runs (api-rs serves the
+# Console and builds the SPA itself). It builds from the repo root so its SPA
+# can use the pnpm workspace lockfile; services/console/Dockerfile.dockerignore
+# limits the context.
 _build-console:
     {{docker_build}} -t centaur-console:latest -f services/console/Dockerfile .
 
@@ -133,7 +134,7 @@ _build-console:
 _push-registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
       target="{{registry}}/library/${img}:latest"
       echo "pushing ${img}:latest -> ${target}..."
       docker tag "${img}:latest" "${target}"
@@ -146,7 +147,7 @@ _push-registry:
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done
@@ -175,7 +176,6 @@ deploy:
           --set githubbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-githubbot
           --set teamsbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-teamsbot
           --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
-          --set console.image.repository=ghcr.io/paradigmxyz/centaur/centaur-console
         )
         ;;
       *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
