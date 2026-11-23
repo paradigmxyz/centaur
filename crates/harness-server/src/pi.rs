@@ -78,6 +78,8 @@ const MODELS: &[(&str, &str)] = &[
     ("openai", "gpt-6-sol"),
     ("openai", "gpt-6.1-sol"),
     ("openai", "gpt-6.1-terra"),
+    ("openai", "gpt-6.2-astra"),
+    ("openai", "gpt-6.2-sol"),
 ];
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -415,6 +417,8 @@ mod tests {
             "claude-sonnet-5",
             "openai/gpt-5.5",
             "openai/gpt-6.1-sol",
+            "openai/gpt-6.2-sol",
+            "gpt-6.2-astra",
             "gpt-6.1-terra",
             "google/gemini-4-neon",
             "gemini-4-neon",

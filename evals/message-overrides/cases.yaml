@@ -7,7 +7,7 @@
   vars:
     text: 'use sol for this: summarize the incident timeline'
     harness: codex
-    model: gpt-6.1-sol
+    model: gpt-6.2-sol
 - description: versioned pro alias
   vars:
     text: switch to 5.5 pro and review the migration
@@ -18,6 +18,11 @@
     text: can you answer this one with luna?
     harness: codex
     model: gpt-6-luna
+- description: versioned sol alias keeps the older generation
+  vars:
+    text: try 6.1 sol on this bug
+    harness: codex
+    model: gpt-6.1-sol
 - description: versioned terra alias
   vars:
     text: try 6.1 terra on this bug
@@ -32,7 +37,7 @@
   vars:
     text: use astra
     harness: codex
-    model: gpt-6-astra
+    model: gpt-6.2-astra
 - description: claude without a model means opus
   vars:
     text: 'using claude: what model are you?'
@@ -84,7 +89,7 @@
   vars:
     text: "@bot using astra code review the pr"
     harness: codex
-    model: gpt-6-astra
+    model: gpt-6.2-astra
 - description: versioned opus at the end of a request
   vars:
     text: "@bot can you perform that market sizing analysis for the developer tools space again but using Opus 5.5?"
@@ -208,7 +213,7 @@
   vars:
     text: use max effort and the sol model
     harness: codex
-    model: gpt-6.1-sol
+    model: gpt-6.2-sol
     reasoning: max
 - description: codex with low reasoning
   vars:
@@ -253,7 +258,7 @@
   vars:
     text: route this through openrouter with sol
     harness: codex
-    model: gpt-6.1-sol
+    model: gpt-6.2-sol
     provider: openrouter
 
 # No selection request

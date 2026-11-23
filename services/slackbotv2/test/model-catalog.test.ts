@@ -65,6 +65,9 @@ describe('configured model selection', () => {
       ['use gpt 5.5 pro', 'gpt-5.5-pro'],
       ['use codex 5.4 pro', 'gpt-5.4-pro'],
       ['use 5.6 sol', 'gpt-5.6-sol'],
+      ['use sol', 'gpt-6.2-sol'],
+      ['use 6.1 sol', 'gpt-6.1-sol'],
+      ['use astra', 'gpt-6.2-astra'],
       ['use opus 4.7', 'claude-opus-4-7']
     ] as const
     for (const [text, model] of cases) {
@@ -77,6 +80,8 @@ describe('configured model selection', () => {
     expect(namesRequestedSelection('use claude', validateStrategyOverrides({ model: 'claude-opus-4-7' }))).toBe(false)
     expect(modelSelectionNames('gpt-5.5-pro')).toContain('codex 5.5 pro')
     expect(modelSelectionNames('gpt-5.6-sol')).not.toContain('sol')
+    expect(modelSelectionNames('gpt-6.1-sol')).not.toContain('sol')
+    expect(modelSelectionNames('gpt-6-astra')).not.toContain('astra')
   })
 
   test('exposes configured aliases to the classifier without hardcoded trigger words', async () => {
