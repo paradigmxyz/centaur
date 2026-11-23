@@ -92,12 +92,17 @@ spec:
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
             - name: CENTAUR_CONSOLE_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
+            # Proxies inject the sandbox token into requests to these hosts in
+            # addition to CENTAUR_API_URL's and CENTAUR_CONSOLE_URL's. The
+            # compatibility Console Service also routes to api-rs, and sandboxes
+            # created before the Console moved there still call it by that name,
+            # so it needs the token too.
+{{- $proxyHosts := list (include "centaur.consoleName" .) }}
 {{- if $companyContext.enabled }}
-            # Proxies inject the principal API JWT into requests to these hosts
-            # in addition to CENTAUR_API_URL's.
-            - name: CENTAUR_API_SERVER_PROXY_HOSTS
-              value: {{ include "centaur.componentName" (dict "root" . "component" "company-context") | quote }}
+{{- $proxyHosts = append $proxyHosts (include "centaur.componentName" (dict "root" . "component" "company-context")) }}
 {{- end }}
+            - name: CENTAUR_API_SERVER_PROXY_HOSTS
+              value: {{ join "," $proxyHosts | quote }}
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}
