@@ -133,6 +133,8 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-6-sol': 'codex',
   'gpt-6.1-sol': 'codex',
   'gpt-6.1-terra': 'codex',
+  'gpt-6.2-astra': 'codex',
+  'gpt-6.2-sol': 'codex',
   'gpt-6-luna': 'codex'
 }
 
@@ -434,7 +436,7 @@ export function modelSelectionNames(model: string): string[] {
     names.push(versionedName, `gpt ${versionedName}`, `gpt${versionedName}`,
       `codex ${versionedName}`, `codex${versionedName}`)
     const defaults: Record<string, string> = {
-      'gpt-6.1-sol': 'sol', 'gpt-6.1-terra': 'terra', 'gpt-6-luna': 'luna', 'gpt-6-astra': 'astra'
+      'gpt-6.2-sol': 'sol', 'gpt-6.1-terra': 'terra', 'gpt-6-luna': 'luna', 'gpt-6.2-astra': 'astra'
     }
     if (defaults[model]) names.push(defaults[model])
   }

@@ -380,7 +380,7 @@ describe('normalizeHarnessOverrides', () => {
 })
 
 describe('validateStrategyOverrides', () => {
-  for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna']) {
+  for (const model of ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna']) {
     test(`accepts ${model} and routes it to Codex`, () => {
       expect(validateStrategyOverrides({ model, reasoning: 'max' })).toEqual({
         harnessType: 'codex',
@@ -788,7 +788,7 @@ describe('messageOverridesForText strategy invocation', () => {
       fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
         requestUrl = String(input)
         requestInit = init
-        return decisionsResponse({ selection: 0.98, model: 'gpt-6.1-sol' })
+        return decisionsResponse({ selection: 0.98, model: 'gpt-6.2-sol' })
       }) as unknown as typeof fetch,
       model: 'gpt-6-luna'
     })
@@ -803,7 +803,7 @@ describe('messageOverridesForText strategy invocation', () => {
       cleanedText: 'use sol for this',
       overrides: {
         harnessType: 'codex',
-        model: 'gpt-6.1-sol',
+        model: 'gpt-6.2-sol',
         personaId: 'invest',
         provider: undefined,
         reasoning: undefined

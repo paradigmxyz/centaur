@@ -97,8 +97,8 @@ RUN useradd -m -s /bin/bash -u 1001 agent \
 ARG CLAUDE_CODE_VERSION=2.1.325
 # Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
 # from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
-ARG CODEX_VERSION=0.167.1
-ARG PI_CODING_AGENT_VERSION=1.5.2
+ARG CODEX_VERSION=0.171.0
+ARG PI_CODING_AGENT_VERSION=1.6.0
 # Hermes Agent (NousResearch) — pinned by commit SHA per the dependency policy.
 ARG HERMES_AGENT_REF=e5e2fb8b2dbe1cae85aa5ad6ce45aef376016e43
 ARG NUSHELL_VERSION=0.117.0
@@ -214,7 +214,7 @@ ARG FOUNDRY_VERSION=v1.9.0
 ARG AMP_CLI_VERSION=0.0.1794326444-g2deeb3
 ARG MANIM_VERSION=0.22.1
 ARG BUN_VERSION=bun-v1.4.4
-ARG OMP_VERSION=18.21.0
+ARG OMP_VERSION=19.1.1
 
 # ── Agent-scoped toolchains ─────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

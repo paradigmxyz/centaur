@@ -63,6 +63,8 @@ describe('reasoningForModel', () => {
     'gpt-6-sol': [...standardEfforts, 'max'],
     'gpt-6.1-sol': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     'gpt-6.1-terra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    'gpt-6.2-astra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    'gpt-6.2-sol': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     'gpt-6-luna': [...standardEfforts, 'max']
   }
 
@@ -222,6 +224,8 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName('claude-haiku-5-5')).toBe('Haiku 5.5')
     expect(modelDisplayName('gpt-6.1-sol')).toBe('Sol 6.1')
     expect(modelDisplayName('gpt-6.1-terra')).toBe('Terra 6.1')
+    expect(modelDisplayName('gpt-6.2-sol')).toBe('Sol 6.2')
+    expect(modelDisplayName('gpt-6.2-astra')).toBe('Astra 6.2')
     expect(modelDisplayName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
     expect(modelDisplayName('claude-opus-5-fast')).toBe('Opus 5 Fast')
     expect(modelDisplayName('gpt-5.6-sol')).toBe('Sol 5.6')

@@ -91,10 +91,12 @@ const MODEL_CHOICES: Choice[] = [
   { value: 'gpt-5.6-luna', description: 'Only when the user says "5.6 luna".' },
   { value: 'gpt-5.6-sol', description: 'Only when the user says "5.6 sol".' },
   { value: 'gpt-5.6-terra', description: 'Only when the user says "5.6 terra".' },
-  { value: 'gpt-6-astra', description: 'Astra: plain "astra".' },
-  { value: 'gpt-6-sol', description: 'Only when the user says "6 sol" (not 6.1).' },
-  { value: 'gpt-6.1-sol', description: 'Sol: plain "sol", "the sol model", or "6.1 sol".' },
+  { value: 'gpt-6-astra', description: 'Only when the user says "6 astra" (not 6.2).' },
+  { value: 'gpt-6-sol', description: 'Only when the user says "6 sol" (not 6.1 or 6.2).' },
+  { value: 'gpt-6.1-sol', description: 'Only when the user says "6.1 sol".' },
   { value: 'gpt-6.1-terra', description: 'Terra: plain "terra" or "6.1 terra".' },
+  { value: 'gpt-6.2-astra', description: 'Astra: plain "astra" or "6.2 astra".' },
+  { value: 'gpt-6.2-sol', description: 'Sol: plain "sol", "the sol model", or "6.2 sol".' },
   { value: 'gpt-6-luna', description: 'Luna: plain "luna" or "6 luna".' }
 ]
 

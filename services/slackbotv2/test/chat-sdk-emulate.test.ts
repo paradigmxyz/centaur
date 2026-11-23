@@ -1011,7 +1011,7 @@ describe('slackbotv2', () => {
           apiKey: 'test-key', model: 'classifier',
           fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => Response.json({ answers: [
             { name: 'selection_request', probability: 0.99, type: 'predicate' },
-            { name: 'model', choice: String(init?.body).includes('use Sol') ? 'gpt-6.1-sol' : 'private/atlas-full', type: 'choice' }
+            { name: 'model', choice: String(init?.body).includes('use Sol') ? 'gpt-6.2-sol' : 'private/atlas-full', type: 'choice' }
           ] })) as unknown as typeof fetch
         })
       })
@@ -1034,7 +1034,7 @@ describe('slackbotv2', () => {
       const reset = await sendMessage(`<@${BOT_USER_ID}> use Sol again`, { threadTs: parent.ts })
       await reset.finished()
       const resetLine = JSON.parse(codexApi.executes[3]!.body.input_lines.at(-1)!)
-      expect(resetLine.model).toBe('gpt-6.1-sol')
+      expect(resetLine.model).toBe('gpt-6.2-sol')
       // Slack clears the provider; the harness resolves the default route.
       expect(resetLine.provider).toBeUndefined()
       const invalid = await sendMessage(`<@${BOT_USER_ID}> --provider openrouter --model atlas use this`, { threadTs: parent.ts })
