@@ -309,13 +309,15 @@ run_tests() {
   # The Console database (console.database.name), created by the bundled Postgres on first boot.
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
-  # The key api-rs administers the console with.
-  E2E_CONSOLE_API_KEY="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.IRON_CONTROL_INITIAL_API_KEY}' | base64 -d)"
-  export E2E_CONSOLE_URL=http://127.0.0.1:30082 E2E_CONSOLE_API_KEY
-  # The Console's bootstrap admin, for the session API (API clients).
+  # The Console's bootstrap admin, for the session API (API clients), and a
+  # bearer key minted as that admin for the operator API.
+  export E2E_CONSOLE_URL=http://127.0.0.1:30082
   E2E_CONSOLE_ADMIN_EMAIL="$(infra_secret IRON_CONTROL_INITIAL_USER_EMAIL)"
   E2E_CONSOLE_ADMIN_PASSWORD="$(infra_secret IRON_CONTROL_INITIAL_USER_PASSWORD)"
   export E2E_CONSOLE_ADMIN_EMAIL E2E_CONSOLE_ADMIN_PASSWORD
+  E2E_CONSOLE_API_KEY="$(CONSOLE_URL="$E2E_CONSOLE_URL" ADMIN_EMAIL="$E2E_CONSOLE_ADMIN_EMAIL" \
+    ADMIN_PASSWORD="$E2E_CONSOLE_ADMIN_PASSWORD" bun e2e/infra/console-api-key.ts)"
+  export E2E_CONSOLE_API_KEY
   # The private key the SSH gateway authorizes, for tests to store and grant.
   E2E_SSH_PRIVATE_KEY="$(kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key -o jsonpath='{.data.id_ed25519}' | base64 -d)"
   export E2E_SSH_PRIVATE_KEY

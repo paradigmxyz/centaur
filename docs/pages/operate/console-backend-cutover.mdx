@@ -55,7 +55,7 @@ api-rs replica at a time.
    host, and port when non-default). The chart fails to render without it.
 2. **Keep the existing Console secrets.** api-rs reads the same
    `IRON_CONTROL_AR_ENCRYPTION_*`, `IRON_CONTROL_DATABASE_URL`,
-   `IRON_CONTROL_INITIAL_API_KEY`, `IRON_CONTROL_SECRET_KEY_BASE` (its session
+   `IRON_CONTROL_SECRET_KEY_BASE` (its session
    keys are derived from it), and `CENTAUR_JWT_SIGNING_SECRET` keys and maps
    them to the `CENTAUR_CONSOLE_*` names the Rust handlers read. Do not rotate
    them during the upgrade, or stored credentials cannot be decrypted.

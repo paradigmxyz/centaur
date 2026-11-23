@@ -125,12 +125,8 @@ async fn prepare_console_db(args: &Args) -> Result<(), ServerError> {
     };
     match centaur_console_db::bootstrap_initial_admin(&pool, &admin).await? {
         centaur_console_db::Bootstrap::Existing => {}
-        centaur_console_db::Bootstrap::Created {
+        centaur_console_db::Bootstrap::Created { user_id } => info!(
             user_id,
-            api_key_id,
-        } => info!(
-            user_id,
-            api_key_id,
             email = %admin.email.trim().to_lowercase(),
             "created the initial Console admin"
         ),

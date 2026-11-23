@@ -15,7 +15,6 @@ use sqlx::{
 mod common;
 
 const BASELINE: &str = include_str!("../migrations/0001_baseline.sql");
-const API_KEY: &str = "iak_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// A database created for one test and dropped with it.
 struct Scratch {
@@ -172,11 +171,10 @@ async fn concurrent_migrations_apply_once() {
     db.drop().await;
 }
 
-fn admin(api_key: Option<&str>) -> InitialAdmin {
+fn admin() -> InitialAdmin {
     InitialAdmin {
         email: " Admin@Example.com ".to_owned(),
         password: "correct horse battery".to_owned(),
-        api_key: api_key.map(str::to_owned),
     }
 }
 
@@ -186,16 +184,10 @@ async fn bootstraps_the_initial_admin_once() {
         return;
     };
     migrate(&db.pool).await.unwrap();
-    let Bootstrap::Created {
-        user_id,
-        api_key_id,
-    } = bootstrap_initial_admin(&db.pool, &admin(Some(API_KEY)))
-        .await
-        .unwrap()
+    let Bootstrap::Created { user_id } = bootstrap_initial_admin(&db.pool, &admin()).await.unwrap()
     else {
         panic!("expected a new admin");
     };
-    assert!(api_key_id.is_some());
     let (email, status, is_admin, digest): (String, String, bool, String) =
         sqlx::query_as("SELECT email, status, admin, password_digest FROM users WHERE id = $1")
             .bind(user_id)
@@ -207,13 +199,12 @@ async fn bootstraps_the_initial_admin_once() {
     assert!(is_admin);
     assert!(digest.starts_with("$2a$"));
     assert!(bcrypt::verify("correct horse battery", &digest).unwrap());
-    let found = centaur_console_db::find_console_api_key(
-        &db.pool,
-        &centaur_console_db::areas::auth_pages::hash_token(API_KEY),
-    )
-    .await
-    .unwrap();
-    assert_eq!(found.map(|(_, user)| user.id), Some(user_id));
+    // Operators create API keys from the Console; the bootstrap makes none.
+    let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(keys, 0);
     let (assign_by_default, labels): (bool, serde_json::Value) =
         sqlx::query_as("SELECT assign_by_default, labels FROM roles WHERE foreign_id = 'infra'")
             .fetch_one(&db.pool)
@@ -223,35 +214,9 @@ async fn bootstraps_the_initial_admin_once() {
     assert_eq!(labels, serde_json::json!({"managed-by": "centaur"}));
 
     assert_eq!(
-        bootstrap_initial_admin(&db.pool, &admin(Some(API_KEY)))
-            .await
-            .unwrap(),
+        bootstrap_initial_admin(&db.pool, &admin()).await.unwrap(),
         Bootstrap::Existing
     );
-    db.drop().await;
-}
-
-#[tokio::test]
-async fn bootstrap_without_an_api_key_creates_none() {
-    let Some(db) = Scratch::new().await else {
-        return;
-    };
-    migrate(&db.pool).await.unwrap();
-    let outcome = bootstrap_initial_admin(&db.pool, &admin(None))
-        .await
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        Bootstrap::Created {
-            api_key_id: None,
-            ..
-        }
-    ));
-    let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-    assert_eq!(keys, 0);
     db.drop().await;
 }
 
@@ -261,13 +226,13 @@ async fn bootstrap_rejects_unusable_settings() {
         return;
     };
     migrate(&db.pool).await.unwrap();
-    let mut short = admin(None);
+    let mut short = admin();
     short.password = "short".to_owned();
-    let mut bad_key = admin(Some("iak_not-hex"));
-    bad_key.email = "admin@example.com".to_owned();
-    let mut no_password = admin(None);
+    let mut bad_email = admin();
+    bad_email.email = "not an email".to_owned();
+    let mut no_password = admin();
     no_password.password.clear();
-    for settings in [short, bad_key, no_password] {
+    for settings in [short, bad_email, no_password] {
         assert!(matches!(
             bootstrap_initial_admin(&db.pool, &settings).await,
             Err(SetupError::Bootstrap(_))
@@ -304,16 +269,14 @@ async fn the_system_user_is_created_once_and_does_not_block_bootstrap() {
 
     // The system user is not an operator: the initial admin is still created,
     // and cannot take the reserved email.
-    let mut reserved = admin(None);
+    let mut reserved = admin();
     reserved.email = SYSTEM_USER_EMAIL.to_uppercase();
     assert!(matches!(
         bootstrap_initial_admin(&db.pool, &reserved).await,
         Err(SetupError::Bootstrap(_))
     ));
     assert!(matches!(
-        bootstrap_initial_admin(&db.pool, &admin(None))
-            .await
-            .unwrap(),
+        bootstrap_initial_admin(&db.pool, &admin()).await.unwrap(),
         Bootstrap::Created { .. }
     ));
 

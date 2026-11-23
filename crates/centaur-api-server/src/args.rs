@@ -215,8 +215,6 @@ impl Args {
                 .initial_user_password
                 .clone()
                 .unwrap_or_default(),
-            api_key: non_empty(self.console_bootstrap.initial_api_key.as_deref())
-                .map(str::to_owned),
         })
     }
 
@@ -258,14 +256,6 @@ struct ConsoleBootstrapArgs {
         hide_env_values = true
     )]
     initial_user_password: Option<String>,
-    /// The initial user's first API key (`iak_` + 64 lowercase hex). Without
-    /// it no key is created; sign in with the password to create one.
-    #[arg(
-        long = "console-initial-api-key",
-        env = "CENTAUR_CONSOLE_INITIAL_API_KEY",
-        hide_env_values = true
-    )]
-    initial_api_key: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -2920,13 +2910,10 @@ mod tests {
             "admin@example.com",
             "--console-initial-user-password",
             "correct horse battery",
-            "--console-initial-api-key",
-            "",
         ])
         .expect("an email configures the initial admin");
         assert_eq!(admin.email, "admin@example.com");
         assert_eq!(admin.password, "correct horse battery");
-        assert_eq!(admin.api_key, None);
     }
 
     #[test]

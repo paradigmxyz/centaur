@@ -313,8 +313,8 @@ spec:
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
             # The initial Console admin, created when the Console database has no
-            # operators, with the API key operators use for the bearer API
-            # (centaur-perms). api-rs itself writes as the Console system user.
+            # operators. Operators create their API keys on the Console's API Keys
+            # page; api-rs itself writes as the Console system user.
             - name: CENTAUR_CONSOLE_INITIAL_USER_EMAIL
               valueFrom:
                 secretKeyRef:
@@ -325,12 +325,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_INITIAL_USER_PASSWORD" .Values.secretManager.envPrefix }}
-            - name: CENTAUR_CONSOLE_INITIAL_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
-                  optional: true
 {{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
             - name: DATABASE_TEXT_SEARCH
               value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}
