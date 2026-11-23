@@ -33,6 +33,10 @@ production:
     database: iron_control_production
     username: iron_control
     password: <%= ConsoleEnv["DATABASE_PASSWORD"] %>
+    # api-rs owns this schema (crates/centaur-console-db/migrations), so Rails
+    # database tasks (`db:prepare`, `db:migrate`) skip it and prepare only the
+    # Solid Cache/Queue/Cable databases below.
+    database_tasks: false
   cache:
     <<: *default
     database: iron_control_production_cache

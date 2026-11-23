@@ -86,11 +86,12 @@ toolServer:
     existingSecretName: ""
     secretKey: token
 
-# console — Rails control plane (formerly "iron-control") for authenticated API
-# access + encrypted secret storage. The console is a required chart component.
-# Uses a dedicated `iron_control_production` database on the bundled Postgres
-# (its own logical DB so its Rails schema_migrations table never collides with
-# the API's migration table); an init container creates the DB idempotently.
+# console — control plane (formerly "iron-control") for authenticated API
+# access + encrypted secret storage, served by api-rs. The console is a required
+# chart component. Uses a dedicated `iron_control_production` database on the
+# bundled Postgres (its own logical DB, with its own migration history); an
+# api-rs init container creates the DB idempotently, and api-rs migrates it and
+# bootstraps the initial admin at startup (`apiRs.runMigrations`).
 # DATABASE_URL, bootstrap user/API-key, and the three ActiveRecord encryption
 # keys are injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
 # elsewhere to use an external DB.
@@ -136,11 +137,11 @@ console:
     # Default Always: the image is published under the mutable `latest` tag, so
     # IfNotPresent would pin pods to whatever digest a node already cached.
     pullPolicy: Always
-  # RAILS_ENV for the Rails worker (schema migrations and Slack catalog jobs).
+  # RAILS_ENV for the Rails worker (Slack catalog jobs).
   railsEnv: production
   database:
-    # Logical DB created on the bundled Postgres by the Console worker's
-    # create-db init container, and the database the Console handlers use. Must
+    # Logical DB created on the bundled Postgres by api-rs's
+    # create-console-db init container, and the database the Console handlers use. Must
     # match the primary connection's `database:` in the image's database.yml —
     # the connection URL carries no database path, so each process resolves the
     # name from here.
@@ -207,13 +208,14 @@ console:
     # host.
     host: ""
     tls: []
-  # Resources for the worker's migrate init container (`bin/rails db:prepare`
-  # plus the bootstrap). Leave empty for the namespace defaults.
+  # Resources for the worker's prepare-job-dbs init container (`bin/rails
+  # db:prepare` for the Solid Cache/Queue/Cable databases). Leave empty for the
+  # namespace defaults.
   resources: {}
   # Solid Queue worker (`bin/jobs`) that runs the Console jobs that still live in
   # Rails: the Slack channel catalog refresh and membership refresh. Without it
-  # those jobs never execute. Its init containers also own the Console schema
-  # (create-db, `db:prepare`, bootstrap), so it must run at least one replica.
+  # those jobs never execute, so it must run at least one replica. The Console
+  # schema itself belongs to api-rs.
   worker:
     replicaCount: 1
     # Node steering for Console background worker pods.
@@ -655,6 +657,9 @@ apiRs:
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
+  # Apply the session and Console database migrations at startup, then create
+  # the initial Console admin on an empty Console database. When false, run
+  # `centaur-api-server migrate --console-database-url ...` before upgrading.
   runMigrations: true
   # Controls whether a missing automatically derived session principal may be
   # created. "preapproved" admits only principals already present in the

@@ -1,8 +1,8 @@
 //! `ConsoleUserPrincipalProvisioner` against a Postgres database holding
 //! Console's schema.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. Every test creates uniquely named rows and removes
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
+//! `cargo run -p centaur-console-db --example migrate -- <url>`. Every test creates uniquely named rows and removes
 //! them again: the default role a test creates is `assign_by_default`, which is
 //! global state, so leaving it behind would change how every other test's
 //! principals are provisioned.

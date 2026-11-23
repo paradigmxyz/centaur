@@ -184,18 +184,49 @@ spec:
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
       initContainers:
-        # api-rs registers principals and roles in the Console database during
-        # startup, and the ported Console handlers read and write it, so wait for
-        # the schema the Console worker's init containers apply before starting.
-        # The worker bootstraps the initial admin right after the schema, so on a
-        # fresh install api-rs can win a sub-second race against the API-key row
-        # and exit; the kubelet restarts it and the next start succeeds.
-{{ include "centaur.consoleDbWait" (dict
-  "root" .
-  "name" "wait-for-console-schema"
-  "database" $console.database.name
-  "query" "SELECT to_regclass('public.users') IS NOT NULL"
-  "message" "waiting for the Console schema (Console worker)…") | nindent 8 }}
+        # api-rs owns the Console schema: at startup (RUN_MIGRATIONS) it applies
+        # the Console migrations and bootstraps the initial admin before it
+        # registers principals there. The databases must exist first, so create
+        # them idempotently on the bundled Postgres: the Console's own, and the
+        # Solid Cache/Queue/Cable databases the Console worker prepares.
+        - name: create-console-db
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # Wait until Postgres accepts connections. A still-starting Postgres
+              # — or a Service with no ready endpoint yet, which is also the case
+              # on a bundled-Postgres install — surfaces as connection refused;
+              # retry rather than failing (and crash-looping) the pod.
+              until psql "$ADMIN_DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for postgres to accept connections..."
+                sleep 2
+              done
+              # Create each database idempotently.
+              for db in $DB_NAMES; do
+                exists=$(psql "$ADMIN_DATABASE_URL" -tAc \
+                  "SELECT 1 FROM pg_database WHERE datname = '$db'")
+                if [ "$exists" != "1" ]; then
+                  echo "creating database $db"
+                  psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE \"$db\"" || true
+                fi
+              done
+          env:
+            - name: ADMIN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            # Primary + Solid Cache/Queue/Cable, matching the Console worker's
+            # config/database.yml.
+            - name: DB_NAMES
+              value: {{ printf "%s %s_cache %s_queue %s_cable" $console.database.name $console.database.name $console.database.name $console.database.name | quote }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            seccompProfile:
+              type: RuntimeDefault
       containers:
         - name: api-rs
           image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
@@ -325,6 +356,24 @@ spec:
 {{- end }}
             - name: RUN_MIGRATIONS
               value: {{ .Values.apiRs.runMigrations | quote }}
+            # The initial Console admin, created when the Console database has no
+            # users. The API key is the one api-rs authenticates with
+            # (IRON_CONTROL_API_KEY below).
+            - name: CENTAUR_CONSOLE_INITIAL_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_EMAIL" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_INITIAL_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_PASSWORD" .Values.secretManager.envPrefix }}
+            - name: CENTAUR_CONSOLE_INITIAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
 {{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
             - name: DATABASE_TEXT_SEARCH
               value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}

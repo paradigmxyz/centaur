@@ -830,11 +830,11 @@ use. Do not add SSO routes through an unguarded router.
 Unit tests do not need a database. DB-backed tests use
 `CONSOLE_DB_TEST_DATABASE_URL` (the same variable as
 `centaur-console-db/tests`). They skip locally when it is unset and panic under
-`CI`, so a CI misconfiguration cannot silently skip them. Prepare the schema
-from `services/console`:
+`CI`, so a CI misconfiguration cannot silently skip them. Migrate an empty
+database first:
 
 ```bash
-RAILS_ENV=test CENTAUR_CONSOLE_DATABASE_URL=postgresql://... bin/rails db:prepare
+cargo run -p centaur-console-db --example migrate -- postgresql://...
 cargo test --locked -p centaur-api-server console_session
 ```
 

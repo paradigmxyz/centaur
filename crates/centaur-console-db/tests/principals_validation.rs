@@ -1,8 +1,8 @@
 //! The principals area's validation against a Postgres database holding
 //! Console's schema.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. Every test creates uniquely named rows and removes
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
+//! `cargo run -p centaur-console-db --example migrate -- <url>`. Every test creates uniquely named rows and removes
 //! them again.
 //!
 //! These tests pin what the write paths accept and reject: the field rules are

@@ -103,8 +103,11 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   reconciliation. A connected UI state alone is not proof of usable access.
 - Put business logic in models or `app/services`, keep controllers thin, and
   preserve JSON error and pagination contracts.
-- Generate migrations with Rails and commit the resulting `db/schema.rb` change.
-  Do not hand-edit the schema dump.
+- api-rs owns the Console schema. Add schema changes as SQLx migrations in
+  `crates/centaur-console-db/migrations`, never under `db/migrate`; a test fails
+  when the two disagree. `db/migrate` and `db/schema.rb` remain only for the
+  Rails test suite and are frozen at the baseline. Production Rails tasks skip
+  the primary database (`database_tasks: false`).
 - Use local fixtures or synthetic snapshots for UI work; do not make tests
   depend on a remote database.
 

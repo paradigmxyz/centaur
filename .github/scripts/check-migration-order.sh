@@ -157,6 +157,11 @@ check_migrations \
   "${sqlx_crate}/search-migrations/postgres"
 
 check_migrations \
+  "Console SQLx" \
+  '^([0-9]+)_.+\.sql$' \
+  "crates/centaur-console-db/migrations"
+
+check_migrations \
   "Rails console" \
   '^([0-9]+)_.+\.rb$' \
   "services/console/db/migrate"

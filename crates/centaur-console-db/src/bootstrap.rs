@@ -1,0 +1,210 @@
+//! The initial Console admin (`Iron::Bootstrap`): on a database with no users,
+//! create the configured operator as an active admin, the default `infra`
+//! role, and, when one is configured, the operator's first API key. It does
+//! nothing once any user exists, so it is safe to run on every start.
+//!
+//! Unlike Rails, it never invents an API key: Rails logged the plaintext of
+//! the key it issued, and credentials stay out of logs. Without a configured
+//! key the operator signs in with the password and creates one.
+
+use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+
+use crate::SetupError as Error;
+
+type Result<T> = std::result::Result<T, Error>;
+
+/// `Iron::Bootstrap::ADVISORY_LOCK_KEY`, so a Rails process bootstrapping the
+/// same database at the same time waits for this one and finds the user.
+/// Written exactly as the Ruby constant is.
+#[allow(clippy::unusual_byte_groupings)]
+const ADVISORY_LOCK_KEY: i64 = 0x1700_B007_C0FFEE & 0x7FFF_FFFF_FFFF_FFFF;
+
+const API_KEY_PREFIX: &str = "iak_";
+/// `User` validates `length: { minimum: 12 }`.
+const MIN_PASSWORD_LENGTH: usize = 12;
+
+/// The operator to create on an empty database.
+#[derive(Clone)]
+pub struct InitialAdmin {
+    pub email: String,
+    pub password: String,
+    /// The first API key's plaintext (`iak_` + 64 lowercase hex). `None`
+    /// creates no key.
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for InitialAdmin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialAdmin")
+            .field("email", &self.email)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`bootstrap_initial_admin`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Bootstrap {
+    /// A user already exists; nothing changed.
+    Existing,
+    Created {
+        user_id: i64,
+        api_key_id: Option<i64>,
+    },
+}
+
+/// Create `admin` and its API key when the database has no users.
+pub async fn bootstrap_initial_admin(pool: &PgPool, admin: &InitialAdmin) -> Result<Bootstrap> {
+    if admin.password.is_empty() {
+        return Err(Error::Bootstrap(
+            "the initial Console user's email is set but its password is missing".to_owned(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(ADVISORY_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
+        .fetch_one(&mut *tx)
+        .await?;
+    if exists {
+        return Ok(Bootstrap::Existing);
+    }
+
+    // Validated only when creating, as Rails did: an existing deployment whose
+    // configured values no longer pass keeps starting.
+    let email = admin.email.trim().to_lowercase();
+    if !valid_email(&email) {
+        return Err(Error::Bootstrap(
+            "the initial Console user's email is invalid".to_owned(),
+        ));
+    }
+    if admin.password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(Error::Bootstrap(format!(
+            "the initial Console user's password must be at least {MIN_PASSWORD_LENGTH} characters"
+        )));
+    }
+    let token = admin.api_key.as_deref().filter(|token| !token.is_empty());
+    if token.is_some_and(|token| !valid_api_key(token)) {
+        return Err(Error::Bootstrap(
+            "the initial Console API key must be iak_ followed by 64 lowercase hex digits"
+                .to_owned(),
+        ));
+    }
+    // `has_secure_password` writes `$2a$` digests at bcrypt's default cost.
+    let digest = bcrypt::hash_with_result(&admin.password, bcrypt::DEFAULT_COST)
+        .map_err(|error| Error::Bootstrap(format!("hashing the initial password: {error}")))?
+        .format_for_version(bcrypt::Version::TwoA);
+
+    // The initial operator predates any approver, so it is created active and
+    // admin: it is the account that approves everyone else.
+    let user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (email, password_digest, status, admin, created_at, updated_at) \
+         VALUES ($1, $2, 'active', true, now(), now()) RETURNING id",
+    )
+    .bind(&email)
+    .bind(&digest)
+    .fetch_one(&mut *tx)
+    .await?;
+    ensure_default_infra_role(&mut tx, user_id).await?;
+    let api_key_id = match token {
+        Some(token) => Some(
+            sqlx::query_scalar(
+                "INSERT INTO api_keys (user_id, name, token_hash, created_at, updated_at) \
+                 VALUES ($1, 'bootstrap', $2, now(), now()) RETURNING id",
+            )
+            .bind(user_id)
+            .bind(hex::encode(Sha256::digest(token.as_bytes())))
+            .fetch_one(&mut *tx)
+            .await?,
+        ),
+        None => None,
+    };
+    tx.commit().await?;
+    Ok(Bootstrap::Created {
+        user_id,
+        api_key_id,
+    })
+}
+
+/// `Role.ensure_default_infra!`: the `infra` role, assigned by default.
+async fn ensure_default_infra_role(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    created_by: i64,
+) -> Result<()> {
+    let updated = sqlx::query(
+        "UPDATE roles SET assign_by_default = true, updated_at = now() \
+         WHERE foreign_id = 'infra' AND NOT assign_by_default",
+    )
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() > 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO roles (foreign_id, name, labels, assign_by_default, created_by_id, created_at, updated_at) \
+         SELECT 'infra', 'Infra', '{\"managed-by\": \"centaur\"}', true, $1, now(), now() \
+         WHERE NOT EXISTS (SELECT 1 FROM roles WHERE foreign_id = 'infra')",
+    )
+    .bind(created_by)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// A simplified `URI::MailTo::EMAIL_REGEXP`: one `@`, a non-empty local part,
+/// and a domain of non-empty dot-separated labels.
+fn valid_email(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    let local_ok = !local.is_empty()
+        && local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".!#$%&'*+/=?^_`{|}~-".contains(c));
+    let domain_ok = !domain.is_empty()
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+    local_ok && domain_ok
+}
+
+/// `ApiKey::TOKEN_FORMAT`.
+fn valid_api_key(token: &str) -> bool {
+    token.strip_prefix(API_KEY_PREFIX).is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn email_validation_matches_the_common_cases() {
+        assert!(valid_email("admin@example.com"));
+        assert!(valid_email("first.last+tag@sub.example.com"));
+        assert!(!valid_email("admin"));
+        assert!(!valid_email("@example.com"));
+        assert!(!valid_email("admin@"));
+        assert!(!valid_email("admin@example..com"));
+        assert!(!valid_email("a b@example.com"));
+    }
+
+    #[test]
+    fn api_keys_match_the_rails_token_format() {
+        let issued = format!("iak_{}", "0123456789abcdef".repeat(4));
+        assert!(valid_api_key(&issued));
+        assert!(!valid_api_key("iak_short"));
+        assert!(!valid_api_key(&issued.to_uppercase()));
+        assert!(!valid_api_key(&issued.replacen("iak_", "xak_", 1)));
+    }
+}

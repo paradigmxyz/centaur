@@ -742,6 +742,7 @@ version = "0.1.0"
 dependencies = [
  "active-record-encryption",
  "base64 0.23.1",
+ "bcrypt",
  "chrono",
  "chrono-tz",
  "garde",

@@ -91,6 +91,8 @@ pub(crate) struct Args {
     activity_summary: ActivitySummaryArgs,
     #[command(flatten)]
     console_session: ConsoleSessionArgs,
+    #[command(flatten)]
+    console_bootstrap: ConsoleBootstrapArgs,
 }
 
 impl Args {
@@ -202,6 +204,22 @@ impl Args {
         self.sandbox.iron_control.console_write_db().ok()
     }
 
+    /// The operator to create on a Console database with no users, when
+    /// `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` is set.
+    pub(crate) fn console_initial_admin(&self) -> Option<centaur_console_db::InitialAdmin> {
+        let email = non_empty(self.console_bootstrap.initial_user_email.as_deref())?;
+        Some(centaur_console_db::InitialAdmin {
+            email: email.to_owned(),
+            password: self
+                .console_bootstrap
+                .initial_user_password
+                .clone()
+                .unwrap_or_default(),
+            api_key: non_empty(self.console_bootstrap.initial_api_key.as_deref())
+                .map(str::to_owned),
+        })
+    }
+
     /// Select the in-process Console implementation for iron-control calls
     /// when the Rust Console is enabled. Without it (a deployment where Rails
     /// still owns the Console, and the external `centaur-perms` CLI) the HTTP
@@ -232,6 +250,31 @@ pub(crate) struct IronControlRuntime {
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
     pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
+}
+
+/// The initial Console operator (`Iron::Bootstrap`), created as an active
+/// admin when the Console database has no users.
+#[derive(Debug, ClapArgs)]
+struct ConsoleBootstrapArgs {
+    #[arg(
+        long = "console-initial-user-email",
+        env = "CENTAUR_CONSOLE_INITIAL_USER_EMAIL"
+    )]
+    initial_user_email: Option<String>,
+    #[arg(
+        long = "console-initial-user-password",
+        env = "CENTAUR_CONSOLE_INITIAL_USER_PASSWORD",
+        hide_env_values = true
+    )]
+    initial_user_password: Option<String>,
+    /// The initial user's first API key (`iak_` + 64 lowercase hex). Without
+    /// it no key is created; sign in with the password to create one.
+    #[arg(
+        long = "console-initial-api-key",
+        env = "CENTAUR_CONSOLE_INITIAL_API_KEY",
+        hide_env_values = true
+    )]
+    initial_api_key: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -808,9 +851,26 @@ pub(crate) struct MigrateArgs {
     /// backend the database was first migrated with.
     #[arg(long, value_parser = TextSearchBackend::from_str)]
     pub(crate) text_search: TextSearchBackend,
+    /// Postgres URL of the Console database to migrate as well. Same password
+    /// advice as `--database-url`.
+    #[arg(long)]
+    pub(crate) console_database_url: Option<String>,
 }
 
 impl MigrateArgs {
+    /// A writable pool for `--console-database-url`, when given.
+    pub(crate) fn console_db(&self) -> Result<Option<PgPool>, ServerError> {
+        let Some(url) = non_empty(self.console_database_url.as_deref()) else {
+            return Ok(None);
+        };
+        let options = console_write_db_options(url, None)?;
+        Ok(Some(
+            PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy_with(options),
+        ))
+    }
+
     /// Parse `migrate` arguments when the command line starts with `migrate`.
     pub(crate) fn from_command_line() -> Option<Self> {
         if env::args_os().nth(1)? != "migrate" {
@@ -2851,6 +2911,22 @@ mod tests {
         .expect("migrate flags parse");
         assert_eq!(args.database_url, "postgres://flag.example/centaur");
         assert_eq!(args.text_search, TextSearchBackend::Paradedb);
+        assert_eq!(args.console_database_url, None);
+
+        let args = MigrateArgs::try_parse_from([
+            "migrate",
+            "--database-url",
+            "postgres://flag.example/centaur",
+            "--text-search",
+            "paradedb",
+            "--console-database-url",
+            "postgres://flag.example/console",
+        ])
+        .expect("migrate flags parse");
+        assert_eq!(
+            args.console_database_url.as_deref(),
+            Some("postgres://flag.example/console")
+        );
 
         for missing in [
             vec!["migrate", "--text-search", "postgres"],
@@ -2887,6 +2963,33 @@ mod tests {
                 what: "unsupported transform".to_owned(),
             })
         ));
+    }
+
+    #[test]
+    fn console_initial_admin_requires_an_email() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+            ];
+            argv.extend_from_slice(extra);
+            Args::try_parse_from(argv).unwrap().console_initial_admin()
+        };
+        assert!(parse(&[]).is_none());
+        assert!(parse(&["--console-initial-user-email", " "]).is_none());
+        let admin = parse(&[
+            "--console-initial-user-email",
+            "admin@example.com",
+            "--console-initial-user-password",
+            "correct horse battery",
+            "--console-initial-api-key",
+            "",
+        ])
+        .expect("an email configures the initial admin");
+        assert_eq!(admin.email, "admin@example.com");
+        assert_eq!(admin.password, "correct horse battery");
+        assert_eq!(admin.api_key, None);
     }
 
     #[test]

@@ -307,8 +307,8 @@ apiRs.enabled=false has none; fail rather than render a URL nothing answers.
 
 {{- /*
 Init container that blocks on a psql predicate against a Console database.
-Console-database clients use it so they start only after the Console worker's
-init containers have applied the schema.
+Console-database clients use it so they start only after api-rs has applied
+the schema.
 
 Params: root, name (container name), database (PGDATABASE), query (SQL returning
 t for ready), message (log line while waiting). It connects through

@@ -13,16 +13,30 @@ URLs do not change.
 What the chart still runs from `services/console`:
 
 - the Solid Queue worker, which runs the Slack channel catalog and membership
-  refresh jobs, and whose init containers own the Console schema
-  (`bin/rails db:prepare`) and the initial-admin bootstrap. It must run at least
-  one replica;
+  refresh jobs and prepares its own Solid Cache/Queue/Cable databases. It must
+  run at least one replica;
 - the `console` Service, now a compatibility alias forwarding its historical
   `console:3000` URL to api-rs, so in-cluster clients with a cached URL keep
   working.
 
 Rollback is `helm rollback` to the previous chart revision. The Console schema is
-unchanged by the upgrade (the same Rails migrations run either way), so the
-rollback is data-safe.
+unchanged by the upgrade, so the rollback is data-safe (see
+[Console schema](#console-schema)).
+
+## Console schema
+
+api-rs owns the Console schema. Its migrations live in
+`crates/centaur-console-db/migrations`, and api-rs applies them at startup
+(`apiRs.runMigrations`) or through `centaur-api-server migrate
+--console-database-url`. Rails no longer migrates the Console database.
+
+The first migration is the schema the last Rails migration produced. On a
+database Rails already migrated, api-rs records that migration as applied
+without running it. api-rs refuses to start when the database is missing Rails
+migrations, or has ones it does not know. In that case, upgrade through the
+previous chart release first, whose worker still runs `bin/rails db:prepare`.
+The Rails `schema_migrations` table stays in place, and a fresh database records
+every Rails version in it, so a rolled-back worker finds nothing to migrate.
 
 ## Before upgrading
 
@@ -52,12 +66,11 @@ kubectl rollout status deploy/<release>-centaur-api-rs -n <namespace>
 kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
 ```
 
-The worker's init containers create the databases (bundled Postgres), run
-`bin/rails db:prepare`, and bootstrap the initial admin before the worker starts.
-api-rs, proxy-sync, and token-broker wait for the Console schema in their own
-init containers. Any rollout that changes the worker's pod template, including
-a `helm rollback` in either direction, restarts it and applies pending
-migrations.
+An api-rs init container creates the databases (bundled Postgres). api-rs then
+migrates the Console database and creates the initial admin before it registers
+principals. The worker, proxy-sync, and token-broker wait for the Console schema
+in their own init containers; the worker then prepares only its Solid
+Cache/Queue/Cable databases.
 
 Then verify:
 
@@ -81,7 +94,9 @@ kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
 
 The previous revision restores the Rails web Deployment, the Ingress, and the
 internal URL. The schema is the same one both implementations use, so no data
-migration is needed: data written on either side is readable on the other.
+migration is needed: data written on either side is readable on the other. A
+release that adds api-rs Console migrations changes the schema; roll back past
+one only if the release notes say those migrations are compatible.
 
 Before upgrading, note the revision number of the current (Rails Console)
 release, and make sure Helm will not prune it: `helm upgrade` keeps 10

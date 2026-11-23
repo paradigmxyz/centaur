@@ -556,7 +556,7 @@ The server needs:
 - A migrating user that can create extensions and roles. Migrations create
   cluster-wide roles such as `centaur_company_context_reader`. That is the `DATABASE_URL` user when api-rs
   migrates at startup, or the user passed to `centaur-api-server migrate` below.
-  The Console also creates its databases with the `DATABASE_URL` user. The RDS
+  api-rs also creates the Console databases with the `DATABASE_URL` user. The RDS
   master user and the Cloud SQL `postgres` user can do all of this. With a less
   privileged user, have an administrator create the `vector` and `uuid-ossp`
   extensions and the Console databases listed below first.
@@ -568,7 +568,7 @@ The deployment uses these databases on the server:
 | Database | Used by | Connection |
 | --- | --- | --- |
 | Any name, for example `centaur` | api-rs, Slackbot, workflows, and the company-context service | `DATABASE_URL`, including the database name. |
-| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; the Console selects each database itself. The Console init container creates missing databases with the `DATABASE_URL` credentials. |
+| `iron_control_production`, plus `_cache`, `_queue`, and `_cable` variants | Console; api-rs and proxy-sync read `iron_control_production` | `IRON_CONTROL_DATABASE_URL` without a database name; each process selects the database itself. An api-rs init container creates missing databases with the `DATABASE_URL` credentials. |
 
 Managed servers usually require TLS, so add `sslmode=require` to both URLs.
 `POSTGRES_PASSWORD` is not needed. Tools that declare `pg_dsn` secrets connect
@@ -626,21 +626,25 @@ bundled Postgres always uses `paradedb`.
   which RDS and Cloud SQL do not offer. Use it only for a self-managed ParadeDB
   server.
 
-api-rs migrates its database at startup while `apiRs.runMigrations` is true. To
-migrate the external database on its own, for example with an administrator
-account before a rollout, run the `migrate` subcommand from the api-rs image.
-It takes only flags and applies the same migrations and checks as startup:
+api-rs migrates its database and the Console database
+(`iron_control_production`) at startup while `apiRs.runMigrations` is true, then
+creates the initial Console admin if the Console has no users. To migrate the
+external databases on their own, for example with an administrator account
+before a rollout, run the `migrate` subcommand from the api-rs image. It takes
+only flags and applies the same migrations and checks as startup:
 
 ```bash
 PGPASSWORD='<password>' centaur-api-server migrate \
   --database-url 'postgresql://<user>@<host>:5432/<database>?sslmode=require' \
-  --text-search postgres
+  --text-search postgres \
+  --console-database-url 'postgresql://<user>@<host>:5432/iron_control_production?sslmode=require'
 ```
 
 Leave the password out of the URL so it stays out of the process list; the
 subcommand also reads a passfile (`~/.pgpass`). Rerunning it is a no-op. When
 migrations run this way, set `apiRs.runMigrations: false` so api-rs starts with
-a user that does not need to create roles or extensions.
+a user that does not need to create roles or extensions. api-rs still creates
+the initial Console admin at startup.
 
 A database keeps the backend it was first migrated with; there is no in-place
 switch. Migrations, at startup or through `centaur-api-server migrate`, fail if

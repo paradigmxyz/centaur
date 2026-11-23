@@ -87,7 +87,7 @@ spec:
             matchLabels:
 {{ include "centaur.componentSelectorLabels" (dict "root" . "component" "teamsbot") | nindent 14 }}
 {{- end }}
-        # The Rails Console worker (schema migrations + bin/jobs) reaches the
+        # The Rails Console worker (job-database setup + bin/jobs) reaches the
         # app and queue DBs.
         - podSelector:
             matchLabels:

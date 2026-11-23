@@ -98,6 +98,39 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.database_url).await?;
     store.run_migrations(args.text_search).await?;
     info!(text_search = %args.text_search, "database migrations applied");
+    if let Some(console_db) = args.console_db()? {
+        centaur_console_db::migrate(&console_db).await?;
+        info!("Console database migrations applied");
+    }
+    Ok(())
+}
+
+/// api-rs owns Console's schema: migrate it with the session database, then
+/// create the initial operator on a database with no users. Both must finish
+/// before anything below registers principals in it.
+async fn prepare_console_db(args: &Args) -> Result<(), ServerError> {
+    let Some(pool) = args.console_write_db() else {
+        return Ok(());
+    };
+    if args.server.run_migrations {
+        centaur_console_db::migrate(&pool).await?;
+        info!("Console database migrations applied");
+    }
+    let Some(admin) = args.console_initial_admin() else {
+        return Ok(());
+    };
+    match centaur_console_db::bootstrap_initial_admin(&pool, &admin).await? {
+        centaur_console_db::Bootstrap::Existing => {}
+        centaur_console_db::Bootstrap::Created {
+            user_id,
+            api_key_id,
+        } => info!(
+            user_id,
+            api_key_id,
+            email = %admin.email.trim().to_lowercase(),
+            "created the initial Console admin"
+        ),
+    }
     Ok(())
 }
 
@@ -138,6 +171,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     if args.server.run_migrations {
         store.run_migrations(args.server.text_search).await?;
     }
+    prepare_console_db(&args).await?;
     if let Some(raw) = args.server.legacy_slack_external_org_allowlist.as_deref() {
         seed_legacy_slack_external_team_ids(&store, raw).await;
     }
@@ -268,6 +302,8 @@ pub(crate) enum ServerError {
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(transparent)]
     IronControlRegister(#[from] centaur_iron_control::RegisterError),
+    #[error(transparent)]
+    ConsoleSetup(#[from] centaur_console_db::SetupError),
     #[error(transparent)]
     Telemetry(#[from] centaur_telemetry::TelemetryError),
     #[error(transparent)]

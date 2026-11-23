@@ -1,7 +1,7 @@
 //! Scheduled-task runs against a Postgres database holding Console's schema.
 //!
-//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database prepared with Console's
-//! `bin/rails db:prepare`. A scheduler pass claims every due task in the
+//! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
+//! `cargo run -p centaur-console-db --example migrate -- <url>`. A scheduler pass claims every due task in the
 //! database, so these tests run one at a time and start from an empty
 //! `scheduled_tasks` table.
 
