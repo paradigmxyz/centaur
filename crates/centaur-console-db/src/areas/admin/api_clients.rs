@@ -149,7 +149,7 @@ pub async fn create_api_client(
         // A brand-new client has no default link, so the first one is it.
         sqlx::query(&write::insert_sql(
             ApiClientPrincipalModel::TABLE,
-            &["api_client_id", "principal_id", "\"default\""],
+            &["api_client_id", "principal_id", "default"],
         ))
         .bind(id)
         .bind(principal_id)
@@ -255,7 +255,7 @@ pub async fn attach_api_client_principal(
             if !default && !has_default {
                 sqlx::query(&write::update_sql(
                     ApiClientPrincipalModel::TABLE,
-                    &["\"default\""],
+                    &["default"],
                 ))
                 .bind(true)
                 .bind(id)
@@ -267,7 +267,7 @@ pub async fn attach_api_client_principal(
         None => {
             sqlx::query_scalar(&write::insert_returning_sql(
                 ApiClientPrincipalModel::TABLE,
-                &["api_client_id", "principal_id", "\"default\""],
+                &["api_client_id", "principal_id", "default"],
                 "id",
             ))
             .bind(api_client_id)
@@ -303,7 +303,7 @@ pub async fn make_default_api_client_principal(
     .await?;
     sqlx::query(&write::update_changed_sql(
         ApiClientPrincipalModel::TABLE,
-        &["\"default\""],
+        &["default"],
     ))
     .bind(true)
     .bind(id)

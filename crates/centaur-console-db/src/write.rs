@@ -31,9 +31,9 @@
 /// `INSERT INTO <table> (<columns>, created_at, updated_at) VALUES ($1, ...,
 /// now(), now())`. Binds are positional in `columns` order.
 pub fn insert_sql(table: &str, columns: &[&str]) -> String {
-    let mut names: Vec<&str> = columns.to_vec();
-    names.push("created_at");
-    names.push("updated_at");
+    let mut names: Vec<String> = columns.iter().map(|column| ident(column)).collect();
+    names.push("created_at".to_owned());
+    names.push("updated_at".to_owned());
     let mut values: Vec<String> = (1..=columns.len())
         .map(|index| format!("${index}"))
         .collect();
@@ -70,7 +70,7 @@ fn update_with(table: &str, columns: &[&str], changed: Option<&[&str]>) -> Strin
     let mut assignments: Vec<String> = columns
         .iter()
         .enumerate()
-        .map(|(index, column)| format!("{column} = ${}", index + 1))
+        .map(|(index, column)| format!("{} = ${}", ident(column), index + 1))
         .collect();
     assignments.push("updated_at = now()".to_owned());
     let id = columns.len() + 1;
@@ -84,7 +84,11 @@ fn update_with(table: &str, columns: &[&str], changed: Option<&[&str]>) -> Strin
             .collect();
         sql.push_str(&format!(
             " AND ({}) IS DISTINCT FROM ({})",
-            changed.join(", "),
+            changed
+                .iter()
+                .map(|column| ident(column))
+                .collect::<Vec<_>>()
+                .join(", "),
             bindings.join(", ")
         ));
     }
@@ -98,13 +102,24 @@ pub fn update_where_sql(table: &str, columns: &[&str], from_where: &str) -> Stri
     let mut assignments: Vec<String> = columns
         .iter()
         .enumerate()
-        .map(|(index, column)| format!("{column} = ${}", index + 1))
+        .map(|(index, column)| format!("{} = ${}", ident(column), index + 1))
         .collect();
     assignments.push("updated_at = now()".to_owned());
     format!(
         "UPDATE {table} SET {} WHERE {from_where}",
         assignments.join(", ")
     )
+}
+
+/// A column name as a quoted SQL identifier. Every builder quotes the columns it
+/// is given, so callers pass plain names and reserved words (`grant`,
+/// `default`) need no special handling.
+fn ident(column: &str) -> String {
+    assert!(
+        !column.contains('"'),
+        "pass plain column names; the SQL builders quote them: {column}"
+    );
+    format!("\"{column}\"")
 }
 
 /// `UPDATE <table> SET updated_at = now() WHERE id = $1`, Rails' `touch`.
@@ -120,12 +135,12 @@ mod tests {
     fn inserts_always_set_both_timestamps() {
         assert_eq!(
             insert_sql("api_keys", &["user_id", "name", "token_hash"]),
-            "INSERT INTO api_keys (user_id, name, token_hash, created_at, updated_at) \
+            "INSERT INTO api_keys (\"user_id\", \"name\", \"token_hash\", created_at, updated_at) \
              VALUES ($1, $2, $3, now(), now())"
         );
         assert_eq!(
             insert_returning_sql("api_keys", &["user_id"], "id, created_at"),
-            "INSERT INTO api_keys (user_id, created_at, updated_at) VALUES ($1, now(), now()) \
+            "INSERT INTO api_keys (\"user_id\", created_at, updated_at) VALUES ($1, now(), now()) \
              RETURNING id, created_at"
         );
     }
@@ -134,17 +149,17 @@ mod tests {
     fn updates_only_bump_updated_at_when_a_column_changes() {
         assert_eq!(
             update_changed_sql("api_clients", &["name", "scopes"]),
-            "UPDATE api_clients SET name = $1, scopes = $2, updated_at = now() \
-             WHERE id = $3 AND (name, scopes) IS DISTINCT FROM ($1, $2)"
+            "UPDATE api_clients SET \"name\" = $1, \"scopes\" = $2, updated_at = now() \
+             WHERE id = $3 AND (\"name\", \"scopes\") IS DISTINCT FROM ($1, $2)"
         );
         assert_eq!(
             update_changed_sql("roles", &["name"]),
-            "UPDATE roles SET name = $1, updated_at = now() \
-             WHERE id = $2 AND (name) IS DISTINCT FROM ($1)"
+            "UPDATE roles SET \"name\" = $1, updated_at = now() \
+             WHERE id = $2 AND (\"name\") IS DISTINCT FROM ($1)"
         );
         assert_eq!(
             update_sql("roles", &["name"]),
-            "UPDATE roles SET name = $1, updated_at = now() WHERE id = $2"
+            "UPDATE roles SET \"name\" = $1, updated_at = now() WHERE id = $2"
         );
         assert_eq!(
             update_where_sql(
@@ -152,7 +167,7 @@ mod tests {
                 &["broker_credential_id"],
                 "broker_credential_id = $2"
             ),
-            "UPDATE static_secrets SET broker_credential_id = $1, updated_at = now() \
+            "UPDATE static_secrets SET \"broker_credential_id\" = $1, updated_at = now() \
              WHERE broker_credential_id = $2"
         );
         assert_eq!(
