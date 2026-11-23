@@ -548,8 +548,7 @@ fn parent_columns(kind: SecretKind) -> &'static [(&'static str, Column)] {
             ("name", Column::Text),
             ("description", Column::Text),
             ("labels", Column::Json),
-            // `grant` is a reserved word in Postgres.
-            ("\"grant\"", Column::Text),
+            ("grant", Column::Text),
             ("token_endpoint", Column::Text),
             ("audience", Column::Text),
             ("header", Column::Text),
@@ -574,6 +573,15 @@ fn parent_columns(kind: SecretKind) -> &'static [(&'static str, Column)] {
             ("labels", Column::Json),
             ("public_key", Column::Text),
         ],
+    }
+}
+
+/// A parent column as written in SQL. The document keys columns by name;
+/// `grant` is a reserved word in Postgres and must be quoted.
+fn sql_name(column: &'static str) -> &'static str {
+    match column {
+        "grant" => "\"grant\"",
+        column => column,
     }
 }
 
@@ -641,7 +649,11 @@ async fn persist_parent(
     };
     let Some(existing) = existing else {
         let mut columns = vec!["foreign_id"];
-        columns.extend(parent_columns(kind).iter().map(|(column, _)| *column));
+        columns.extend(
+            parent_columns(kind)
+                .iter()
+                .map(|(column, _)| sql_name(column)),
+        );
         columns.push("created_by_id");
         let sql = write::insert_returning_sql(kind.table(), &columns, "id");
         let row = bind_all(
@@ -664,7 +676,7 @@ async fn persist_parent(
         }
         let mut columns: Vec<&str> = parent_columns(kind)
             .iter()
-            .map(|(column, _)| *column)
+            .map(|(column, _)| sql_name(column))
             .collect();
         if foreign_changed {
             columns.push("foreign_id");
@@ -680,7 +692,7 @@ async fn persist_parent(
 
     let columns: Vec<&str> = parent_columns(kind)
         .iter()
-        .map(|(column, _)| *column)
+        .map(|(column, _)| sql_name(column))
         .collect();
     let sql = write::update_sql(kind.table(), &columns);
     bind_all(sqlx::query(&sql), parent_binds(kind, &document.parent))

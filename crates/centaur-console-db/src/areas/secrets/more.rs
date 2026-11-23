@@ -912,7 +912,7 @@ mod db_tests {
     use serde_json::json;
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
-    use super::{BearerRequest, SshKeyRequest, write_secret};
+    use super::{BearerRequest, OauthTokenRequest, SshKeyRequest, write_secret};
     use crate::areas::secrets::{
         SecretFields, SecretKind, WriteTarget, decrypt, delete_secret, find_secret,
     };
@@ -984,6 +984,75 @@ lGH7Zg4i/TJnXyPb7G9VAAAACGRpZmYtb25lAQIDBAU=\n\
 
     fn suffix() -> u64 {
         rand::random()
+    }
+
+    fn oauth_token_request(grant: &str) -> BearerRequest {
+        let mut credentials = json!({
+            "client_id": { "source_type": "env", "config": { "var": "CID" } },
+            "client_secret": { "source_type": "env", "config": { "var": "CSECRET" } },
+        });
+        if grant == "refresh_token" {
+            credentials["refresh_token"] =
+                json!({ "source_type": "env", "config": { "var": "RT" } });
+        }
+        serde_json::from_value::<OauthTokenRequest>(json!({
+            "name": "DB OAuth",
+            "grant": grant,
+            "token_endpoint": "https://auth.example.test/token",
+            "scopes": ["read"],
+            "credentials": credentials,
+            "rules": [{ "host": "api.example.test", "http_methods": ["GET"] }],
+        }))
+        .map(BearerRequest::OauthToken)
+        .expect("valid oauth token request")
+    }
+
+    /// `grant` is a reserved word in Postgres; the writer must still store it on
+    /// create and on update.
+    #[tokio::test]
+    async fn oauth_token_grant_is_stored_on_create_and_update() {
+        let Some(pool) = database().await else {
+            return;
+        };
+        let admin = operator(&pool).await;
+        let created = write_secret(
+            &pool,
+            WriteTarget::ForeignId(format!("db-oauth-{}", suffix())),
+            oauth_token_request("refresh_token"),
+            Some(admin),
+        )
+        .await
+        .expect("create");
+        let stored = |id: i64| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT \"grant\" FROM oauth_token_secrets WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored grant")
+            }
+        };
+        assert_eq!(
+            stored(created.row.id).await.as_deref(),
+            Some("refresh_token")
+        );
+
+        let updated = write_secret(
+            &pool,
+            WriteTarget::Oid(created.row.oid()),
+            oauth_token_request("client_credentials"),
+            Some(admin),
+        )
+        .await
+        .expect("update");
+        assert!(!updated.created);
+        assert_eq!(
+            stored(created.row.id).await.as_deref(),
+            Some("client_credentials")
+        );
     }
 
     #[tokio::test]
