@@ -948,6 +948,94 @@ fn sandbox_claims(proxy_id: &str, sandbox_id: &str, principal_id: &str, now: i64
 }
 
 #[tokio::test]
+async fn console_session_db_admin_manages_own_api_keys_from_a_session() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let app = app(&fixture);
+    let response = login(&app, &fixture.admin_email, PASSWORD).await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let session = cookie(&response).expect("signed-in session");
+    let session_header = ("cookie", session.as_str());
+
+    let response = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/v1/console/api_keys",
+            &[
+                origin(),
+                session_header,
+                ("content-type", "application/json"),
+            ],
+            Body::from(r#"{"data":{"name":"laptop"}}"#),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let created = json_body(response).await;
+    let token = created["data"]["token"].as_str().unwrap().to_owned();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    assert!(token.starts_with("iak_"));
+
+    // The new key authenticates the bearer API as its owner.
+    let response = send(
+        &app,
+        request(
+            Method::GET,
+            "/api/v1/api_keys",
+            &[("authorization", &format!("Bearer {token}"))],
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = send(
+        &app,
+        request(
+            Method::GET,
+            "/api/v1/console/api_keys",
+            &[session_header],
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = json_body(response).await;
+    let keys = listed["data"].as_array().unwrap();
+    assert!(keys.iter().any(|key| key["id"] == id.as_str()));
+    assert!(keys.iter().all(|key| key.get("token").is_none()));
+
+    let response = send(
+        &app,
+        request(
+            Method::DELETE,
+            &format!("/api/v1/console/api_keys/{id}"),
+            &[origin(), session_header],
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = send(
+        &app,
+        request(
+            Method::GET,
+            "/api/v1/api_keys",
+            &[("authorization", &format!("Bearer {token}"))],
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn console_session_db_sandbox_token_checks_proxy_binding_and_admin() {
     let Some(fixture) = Fixture::new().await else {
         return;
@@ -1150,6 +1238,23 @@ async fn console_session_db_sandbox_admin_jwt_acts_as_console_user() {
     assert_eq!(me["data"]["auth_method"], "sandbox");
     assert_eq!(me["data"]["csrf_token"], Value::Null);
     assert_eq!(me["data"]["user"]["id"], oid("usr", fixture.admin));
+    assert_eq!(me["data"]["nav"]["api_keys"], false);
+
+    // A key outlives the delegation, so a sandbox cannot mint one.
+    let response = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/v1/console/api_keys",
+            &[
+                ("authorization", &auth),
+                ("content-type", "application/json"),
+            ],
+            Body::from(r#"{"data":{"name":"from-a-sandbox"}}"#),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = send(
         &app,

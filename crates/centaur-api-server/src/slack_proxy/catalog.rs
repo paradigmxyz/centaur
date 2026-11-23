@@ -181,9 +181,13 @@ async fn pages(
             page_form.push(("cursor", cursor.clone()));
         }
         let body = slack_api_post_form(http_client(), config, method, &page_form).await?;
-        if let Some(page) = body.get(key).and_then(Value::as_array) {
-            rows.extend(page.iter().cloned());
-        }
+        // A page without its array is not an empty page: replacing the catalog
+        // or a membership with it would drop what Console already knows.
+        let page = body
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| ApiError::Internal(format!("Slack {method} returned no {key} array")))?;
+        rows.extend(page.iter().cloned());
         cursor = body
             .pointer("/response_metadata/next_cursor")
             .and_then(Value::as_str)
@@ -272,7 +276,11 @@ mod tests {
             "auth.test" => json!({"ok": true, "team_id": "T1", "user_id": "UBOT"}),
             "conversations.list" if !form.contains_key("cursor") => json!({
                 "ok": true,
-                "channels": [{"id": "C2", "name": "zeta"}, {"id": "D9", "name": "direct"}],
+                "channels": [
+                    {"id": "C2", "name": "zeta"},
+                    {"id": "C4", "name": "malformed"},
+                    {"id": "D9", "name": "direct"}
+                ],
                 "response_metadata": {"next_cursor": "page2"}
             }),
             "conversations.list" => json!({
@@ -284,6 +292,10 @@ mod tests {
             }),
             "conversations.members" if form.get("channel").is_some_and(|c| c == "C1") => {
                 json!({"ok": true, "members": ["U2", "UBOT", "U2", ""]})
+            }
+            // A success without the members array must not read as no members.
+            "conversations.members" if form.get("channel").is_some_and(|c| c == "C4") => {
+                json!({"ok": true})
             }
             _ => json!({"ok": false, "error": "not_in_channel"}),
         };
@@ -374,6 +386,13 @@ mod tests {
                 row("C1", "Alpha", [true, false, true], &["U2", "UBOT"], None),
                 row("C2", "zeta", [false, false, true], &[], Some(refused)),
                 row("C3", "old", [false, true, false], &[], None),
+                row(
+                    "C4",
+                    "malformed",
+                    [false, false, true],
+                    &[],
+                    Some("Slack conversations.members returned no members array")
+                ),
                 row("CGONE", "gone", [false, false, false], &[], None),
             ]
         );

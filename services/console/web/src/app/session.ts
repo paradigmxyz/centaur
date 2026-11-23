@@ -13,6 +13,7 @@ export type NavSection =
   | "oauth_apps"
   | "users"
   | "api_clients"
+  | "api_keys"
   | "settings"
   | "workflows"
   | "integrations"

@@ -17,6 +17,7 @@ const admin: FeatureModule = {
         { path: ":id/edit", lazy: () => import("./pages/ApiClientEdit").then((m) => ({ Component: m.default })) },
       ],
     },
+    { path: "/console/api_keys", lazy: () => import("./pages/ApiKeysPage").then((m) => ({ Component: m.default })) },
     { path: "/console/settings", loader: () => redirect("/console/settings/edit") },
     { path: "/console/settings/edit", lazy: () => import("./pages/SystemSettingsPage").then((m) => ({ Component: m.default })) },
   ],
@@ -28,6 +29,13 @@ const admin: FeatureModule = {
       to: "/console/api_clients",
       order: 70,
       visible: (me) => me.nav.api_clients,
+    },
+    {
+      id: "api_keys",
+      label: "API Keys",
+      to: "/console/api_keys",
+      order: 75,
+      visible: (me) => me.nav.api_keys,
     },
     {
       id: "settings",

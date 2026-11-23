@@ -302,12 +302,27 @@ async fn the_system_user_is_created_once_and_does_not_block_bootstrap() {
     assert!(!is_admin);
     assert_eq!(digest, None);
 
-    // The system user is not an operator: the initial admin is still created.
+    // The system user is not an operator: the initial admin is still created,
+    // and cannot take the reserved email.
+    let mut reserved = admin(None);
+    reserved.email = SYSTEM_USER_EMAIL.to_uppercase();
+    assert!(matches!(
+        bootstrap_initial_admin(&db.pool, &reserved).await,
+        Err(SetupError::Bootstrap(_))
+    ));
     assert!(matches!(
         bootstrap_initial_admin(&db.pool, &admin(None))
             .await
             .unwrap(),
         Bootstrap::Created { .. }
     ));
+
+    // A system user that somehow got a password is refused, not written as.
+    sqlx::query("UPDATE users SET password_digest = 'x' WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(system_user_id(&db.pool).await.is_err());
     db.drop().await;
 }

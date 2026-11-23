@@ -330,6 +330,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" .Values.secretManager.envPrefix }}
+                  optional: true
 {{- if not (hasKey .Values.apiRs.extraEnv "DATABASE_TEXT_SEARCH") }}
             - name: DATABASE_TEXT_SEARCH
               value: {{ ternary "paradedb" (default "postgres" .Values.externalDatabase.textSearch) .Values.postgres.enabled | quote }}

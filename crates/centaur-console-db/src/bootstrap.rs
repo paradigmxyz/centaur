@@ -6,7 +6,7 @@
 //!
 //! Unlike Rails, it never invents an API key: Rails logged the plaintext of
 //! the key it issued, and credentials stay out of logs. Without a configured
-//! key the operator signs in with the password and creates one.
+//! key the operator signs in and creates one on the Console's API Keys page.
 
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -79,6 +79,12 @@ pub async fn bootstrap_initial_admin(pool: &PgPool, admin: &InitialAdmin) -> Res
     // Validated only when creating, as Rails did: an existing deployment whose
     // configured values no longer pass keeps starting.
     let email = admin.email.trim().to_lowercase();
+    if email == crate::SYSTEM_USER_EMAIL {
+        return Err(Error::Bootstrap(format!(
+            "{} is reserved for the system user; choose another initial Console user email",
+            crate::SYSTEM_USER_EMAIL
+        )));
+    }
     if !valid_email(&email) {
         return Err(Error::Bootstrap(
             "the initial Console user's email is invalid".to_owned(),

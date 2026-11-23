@@ -74,16 +74,18 @@ impl UserRecord {
 }
 
 /// Every console user, optionally filtered by `status`, in Console's order:
-/// admins first, then email, then id. The list is never paginated.
+/// admins first, then email, then id. The list is never paginated. The system
+/// user api-rs writes as is not an operator and is never listed.
 pub async fn admin_users(pool: &PgPool, status: Option<&str>) -> Result<Vec<UserRow>> {
     let records: Vec<UserRecord> = sqlx::query_as(&format!(
         "SELECT {USER_COLUMNS} FROM {} u LEFT JOIN {} a ON a.id = u.approved_by_id \
-         WHERE $1::text IS NULL OR u.status = $1 \
+         WHERE ($1::text IS NULL OR u.status = $1) AND u.email <> $2 \
          ORDER BY u.admin DESC, u.email ASC, u.id ASC",
         UserModel::TABLE,
         UserModel::TABLE,
     ))
     .bind(status)
+    .bind(crate::SYSTEM_USER_EMAIL)
     .fetch_all(pool)
     .await?;
     let mut users = records
@@ -107,11 +109,12 @@ pub async fn admin_users(pool: &PgPool, status: Option<&str>) -> Result<Vec<User
 pub async fn admin_user(pool: &PgPool, id: i64) -> Result<Option<UserRow>> {
     let record: Option<UserRecord> = sqlx::query_as(&format!(
         "SELECT {USER_COLUMNS} FROM {} u LEFT JOIN {} a ON a.id = u.approved_by_id \
-         WHERE u.id = $1",
+         WHERE u.id = $1 AND u.email <> $2",
         UserModel::TABLE,
         UserModel::TABLE,
     ))
     .bind(id)
+    .bind(crate::SYSTEM_USER_EMAIL)
     .fetch_optional(pool)
     .await?;
     let Some(record) = record else {

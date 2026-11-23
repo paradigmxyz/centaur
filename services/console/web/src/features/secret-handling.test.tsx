@@ -14,6 +14,7 @@ import { adminMe, apiResponse, mockApi, operatorMe, renderRoute } from "@/test/u
 import ApiClientDetailPage from "./admin/pages/ApiClientDetail";
 import ApiClientNewPage from "./admin/pages/ApiClientNew";
 import ApiClientsListPage from "./admin/pages/ApiClientsList";
+import ApiKeysPage from "./admin/pages/ApiKeysPage";
 import { IssuedSecretScope } from "./admin/secret-handoff";
 import CredentialNewPage from "./credentials/pages/CredentialNew";
 import OauthAppNewPage from "./oauth-apps/pages/OauthAppNew";
@@ -249,5 +250,24 @@ describe("issued API client secret", () => {
     expect(cachedText(queryClient)).not.toContain("issued-on-rotate");
     await expectGoneAfterLeavingAndReturning(router, "issued-on-rotate");
     expect(cachedText(queryClient)).not.toContain("issued-on-rotate");
+  });
+});
+
+describe("an issued API key", () => {
+  const key = { id: "ak_laptop", name: "laptop", created_at: "2026-06-01T10:00:00Z", updated_at: "2026-06-01T10:00:00Z" };
+
+  it("is shown once after create and never cached", async () => {
+    mockApi({
+      "GET /api/v1/console/api_keys": { data: [key], meta: { total: 1 } },
+      "POST /api/v1/console/api_keys": { data: { ...key, token: "iak_issued-on-create" } },
+    });
+    const { router, queryClient } = renderRoute(<ApiKeysPage />, { path: "/console/api_keys", url: "/console/api_keys", me: adminMe() });
+    await userEvent.type(await screen.findByLabelText("New key name"), "laptop");
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+
+    expect(await screen.findByRole("textbox", { name: "API key" })).toHaveValue("iak_issued-on-create");
+    expect(cachedText(queryClient)).not.toContain("iak_issued-on-create");
+    await act(() => router.navigate("/console/api_keys?again"));
+    expect(cachedText(queryClient)).not.toContain("iak_issued-on-create");
   });
 });

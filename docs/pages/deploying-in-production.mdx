@@ -78,7 +78,7 @@ component. Add these keys to the same infra Secret:
 | `IRON_CONTROL_DATABASE_URL` | Console database, also read by api-rs and proxy-sync | May use the bundled Postgres server. Keep the Console in its own logical database. |
 | `IRON_CONTROL_INITIAL_USER_EMAIL` | Initial Console admin | Used only to create the first user when no user exists. |
 | `IRON_CONTROL_INITIAL_USER_PASSWORD` | Initial Console admin | Minimum 12 characters. Use a generated break-glass password. |
-| `IRON_CONTROL_INITIAL_API_KEY` | The initial admin's API key, for `centaur-perms` and other bearer-API callers | Must be `iak_` followed by 64 lowercase hexadecimal characters. Optional: without it, sign in and create a key. api-rs does not use it. |
+| `IRON_CONTROL_INITIAL_API_KEY` | The initial admin's API key, for `centaur-perms` and other bearer-API callers | Must be `iak_` followed by 64 lowercase hexadecimal characters. Optional: without it, sign in as the initial admin and create a key on the Console's **API Keys** page. api-rs does not use it. |
 | `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY` | Console encryption at rest | Generate a long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY` | Console encryption at rest | Generate a separate long random value and keep it stable. |
 | `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT` | Console encryption at rest | Generate a separate long random value and keep it stable. |
