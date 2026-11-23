@@ -1687,10 +1687,7 @@ async fn console_session_db_workflow_force_start_uses_in_process_runtime() {
             &workflows_dir.to_string_lossy(),
             std::collections::BTreeMap::new(),
         ),
-        WorkflowPrincipalRegistrar::new(IronControlClient::new(
-            fixture.pool.clone(),
-            "fake-test-api-key",
-        )),
+        WorkflowPrincipalRegistrar::new(IronControlClient::new(fixture.pool.clone())),
     )
     .await
     .expect("build the real workflow runtime");

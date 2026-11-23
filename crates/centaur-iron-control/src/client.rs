@@ -4,8 +4,8 @@
 //! Every call runs in-process against the Console database through the same
 //! `centaur_console_db` functions the Console handlers use, so validation,
 //! reconciliation, cache invalidation, and timestamps match the Console API.
-//! Writes are attributed to the Console user that owns the configured API key,
-//! as a bearer API call with that key would be.
+//! Writes are attributed to the Console system user
+//! (`centaur_console_db::SYSTEM_USER_EMAIL`), not to any operator.
 
 use sqlx::PgPool;
 
@@ -21,35 +21,22 @@ use crate::models::{
 use crate::registry::RoleSecretWriter;
 
 /// Registers Centaur's Console model through the Console database.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct IronControlClient {
     pool: PgPool,
-    api_key: String,
-}
-
-impl std::fmt::Debug for IronControlClient {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("IronControlClient")
-            .finish_non_exhaustive()
-    }
 }
 
 impl IronControlClient {
-    /// A client writing through `pool`, a writable Console database pool, on
-    /// behalf of the Console user that owns `api_key`.
-    pub fn new(pool: PgPool, api_key: impl Into<String>) -> Self {
-        Self {
-            pool,
-            api_key: api_key.into(),
-        }
+    /// A client writing through `pool`, a writable Console database pool.
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     // ----- principals & roles ---------------------------------------------
 
     /// Upsert a principal by ``foreign_id`` (create if absent, update if not).
     pub async fn upsert_principal(&self, input: &PrincipalInput) -> Result<Principal> {
-        in_process::upsert_principal(&self.pool, &self.api_key, input).await
+        in_process::upsert_principal(&self.pool, input).await
     }
 
     /// Upsert a principal unless Console already stores exactly `input` for it.
@@ -62,7 +49,7 @@ impl IronControlClient {
 
     /// Upsert a role by ``foreign_id``.
     pub async fn upsert_role(&self, input: &IdentityInput) -> Result<Role> {
-        in_process::upsert_role(&self.pool, &self.api_key, input).await
+        in_process::upsert_role(&self.pool, input).await
     }
 
     /// The principal's effective config: the secrets and Postgres listeners
@@ -110,7 +97,7 @@ impl IronControlClient {
 
     /// Upsert a static secret by ``foreign_id``.
     pub async fn upsert_static_secret(&self, input: &StaticSecretInput) -> Result<SecretRecord> {
-        in_process::upsert_static_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_static_secret(&self.pool, input).await
     }
 
     /// Upsert an OAuth token secret by ``foreign_id``.
@@ -118,12 +105,12 @@ impl IronControlClient {
         &self,
         input: &OAuthTokenSecretInput,
     ) -> Result<SecretRecord> {
-        in_process::upsert_oauth_token_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_oauth_token_secret(&self.pool, input).await
     }
 
     /// Upsert a GCP auth secret by ``foreign_id``, or create one without.
     pub async fn upsert_gcp_auth_secret(&self, input: &GcpAuthSecretInput) -> Result<SecretRecord> {
-        in_process::upsert_gcp_auth_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_gcp_auth_secret(&self.pool, input).await
     }
 
     /// Upsert a GCP ID token secret by ``foreign_id``.
@@ -131,27 +118,27 @@ impl IronControlClient {
         &self,
         input: &GcpIdTokenSecretInput,
     ) -> Result<SecretRecord> {
-        in_process::upsert_gcp_id_token_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_gcp_id_token_secret(&self.pool, input).await
     }
 
     /// Upsert a Postgres DSN secret by ``foreign_id``.
     pub async fn upsert_pg_dsn_secret(&self, input: &PgDsnSecretInput) -> Result<SecretRecord> {
-        in_process::upsert_pg_dsn_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_pg_dsn_secret(&self.pool, input).await
     }
 
     /// Upsert an HMAC signing secret by ``foreign_id``.
     pub async fn upsert_hmac_secret(&self, input: &HmacSecretInput) -> Result<SecretRecord> {
-        in_process::upsert_hmac_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_hmac_secret(&self.pool, input).await
     }
 
     /// Upsert an AWS auth secret by ``foreign_id``.
     pub async fn upsert_aws_auth_secret(&self, input: &AwsAuthSecretInput) -> Result<SecretRecord> {
-        in_process::upsert_aws_auth_secret(&self.pool, &self.api_key, input).await
+        in_process::upsert_aws_auth_secret(&self.pool, input).await
     }
 
     /// Attach a secret to a grantee (principal or role).
     pub async fn create_grant(&self, grantee: &Grantee, secret: &GrantSecret) -> Result<Grant> {
-        in_process::create_grant(&self.pool, &self.api_key, grantee, secret).await
+        in_process::create_grant(&self.pool, grantee, secret).await
     }
 
     /// The grants attached to a role (by OID).

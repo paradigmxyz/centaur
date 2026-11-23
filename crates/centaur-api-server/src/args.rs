@@ -660,14 +660,6 @@ struct IronControlArgs {
         env = "IRON_CONTROL_PROXY_SYNC_URL"
     )]
     proxy_sync_url: Option<String>,
-    /// The Console API key whose owner api-rs's Console writes are attributed
-    /// to (`created_by`).
-    #[arg(
-        long = "iron-control-api-key",
-        env = "IRON_CONTROL_API_KEY",
-        hide_env_values = true
-    )]
-    api_key: Option<String>,
     /// Console's database. api-rs migrates it, serves the Console from it, and
     /// registers principals, roles, secrets, and proxies in it directly.
     #[arg(
@@ -698,15 +690,10 @@ struct IronControlArgs {
 }
 
 impl IronControlArgs {
-    /// The client api-rs registers its Console model with: the writable
-    /// Console pool, acting as the owner of `IRON_CONTROL_API_KEY`.
+    /// The client api-rs registers its Console model with, on the writable
+    /// Console pool.
     fn required_client(&self) -> Result<IronControlClient, ServerError> {
-        let api_key = non_empty(self.api_key.as_deref()).ok_or_else(|| {
-            ServerError::UnsupportedConfig(
-                "iron-control is required: set IRON_CONTROL_API_KEY".to_owned(),
-            )
-        })?;
-        Ok(IronControlClient::new(self.console_write_db()?, api_key))
+        Ok(IronControlClient::new(self.console_write_db()?))
     }
 
     /// The shared Console database pool. Call it within a Tokio runtime: the
@@ -3199,8 +3186,6 @@ mod tests {
                     "http://console.local",
                     "--iron-control-proxy-sync-url",
                     "http://proxy-sync.local:8080",
-                    "--iron-control-api-key",
-                    "iak_test",
                     "--iron-control-database-url",
                     "postgres://console@localhost/console",
                 ]
@@ -3225,8 +3210,6 @@ mod tests {
                 "http://console.local",
                 "--iron-control-proxy-sync-url",
                 "http://proxy-sync.local:8080",
-                "--iron-control-api-key",
-                "iak_test",
                 "--iron-control-database-url",
                 "postgres://console@localhost/console",
                 "--session-sandbox-state-volume-enabled",
@@ -3296,8 +3279,6 @@ mod tests {
             "http://console.local",
             "--iron-control-proxy-sync-url",
             "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
             "--iron-control-database-url",
             "postgres://console@localhost/console",
         ])
@@ -3324,8 +3305,6 @@ mod tests {
             "http://console.local:3000",
             "--iron-control-proxy-sync-url",
             "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
             "--iron-control-database-url",
             "postgres://console@localhost/console",
         ])
@@ -3344,26 +3323,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn iron_control_requires_the_console_database_and_api_key() {
-        let parse = |skip: &str| {
-            let argv = [
-                ("", "centaur-api-server"),
-                ("", "--database-url"),
-                ("", "postgres://postgres:postgres@localhost/centaur"),
-                ("key", "--iron-control-api-key"),
-                ("key", "iak_test"),
-                ("db", "--iron-control-database-url"),
-                ("db", "postgres://console@localhost/console"),
+    async fn iron_control_requires_the_console_database() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
             ];
-            let argv = argv
-                .into_iter()
-                .filter(|(group, _)| group.is_empty() || *group != skip)
-                .map(|(_, arg)| arg);
+            argv.extend_from_slice(extra);
             Args::try_parse_from(argv).unwrap()
         };
-        assert!(parse("").sandbox.iron_control.required_client().is_ok());
-        assert!(parse("key").sandbox.iron_control.required_client().is_err());
-        assert!(parse("db").sandbox.iron_control.required_client().is_err());
+        assert!(
+            parse(&[
+                "--iron-control-database-url",
+                "postgres://console@localhost/console"
+            ])
+            .sandbox
+            .iron_control
+            .required_client()
+            .is_ok()
+        );
+        assert!(parse(&[]).sandbox.iron_control.required_client().is_err());
     }
 
     #[test]
@@ -3395,8 +3375,6 @@ mod tests {
             "http://console.local:3000",
             "--iron-control-proxy-sync-url",
             "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
         ])
         .unwrap();
 
@@ -3414,8 +3392,6 @@ mod tests {
             "postgres://postgres:postgres@localhost/centaur",
             "--iron-control-url",
             "http://console.local:3000",
-            "--iron-control-api-key",
-            "iak_test",
             "--iron-control-database-url",
             "postgres://console@localhost/console",
         ])
@@ -3437,8 +3413,6 @@ mod tests {
             "http://console.local",
             "--iron-control-proxy-sync-url",
             "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
             "--iron-control-database-url",
             "postgres://console@localhost/console",
             "--kubernetes-tools-repo",
@@ -3853,8 +3827,6 @@ mod tests {
                     "http://console.local",
                     "--iron-control-proxy-sync-url",
                     "http://proxy-sync.local:8080",
-                    "--iron-control-api-key",
-                    "iak_test",
                     "--iron-control-database-url",
                     "postgres://console@localhost/console",
                 ]
@@ -4434,8 +4406,6 @@ mod tests {
             "http://console.local",
             "--iron-control-proxy-sync-url",
             "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
             "--iron-control-database-url",
             "postgres://console@localhost/console",
         ])
@@ -4495,8 +4465,6 @@ mod tests {
             "http://console.local",
             "--iron-control-proxy-sync-url",
             "http://proxy-sync.local:8080",
-            "--iron-control-api-key",
-            "iak_test",
             "--iron-control-database-url",
             "postgres://console@localhost/console",
         ])

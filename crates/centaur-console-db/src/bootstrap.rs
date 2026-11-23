@@ -1,7 +1,8 @@
-//! The initial Console admin (`Iron::Bootstrap`): on a database with no users,
+//! The initial Console admin (`Iron::Bootstrap`): on a database with no users
+//! other than the system user api-rs writes as,
 //! create the configured operator as an active admin, the default `infra`
 //! role, and, when one is configured, the operator's first API key. It does
-//! nothing once any user exists, so it is safe to run on every start.
+//! nothing once any operator exists, so it is safe to run on every start.
 //!
 //! Unlike Rails, it never invents an API key: Rails logged the plaintext of
 //! the key it issued, and credentials stay out of logs. Without a configured
@@ -66,7 +67,9 @@ pub async fn bootstrap_initial_admin(pool: &PgPool, admin: &InitialAdmin) -> Res
         .bind(ADVISORY_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users)")
+    // The system user api-rs writes as is not an operator.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE email <> $1)")
+        .bind(crate::SYSTEM_USER_EMAIL)
         .fetch_one(&mut *tx)
         .await?;
     if exists {

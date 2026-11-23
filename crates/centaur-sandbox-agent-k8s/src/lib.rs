@@ -153,7 +153,6 @@ fn test_iron_control_settings() -> IronControlSettings {
                 .max_lifetime(None)
                 .connect_lazy("postgres://unused@127.0.0.1:1/unused")
                 .expect("a lazy pool never connects"),
-            "test-key",
         ),
         console_url: "http://iron-control".to_owned(),
         control_url: "http://iron-control".to_owned(),

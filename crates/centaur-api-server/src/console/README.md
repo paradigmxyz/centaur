@@ -853,8 +853,10 @@ explicitly.
 
 `IronControlClient` (session, warm-pool, workflow, and infra-role
 registration) writes the Console database directly through the writable Console
-pool, so api-rs requires `IRON_CONTROL_DATABASE_URL` and `IRON_CONTROL_API_KEY`.
-The calls resolve to the same `centaur_console_db` functions the Console
-handlers use, so validation, reconciliation, cache invalidation, and timestamps
-match the Console API, and writes are attributed to the key's owner. There is
-no HTTP fallback; only the external `centaur-perms` CLI calls the bearer API.
+pool, so api-rs requires `IRON_CONTROL_DATABASE_URL`. The calls resolve to the
+same `centaur_console_db` functions the Console handlers use, so validation,
+reconciliation, cache invalidation, and timestamps match the Console API.
+Writes are attributed to the Console system user
+(`centaur_console_db::SYSTEM_USER_EMAIL`), created on first use; it cannot sign
+in and has no API keys. Only the external `centaur-perms` CLI calls the bearer
+API.

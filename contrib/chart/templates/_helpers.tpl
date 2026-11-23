@@ -258,9 +258,9 @@ templates should consume this helper rather than `.Values.console` /
 `.Values.ironControl` directly.
 
 In-cluster Service/DNS names use the "console" component (e.g.
-`<release>-centaur-console`). The api-rs-facing env vars stay IRON_CONTROL_URL /
-IRON_CONTROL_API_KEY (their names are hardcoded in the Rust binaries); the URL
-*value* is derived from `centaur.consoleUrl`.
+`<release>-centaur-console`). The api-rs-facing env var stays IRON_CONTROL_URL
+(its name is hardcoded in the Rust binaries); the URL *value* is derived from
+`centaur.consoleUrl`.
 
 The Console is served by api-rs; the chart runs no Rails web pod. The `console`
 Service survives only as a compatibility alias (same name and port, forwarding

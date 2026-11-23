@@ -10863,9 +10863,8 @@ mod adoption_tests {
         reset_test_store(&store).await;
     }
 
-    /// A real registrar on the Console test database, writing as a fresh admin.
-    /// Without `CONSOLE_DB_TEST_DATABASE_URL` the test skips locally and fails
-    /// in CI.
+    /// A real registrar on the Console test database. Without
+    /// `CONSOLE_DB_TEST_DATABASE_URL` the test skips locally and fails in CI.
     async fn console_registrar() -> Option<(SessionRegistrar, sqlx::PgPool)> {
         let Ok(url) = std::env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
             assert!(
@@ -10878,20 +10877,7 @@ mod adoption_tests {
         let pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect to the Console test database");
-        let token = format!("iak_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(
-            "WITH admin AS ( \
-               INSERT INTO users (email, admin, status, created_at, updated_at) \
-               VALUES ($1, true, 'active', now(), now()) RETURNING id) \
-             INSERT INTO api_keys (name, token_hash, user_id, created_at, updated_at) \
-             SELECT 'session-runtime-test', $2, id, now(), now() FROM admin",
-        )
-        .bind(format!("{token}@example.com"))
-        .bind(hex::encode(sha2::Sha256::digest(token.as_bytes())))
-        .execute(&pool)
-        .await
-        .expect("create the test operator");
-        let client = centaur_iron_control::IronControlClient::new(pool.clone(), token);
+        let client = centaur_iron_control::IronControlClient::new(pool.clone());
         Some((SessionRegistrar::new(client), pool))
     }
 

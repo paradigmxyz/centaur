@@ -4,7 +4,8 @@
 //! role may create databases. Each test creates and drops its own.
 
 use centaur_console_db::{
-    Bootstrap, InitialAdmin, SetupError, bootstrap_initial_admin, migrate, rails_versions,
+    Bootstrap, InitialAdmin, SYSTEM_USER_EMAIL, SetupError, bootstrap_initial_admin, migrate,
+    rails_versions, system_user_id,
 };
 use sqlx::{
     Connection, Executor, PgConnection, PgPool,
@@ -277,5 +278,36 @@ async fn bootstrap_rejects_unusable_settings() {
         .await
         .unwrap();
     assert_eq!(users, 0);
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn the_system_user_is_created_once_and_does_not_block_bootstrap() {
+    let Some(db) = Scratch::new().await else {
+        return;
+    };
+    migrate(&db.pool).await.unwrap();
+    let (first, second) = tokio::join!(system_user_id(&db.pool), system_user_id(&db.pool));
+    let id = first.unwrap();
+    assert_eq!(second.unwrap(), id);
+    assert_eq!(system_user_id(&db.pool).await.unwrap(), id);
+    let (email, status, is_admin, digest): (String, String, bool, Option<String>) =
+        sqlx::query_as("SELECT email, status, admin, password_digest FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(email, SYSTEM_USER_EMAIL);
+    assert_eq!(status, "active");
+    assert!(!is_admin);
+    assert_eq!(digest, None);
+
+    // The system user is not an operator: the initial admin is still created.
+    assert!(matches!(
+        bootstrap_initial_admin(&db.pool, &admin(None))
+            .await
+            .unwrap(),
+        Bootstrap::Created { .. }
+    ));
     db.drop().await;
 }

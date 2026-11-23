@@ -5,9 +5,8 @@
 //! `centaur_console_db` functions the Console handlers use, so validation,
 //! reconciliation, cache invalidation, and timestamps match the Console API.
 //!
-//! Writes need an operator for Console's `created_by_id` columns. The client
-//! resolves one from `IRON_CONTROL_API_KEY`, exactly as the bearer API would:
-//! hash the token the same way and look up its active owner in `api_keys`.
+//! Writes need an operator for Console's `created_by_id` columns: the Console
+//! system user (`centaur_console_db::SYSTEM_USER_EMAIL`), created on first use.
 
 use std::collections::BTreeMap;
 
@@ -25,7 +24,7 @@ use centaur_console_db::areas::secrets::{
     AwsAuthRequest, HmacRequest, OauthTokenRequest, SecretDocumentPayload, SecretKind, SecretRow,
     WriteDocument, WriteOptions, WriteTarget, write_secret as db_write_secret,
 };
-use centaur_console_db::{find_console_api_key, find_principal};
+use centaur_console_db::find_principal;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -45,26 +44,15 @@ const ROLE_OID_PREFIX: &str = "role_";
 const PROXY_OID_PREFIX: &str = "prx_";
 const TOKEN_PREFIX: &str = "iprx_";
 
-/// The active Console user that owns the configured API key, used for rows the
-/// in-process writes create.
-pub(crate) async fn operator_id(pool: &PgPool, api_key: &str) -> Result<i64> {
-    let token_hash = hex::encode(Sha256::digest(api_key.as_bytes()));
-    find_console_api_key(pool, &token_hash)
+/// The Console system user api-rs's writes are attributed to.
+pub(crate) async fn operator_id(pool: &PgPool) -> Result<i64> {
+    centaur_console_db::system_user_id(pool)
         .await
-        .map_err(IronControlError::ConsoleDb)?
-        .map(|(_, user)| user.id)
-        .ok_or_else(|| IronControlError::InProcess {
-            operation: "operator",
-            message: "IRON_CONTROL_API_KEY is not an active Console API key".to_owned(),
-        })
+        .map_err(IronControlError::ConsoleDb)
 }
 
-pub(crate) async fn upsert_principal(
-    pool: &PgPool,
-    api_key: &str,
-    input: &PrincipalInput,
-) -> Result<Principal> {
-    let operator = operator_id(pool, api_key).await?;
+pub(crate) async fn upsert_principal(pool: &PgPool, input: &PrincipalInput) -> Result<Principal> {
+    let operator = operator_id(pool).await?;
     let write = principal_write(input);
     db_upsert_principal(pool, &input.foreign_id, &write, operator)
         .await
@@ -91,12 +79,8 @@ pub(crate) async fn upsert_slack_channel_permission(
         .map_err(|error| principal_error("upsert slack channel permission", error))
 }
 
-pub(crate) async fn upsert_role(
-    pool: &PgPool,
-    api_key: &str,
-    input: &IdentityInput,
-) -> Result<Role> {
-    let operator = operator_id(pool, api_key).await?;
+pub(crate) async fn upsert_role(pool: &PgPool, input: &IdentityInput) -> Result<Role> {
+    let operator = operator_id(pool).await?;
     let (view, _) = db_upsert_role(
         pool,
         &input.foreign_id,
@@ -142,11 +126,10 @@ async fn grants(pool: &PgPool, grantee: DbGrantee, operation: &'static str) -> R
 
 pub(crate) async fn create_grant(
     pool: &PgPool,
-    api_key: &str,
     grantee: &Grantee,
     secret: &GrantSecret,
 ) -> Result<Grant> {
-    let operator = operator_id(pool, api_key).await?;
+    let operator = operator_id(pool).await?;
     let write = grant_write(grantee, secret);
     let (row, _) = db_create_grant(pool, &write, operator)
         .await
@@ -158,12 +141,10 @@ pub(crate) async fn create_grant(
 
 pub(crate) async fn upsert_static_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &StaticSecretInput,
 ) -> Result<SecretRecord> {
     write_secret(
         pool,
-        api_key,
         SecretKind::Static,
         WriteTarget::ForeignId(input.foreign_id.clone()),
         document(input, "static secret")?,
@@ -174,12 +155,10 @@ pub(crate) async fn upsert_static_secret(
 
 pub(crate) async fn upsert_oauth_token_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &OAuthTokenSecretInput,
 ) -> Result<SecretRecord> {
     write_secret(
         pool,
-        api_key,
         SecretKind::OauthToken,
         WriteTarget::ForeignId(input.foreign_id.clone()),
         deserialize_request::<OauthTokenRequest>(input, "oauth token secret")?.into(),
@@ -190,7 +169,6 @@ pub(crate) async fn upsert_oauth_token_secret(
 
 pub(crate) async fn upsert_gcp_auth_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &GcpAuthSecretInput,
 ) -> Result<SecretRecord> {
     let target = match &input.foreign_id {
@@ -199,7 +177,6 @@ pub(crate) async fn upsert_gcp_auth_secret(
     };
     write_secret(
         pool,
-        api_key,
         SecretKind::GcpAuth,
         target,
         document(input, "GCP auth secret")?,
@@ -210,12 +187,10 @@ pub(crate) async fn upsert_gcp_auth_secret(
 
 pub(crate) async fn upsert_gcp_id_token_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &GcpIdTokenSecretInput,
 ) -> Result<SecretRecord> {
     write_secret(
         pool,
-        api_key,
         SecretKind::GcpIdToken,
         WriteTarget::ForeignId(input.foreign_id.clone()),
         document(input, "GCP ID token secret")?,
@@ -226,12 +201,10 @@ pub(crate) async fn upsert_gcp_id_token_secret(
 
 pub(crate) async fn upsert_pg_dsn_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &PgDsnSecretInput,
 ) -> Result<SecretRecord> {
     write_secret(
         pool,
-        api_key,
         SecretKind::PgDsn,
         WriteTarget::ForeignId(input.foreign_id.clone()),
         document(input, "Postgres DSN secret")?,
@@ -242,12 +215,10 @@ pub(crate) async fn upsert_pg_dsn_secret(
 
 pub(crate) async fn upsert_hmac_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &HmacSecretInput,
 ) -> Result<SecretRecord> {
     write_secret(
         pool,
-        api_key,
         SecretKind::Hmac,
         WriteTarget::ForeignId(input.foreign_id.clone()),
         deserialize_request::<HmacRequest>(input, "HMAC secret")?.into(),
@@ -258,12 +229,10 @@ pub(crate) async fn upsert_hmac_secret(
 
 pub(crate) async fn upsert_aws_auth_secret(
     pool: &PgPool,
-    api_key: &str,
     input: &AwsAuthSecretInput,
 ) -> Result<SecretRecord> {
     write_secret(
         pool,
-        api_key,
         SecretKind::AwsAuth,
         WriteTarget::ForeignId(input.foreign_id.clone()),
         deserialize_request::<AwsAuthRequest>(input, "AWS auth secret")?.into(),
@@ -274,13 +243,12 @@ pub(crate) async fn upsert_aws_auth_secret(
 
 async fn write_secret(
     pool: &PgPool,
-    api_key: &str,
     kind: SecretKind,
     target: WriteTarget,
     document: WriteDocument,
     operation: &'static str,
 ) -> Result<SecretRecord> {
-    let operator = operator_id(pool, api_key).await?;
+    let operator = operator_id(pool).await?;
     let result = db_write_secret(
         pool,
         kind,

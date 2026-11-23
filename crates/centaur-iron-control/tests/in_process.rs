@@ -14,7 +14,6 @@ use centaur_iron_control::{
     SlackChannelPermissionInput, StaticSecretInput,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -42,42 +41,13 @@ fn unique() -> String {
     hex::encode(bytes)
 }
 
-async fn insert_user(pool: &PgPool, email: &str) -> i64 {
-    sqlx::query_scalar(
-        "INSERT INTO users (email, admin, status, created_at, updated_at) \
-         VALUES ($1, true, 'active', now(), now()) RETURNING id",
-    )
-    .bind(email)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
-async fn insert_api_key(pool: &PgPool, user_id: i64, token: &str) {
-    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
-    sqlx::query(
-        "INSERT INTO api_keys (name, token_hash, user_id, created_at, updated_at) \
-         VALUES ($1, $2, $3, now(), now())",
-    )
-    .bind(format!("in-process-{token_hash}"))
-    .bind(&token_hash)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn in_process_client_writes_principal_proxy_and_effective_config() {
     let Some(pool) = test_pool().await else {
         return;
     };
     let unique = unique();
-    let token = format!("iak_{unique}");
-    let admin = insert_user(&pool, &format!("in-process-{unique}@example.com")).await;
-    insert_api_key(&pool, admin, &token).await;
-
-    let client = IronControlClient::new(pool.clone(), &token);
+    let client = IronControlClient::new(pool.clone());
 
     let principal_input = PrincipalInput {
         foreign_id: format!("in-process-principal-{unique}"),
@@ -94,6 +64,16 @@ async fn in_process_client_writes_principal_proxy_and_effective_config() {
         .await
         .expect("upsert principal in-process");
     assert!(principal.id.starts_with("prn_"));
+    // api-rs writes as the Console system user, never as an operator.
+    let created_by: String = sqlx::query_scalar(
+        "SELECT u.email FROM principals p JOIN users u ON u.id = p.created_by_id \
+         WHERE p.foreign_id = $1",
+    )
+    .bind(&principal_input.foreign_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(created_by, centaur_console_db::SYSTEM_USER_EMAIL);
     assert_eq!(
         principal.foreign_id.as_deref(),
         Some(principal_input.foreign_id.as_str())
@@ -257,10 +237,7 @@ async fn in_process_client_upserts_every_secret_kind_the_registrar_uses() {
         return;
     };
     let unique = unique();
-    let token = format!("iak_{unique}");
-    let admin = insert_user(&pool, &format!("in-process-secrets-{unique}@example.com")).await;
-    insert_api_key(&pool, admin, &token).await;
-    let client = IronControlClient::new(pool.clone(), &token);
+    let client = IronControlClient::new(pool.clone());
     let rules = vec![RequestRule::host("api.example.com")];
 
     let oauth = client
@@ -382,13 +359,10 @@ async fn in_process_client_upserts_every_secret_kind_the_registrar_uses() {
     }
 }
 
-/// A registrar writing as a fresh admin, and unique Slack team/user/channel IDs.
+/// A registrar, and unique Slack team/user/channel IDs.
 async fn registrar(pool: &PgPool) -> (SessionRegistrar, IronControlClient, [String; 3]) {
     let unique = unique();
-    let token = format!("iak_{unique}");
-    let admin = insert_user(pool, &format!("session-{unique}@example.com")).await;
-    insert_api_key(pool, admin, &token).await;
-    let client = IronControlClient::new(pool.clone(), &token);
+    let client = IronControlClient::new(pool.clone());
     let suffix = unique[..8].to_uppercase();
     let ids = [
         format!("T{suffix}"),

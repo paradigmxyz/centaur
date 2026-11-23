@@ -706,6 +706,6 @@ mod tests {
             .acquire_timeout(std::time::Duration::from_millis(200))
             .connect_lazy("postgres://unused@127.0.0.1:1/unused")
             .expect("a lazy pool never connects");
-        IronControlClient::new(pool, "test-key")
+        IronControlClient::new(pool)
     }
 }

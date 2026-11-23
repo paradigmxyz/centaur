@@ -32,6 +32,38 @@ impl ConsoleUserStatus {
     }
 }
 
+/// The email of the Console user api-rs's own writes (principal, role,
+/// secret, grant, and proxy registration) are attributed to. `.invalid` is a
+/// reserved domain, so no identity provider can verify it and link a sign-in
+/// to this user; it has no password or API keys either.
+pub const SYSTEM_USER_EMAIL: &str = "system@centaur.invalid";
+
+/// The id of the system user ([`SYSTEM_USER_EMAIL`]), creating it on first use:
+/// active, not an admin, and unable to sign in.
+pub async fn system_user_id(pool: &PgPool) -> Result<i64> {
+    // A concurrent first insert by another process is invisible to this
+    // statement's snapshot, so the second attempt finds the committed row.
+    for _ in 0..2 {
+        let id: Option<i64> = sqlx::query_scalar(
+            "WITH created AS ( \
+               INSERT INTO users (email, name, status, admin, created_at, updated_at) \
+               VALUES ($1, 'Centaur', 'active', false, \
+                       now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC') \
+               ON CONFLICT (email) DO NOTHING RETURNING id) \
+             SELECT id FROM created UNION ALL SELECT id FROM users WHERE email = $1 LIMIT 1",
+        )
+        .bind(SYSTEM_USER_EMAIL)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(id) = id {
+            return Ok(id);
+        }
+    }
+    Err(crate::Error::InvalidData(
+        "the Console system user could not be created".to_owned(),
+    ))
+}
+
 /// The Console user whose id is `id`, or `None` when it does not exist.
 pub async fn find_console_user(pool: &PgPool, id: i64) -> Result<Option<ConsoleUser>> {
     let row = sqlx::query("SELECT id, email, name, admin, status FROM users WHERE id = $1")

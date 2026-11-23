@@ -621,7 +621,7 @@ mod tests {
         let mut runtime = SessionRuntime::new(
             PgSessionStore::new(pool.clone()),
             crate::SandboxRuntime::backend(backend, base_spec()),
-            SessionRegistrar::new(IronControlClient::new(pool, "unused")),
+            SessionRegistrar::new(IronControlClient::new(pool)),
         )
         .with_codemode(CODEMODE_IMAGE);
         runtime
