@@ -2,30 +2,18 @@
 //!
 //! Console stores the tasks; [`centaur_console_db::scheduled_tasks`] claims due
 //! occurrences and records their outcome in Console's database. This module
-//! drives it: a background loop starts due runs, and Console's "run now"
-//! requests start one on demand. Either way the run is a `console_workflow`
-//! started in-process.
+//! drives it: a background loop starts due runs as `console_workflow` runs,
+//! in-process. "Run now" is the Console's own route
+//! (`console::areas::automation`).
 
 use std::time::Duration;
 
-use axum::{
-    Extension, Json,
-    extract::{Path, State},
-    http::StatusCode,
-};
-use centaur_console_db::{
-    decode_oid,
-    scheduled_tasks::{self, ManualRun, Outcome, RunRequest, StartError},
-};
+use centaur_console_db::scheduled_tasks::{self, Outcome, RunRequest, StartError};
 use centaur_workflows::{CreateWorkflowRunRequest, WorkflowRuntime, WorkflowRuntimeError};
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use chrono::Utc;
 use sqlx::PgPool;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
-
-use crate::{ApiError, AppState, auth::AuthenticatedCaller, routes::caller_may_start_workflow};
 
 /// How often due tasks are checked. Schedules have minute precision.
 const TICK: Duration = Duration::from_secs(20);
@@ -84,52 +72,4 @@ async fn start_run(workflows: &WorkflowRuntime, request: RunRequest) -> Result<S
             ),
             message: error.to_string(),
         })
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct RunScheduledTaskRequest {
-    /// The occurrence the run stands for, when it is not "now". Console's
-    /// retired run job passes the occurrence it was enqueued for, so a run
-    /// it already started is not started again.
-    #[serde(default)]
-    scheduled_for: Option<DateTime<Utc>>,
-}
-
-/// `POST /api/scheduled-tasks/{task_id}/runs`: runs an enabled task now.
-pub(crate) async fn run_scheduled_task(
-    State(state): State<AppState>,
-    Extension(caller): Extension<AuthenticatedCaller>,
-    Path(task_id): Path<String>,
-    Json(request): Json<RunScheduledTaskRequest>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let workflows = state.workflows()?;
-    // The run executes as the task's owner, so only callers allowed to start
-    // the workflow directly may start it here.
-    let starters = workflows.workflow_starters(scheduled_tasks::WORKFLOW_NAME);
-    if !caller_may_start_workflow(starters.as_ref(), caller.class()) {
-        return Err(ApiError::Forbidden(
-            "caller is not allowed to run scheduled tasks".to_owned(),
-        ));
-    }
-    let console_db = state.console_db()?;
-    let id = decode_oid(scheduled_tasks::OID_PREFIX, &task_id)
-        .ok_or_else(|| ApiError::NotFound("scheduled task not found".to_owned()))?;
-    let start = |request| async { start_run(&workflows, request).await };
-    let run = scheduled_tasks::run_now(&console_db, id, request.scheduled_for, Utc::now(), start)
-        .await
-        .map_err(|error| ApiError::Internal(format!("failed to run scheduled task: {error}")))?;
-    match run {
-        ManualRun::Started { run_id } => Ok((
-            StatusCode::ACCEPTED,
-            Json(json!({ "ok": true, "run_id": run_id })),
-        )),
-        ManualRun::NotFound => Err(ApiError::NotFound("scheduled task not found".to_owned())),
-        ManualRun::Disabled => Err(ApiError::Unprocessable(
-            "scheduled task is disabled".to_owned(),
-        )),
-        ManualRun::Failed(error) if error.retryable => {
-            Err(ApiError::ServiceUnavailable(error.message))
-        }
-        ManualRun::Failed(error) => Err(ApiError::Unprocessable(error.message)),
-    }
 }

@@ -344,8 +344,8 @@ and starters. Module load errors appear on the server's stderr as
 Then create a real run:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
-  centaur-api-server console-service-token)
+CENTAUR_API_TOKEN=$(kubectl get secret -n centaur-system centaur-infra-env \
+  -o jsonpath='{.data.CENTAUR_APIRS_ADMIN_API_KEY}' | base64 -d)
 
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" \

@@ -189,12 +189,13 @@ instead of rebinding it.
 
 ## Run a workflow
 
-Direct administrative API calls need a short-lived Console service token. Mint
-one in a running api-rs pod instead of storing a separate static key:
+Direct administrative API calls use the api-rs admin key,
+`CENTAUR_APIRS_ADMIN_API_KEY` in the infra Secret (see
+[Deploying in production](/deploying-in-production)):
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- \
-  centaur-api-server console-service-token)
+CENTAUR_API_TOKEN=$(kubectl get secret -n centaur-system centaur-infra-env \
+  -o jsonpath='{.data.CENTAUR_APIRS_ADMIN_API_KEY}' | base64 -d)
 ```
 
 Create a run through the API:

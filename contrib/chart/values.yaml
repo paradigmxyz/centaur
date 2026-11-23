@@ -107,7 +107,7 @@ console:
   # alias (same name and port, forwarding to api-rs) for in-cluster clients with
   # a cached `centaur-console:3000` URL. The chart runs no Rails process: api-rs
   # owns the Console schema, the initial-admin bootstrap, and the Slack channel
-  # catalog refresh. See docs/pages/operate/console-backend-cutover.mdx.
+  # catalog refresh.
   #
   # api-rs reads the existing IRON_CONTROL_* Console keys from the shared infra
   # Secret; its session-cookie key is derived from IRON_CONTROL_SECRET_KEY_BASE.

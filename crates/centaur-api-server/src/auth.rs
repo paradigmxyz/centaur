@@ -8,41 +8,13 @@ use thiserror::Error;
 
 use crate::{
     ApiError,
-    api_jwt::{
-        API_JWT_AUDIENCE, CONSOLE_JWT_ISSUER, bearer_token, decode_jwt_payload, verify_hs256_jwt,
-    },
+    api_jwt::{API_JWT_AUDIENCE, bearer_token, decode_jwt_payload, verify_hs256_jwt},
     console::sandbox::SandboxBinding,
     console::session_cookie::ConsoleSession,
 };
 use centaur_console_db::ConsoleUser;
 
-const CONSOLE_SERVICE_SUBJECT: &str = "centaur-console";
 const STATIC_ADMIN_IDENTITY: &str = "api-rs-admin";
-
-/// Lifetime of a token from [`console_service_token`] (Rails'
-/// `ApiServer::Jwt::DEFAULT_TTL_SECONDS`).
-const CONSOLE_SERVICE_TOKEN_TTL_SECS: i64 = 60 * 60;
-
-/// A short-lived Console service token (`ApiServer::Jwt.encode_for_console_service`):
-/// it authenticates as the `console` caller with every capability, for an
-/// operator's direct API calls. `now` is seconds since the Unix epoch.
-pub fn console_service_token(
-    signing_secret: &str,
-    now: i64,
-) -> Result<String, jsonwebtoken::errors::Error> {
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-        &serde_json::json!({
-            "iss": "centaur-console",
-            "sub": "centaur-console",
-            "aud": "centaur-api",
-            "iat": now,
-            "exp": now + CONSOLE_SERVICE_TOKEN_TTL_SECS,
-            "token_use": "console_service",
-        }),
-        &jsonwebtoken::EncodingKey::from_secret(signing_secret.as_bytes()),
-    )
-}
 /// Audience of the single sandbox token proxy-sync mints. Distinct from
 /// [`API_JWT_AUDIENCE`] so neither kind of token can be read as the other.
 pub(crate) const SANDBOX_TOKEN_AUDIENCE: &str = "centaur-sandbox";
@@ -460,6 +432,21 @@ impl ApiAuthConfig {
         }
     }
 
+    /// Adds the static admin caller with `key`, as `CENTAUR_APIRS_ADMIN_API_KEY`.
+    #[cfg(test)]
+    pub(crate) fn with_test_admin(mut self, key: &str) -> Self {
+        let mut callers = self.static_callers.as_ref().clone();
+        callers.push(static_caller(
+            STATIC_ADMIN_IDENTITY,
+            CallerClass::Admin,
+            key.to_owned(),
+            Capability::API_RS,
+            None,
+        ));
+        self.static_callers = Arc::new(callers);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn testing_with_slack_ingress(
         slack_key: impl Into<String>,
@@ -531,35 +518,9 @@ impl ApiAuthConfig {
             }
             return self.authenticate_api_client(token);
         }
-        let claims = verify_hs256_jwt::<ApiJwtClaims>(
-            token,
-            self.jwt_secret.as_bytes(),
-            API_JWT_AUDIENCE,
-            CONSOLE_JWT_ISSUER,
-        )?;
-        let subject = claims.sub.trim().to_owned();
-        match claims.token_use {
-            Some(ApiJwtTokenUse::ConsoleService) if subject == CONSOLE_SERVICE_SUBJECT => {
-                Ok(AuthenticatedCaller {
-                    class: CallerClass::Console,
-                    identity: subject,
-                    capabilities: Capability::API_RS.into_iter().collect(),
-                    platform_prefixes: None,
-                    principal_subject: None,
-                    api_client_token: None,
-                    console_user: None,
-                    console_session: None,
-                    bearer_api_key: None,
-                    sandbox: None,
-                })
-            }
-            Some(ApiJwtTokenUse::ConsoleService) => Err(ApiError::Unauthorized(
-                "invalid Console service token subject".to_owned(),
-            )),
-            None => Err(ApiError::Unauthorized(
-                "invalid token use for this audience".to_owned(),
-            )),
-        }
+        // The only JWTs api-rs accepts are its own API client tokens; the
+        // Console runs in-process and mints none.
+        Err(ApiError::Unauthorized("invalid bearer token".to_owned()))
     }
 }
 
@@ -657,18 +618,6 @@ pub enum ApiAuthConfigError {
     MissingEnvironment(&'static str),
     #[error("api-rs authentication keys for {first} and {second} must be distinct")]
     DuplicateToken { first: String, second: String },
-}
-
-#[derive(Deserialize)]
-struct ApiJwtClaims {
-    sub: String,
-    token_use: Option<ApiJwtTokenUse>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ApiJwtTokenUse {
-    ConsoleService,
 }
 
 /// Every ingress key and the session thread-key families it is allowed to
@@ -780,58 +729,6 @@ mod tests {
     use crate::routes::thread_key_matches_platform;
 
     #[test]
-    fn authenticates_console_service_jwt() {
-        let auth = ApiAuthConfig::testing("jwt-secret");
-        let token = encode(
-            &Header::new(Algorithm::HS256),
-            &json!({
-                "iss": "centaur-console",
-                "sub": "centaur-console",
-                "aud": "centaur-api",
-                "iat": 1_700_000_000i64,
-                "exp": 4_102_444_800i64,
-                "token_use": "console_service",
-            }),
-            &EncodingKey::from_secret(b"jwt-secret"),
-        )
-        .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-
-        let caller = auth.authenticate(&headers).unwrap();
-        assert_eq!(caller.class(), CallerClass::Console);
-        assert!(caller.has_capability(Capability::WorkflowsWrite));
-    }
-
-    #[test]
-    fn minted_console_service_tokens_authenticate_as_the_console() {
-        let auth = ApiAuthConfig::testing("jwt-secret");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let token = console_service_token("jwt-secret", now).unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-        let caller = auth.authenticate(&headers).unwrap();
-        assert_eq!(caller.class(), CallerClass::Console);
-
-        let expired =
-            console_service_token("jwt-secret", now - 2 * CONSOLE_SERVICE_TOKEN_TTL_SECS).unwrap();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {expired}").parse().unwrap(),
-        );
-        assert!(auth.authenticate(&headers).is_err());
-    }
-
-    #[test]
     fn authenticates_static_admin_with_every_capability() {
         let auth = ApiAuthConfig {
             static_callers: Arc::new(vec![static_caller(
@@ -857,34 +754,6 @@ mod tests {
         );
         assert_eq!(caller.platform_prefixes(), None);
         assert_eq!(caller.principal_subject(), None);
-    }
-
-    #[test]
-    fn console_service_jwt_requires_the_exact_service_subject() {
-        let auth = ApiAuthConfig::testing("jwt-secret");
-        let token = encode(
-            &Header::new(Algorithm::HS256),
-            &json!({
-                "iss": "centaur-console",
-                "sub": "prn_test",
-                "aud": "centaur-api",
-                "iat": 1_700_000_000i64,
-                "exp": 4_102_444_800i64,
-                "token_use": "console_service",
-            }),
-            &EncodingKey::from_secret(b"jwt-secret"),
-        )
-        .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-
-        assert!(matches!(
-            auth.authenticate(&headers),
-            Err(ApiError::Unauthorized(_))
-        ));
     }
 
     fn bearer(token: &str) -> HeaderMap {
@@ -965,6 +834,12 @@ mod tests {
             // An api-rs-issued token without the API client token use.
             json!({
                 "iss": API_CLIENT_TOKEN_ISSUER, "sub": "centaur-console", "aud": "centaur-api",
+                "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,
+                "token_use": "console_service",
+            }),
+            // The retired Rails Console service token.
+            json!({
+                "iss": "centaur-console", "sub": "centaur-console", "aud": "centaur-api",
                 "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,
                 "token_use": "console_service",
             }),

@@ -664,10 +664,13 @@ struct IronControlArgs {
         env = "IRON_CONTROL_DATABASE_NAME"
     )]
     console_database_name: Option<String>,
+    /// At least 2: the Slack channel catalog refresh holds one connection for
+    /// its advisory lock while its queries use another.
     #[arg(
         long = "iron-control-database-max-connections",
         env = "IRON_CONTROL_DATABASE_MAX_CONNECTIONS",
-        default_value_t = 5
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u32).range(2..)
     )]
     console_database_max_connections: u32,
     /// The read-only Console database pool shared by every client built from
@@ -3307,6 +3310,21 @@ mod tests {
                 .get("app.kubernetes.io/component"),
             Some(&"console".to_owned())
         );
+    }
+
+    #[test]
+    fn console_pool_needs_at_least_two_connections() {
+        let parse = |max: &str| {
+            Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+                "--iron-control-database-max-connections",
+                max,
+            ])
+        };
+        assert!(parse("1").is_err());
+        assert!(parse("2").is_ok());
     }
 
     #[tokio::test]

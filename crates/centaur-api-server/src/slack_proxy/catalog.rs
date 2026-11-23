@@ -18,8 +18,48 @@ use sqlx::PgPool;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
-use super::{SlackFileProxyConfig, http_client, slack_api_post_form, slack_proxy_config};
+use super::{SlackFileProxyConfig, http_client, slack_api_call, slack_proxy_config};
 use crate::ApiError;
+
+/// Slack's own "try again later" error codes (`SlackApi::TRANSIENT_ERRORS`).
+const TRANSIENT_SLACK_ERRORS: [&str; 2] = ["fatal_error", "internal_error"];
+
+/// Why a Slack call failed, as the refresh decides what to do about it.
+#[derive(Debug)]
+enum SlackFailure {
+    /// Slack or the network is having trouble (transport failure, a non-JSON
+    /// or 5xx response, exhausted rate-limit retries, or Slack's transient
+    /// codes): stop the pass without blaming the channel.
+    Transient(String),
+    /// Slack answered and refused, or answered without the expected data.
+    Failed(String),
+}
+
+impl std::fmt::Display for SlackFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(message) | Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// One Web API call through the proxy's client, classified.
+async fn call(
+    config: &SlackFileProxyConfig,
+    method: &str,
+    form: &[(&str, String)],
+) -> Result<Value, SlackFailure> {
+    match slack_api_call(http_client(), config, method, form).await {
+        Ok(Ok(body)) => Ok(body),
+        Ok(Err(code)) if TRANSIENT_SLACK_ERRORS.contains(&code.as_str()) => Err(
+            SlackFailure::Transient(format!("Slack {method} failed: {code}")),
+        ),
+        Ok(Err(code)) => Err(SlackFailure::Failed(format!(
+            "Slack {method} failed: {code}"
+        ))),
+        Err(error) => Err(SlackFailure::Transient(error.to_string())),
+    }
+}
 
 const PASS_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const CATALOG_MAX_AGE_SECS: i64 = 60 * 60;
@@ -95,7 +135,9 @@ async fn with_lock(
 /// `SlackChannelCatalogSync#sync_channels`: replace the catalog with every
 /// channel the bot can see.
 async fn sync_channels(pool: &PgPool, config: &SlackFileProxyConfig) -> Result<usize, ApiError> {
-    let identity = slack_api_post_form(http_client(), config, "auth.test", &[]).await?;
+    let identity = call(config, "auth.test", &[])
+        .await
+        .map_err(|failure| ApiError::Internal(failure.to_string()))?;
     let field = |name: &str| {
         identity
             .get(name)
@@ -113,7 +155,8 @@ async fn sync_channels(pool: &PgPool, config: &SlackFileProxyConfig) -> Result<u
         ("exclude_archived", "false"),
     ];
     let mut channels: Vec<RemoteChannel> = pages(config, "conversations.list", "channels", &form)
-        .await?
+        .await
+        .map_err(|failure| ApiError::Internal(failure.to_string()))?
         .iter()
         .filter_map(parse_channel)
         .collect();
@@ -124,8 +167,8 @@ async fn sync_channels(pool: &PgPool, config: &SlackFileProxyConfig) -> Result<u
 
 /// `SlackChannelCatalogSync#sync_memberships`: refresh a batch of stale
 /// memberships. A channel Slack refuses keeps the error and waits out the
-/// retry interval; when Slack stays rate limited, the pass stops and the
-/// channel is retried next pass.
+/// retry interval; when Slack or the network is in trouble, the pass stops
+/// and the channel is retried next pass.
 async fn sync_memberships(pool: &PgPool, config: &SlackFileProxyConfig) -> Result<(), ApiError> {
     let channels = slack_bot_channels::stale_memberships(
         pool,
@@ -149,13 +192,13 @@ async fn sync_memberships(pool: &PgPool, config: &SlackFileProxyConfig) -> Resul
                 members.dedup();
                 slack_bot_channels::record_members(pool, *id, &members).await?;
             }
-            Err(error @ ApiError::ServiceUnavailable(_)) => {
+            Err(SlackFailure::Transient(message)) => {
                 slack_bot_channels::forget_membership_attempt(pool, *id).await?;
-                return Err(error);
+                return Err(ApiError::ServiceUnavailable(message));
             }
-            Err(error) => {
-                warn!(channel_id, %error, "could not refresh Slack channel membership");
-                slack_bot_channels::record_membership_error(pool, *id, &error.to_string()).await?;
+            Err(SlackFailure::Failed(message)) => {
+                warn!(channel_id, error = %message, "could not refresh Slack channel membership");
+                slack_bot_channels::record_membership_error(pool, *id, &message).await?;
             }
         }
     }
@@ -168,7 +211,7 @@ async fn pages(
     method: &str,
     key: &str,
     form: &[(&str, &str)],
-) -> Result<Vec<Value>, ApiError> {
+) -> Result<Vec<Value>, SlackFailure> {
     let mut rows = Vec::new();
     let mut cursor = String::new();
     loop {
@@ -180,13 +223,12 @@ async fn pages(
         if !cursor.is_empty() {
             page_form.push(("cursor", cursor.clone()));
         }
-        let body = slack_api_post_form(http_client(), config, method, &page_form).await?;
+        let body = call(config, method, &page_form).await?;
         // A page without its array is not an empty page: replacing the catalog
         // or a membership with it would drop what Console already knows.
-        let page = body
-            .get(key)
-            .and_then(Value::as_array)
-            .ok_or_else(|| ApiError::Internal(format!("Slack {method} returned no {key} array")))?;
+        let page = body.get(key).and_then(Value::as_array).ok_or_else(|| {
+            SlackFailure::Failed(format!("Slack {method} returned no {key} array"))
+        })?;
         rows.extend(page.iter().cloned());
         cursor = body
             .pointer("/response_metadata/next_cursor")
@@ -264,14 +306,22 @@ mod tests {
         assert!(parse_channel(&json!({"id": "C4"})).is_none());
     }
 
+    /// The calls the fake answered, and whether Slack is having an outage.
+    type FakeSlackState = (Arc<Mutex<usize>>, Arc<Mutex<bool>>);
+
     /// A Slack double: two pages of channels, members for C1, an error for
-    /// every other channel, and a count of the calls it answered.
+    /// every other channel, and a count of the calls it answered. While
+    /// `outage` is set, `conversations.members` answers Slack's transient
+    /// `internal_error`.
     async fn fake_slack(
-        State(calls): State<Arc<Mutex<usize>>>,
+        State((calls, outage)): State<FakeSlackState>,
         Path(method): Path<String>,
         Form(form): Form<HashMap<String, String>>,
     ) -> Response {
         *calls.lock().unwrap() += 1;
+        if method == "conversations.members" && *outage.lock().unwrap() {
+            return Json(json!({"ok": false, "error": "internal_error"})).into_response();
+        }
         let body = match method.as_str() {
             "auth.test" => json!({"ok": true, "team_id": "T1", "user_id": "UBOT"}),
             "conversations.list" if !form.contains_key("cursor") => json!({
@@ -346,9 +396,10 @@ mod tests {
         .unwrap();
 
         let calls = Arc::new(Mutex::new(0));
+        let outage = Arc::new(Mutex::new(false));
         let app = Router::new()
             .route("/api/{method}", post(fake_slack))
-            .with_state(calls.clone());
+            .with_state((calls.clone(), outage.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -402,6 +453,29 @@ mod tests {
         let answered = *calls.lock().unwrap();
         refresh(&pool, &config).await;
         assert_eq!(*calls.lock().unwrap(), answered);
+
+        // During a Slack outage a stale channel keeps its members and gets no
+        // error; its attempt is forgotten so the next pass retries it.
+        *outage.lock().unwrap() = true;
+        sqlx::query(
+            "UPDATE slack_bot_channels SET membership_refreshed_at = NULL, \
+               membership_last_attempted_at = NULL WHERE channel_id = 'C1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        refresh(&pool, &config).await;
+        let after: (Vec<String>, Option<String>, bool) = sqlx::query_as(
+            "SELECT member_user_ids, membership_error, membership_last_attempted_at IS NULL \
+             FROM slack_bot_channels WHERE channel_id = 'C1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after,
+            (vec!["U2".to_owned(), "UBOT".to_owned()], None, true)
+        );
 
         pool.close().await;
         admin

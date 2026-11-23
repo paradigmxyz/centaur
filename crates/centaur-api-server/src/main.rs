@@ -1,12 +1,10 @@
 mod activity_summary;
 mod args;
 
-use std::env;
-
 use centaur_api_server::{
-    ApiAuthConfig, AppState, build_router_with_app_state, console_service_token,
-    partition_slack_external_team_ids, spawn_scheduled_task_scheduler,
-    spawn_slack_channel_catalog_refresh, warm_slack_public_channel_cache,
+    ApiAuthConfig, AppState, build_router_with_app_state, partition_slack_external_team_ids,
+    spawn_scheduled_task_scheduler, spawn_slack_channel_catalog_refresh,
+    warm_slack_public_channel_cache,
 };
 use centaur_session_runtime::SessionRuntime;
 use centaur_session_sqlx::PgSessionStore;
@@ -22,13 +20,6 @@ use args::{Args, InstallAgentSandboxCrdsArgs, MigrateArgs};
 #[tokio::main]
 async fn main() -> Result<(), ServerError> {
     init_crypto_provider();
-    // Before telemetry, so nothing but the token reaches stdout.
-    if env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "console-service-token")
-    {
-        return print_console_service_token();
-    }
     let telemetry = init_telemetry(TelemetryConfig::from_env())?;
 
     if let Some(args) = MigrateArgs::from_command_line() {
@@ -131,26 +122,6 @@ async fn prepare_console_db(args: &Args) -> Result<(), ServerError> {
             "created the initial Console admin"
         ),
     }
-    Ok(())
-}
-
-/// `centaur-api-server console-service-token`: print a one-hour Console
-/// service token signed with this process's `CENTAUR_JWT_SIGNING_SECRET`, for
-/// an operator's direct API calls (`kubectl exec` into an api-rs pod).
-fn print_console_service_token() -> Result<(), ServerError> {
-    let secret = env::var("CENTAUR_JWT_SIGNING_SECRET")
-        .ok()
-        .filter(|secret| !secret.trim().is_empty())
-        .ok_or_else(|| {
-            ServerError::UnsupportedConfig("CENTAUR_JWT_SIGNING_SECRET is not set".to_owned())
-        })?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))?
-        .as_secs() as i64;
-    let token = console_service_token(&secret, now)
-        .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))?;
-    print!("{token}");
     Ok(())
 }
 
