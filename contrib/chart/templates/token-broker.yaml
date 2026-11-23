@@ -37,6 +37,15 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" $tokenBroker "indent" 6) }}
+      initContainers:
+        # token-broker reads broker credentials from the Console database, so wait
+        # for the schema the Console worker applies.
+{{ include "centaur.consoleDbWait" (dict
+  "root" .
+  "name" "wait-for-console-schema"
+  "database" $console.database.name
+  "query" "SELECT to_regclass('public.users') IS NOT NULL"
+  "message" "waiting for the Console schema (Console worker)…") | nindent 8 }}
       containers:
         - name: token-broker
           image: {{ printf "%s:%s" $tokenBroker.image.repository $tokenBroker.image.tag | quote }}

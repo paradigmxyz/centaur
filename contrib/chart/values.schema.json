@@ -25,16 +25,9 @@
       }
     },
     "consoleConfig": {
-      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
-        "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
-        "allowedHosts": {
-          "type": "array",
-          "items": { "type": "string" },
-          "uniqueItems": true
-        },
         "sentryDsn": { "type": "string" },
         "railsEnv": { "type": "string" },
         "oktaOauth": {

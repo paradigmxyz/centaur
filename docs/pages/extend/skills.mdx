@@ -82,7 +82,7 @@ centaur-skills list --scope shared
 ```
 
 The CLI reads Console skills by exact name or `skl_` OID through iron-proxy
-using the sandbox's existing entitlement token. Names use lowercase letters,
+using the sandbox's existing sandbox token. Names use lowercase letters,
 numbers, and hyphens, so they cannot conflict with the underscore in an OID.
 Builtin skills remain separate: the sandbox mounts them from the overlay and
 the agent's native skill loader discovers them directly. A skill never adds

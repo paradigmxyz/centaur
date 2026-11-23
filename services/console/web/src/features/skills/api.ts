@@ -27,9 +27,8 @@ export interface SkillSummary {
 }
 
 export interface Skill extends Omit<SkillSummary, "viewer"> {
+  /** Raw SKILL.md Markdown; the SPA renders and sanitizes it. */
   instructions: string;
-  /** Sanitized server-rendered Markdown (safe for innerHTML). */
-  content_html: string;
   lock_version: number;
   checksum: string;
   created_at: string | null;

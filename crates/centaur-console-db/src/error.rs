@@ -7,6 +7,9 @@ pub enum Error {
     Encryption(active_record_encryption::Error),
     /// A row whose stored data does not have the shape Console writes.
     InvalidData(String),
+    /// A row a route named that does not exist. The message is Console's plain
+    /// `"<Model> not found"`, not Rails' SQL-ish `RecordNotFound` text.
+    NotFound(String),
 }
 
 impl fmt::Display for Error {
@@ -15,7 +18,24 @@ impl fmt::Display for Error {
             Self::Database(error) => write!(formatter, "database operation failed: {error}"),
             Self::Encryption(error) => error.fmt(formatter),
             Self::InvalidData(message) => formatter.write_str(message),
+            Self::NotFound(message) => formatter.write_str(message),
         }
+    }
+}
+
+impl Error {
+    /// The uniform not-found error for a Console model name.
+    pub fn not_found(model: &str) -> Self {
+        Self::NotFound(format!("{model} not found"))
+    }
+
+    /// Whether this is Postgres' unique-index violation (`23505`).
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(sqlx::Error::Database(database))
+                if database.code().as_deref() == Some("23505")
+        )
     }
 }
 

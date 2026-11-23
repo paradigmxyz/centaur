@@ -344,7 +344,7 @@ and starters. Module load errors appear on the server's stderr as
 Then create a real run:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
   bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
 
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \

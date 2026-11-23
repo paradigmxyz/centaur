@@ -1,18 +1,15 @@
 use serde_json::Value;
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Row};
 
 use crate::{
     Result,
+    areas::principals::PRINCIPAL_COLUMNS,
     config::{SecretValues, Subject, build_config},
     models::Config,
 };
 
-const PRINCIPAL_COLUMNS: &str = "id, foreign_id, name, kind, labels, slack_user_id, \
-     slack_channel_id, slack_team_id, slack_email, console_user_id, sandbox_repo_cache, \
-     sandbox_observability_enabled";
-
 /// A principal row, with the attributes callers compare and report.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, sqlx::FromRow)]
 pub struct Principal {
     pub id: i64,
     pub foreign_id: Option<String>,
@@ -37,26 +34,24 @@ pub struct SlackChannelPermission {
 }
 
 pub async fn find_principal(pool: &PgPool, id: i64) -> Result<Option<Principal>> {
-    let row = sqlx::query(&format!(
+    Ok(sqlx::query_as(&format!(
         "SELECT {PRINCIPAL_COLUMNS} FROM principals WHERE id = $1"
     ))
     .bind(id)
     .fetch_optional(pool)
-    .await?;
-    row.as_ref().map(principal).transpose()
+    .await?)
 }
 
 pub async fn find_principal_by_foreign_id(
     pool: &PgPool,
     foreign_id: &str,
 ) -> Result<Option<Principal>> {
-    let row = sqlx::query(&format!(
+    Ok(sqlx::query_as(&format!(
         "SELECT {PRINCIPAL_COLUMNS} FROM principals WHERE foreign_id = $1"
     ))
     .bind(foreign_id)
     .fetch_optional(pool)
-    .await?;
-    row.as_ref().map(principal).transpose()
+    .await?)
 }
 
 /// The Console user whose email is exactly `email`.
@@ -131,21 +126,4 @@ pub async fn effective_config(pool: &PgPool, principal_id: i64) -> Result<Option
     build_config(pool, SecretValues::Redacted, &subject, None)
         .await
         .map(Some)
-}
-
-fn principal(row: &PgRow) -> Result<Principal> {
-    Ok(Principal {
-        id: row.try_get("id")?,
-        foreign_id: row.try_get("foreign_id")?,
-        name: row.try_get("name")?,
-        kind: row.try_get("kind")?,
-        labels: row.try_get("labels")?,
-        slack_user_id: row.try_get("slack_user_id")?,
-        slack_channel_id: row.try_get("slack_channel_id")?,
-        slack_team_id: row.try_get("slack_team_id")?,
-        slack_email: row.try_get("slack_email")?,
-        console_user_id: row.try_get("console_user_id")?,
-        sandbox_repo_cache: row.try_get("sandbox_repo_cache")?,
-        sandbox_observability_enabled: row.try_get("sandbox_observability_enabled")?,
-    })
 }

@@ -18,9 +18,6 @@ const railsPaths = [
   "/oauth",
   "/mcp",
   "/.well-known",
-  "/launch",
-  "/manifest",
-  "/service-worker",
   "/up",
 ];
 
@@ -90,7 +87,7 @@ export default defineConfig(({ command }) => ({
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
-  // Favicons and PWA icons; Rails serves them in production.
+  // Favicons; Rails serves them in production.
   publicDir: command === "build" ? false : "../public",
   server: {
     port: 5173,

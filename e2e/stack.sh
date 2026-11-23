@@ -174,9 +174,13 @@ up() {
 # The NodePorts and the policy admitting them take a moment to start routing;
 # until then connections are reset, so wait before declaring the stack up.
 wait_for_test_access() {
+  # api-rs serves the Console, so the Console NodePort is probed with a Console
+  # page. `/login` is the server-rendered sign-in page, selected by the Host
+  # matching console.publicUrl (http://127.0.0.1:30082 in e2e/infra/values.yaml);
+  # api-rs has no Rails `/up` health route.
   for _ in $(seq 60); do
     if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30081/readyz 2> /dev/null &&
-      curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30082/up 2> /dev/null &&
+      curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30082/login 2> /dev/null &&
       timeout 2 bash -c '< /dev/tcp/127.0.0.1/30432' 2> /dev/null; then
       return 0
     fi
@@ -194,9 +198,12 @@ admit_external_team() {
 }
 
 # Stores the subscription access tokens as token-broker would after a refresh.
-# Without a refresh token token-broker never tries to refresh them.
+# Without a refresh token token-broker never tries to refresh them. The Console
+# itself is served by api-rs, so the Rails worker is the only Rails process left;
+# it shares the image, the DB env, and the ActiveRecord encryption keys, so
+# `bin/rails runner` runs there.
 seed_broker_credentials() {
-  local console="deploy/${RELEASE}-centaur-console"
+  local console="deploy/${RELEASE}-centaur-console-worker"
   until kubectl -n "$NAMESPACE" get "$console" > /dev/null 2>&1; do sleep 2; done
   kubectl -n "$NAMESPACE" rollout status "$console" --timeout=15m
   kubectl -n "$NAMESPACE" exec "$console" -- bin/rails runner "
@@ -294,7 +301,7 @@ run_tests() {
   export E2E_SLACK_URL=http://127.0.0.1:30443
   export E2E_MODEL_URL=http://127.0.0.1:30080
   export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
-  # The console names its database after the Rails environment (contrib/chart/templates/console.yaml).
+  # The console names its database after the Rails environment (console.database.name, created by the Console worker).
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
   # The key api-rs administers the console with.

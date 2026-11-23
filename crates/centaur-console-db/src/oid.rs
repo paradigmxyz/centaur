@@ -1,3 +1,8 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, RwLock},
+};
+
 use sha2::{Digest, Sha256};
 use sqids::Sqids;
 
@@ -25,9 +30,30 @@ pub fn decode_oid(prefix: &str, value: &str) -> Option<i64> {
     i64::try_from(id).ok()
 }
 
+/// Encoders are deterministic per prefix, so build each one once: rebuilding
+/// hashes the alphabet 62 times and dominates a list endpoint's response time.
+static ENCODERS: LazyLock<RwLock<HashMap<String, Arc<Sqids>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn encoder(prefix: &str) -> Arc<Sqids> {
+    if let Some(sqids) = ENCODERS
+        .read()
+        .expect("oid encoder cache poisoned")
+        .get(prefix)
+    {
+        return Arc::clone(sqids);
+    }
+    let mut encoders = ENCODERS.write().expect("oid encoder cache poisoned");
+    Arc::clone(
+        encoders
+            .entry(prefix.to_owned())
+            .or_insert_with(|| Arc::new(build_encoder(prefix))),
+    )
+}
+
 /// Console permutes the base alphabet per prefix, so ids of different models
 /// do not decode as each other.
-fn encoder(prefix: &str) -> Sqids {
+fn build_encoder(prefix: &str) -> Sqids {
     let mut alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         .chars()
         .collect();

@@ -13,8 +13,8 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use centaur_api_server::{
-    DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig, discover_persona_registry,
-    discover_tool_proxy_fragment,
+    ConsoleSessionConfig, DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig,
+    discover_persona_registry, discover_tool_proxy_fragment,
 };
 use centaur_iron_control::{
     IdentityInput, IronControlClient, IronControlError, PrincipalInput, RegisterError, RoleSpec,
@@ -89,6 +89,8 @@ pub(crate) struct Args {
     session_principal_admission: SessionPrincipalAdmissionArg,
     #[command(flatten)]
     activity_summary: ActivitySummaryArgs,
+    #[command(flatten)]
+    console_session: ConsoleSessionArgs,
 }
 
 impl Args {
@@ -181,6 +183,34 @@ impl Args {
         self.activity_summary.config()
     }
 
+    pub(crate) fn console_session_config(
+        &self,
+    ) -> Result<Option<ConsoleSessionConfig>, ServerError> {
+        // Console booleans are strict: a typo is a startup error instead of an
+        // ActiveModel-style guess.
+        centaur_api_server::validate_boolean_settings().map_err(ServerError::UnsupportedConfig)?;
+        ConsoleSessionConfig::from_settings(
+            self.console_session.session_secret.as_deref(),
+            self.console_session.public_url.as_deref(),
+        )
+        .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))
+    }
+
+    /// A writable Console pool for the ported Console handlers. The pool used
+    /// by the turn path stays read-only. Both come from the same URL.
+    pub(crate) fn console_write_db(&self) -> Option<PgPool> {
+        self.sandbox.iron_control.console_write_db().ok()
+    }
+
+    /// Select the in-process Console implementation for iron-control calls
+    /// when the Rust Console is enabled. Without it (a deployment where Rails
+    /// still owns the Console, and the external `centaur-perms` CLI) the HTTP
+    /// admin client stays in use. This is set once at startup from
+    /// `ConsoleSessionConfig`; the HTTP path can be deleted at cutover.
+    pub(crate) fn set_console_in_process(&mut self, enabled: bool) {
+        self.sandbox.iron_control.console_in_process = enabled;
+    }
+
     pub(crate) fn shutdown_execution_drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.shutdown_execution_drain_timeout_secs)
     }
@@ -202,6 +232,21 @@ pub(crate) struct IronControlRuntime {
     pub(crate) warm_pool_bootstrap_principal: String,
     pub(crate) workflow_host_principal: String,
     pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ConsoleSessionArgs {
+    /// Secret used to authenticate the Rust Console session cookie. Setting it
+    /// enables the Console API; it requires `CENTAUR_CONSOLE_PUBLIC_URL`.
+    #[arg(
+        long = "console-session-secret",
+        env = "CONSOLE_SESSION_SECRET",
+        hide_env_values = true
+    )]
+    session_secret: Option<String>,
+    /// Console's public origin, used to validate `Origin` on writes.
+    #[arg(long = "console-public-url", env = "CENTAUR_CONSOLE_PUBLIC_URL")]
+    public_url: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -602,9 +647,20 @@ struct IronControlArgs {
         default_value_t = 5
     )]
     console_database_max_connections: u32,
-    /// The Console database pool shared by every client built from these args.
+    /// The read-only Console database pool shared by every client built from
+    /// these args.
     #[arg(skip)]
     console_db: OnceLock<PgPool>,
+    /// A writable Console pool for the ported Console handlers. `None` when the
+    /// database is not configured.
+    #[arg(skip)]
+    console_write_db: OnceLock<PgPool>,
+    /// Route iron-control calls through `centaur_console_db` instead of the
+    /// admin API. `Args` sets this when the Rust Console is enabled. The HTTP
+    /// client remains for deployments where Rails still owns the Console and
+    /// for the external `centaur-perms` CLI; delete it at cutover.
+    #[arg(skip)]
+    console_in_process: bool,
 }
 
 impl IronControlArgs {
@@ -622,6 +678,11 @@ impl IronControlArgs {
                     .to_owned(),
             )
         })?;
+        let client = if self.console_in_process {
+            client.with_console_write_db(self.console_write_db()?)
+        } else {
+            client
+        };
         Ok(client.with_console_db(self.console_db()?))
     }
 
@@ -642,6 +703,26 @@ impl IronControlArgs {
             .acquire_timeout(CONSOLE_DB_ACQUIRE_TIMEOUT)
             .connect_lazy_with(options);
         Ok(self.console_db.get_or_init(|| pool).clone())
+    }
+
+    /// The writable Console pool, from the same settings as the read-only one.
+    /// Call within a Tokio runtime.
+    fn console_write_db(&self) -> Result<PgPool, ServerError> {
+        if let Some(pool) = self.console_write_db.get() {
+            return Ok(pool.clone());
+        }
+        let url = non_empty(self.console_database_url.as_deref()).ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "the Console database is required: set IRON_CONTROL_DATABASE_URL".to_owned(),
+            )
+        })?;
+        let options =
+            console_write_db_options(url, non_empty(self.console_database_name.as_deref()))?;
+        let pool = PgPoolOptions::new()
+            .max_connections(self.console_database_max_connections)
+            .acquire_timeout(CONSOLE_DB_ACQUIRE_TIMEOUT)
+            .connect_lazy_with(options);
+        Ok(self.console_write_db.get_or_init(|| pool).clone())
     }
 
     /// Required backend sync settings (admin client + proxy-sync URL).
@@ -685,6 +766,23 @@ fn console_db_options(
         None => options,
     };
     Ok(options.options([("default_transaction_read_only", "on")]))
+}
+
+/// The writable counterpart of [`console_db_options`], for the Rust Console
+/// handlers. Same URL, no read-only transaction default.
+fn console_write_db_options(
+    url: &str,
+    database_name: Option<&str>,
+) -> Result<PgConnectOptions, ServerError> {
+    let options = PgConnectOptions::from_str(url).map_err(|_| {
+        ServerError::UnsupportedConfig(
+            "IRON_CONTROL_DATABASE_URL is not a valid PostgreSQL URL".to_owned(),
+        )
+    })?;
+    Ok(match database_name {
+        Some(name) => options.database(name),
+        None => options,
+    })
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -1805,7 +1903,8 @@ fn should_retry_iron_control_register(error: &RegisterError) -> bool {
         | RegisterError::Control(IronControlError::SessionPrincipalNotPreapproved { .. }) => false,
         RegisterError::Control(IronControlError::Transport { .. }) => true,
         RegisterError::Control(IronControlError::Decode { .. })
-        | RegisterError::Control(IronControlError::NotFound { .. }) => false,
+        | RegisterError::Control(IronControlError::NotFound { .. })
+        | RegisterError::Control(IronControlError::InProcess { .. }) => false,
         RegisterError::Control(IronControlError::ConsoleDb(error)) => {
             matches!(error, centaur_console_db::Error::Database(_))
         }
@@ -3188,6 +3287,41 @@ mod tests {
                 .control_plane_pod_labels
                 .get("app.kubernetes.io/component"),
             Some(&"console".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn iron_control_uses_in_process_only_when_the_rust_console_is_enabled() {
+        let base = [
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local:3000",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
+            "--iron-control-api-key",
+            "iak_test",
+            "--iron-control-database-url",
+            "postgres://console@localhost/console",
+        ];
+        let mut args = Args::try_parse_from(base).unwrap();
+        assert!(
+            !args
+                .sandbox
+                .iron_control
+                .required_client()
+                .unwrap()
+                .is_in_process()
+        );
+
+        args.set_console_in_process(true);
+        assert!(
+            args.sandbox
+                .iron_control
+                .required_client()
+                .unwrap()
+                .is_in_process()
         );
     }
 

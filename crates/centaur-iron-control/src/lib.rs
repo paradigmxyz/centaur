@@ -11,6 +11,7 @@
 mod client;
 mod database;
 mod error;
+mod in_process;
 mod models;
 mod principal;
 mod registry;
@@ -25,8 +26,8 @@ pub use models::{
     GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee, HmacSecretHeader,
     HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput,
     PgDsnSettingInput, PgDsnSettingValueFromInput, Principal, PrincipalInput, Proxy, ProxyInput,
-    ReplaceConfig, RequestRule, Role, SECRET_TYPES, SecretRecord, SecretSource, StaticSecretInput,
-    normalize_gcp_id_token_header,
+    ReplaceConfig, RequestRule, Role, SECRET_TYPES, SecretRecord, SecretSource,
+    SlackChannelPermissionInput, StaticSecretInput, normalize_gcp_id_token_header,
 };
 pub use principal::{
     PrincipalDerivationError, PrincipalRef, derive_principal, derive_slack_requester_principal,

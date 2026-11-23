@@ -107,7 +107,8 @@ pub(crate) async fn refresh_api_client(
     let live: Vec<Capability> = client
         .scopes
         .iter()
-        .filter_map(|scope| Capability::from_api_client_scope(scope))
+        .flat_map(|scope| Capability::from_api_client_scope(scope))
+        .copied()
         .collect();
     caller.retain_capabilities(|capability| live.contains(&capability));
     Ok(ApiClientContext {

@@ -1,0 +1,99 @@
+---
+title: Upgrade to the api-rs Console
+description: What changes when the chart moves the Console to api-rs, how to verify the upgrade, and how to roll back.
+---
+
+# Upgrade to the api-rs Console
+
+The Console runs in api-rs. There is no implementation flag: upgrading to this
+chart version moves the Console host, its JSON API, the operator SPA, the MCP
+OAuth endpoints, and the bearer and sandbox APIs from the Rails pods to api-rs.
+URLs do not change.
+
+What the chart still runs from `services/console`:
+
+- the Solid Queue worker, which runs the Slack channel catalog and membership
+  refresh jobs, and whose init containers own the Console schema
+  (`bin/rails db:prepare`) and the initial-admin bootstrap. It must run at least
+  one replica;
+- the `console` Service, now a compatibility alias forwarding its historical
+  `console:3000` URL to api-rs, so in-cluster clients with a cached URL keep
+  working.
+
+Rollback is `helm rollback` to the previous chart revision. The Console schema is
+unchanged by the upgrade (the same Rails migrations run either way), so the
+rollback is data-safe.
+
+## Before upgrading
+
+1. **`console.publicUrl` must be the real browser origin.** api-rs uses it as the
+   session-cookie and unsafe-request Origin, and as the host that selects the
+   Console router, so it must match the URL users and MCP clients load (scheme,
+   host, and port when non-default). The chart fails to render without it.
+2. **Keep the existing Console secrets.** api-rs reads the same
+   `IRON_CONTROL_AR_ENCRYPTION_*`, `IRON_CONTROL_DATABASE_URL`,
+   `IRON_CONTROL_INITIAL_API_KEY`, `IRON_CONTROL_SECRET_KEY_BASE` (its session
+   keys are derived from it), and `CENTAUR_JWT_SIGNING_SECRET` keys and maps
+   them to the `CENTAUR_CONSOLE_*` names the Rust handlers read. Do not rotate
+   them during the upgrade, or stored credentials cannot be decrypted.
+3. **The Console database role needs write access.** api-rs writes through
+   `IRON_CONTROL_DATABASE_URL` (plus `IRON_CONTROL_DATABASE_NAME` when the URL
+   has no database path).
+4. **Use an api-rs image that contains the Console**, including the built SPA.
+   The image sets `CENTAUR_CONSOLE_SPA_SHELL`, `CENTAUR_CONSOLE_SPA_ASSETS`, and
+   `CENTAUR_CONSOLE_PUBLIC_ROOT`; override them through `apiRs.extraEnv` only if
+   your image places the files elsewhere.
+
+## Upgrade
+
+```bash
+helm upgrade <release> contrib/chart -n <namespace> -f your-values.yaml
+kubectl rollout status deploy/<release>-centaur-api-rs -n <namespace>
+kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
+```
+
+The worker's init containers create the databases (bundled Postgres), run
+`bin/rails db:prepare`, and bootstrap the initial admin before the worker starts.
+api-rs, proxy-sync, and token-broker wait for the Console schema in their own
+init containers. Any rollout that changes the worker's pod template, including
+a `helm rollback` in either direction, restarts it and applies pending
+migrations.
+
+Then verify:
+
+1. **Browser.** Sign in at the Console public URL. The SPA must load, the
+   signed-in user must be correct, and an admin page must read and write.
+2. **MCP login.** Add the Console URL as a remote MCP server in your clients and
+   complete login and consent in each. An OAuth callback that never lists tools
+   is not proof of usable access.
+3. **One interactive consent per configured IdP** (Google, Slack, Okta), then a
+   token use that exercises the stored credential.
+4. **Worker.** Confirm the Slack channel catalog and membership refresh jobs
+   still run (`kubectl logs deploy/<release>-centaur-console-worker`).
+
+## Rollback
+
+```bash
+helm rollback <release> <previous-revision> -n <namespace>
+kubectl rollout status deploy/<release>-centaur-console -n <namespace>
+kubectl rollout status deploy/<release>-centaur-console-worker -n <namespace>
+```
+
+The previous revision restores the Rails web Deployment, the Ingress, and the
+internal URL. The schema is the same one both implementations use, so no data
+migration is needed: data written on either side is readable on the other.
+
+Before upgrading, note the revision number of the current (Rails Console)
+release, and make sure Helm will not prune it: `helm upgrade` keeps 10
+revisions by default (`--history-max`). If that revision is gone, reinstall the
+previous chart version with the previous values instead.
+
+## Expected one-time effects
+
+- **Every browser signs in once more.** The Rails and api-rs session cookies are
+  different formats under the same cookie name, so sessions do not carry over
+  between implementations. api-rs sessions issued before a rollback work again
+  after rolling forward, as long as `IRON_CONTROL_SECRET_KEY_BASE` is unchanged.
+- **In-flight OAuth flows fail.** A flow started on one implementation must
+  finish there; users in the middle of an MCP consent or a broker OAuth callback
+  see an invalid-state error and retry.

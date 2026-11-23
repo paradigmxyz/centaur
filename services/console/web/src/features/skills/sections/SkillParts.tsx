@@ -1,4 +1,6 @@
+import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import { Link, useLocation } from "react-router";
+import remarkGfm from "remark-gfm";
 
 import { ResourceBadge, RolePill } from "@/components/badges";
 import { cn } from "@/lib/utils";
@@ -42,9 +44,8 @@ export function SkillTabs({ tab, q }: { tab: SkillTab; q: string }) {
   );
 }
 
-// Styles for SkillMarkdown's output (app/services/skill_markdown.rb), which
-// emits bare semantic HTML plus `console-markdown-link` and the table
-// alignment classes (text-left / text-center / text-right).
+// Styles for the SPA's Markdown output: bare semantic HTML plus
+// `console-markdown-link`; GFM table alignment is a React `style` prop (CSSOM).
 const MARKDOWN_CLASSES = [
   "console-markdown text-sm leading-6 text-foreground",
   "[&_p]:mb-3 [&_p:last-child]:mb-0",
@@ -60,15 +61,51 @@ const MARKDOWN_CLASSES = [
   "[&_div]:mb-3 [&_div]:overflow-x-auto [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm",
   "[&_th]:border-b [&_th]:border-border [&_th]:px-3 [&_th]:py-1.5 [&_th]:font-semibold [&_th]:text-foreground",
   "[&_td]:border-b [&_td]:border-border/70 [&_td]:px-3 [&_td]:py-1.5 [&_td]:align-top",
-  "[&_.text-left]:text-left [&_.text-center]:text-center [&_.text-right]:text-right",
   "[&_a]:text-primary [&_a]:underline [&_a]:decoration-primary/30 [&_a]:underline-offset-2 [&_a:hover]:decoration-primary",
 ].join(" ");
 
+const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
 /**
- * Skill instructions. `html` comes from the API's `content_html`, which the
- * server builds from escaped text and passes through an allow-list sanitizer
- * (no scripts, attributes limited to class/href/rel/target, http(s) links only).
+ * Only absolute http(s) and mailto links survive. Relative URLs and every other
+ * scheme (including `javascript:`) lose their href.
  */
-export function SkillMarkdown({ html }: { html: string }) {
-  return <article className={MARKDOWN_CLASSES} dangerouslySetInnerHTML={{ __html: html }} />;
+const safeUrl: UrlTransform = (url) => {
+  try {
+    return SAFE_PROTOCOLS.has(new URL(url).protocol) ? url : null;
+  } catch {
+    return null;
+  }
+};
+
+// React Markdown never parses raw HTML (and `skipHtml` drops it outright), so
+// the document cannot inject markup; these components only add the classes the
+// previous server renderer emitted.
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ node: _node, children, ...props }) => (
+    <a {...props} className="console-markdown-link" target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  ),
+  table: ({ node: _node, children, ...props }) => (
+    <div>
+      <table {...props}>{children}</table>
+    </div>
+  ),
+};
+
+/** Skill instructions rendered from the raw Markdown the API returns. */
+export function SkillMarkdown({ markdown }: { markdown: string }) {
+  return (
+    <article className={MARKDOWN_CLASSES}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        urlTransform={safeUrl}
+        components={MARKDOWN_COMPONENTS}
+      >
+        {markdown}
+      </ReactMarkdown>
+    </article>
+  );
 }

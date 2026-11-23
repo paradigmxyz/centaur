@@ -119,6 +119,7 @@ jobs:
             '^crates/active-record-encryption/' \
             '^crates/centaur-' \
             '^services/api-rs/' \
+            '^services/console/' \
             '^contrib/chart/charts/agent-sandbox/crds/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
@@ -422,6 +423,23 @@ jobs:
       - name: Start Test Postgres
         run: .github/scripts/start-test-postgres.sh centaur-api-test-postgres 5432 centaur
 
+      - name: Install Console packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
+
+      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
+        with:
+          working-directory: services/console
+          bundler-cache: true
+
+      # api-rs serves the Console from Console's tables, so its Console tests
+      # run against the schema Console currently ships.
+      - name: Load Console schema
+        working-directory: services/console
+        env:
+          RAILS_ENV: test
+          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/console_test
+        run: bin/rails db:prepare
+
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -444,6 +462,7 @@ jobs:
       - name: Test
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          CONSOLE_DB_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/console_test
         run: |
           cargo test --locked --workspace \
             --exclude absurd-sdk \

@@ -50,6 +50,15 @@ spec:
 {{ toYaml . | nindent 8 }}
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" .Values.proxySync "indent" 6) }}
+      initContainers:
+        # proxy-sync reads principals, proxies, and their grants from the Console
+        # database, so wait for the schema the Console worker applies.
+{{ include "centaur.consoleDbWait" (dict
+  "root" .
+  "name" "wait-for-console-schema"
+  "database" $console.database.name
+  "query" "SELECT to_regclass('public.users') IS NOT NULL"
+  "message" "waiting for the Console schema (Console worker)…") | nindent 8 }}
       containers:
         - name: proxy-sync
           image: {{ printf "%s:%s" .Values.proxySync.image.repository .Values.proxySync.image.tag | quote }}
@@ -83,12 +92,17 @@ spec:
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
             - name: CENTAUR_CONSOLE_URL
               value: {{ include "centaur.consoleUrl" . | quote }}
+            # Proxies inject the sandbox token into requests to these hosts in
+            # addition to CENTAUR_API_URL's and CENTAUR_CONSOLE_URL's. The
+            # compatibility Console Service also routes to api-rs, and sandboxes
+            # created before the Console moved there still call it by that name,
+            # so it needs the token too.
+{{- $proxyHosts := list (include "centaur.consoleName" .) }}
 {{- if $companyContext.enabled }}
-            # Proxies inject the principal API JWT into requests to these hosts
-            # in addition to CENTAUR_API_URL's.
-            - name: CENTAUR_API_SERVER_PROXY_HOSTS
-              value: {{ include "centaur.componentName" (dict "root" . "component" "company-context") | quote }}
+{{- $proxyHosts = append $proxyHosts (include "centaur.componentName" (dict "root" . "component" "company-context")) }}
 {{- end }}
+            - name: CENTAUR_API_SERVER_PROXY_HOSTS
+              value: {{ join "," $proxyHosts | quote }}
 {{- if .Values.apiRs.enabled }}
             - name: CENTAUR_API_URL
               value: {{ printf "http://%s:%v" $apiRsName .Values.apiRs.port | quote }}

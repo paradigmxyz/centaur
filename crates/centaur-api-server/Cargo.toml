@@ -6,8 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+active-record-encryption = { path = "../active-record-encryption" }
+aes-gcm = "0.11"
 axum.workspace = true
 base64.workspace = true
+bcrypt = "0.19"
 centaur-console-db.workspace = true
 centaur-iron-control.workspace = true
 centaur-iron-proxy.workspace = true
@@ -23,30 +26,39 @@ chrono.workspace = true
 clap.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
+garde.workspace = true
+getrandom = "0.3"
+pbkdf2 = "0.13"
 hmac.workspace = true
 hex.workspace = true
 jsonwebtoken.workspace = true
 kube.workspace = true
 reqwest.workspace = true
+regex = "1"
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error = "0.1"
+serde_urlencoded = "0.7"
 serde_yaml.workspace = true
 sha2.workspace = true
 standardwebhooks.workspace = true
 subtle.workspace = true
 sqlx.workspace = true
+ssh-key.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+url.workspace = true
 urlencoding.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+tempfile.workspace = true
 tower.workspace = true
 
 [lints]

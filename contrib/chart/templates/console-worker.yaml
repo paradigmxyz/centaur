@@ -3,19 +3,21 @@
 {{- $prefix := .Values.secretManager.envPrefix }}
 {{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl }}
-# console background job worker — runs Solid Queue (`bin/jobs`) so
-# console's enqueued jobs actually execute. The most important of these is
-# the broker-credential OAuth refresh loop, which mints and refreshes the access
-# tokens delivered inline via `token_broker` sources (e.g. the `openai-codex`
-# brokered token); the web (Puma) pod runs no worker, so without this those jobs
-# never run. The web Deployment owns database setup (create-db init + the image's
-# Rails db:prepare on boot), so this worker only processes jobs and waits for the
-# Solid Queue database to exist before starting.
+{{- $dbName := $console.database.name }}
+{{- if lt (int $console.worker.replicaCount) 1 }}
+{{- fail "console.worker.replicaCount must be at least 1: the worker owns the Console schema migrations and runs the Slack channel catalog jobs" }}
+{{- end }}
+# console background job worker — runs Solid Queue (`bin/jobs`) for the Console
+# jobs that still live in Rails: the Slack channel catalog refresh and membership
+# refresh. The Console itself is served by api-rs, so this worker is the only
+# Rails process left; it also owns the Console schema (see its init containers).
+# Broker-credential OAuth refresh, which the Console used to own, runs in
+# api-rs's token-broker.
 #
-# It shares the web image and the same infra-Secret env (DB URL, ActiveRecord
-# encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. It uses
-# its own `console-worker` component label so it is NOT selected by the
-# console Service (which load-balances HTTP to the web pods).
+# It shares the Console image and the same infra-Secret env (DB URL, ActiveRecord
+# encryption keys, SECRET_KEY_BASE) so it can decrypt stored credentials. It
+# uses its own `console-worker` component label so the compatibility `console`
+# Service (which selects api-rs) never routes traffic to it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,20 +43,37 @@ spec:
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" $console.worker "indent" 6) }}
       initContainers:
-        # Wait for the Solid Queue database (created by the web pod's Rails
-        # db:prepare) so a cold start does not crash-loop before it exists.
-        # Read-only and idempotent; connects as the admin (ai_v2) DSN.
-        - name: wait-for-queue-db
+        # Console schema setup, which the Rails web pod did on boot before the
+        # Console moved to api-rs: create the databases on the bundled Postgres,
+        # then `db:prepare` (load the schema on a fresh database, apply pending
+        # migrations on an existing one) and the initial-admin bootstrap. A
+        # rollout in either direction changes this pod template, so the worker
+        # restarts and migrates. Rails takes an advisory lock, so concurrent
+        # replicas are safe. api-rs, proxy-sync, and token-broker wait for the
+        # schema with their own init containers.
+        - name: create-db
           image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
           command:
             - /bin/sh
             - -ec
             - |
-              until [ "$(psql "$ADMIN_DATABASE_URL" -tAc \
-                "SELECT 1 FROM pg_database WHERE datname = '$QUEUE_DB_NAME'")" = "1" ]; do
-                echo "waiting for database $QUEUE_DB_NAME to exist…"
+              # Wait until Postgres accepts connections. A still-starting Postgres
+              # — or a Service with no ready endpoint yet, which is also the case
+              # on a bundled-Postgres install — surfaces as connection refused;
+              # retry rather than failing (and crash-looping) the Job.
+              until psql "$ADMIN_DATABASE_URL" -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for postgres to accept connections..."
                 sleep 2
+              done
+              # Create each database idempotently.
+              for db in $DB_NAMES; do
+                exists=$(psql "$ADMIN_DATABASE_URL" -tAc \
+                  "SELECT 1 FROM pg_database WHERE datname = '$db'")
+                if [ "$exists" != "1" ]; then
+                  echo "creating database $db"
+                  psql "$ADMIN_DATABASE_URL" -c "CREATE DATABASE \"$db\"" || true
+                fi
               done
           env:
             - name: ADMIN_DATABASE_URL
@@ -62,13 +81,81 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Rails 8 names the Solid Queue database "<primary>_queue".
-            - name: QUEUE_DB_NAME
-              value: {{ printf "%s_queue" $console.database.name | quote }}
+            # Primary + Solid Cache/Queue/Cable, matching config/database.yml.
+            - name: DB_NAMES
+              value: {{ printf "%s %s_cache %s_queue %s_cable" $dbName $dbName $dbName $dbName | quote }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
             seccompProfile:
               type: RuntimeDefault
+        - name: migrate
+          image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
+          imagePullPolicy: {{ $console.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              bin/rails db:prepare
+              bin/rails runner 'Iron::Bootstrap.run!'
+          env:
+            # Explicit secretKeyRefs only — never envFrom the shared Secret, or
+            # its DATABASE_URL (ai_v2) would leak into the Rails process. Console
+            # reads IRON_CONTROL_DATABASE_URL through ConsoleEnv's legacy
+            # fallback for its DATABASE_URL.
+            - name: IRON_CONTROL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_DATABASE_URL" $prefix }}
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_SECRET_KEY_BASE" $prefix }}
+            # encryption.rb refuses to boot production without the three
+            # ActiveRecord encryption keys.
+            - name: IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" $prefix }}
+            - name: IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT" $prefix }}
+            # The bootstrap creates the initial admin and its API key.
+            - name: IRON_CONTROL_INITIAL_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_EMAIL" $prefix }}
+            - name: IRON_CONTROL_INITIAL_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_USER_PASSWORD" $prefix }}
+            - name: IRON_CONTROL_INITIAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sIRON_CONTROL_INITIAL_API_KEY" $prefix }}
+            - name: RAILS_ENV
+              value: {{ $console.railsEnv | quote }}
+            - name: RAILS_LOG_TO_STDOUT
+              value: "1"
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+            # No readOnlyRootFilesystem — Rails writes to tmp/ at runtime.
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+{{ toYaml $console.resources | nindent 12 }}
       containers:
         - name: console-worker
           image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
@@ -91,8 +178,8 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sDATABASE_URL" $prefix }}
-            # Slack channel catalog refresh jobs run in this worker, so it
-            # needs the same bot token as the web Console process.
+            # The Slack channel catalog refresh and membership jobs run in this
+            # worker, so it needs the same bot token as the web Console process.
             - name: CENTAUR_CONSOLE_SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:

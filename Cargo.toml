@@ -45,6 +45,7 @@ eventsource-stream = "0.2.3"
 eyre = "0.6"
 base64 = "0.23"
 futures-util = { version = "0.3", features = ["sink"] }
+garde = { version = "0.23", features = ["derive", "pattern"] }
 hmac = "0.13"
 hex = "0.4"
 jiff = "0.2"
@@ -66,6 +67,7 @@ prost = "0.14"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 sqlx = { version = "0.8.6", default-features = false, features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "time"] }
+ssh-key = { version = "0.6.7", features = ["ed25519", "rsa", "p256", "p384", "p521"] }
 strum = { version = "0.28", features = ["derive"] }
 subtle = "2"
 standardwebhooks = "1.0.1"
@@ -78,7 +80,7 @@ tokio = "1"
 tokio-util = "0.7"
 toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.7.0", features = ["trace"] }
+tower-http = { version = "0.7.0", features = ["trace", "compression-br", "compression-gzip", "fs"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = "0.3"

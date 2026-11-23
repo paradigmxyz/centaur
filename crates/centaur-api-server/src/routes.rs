@@ -27,8 +27,8 @@ use centaur_session_runtime::{
 };
 use centaur_session_sqlx::{PgSessionStore, SessionStoreError};
 use centaur_telemetry::{
-    PrometheusHandle, http_status_class, prometheus_handle, record_api_authentication,
-    record_http_request_finished, record_http_request_started,
+    PrometheusHandle, http_status_class, prometheus_handle, record_http_request_finished,
+    record_http_request_started,
 };
 use centaur_workflows::{
     CreateWorkflowRunRequest, WebhookFilter, WorkflowRuntime, WorkflowWebhookAuth,
@@ -46,10 +46,11 @@ use crate::{
     ApiError,
     api_clients::{
         ApiClientContext, api_client_metadata, api_client_read_access_ended, end_events_when,
-        issue_api_client_token, refresh_api_client, select_principal,
+        issue_api_client_token, select_principal,
     },
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
+    console_session::ConsoleSessionConfig,
     mcp::{mcp_enabled, mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_external_teams::{get_slack_external_team_ids, replace_slack_external_team_ids},
     slack_proxy::slack_proxy_router,
@@ -68,8 +69,19 @@ pub struct AppState {
     initialized: Arc<RwLock<Option<AppRuntimeState>>>,
     metrics: PrometheusHandle,
     auth: ApiAuthConfig,
-    /// Console's database, read for API client authentication.
+    /// Console's database, read-only, for API client authentication and the
+    /// turn path.
     console_db: Option<PgPool>,
+    /// A second Console pool without the read-only default, for the ported
+    /// Console handlers. Their handlers prefer it and fall back to the
+    /// read-only pool when only that one is configured.
+    console_write_db: Option<PgPool>,
+    /// The database holding api-rs's read-only workflow run view. Production
+    /// uses the runtime pool; the Console differential harness points this at
+    /// its cloned workflow database.
+    workflow_db: Option<PgPool>,
+    /// Rust-issued Console sessions, when the console API layer is enabled.
+    console_session: Option<ConsoleSessionConfig>,
 }
 
 #[derive(Clone)]
@@ -86,12 +98,35 @@ impl AppState {
             metrics: prometheus_handle().expect("failed to initialize Prometheus metrics recorder"),
             auth,
             console_db: None,
+            console_write_db: None,
+            workflow_db: None,
+            console_session: None,
         }
     }
 
-    /// Enables API clients, which Console stores in its database.
+    /// Enables the browser-facing Console layer. Mounted only when configured.
+    pub fn with_console_session(mut self, config: ConsoleSessionConfig) -> Self {
+        self.console_session = Some(config);
+        self
+    }
+
+    /// Enables API clients, which Console stores in its database. The pool is
+    /// the read-only one used by the turn path.
     pub fn with_console_db(mut self, pool: PgPool) -> Self {
         self.console_db = Some(pool);
+        self
+    }
+
+    /// Sets the writable pool used by the ported Console handlers.
+    pub fn with_console_write_db(mut self, pool: PgPool) -> Self {
+        self.console_write_db = Some(pool);
+        self
+    }
+
+    /// Points the Console workflow dashboard at the database publishing
+    /// `centaur_readonly_workflow_runs`. Without it the runtime pool is used.
+    pub fn with_workflow_db(mut self, pool: PgPool) -> Self {
+        self.workflow_db = Some(pool);
         self
     }
 
@@ -103,6 +138,36 @@ impl AppState {
         self.console_db.clone().ok_or_else(|| {
             ApiError::ServiceUnavailable("API clients are not configured".to_owned())
         })
+    }
+
+    /// The read-only (or writable) Console pool, when one is configured.
+    pub(crate) fn console_db_optional(&self) -> Option<PgPool> {
+        self.console_db
+            .clone()
+            .or_else(|| self.console_write_db.clone())
+    }
+
+    pub(crate) fn console_session_db(&self) -> Result<PgPool, ApiError> {
+        self.console_write_db
+            .clone()
+            .or_else(|| self.console_db.clone())
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable("the console database is not configured".to_owned())
+            })
+    }
+
+    pub(crate) fn console_session(&self) -> Option<&ConsoleSessionConfig> {
+        self.console_session.as_ref()
+    }
+
+    /// The pool holding the published workflow run view. Production uses the
+    /// same database as the runtime; tests and the differential harness can
+    /// attach a separate one.
+    pub(crate) fn workflow_db(&self) -> Result<PgPool, ApiError> {
+        match &self.workflow_db {
+            Some(pool) => Ok(pool.clone()),
+            None => self.pool(),
+        }
     }
 
     pub fn ready(
@@ -227,61 +292,106 @@ pub fn build_router_with_session_and_workflow_runtime(
 }
 
 pub fn build_router_with_app_state(state: AppState) -> Router {
-    let protected = Router::new()
-        .route(
+    // Every protected route declares the capability it requires. The builder
+    // attaches the unified authorization layer together with the declaration,
+    // so a route cannot be added without one.
+    use crate::console::guard::GuardedRoutes;
+    let protected = GuardedRoutes::new(state.clone())
+        .methods(
             "/api/session/{thread_key}",
             post(create_or_get_session).get(get_session_context),
+            [
+                (Method::GET, Capability::SessionsRead),
+                (Method::POST, Capability::SessionsWrite),
+            ],
         )
-        .route(
+        .methods(
             "/api/session/{thread_key}/messages",
             post(append_messages).layer(DefaultBodyLimit::disable()),
+            [(Method::POST, Capability::SessionsWrite)],
         )
-        .route(
+        .methods(
             "/api/session/{thread_key}/execute",
             post(execute_session).layer(DefaultBodyLimit::disable()),
+            [(Method::POST, Capability::SessionsWrite)],
         )
-        .route(
+        .methods(
             "/api/session/{thread_key}/interrupt",
             post(interrupt_session_execution),
+            [(Method::POST, Capability::SessionsWrite)],
         )
-        .route("/api/session/{thread_key}/events", get(stream_events))
-        .route(
+        .methods(
+            "/api/session/{thread_key}/events",
+            get(stream_events),
+            [
+                (Method::GET, Capability::SessionsRead),
+                (Method::HEAD, Capability::SessionsRead),
+            ],
+        )
+        .methods(
             "/api/session/{thread_key}/pause",
             post(pause_session_sandbox),
+            [(Method::POST, Capability::SandboxesDrain)],
         )
-        .route(
+        .methods(
             "/api/session/{thread_key}/sandbox",
             delete(release_session_sandbox),
+            [(Method::DELETE, Capability::SessionsSandboxRelease)],
         )
-        .route("/api/sandboxes/drain", post(drain_sandboxes))
-        .route(
+        .methods(
+            "/api/sandboxes/drain",
+            post(drain_sandboxes),
+            [(Method::POST, Capability::SandboxesDrain)],
+        )
+        .methods(
             "/api/slack/external-team-ids",
             get(get_slack_external_team_ids).put(replace_slack_external_team_ids),
+            [
+                (Method::GET, Capability::SlackExternalTeamsRead),
+                (Method::HEAD, Capability::SlackExternalTeamsRead),
+                (Method::PUT, Capability::SlackExternalTeamsWrite),
+            ],
         )
-        .merge(slack_proxy_router())
-        .route("/api/workflows/schedules", get(list_workflow_schedules))
-        .route(
+        .merge_guarded(slack_proxy_router(), Capability::SlackProxy)
+        .methods(
+            "/api/workflows/schedules",
+            get(list_workflow_schedules),
+            [(Method::GET, Capability::WorkflowsRead)],
+        )
+        .methods(
             "/api/workflows/runs",
             post(create_workflow_run).get(list_workflow_runs),
+            [
+                (Method::GET, Capability::WorkflowsRead),
+                (Method::POST, Capability::WorkflowsWrite),
+            ],
         )
-        .route("/api/workflows/runs/{run_id}", get(get_workflow_run))
-        .route(
+        .methods(
+            "/api/workflows/runs/{run_id}",
+            get(get_workflow_run),
+            [(Method::GET, Capability::WorkflowsRead)],
+        )
+        .methods(
             "/api/workflows/runs/{run_id}/cancel",
             post(cancel_workflow_run),
+            [(Method::POST, Capability::WorkflowsWrite)],
         )
-        .route("/api/workflows/events", post(emit_workflow_event))
-        .route(
+        .methods(
+            "/api/workflows/events",
+            post(emit_workflow_event),
+            [(Method::POST, Capability::WorkflowsEvents)],
+        )
+        .methods(
             "/api/scheduled-tasks/{task_id}/runs",
             post(crate::scheduled_tasks::run_scheduled_task),
+            [(Method::POST, Capability::WorkflowsWrite)],
         )
-        .route(
+        .methods(
             "/api/workflows/actions/invoke",
             post(invoke_workflow_button),
+            [(Method::POST, Capability::WorkflowsActions)],
         )
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            authorize_api_request,
-        ));
+        .into_router();
 
     let mut app = Router::new()
         .route("/healthz", get(healthz))
@@ -289,6 +399,11 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .merge(protected);
+    if state.console_session().is_some() {
+        app = app
+            .merge(crate::console::router(state.clone()))
+            .fallback(crate::console::fallback);
+    }
     if mcp_enabled() {
         app = app
             .route("/mcp", post(mcp_post).get(mcp_get))
@@ -303,6 +418,19 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
     }
     let app = if state.auth().api_clients_enabled() {
         app.route("/oauth/token", post(issue_api_client_token))
+    } else {
+        app
+    };
+
+    // Both surfaces share the listener. The public Console host answers only
+    // the Console router; every other host answers api-rs plus the Console API
+    // namespaces. Keep this layer after every route is registered so it also
+    // covers `/mcp` and `/oauth/token`. See `console/host.rs`.
+    let app = if state.console_session().is_some() {
+        app.layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::console::host::route,
+        ))
     } else {
         app
     };
@@ -399,131 +527,6 @@ async fn metrics(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-#[derive(Clone, Copy)]
-enum RouteAccess {
-    Capability(Capability),
-    PrincipalOnly,
-    /// Session write access, held by an API client (confined to its own
-    /// namespace) or an operator; ingress keys are excluded.
-    ApiClientOrOperatorSessionWrite,
-}
-
-async fn authorize_api_request(
-    State(state): State<AppState>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let route = matched_route(&request);
-    let method = request.method().clone();
-    let mut caller = match state.auth.authenticate(request.headers()) {
-        Ok(caller) => caller,
-        Err(error) => {
-            record_api_authentication("unknown", "unauthorized");
-            return error.into_response();
-        }
-    };
-    let api_client = if caller.class() == CallerClass::ApiClient {
-        let refreshed = match state.console_db() {
-            Ok(pool) => refresh_api_client(&pool, &mut caller).await,
-            Err(error) => Err(error),
-        };
-        match refreshed {
-            Ok(client) => Some(client),
-            Err(error) => {
-                record_api_authentication(caller.class().as_str(), "unauthorized");
-                return error.into_response();
-            }
-        }
-    } else {
-        None
-    };
-    let Some(access) = route_access(&method, &route) else {
-        record_api_authentication(caller.class().as_str(), "forbidden");
-        tracing::warn!(
-            caller_class = caller.class().as_str(),
-            caller_identity = if caller.class() == CallerClass::Principal {
-                "principal"
-            } else {
-                caller.identity()
-            },
-            http_method = method.as_str(),
-            http_route = route,
-            "authenticated caller denied because route has no authorization policy"
-        );
-        return ApiError::Forbidden("caller is not authorized for this route".to_owned())
-            .into_response();
-    };
-
-    let allowed = match access {
-        RouteAccess::Capability(capability) => caller.has_capability(capability),
-        RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
-        RouteAccess::ApiClientOrOperatorSessionWrite => {
-            caller.has_capability(Capability::SessionsWrite)
-                && matches!(
-                    caller.class(),
-                    CallerClass::ApiClient | CallerClass::Admin | CallerClass::Console
-                )
-        }
-    };
-    if !allowed {
-        record_api_authentication(caller.class().as_str(), "forbidden");
-        tracing::warn!(
-            caller_class = caller.class().as_str(),
-            caller_identity = if caller.class() == CallerClass::Principal {
-                "principal"
-            } else {
-                caller.identity()
-            },
-            http_method = method.as_str(),
-            http_route = route,
-            "authenticated caller lacks route capability"
-        );
-        return ApiError::Forbidden("caller is not authorized for this route".to_owned())
-            .into_response();
-    }
-
-    if let Some(prefixes) = caller.platform_prefixes()
-        && route.starts_with("/api/session/")
-        && let Some(thread_key) = session_thread_key_from_request(&request)
-        && !thread_key_matches_platform(prefixes, thread_key.as_str())
-    {
-        record_api_authentication(caller.class().as_str(), "forbidden");
-        tracing::warn!(
-            caller_class = caller.class().as_str(),
-            caller_identity = if caller.class() == CallerClass::Principal {
-                "principal"
-            } else {
-                caller.identity()
-            },
-            expected_thread_prefixes = ?prefixes,
-            "ingress caller denied for another platform's session"
-        );
-        return ApiError::Forbidden("caller is not authorized for this session".to_owned())
-            .into_response();
-    }
-
-    if let Some(client) = &api_client
-        && !api_client_may_touch(client, &route, session_thread_key_from_request(&request))
-    {
-        record_api_authentication(caller.class().as_str(), "forbidden");
-        tracing::warn!(
-            caller_class = caller.class().as_str(),
-            caller_identity = caller.identity(),
-            http_route = route,
-            "API client denied outside its session namespace"
-        );
-        return ApiError::Forbidden("caller is not authorized for this session".to_owned())
-            .into_response();
-    }
-
-    record_api_authentication(caller.class().as_str(), "authorized");
-    request.extensions_mut().insert(caller);
-    if let Some(client) = api_client {
-        request.extensions_mut().insert(client);
-    }
-    next.run(request).await
-}
-
 /// API clients reach only session routes, and only for thread keys in their
 /// own `api:<client id>:` namespace.
 pub(crate) fn api_client_may_touch(
@@ -533,51 +536,6 @@ pub(crate) fn api_client_may_touch(
 ) -> bool {
     route.starts_with("/api/session/")
         && thread_key.is_some_and(|thread_key| client.owns_thread_key(&thread_key))
-}
-
-fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
-    let capability = |capability| Some(RouteAccess::Capability(capability));
-    match (method, route) {
-        (&Method::GET, "/api/session/{thread_key}")
-        | (&Method::GET, "/api/session/{thread_key}/events") => {
-            capability(Capability::SessionsRead)
-        }
-        (&Method::POST, "/api/session/{thread_key}")
-        | (&Method::POST, "/api/session/{thread_key}/messages")
-        | (&Method::POST, "/api/session/{thread_key}/execute")
-        | (&Method::POST, "/api/session/{thread_key}/interrupt") => {
-            capability(Capability::SessionsWrite)
-        }
-        (&Method::DELETE, "/api/session/{thread_key}/sandbox") => {
-            Some(RouteAccess::ApiClientOrOperatorSessionWrite)
-        }
-        (&Method::POST, "/api/sandboxes/drain")
-        | (&Method::POST, "/api/session/{thread_key}/pause") => {
-            capability(Capability::SandboxesDrain)
-        }
-        (&Method::GET, "/api/workflows/schedules")
-        | (&Method::GET, "/api/workflows/runs")
-        | (&Method::GET, "/api/workflows/runs/{run_id}") => capability(Capability::WorkflowsRead),
-        (&Method::POST, "/api/workflows/runs")
-        | (&Method::POST, "/api/workflows/runs/{run_id}/cancel")
-        | (&Method::POST, "/api/scheduled-tasks/{task_id}/runs") => {
-            capability(Capability::WorkflowsWrite)
-        }
-        (&Method::POST, "/api/workflows/events") => capability(Capability::WorkflowsEvents),
-        (&Method::POST, "/api/workflows/actions/invoke") => {
-            capability(Capability::WorkflowsActions)
-        }
-        (&Method::GET | &Method::HEAD, "/api/slack/external-team-ids") => {
-            capability(Capability::SlackExternalTeamsRead)
-        }
-        (&Method::PUT, "/api/slack/external-team-ids") => {
-            capability(Capability::SlackExternalTeamsWrite)
-        }
-        // Keep other methods out of the principal-only `/api/slack/` family.
-        (_, "/api/slack/external-team-ids") => None,
-        (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
-        _ => None,
-    }
 }
 
 async fn http_metrics(req: Request, next: Next) -> Response {
@@ -606,7 +564,7 @@ fn matched_route<B>(request: &Request<B>) -> String {
         .unwrap_or_else(|| "__unmatched__".to_owned())
 }
 
-fn session_thread_key_from_request<B>(request: &Request<B>) -> Option<ThreadKey> {
+pub(crate) fn session_thread_key_from_request<B>(request: &Request<B>) -> Option<ThreadKey> {
     session_thread_key_from_path(request.uri().path())
 }
 

@@ -7,15 +7,22 @@ repository.workspace = true
 
 [dependencies]
 active-record-encryption = { path = "../active-record-encryption" }
+base64.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
+garde.workspace = true
+getrandom = "0.3"
 hex.workspace = true
+percent-encoding = "2"
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqids = "0.4"
 sqlx.workspace = true
+ssh-key.workspace = true
 time.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 rand = "0.10"

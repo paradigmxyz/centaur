@@ -25,6 +25,6 @@ nodes:
       - containerPort: 30081 # release api-rs (test-access.yaml)
         hostPort: 30081
         listenAddress: 127.0.0.1
-      - containerPort: 30082 # release console API (test-access.yaml)
+      - containerPort: 30082 # release Console host and operator API, served by api-rs (test-access.yaml)
         hostPort: 30082
         listenAddress: 127.0.0.1

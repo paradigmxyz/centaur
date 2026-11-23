@@ -361,9 +361,10 @@ Codex, api-rs fails fast at startup if the broker credential is missing.
 
 ## 4. Configure Advanced Permissioning
 
-Set `console.publicUrl` and configure `console.ingress` if operators need to
-reach the Console outside the cluster. Sign in as the bootstrap admin, then
-open **System Settings** before creating user sessions:
+Set `console.publicUrl` to the origin operators and MCP clients reach — api-rs
+serves the Console, so it is required — and configure `console.ingress` if that
+origin is outside the cluster. Sign in as the bootstrap admin, then open
+**System Settings** before creating user sessions:
 
 - Keep `infra` as a default role if every admitted user may run an agent.
 - Clear default roles if even harness access must be explicitly approved.
@@ -681,7 +682,9 @@ Run one agent turn from inside the api-rs deployment:
 ```bash
 THREAD_KEY=cli:production-smoke-codex
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
+# api-rs serves the Console; the Rails worker is the process that still boots
+# Rails, so run the runner there.
+CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console-worker -- \
   bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
 
 SESSION=$(kubectl exec -n centaur-system deploy/centaur-centaur-api-rs -- curl -s -X POST "http://localhost:8080/api/session/${THREAD_PATH}" \

@@ -22,11 +22,14 @@ use std::future::Future;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Row};
 use time::OffsetDateTime;
 
+use crate::areas::automation::{SlackPolicy, begin_write, slack_policy};
+use crate::timestamp::{from_chrono, to_chrono};
 use crate::{Result, cron::Schedule, oid::oid};
+
+pub use crate::areas::auth_pages::console_user_foreign_id;
 
 /// Console's opaque-id prefix for scheduled tasks.
 pub const OID_PREFIX: &str = "tsk";
@@ -51,7 +54,6 @@ const TASK_COLUMNS: &str = "id, name, prompt, author_id, principal_id, delivery_
 /// A workflow run to start for one occurrence of a task.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunRequest {
-    pub task_id: i64,
     pub workflow_name: &'static str,
     pub input: Value,
     pub idempotency_key: String,
@@ -119,7 +121,7 @@ where
          WHERE enabled AND next_run_at <= ($1::timestamptz AT TIME ZONE 'UTC') \
          ORDER BY next_run_at, id LIMIT $2",
     )
-    .bind(offset(now))
+    .bind(from_chrono(now))
     .bind(BATCH_SIZE)
     .fetch_all(pool)
     .await?;
@@ -235,7 +237,6 @@ where
 
 fn run_request(task: &Task, input: Value, scheduled_for: DateTime<Utc>) -> RunRequest {
     RunRequest {
-        task_id: task.id,
         workflow_name: WORKFLOW_NAME,
         input,
         idempotency_key: idempotency_key(task.id, scheduled_for),
@@ -322,12 +323,12 @@ async fn run_input(
                     .to_owned(),
             ));
         }
-        let identity = slack_identity(connection, author_id).await?;
-        if !author_may_deliver(connection, &task.delivery_channel, identity.as_ref()).await? {
+        let identity = slack_policy(connection, author_id).await?;
+        if !author_may_deliver(connection, &task.delivery_channel, &identity).await? {
             return Ok(Err(DESTINATION_UNAVAILABLE.to_owned()));
         }
         input.insert("principal".to_owned(), json!(foreign_id));
-        if let Some((slack_user_id, _)) = identity {
+        if let Some(slack_user_id) = identity.slack_user_id {
             input.insert("slack_user_id".to_owned(), json!(slack_user_id));
         }
     } else {
@@ -342,87 +343,22 @@ async fn run_input(
     Ok(Ok(Value::Object(input)))
 }
 
-/// `ConsoleUserPrincipalProvisioner#foreign_id`: the principal Console
-/// provisions for a user, named from their email.
-pub fn console_user_foreign_id(email: &str) -> String {
-    // Ruby's `String#strip` removes ASCII whitespace and NUL.
-    let normalized = email
-        .to_lowercase()
-        .trim_matches(|c| matches!(c, '\0' | '\t' | '\n' | '\x0b' | '\x0c' | '\r' | ' '))
-        .to_owned();
-    let mut safe = String::new();
-    for character in normalized.chars() {
-        let character = if character.is_ascii_alphanumeric() || "-._~".contains(character) {
-            character
-        } else {
-            '-'
-        };
-        if !(character == '-' && safe.ends_with('-')) {
-            safe.push(character);
-        }
-    }
-    safe.truncate(48);
-    let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
-    format!("console-user-{safe}-{}", &digest[..12])
-}
-
-/// `SlackDeliveryPolicy#slack_identity`: the user's one Slack user and team,
-/// gathered from their sign-in identities, Console principals, and Slack OAuth
-/// credentials. `None` when there is none or more than one.
-async fn slack_identity(
-    connection: &mut PgConnection,
-    user_id: i64,
-) -> Result<Option<(String, String)>> {
-    let rows = sqlx::query(
-        "SELECT subject AS slack_user_id, team_id AS slack_team_id, NULL AS app_team_id \
-         FROM user_identities WHERE user_id = $1 AND provider = 'slack' \
-         UNION ALL \
-         SELECT slack_user_id, slack_team_id, NULL \
-         FROM principals WHERE kind = 'console_user' AND console_user_id = $1 \
-         UNION ALL \
-         SELECT c.provider_subject, c.labels->>'slack_team_id', a.labels->>'slack_team_id' \
-         FROM broker_credentials c JOIN oauth_apps a ON a.id = c.oauth_app_id \
-         WHERE c.created_by_id = $1 AND a.provider = 'slack'",
-    )
-    .bind(user_id)
-    .fetch_all(&mut *connection)
-    .await?;
-    let mut identities: Vec<(String, String)> = Vec::new();
-    for row in rows {
-        let user: Option<String> = row.try_get("slack_user_id")?;
-        let team = present(row.try_get("slack_team_id")?).or(present(row.try_get("app_team_id")?));
-        let (Some(user), Some(team)) = (user, team) else {
-            continue;
-        };
-        if slack_user_id_valid(&user)
-            && slack_team_id_valid(&team)
-            && !identities.contains(&(user.clone(), team.clone()))
-        {
-            identities.push((user, team));
-        }
-    }
-    Ok(match identities.len() {
-        1 => identities.pop(),
-        _ => None,
-    })
-}
-
 /// `SlackDeliveryPolicy#allowed?`: the author's own DM, a public channel the
 /// bot is in, or a private channel both the author and the bot are in.
 async fn author_may_deliver(
     connection: &mut PgConnection,
     destination: &str,
-    identity: Option<&(String, String)>,
+    policy: &SlackPolicy,
 ) -> Result<bool> {
     let destination = destination.trim().to_uppercase();
-    if identity.is_some_and(|(user, _)| *user == destination) {
+    if policy.slack_user_id.as_deref() == Some(destination.as_str()) {
         return Ok(true);
     }
     bot_channel_available(
         connection,
         &destination,
-        identity.map(|(_, team)| team.as_str()),
-        Some(identity.map(|(user, _)| user.as_str())),
+        policy.slack_team_id.as_deref(),
+        Some(policy.slack_user_id.as_deref()),
     )
     .await
 }
@@ -455,36 +391,9 @@ async fn bot_channel_available(
     .await?)
 }
 
-/// `Principal::SLACK_USER_ID_FORMAT`.
-fn slack_user_id_valid(value: &str) -> bool {
-    value == "USLACK" || slack_id_valid(value, &['U', 'W'])
-}
-
-/// `Principal::SLACK_TEAM_ID_FORMAT`.
-fn slack_team_id_valid(value: &str) -> bool {
-    slack_id_valid(value, &['T', 'E'])
-}
-
-fn slack_id_valid(value: &str, prefixes: &[char]) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|first| prefixes.contains(&first))
-        && value.len() >= 9
-        && characters.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-}
-
 /// Rails' `presence`: `None` for a missing or blank string.
 fn present(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
-}
-
-async fn begin_write(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION READ WRITE")
-        .execute(&mut *tx)
-        .await?;
-    Ok(tx)
 }
 
 async fn lock_task(connection: &mut PgConnection, id: i64, lock: &str) -> Result<Option<Task>> {
@@ -509,7 +418,7 @@ async fn lock_task(connection: &mut PgConnection, id: i64, lock: &str) -> Result
         enabled: row.try_get("enabled")?,
         next_run_at: row
             .try_get::<Option<OffsetDateTime>, _>("next_run_at")?
-            .map(utc),
+            .map(to_chrono),
     }))
 }
 
@@ -527,8 +436,8 @@ async fn advance(
          WHERE id = $1",
     )
     .bind(id)
-    .bind(offset(scheduled_for))
-    .bind(next_run_at.map(offset))
+    .bind(from_chrono(scheduled_for))
+    .bind(next_run_at.map(from_chrono))
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -551,7 +460,7 @@ async fn record_run(
     )
     .bind(id)
     .bind(run_id)
-    .bind(offset(now))
+    .bind(from_chrono(now))
     .bind(error)
     .execute(&mut *connection)
     .await?;
@@ -567,20 +476,10 @@ async fn record_error(connection: &mut PgConnection, id: i64, error: &str) -> Re
     Ok(())
 }
 
-fn offset(time: DateTime<Utc>) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(
-        time.timestamp_nanos_opt().unwrap_or_default(),
-    ))
-    .unwrap_or(OffsetDateTime::UNIX_EPOCH)
-}
-
-fn utc(time: OffsetDateTime) -> DateTime<Utc> {
-    DateTime::from_timestamp(time.unix_timestamp(), time.nanosecond()).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::areas::automation::{slack_team_id_valid, slack_user_id_valid};
 
     #[test]
     fn console_user_foreign_ids_match_console() {

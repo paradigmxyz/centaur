@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     ApiError,
     models::{AppState, ProxyRecord},
-    tokens::{append_api_jwt, append_sandbox_jwt},
+    tokens::append_sandbox_token,
 };
 
 pub(crate) async fn build_config(
@@ -30,8 +30,7 @@ pub(crate) async fn build_config(
         proxy.requester_principal_id,
     )
     .await?;
-    append_api_jwt(state, proxy, &mut config, now).await?;
-    append_sandbox_jwt(state, proxy, &mut config, now)?;
+    append_sandbox_token(state, proxy, &mut config, now).await?;
     Ok(config)
 }
 

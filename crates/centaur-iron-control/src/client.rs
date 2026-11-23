@@ -1,10 +1,18 @@
-//! HTTP client for the iron-control admin API.
+//! Admin client for iron-control.
 //!
-//! The wire-touching surface is intentionally thin: request bodies are built by
+//! When api-rs has the writable Console pool (the Rust Console is enabled),
+//! [`IronControlClient`] runs every call in-process through
+//! `centaur_console_db`; otherwise it uses the HTTP admin API. The HTTP
+//! wire-touching surface stays intentionally thin: request bodies are built by
 //! pure helpers ([`grant_body`], [`collection_path`], [`upsert_path`]) that are
-//! unit-tested without a server, and [`IronControlClient`] just authenticates,
-//! wraps the body in the ``{ "data": ... }`` envelope, sends, and unwraps the
-//! response ``data`` field.
+//! unit-tested without a server, and the client just authenticates, wraps the
+//! body in the ``{ "data": ... }`` envelope, sends, and unwraps the response
+//! ``data`` field.
+//!
+//! `centaur-perms` is an external CLI and always uses the HTTP client. The two
+//! remaining operator-only resources (full secret detail and broker
+//! credentials) are therefore HTTP-only: no api-rs caller uses them. Delete the
+//! HTTP path once every deployment has cut over from Rails.
 
 use reqwest::{Client as HttpClient, Method, Response};
 use serde::Serialize;
@@ -14,6 +22,7 @@ use sqlx::PgPool;
 
 use crate::database;
 use crate::error::{IronControlError, Result};
+use crate::in_process;
 use crate::models::{
     AwsAuthSecretInput, BrokerCredentialInput, BrokerCredentialRecord, DataEnvelope,
     EffectiveConfig, GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee,
@@ -30,7 +39,14 @@ pub struct IronControlClient {
     http: HttpClient,
     base_url: String,
     api_key: String,
+    /// Console's read-only pool: reads can bypass the admin API even when
+    /// Rails still owns writes.
     console_db: Option<PgPool>,
+    /// Console's writable pool. Presence selects the in-process implementation
+    /// for every call (the Rust Console is enabled); absence keeps the HTTP
+    /// admin API (a deployment where Rails still owns the Console, and the
+    /// external `centaur-perms` CLI).
+    console_write_db: Option<PgPool>,
 }
 
 impl IronControlClient {
@@ -51,6 +67,7 @@ impl IronControlClient {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             api_key: api_key.into(),
             console_db: None,
+            console_write_db: None,
         }
     }
 
@@ -61,10 +78,41 @@ impl IronControlClient {
         self
     }
 
+    /// Run every call in-process against the writable Console pool, using the
+    /// same `centaur_console_db` functions as the ported Console handlers.
+    ///
+    /// api-rs selects this when `CONSOLE_SESSION_SECRET` enables the Rust
+    /// Console. The HTTP path below stays for deployments where Rails still
+    /// owns the Console and for `centaur-perms`; it can be deleted once every
+    /// deployment has cut over.
+    pub fn with_console_write_db(mut self, pool: PgPool) -> Self {
+        self.console_write_db = Some(pool);
+        self
+    }
+
+    /// Whether calls run in-process rather than over the admin API.
+    pub fn is_in_process(&self) -> bool {
+        self.console_write_db.is_some()
+    }
+
+    /// The pool reads resolve through: the writable pool in-process, otherwise
+    /// the read-only pool when direct reads were configured.
+    fn read_pool(&self) -> Option<&PgPool> {
+        self.console_write_db.as_ref().or(self.console_db.as_ref())
+    }
+
+    /// The pool only the in-process write path uses.
+    fn write_pool(&self) -> Option<&PgPool> {
+        self.console_write_db.as_ref()
+    }
+
     // ----- principals & roles ---------------------------------------------
 
     /// Upsert a principal by ``foreign_id`` (create if absent, update if not).
     pub async fn upsert_principal(&self, input: &PrincipalInput) -> Result<Principal> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_principal(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("principals", &input.foreign_id),
@@ -76,7 +124,7 @@ impl IronControlClient {
     /// Upsert a principal unless Console already stores exactly `input` for
     /// it. Without a Console database connection this always upserts.
     pub async fn refresh_principal(&self, input: &PrincipalInput) -> Result<Principal> {
-        if let Some(pool) = &self.console_db
+        if let Some(pool) = self.read_pool()
             && let Some(principal) = database::unchanged_principal(pool, input).await?
         {
             return Ok(principal);
@@ -86,12 +134,18 @@ impl IronControlClient {
 
     /// Upsert a role by ``foreign_id``.
     pub async fn upsert_role(&self, input: &IdentityInput) -> Result<Role> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_role(pool, &self.api_key, input).await;
+        }
         self.write(Method::PUT, &upsert_path("roles", &input.foreign_id), input)
             .await
     }
 
     /// Fetch a role by OID (``role_…``) or globally unique ``foreign_id``.
     pub async fn get_role(&self, role: &str) -> Result<Role> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::get_role(pool, role).await;
+        }
         let path = resource_path("roles", "role_", role, "");
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
@@ -101,11 +155,17 @@ impl IronControlClient {
     /// carrying all of ``labels`` (JSONB containment). Pages are fetched
     /// transparently, so the full set is returned.
     pub async fn list_principals(&self, labels: &[(String, String)]) -> Result<Vec<Principal>> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::list_principals(pool, labels).await;
+        }
         self.list_collection("principals", labels).await
     }
 
     /// List every role, optionally filtered by ``labels``.
     pub async fn list_roles(&self, labels: &[(String, String)]) -> Result<Vec<Role>> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::list_roles(pool, labels).await;
+        }
         self.list_collection("roles", labels).await
     }
 
@@ -154,7 +214,7 @@ impl IronControlClient {
     /// through the canonical lookup endpoint). api-rs reads this to wire the sandbox's env for
     /// operator-managed secrets.
     pub async fn effective_config(&self, principal: &str) -> Result<EffectiveConfig> {
-        if let Some(pool) = &self.console_db {
+        if let Some(pool) = self.read_pool() {
             return database::effective_config(pool, principal).await;
         }
         let path = resource_path("principals", "prn_", principal, "/effective_config");
@@ -167,7 +227,7 @@ impl IronControlClient {
     /// is resolved through the canonical lookup endpoint, since the bare
     /// ``/:id`` route only matches OIDs.
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
-        if let Some(pool) = &self.console_db {
+        if let Some(pool) = self.read_pool() {
             return database::principal(pool, principal).await;
         }
         let path = resource_path("principals", "prn_", principal, "");
@@ -177,6 +237,9 @@ impl IronControlClient {
 
     /// Assign a role (by OID) to a principal (by OID).
     pub async fn assign_role(&self, principal_id: &str, role_id: &str) -> Result<()> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::assign_role(pool, principal_id, role_id).await;
+        }
         let path = format!(
             "{API_PREFIX}/principals/{}/roles",
             urlencoding::encode(principal_id)
@@ -192,6 +255,9 @@ impl IronControlClient {
         principal_id: &str,
         input: &SlackChannelPermissionInput,
     ) -> Result<()> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_slack_channel_permission(pool, principal_id, input).await;
+        }
         let path = format!(
             "{API_PREFIX}/principals/{}/slack_channel_permissions",
             urlencoding::encode(principal_id)
@@ -207,7 +273,7 @@ impl IronControlClient {
         principal_id: &str,
         input: &SlackChannelPermissionInput,
     ) -> Result<()> {
-        if let Some(pool) = &self.console_db
+        if let Some(pool) = self.read_pool()
             && database::slack_channel_permission_is_current(pool, principal_id, input).await?
         {
             return Ok(());
@@ -219,6 +285,9 @@ impl IronControlClient {
     /// List the roles assigned to a principal (by OID; this sub-resource route
     /// does not resolve ``foreign_id``s — pass the OID from [`Self::get_principal`]).
     pub async fn list_principal_roles(&self, principal: &str) -> Result<Vec<Role>> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::list_principal_roles(pool, principal).await;
+        }
         let path = format!(
             "{API_PREFIX}/principals/{}/roles",
             urlencoding::encode(principal)
@@ -229,6 +298,9 @@ impl IronControlClient {
 
     /// Unassign a role (by OID) from a principal (by OID).
     pub async fn unassign_role(&self, principal_id: &str, role_id: &str) -> Result<()> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::unassign_role(pool, principal_id, role_id).await;
+        }
         let path = format!(
             "{API_PREFIX}/principals/{}/roles/{}",
             urlencoding::encode(principal_id),
@@ -242,6 +314,9 @@ impl IronControlClient {
 
     /// Upsert a static secret by ``foreign_id``.
     pub async fn upsert_static_secret(&self, input: &StaticSecretInput) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_static_secret(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("static_secrets", &input.foreign_id),
@@ -255,6 +330,9 @@ impl IronControlClient {
         &self,
         input: &OAuthTokenSecretInput,
     ) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_oauth_token_secret(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("oauth_token_secrets", &input.foreign_id),
@@ -266,6 +344,9 @@ impl IronControlClient {
     /// Upsert a GCP auth secret. Upserts by ``foreign_id`` when one is set;
     /// otherwise creates a new secret (workload-identity secrets need no ref).
     pub async fn upsert_gcp_auth_secret(&self, input: &GcpAuthSecretInput) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_gcp_auth_secret(pool, &self.api_key, input).await;
+        }
         match &input.foreign_id {
             Some(foreign_id) => {
                 self.write(
@@ -287,6 +368,9 @@ impl IronControlClient {
         &self,
         input: &GcpIdTokenSecretInput,
     ) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_gcp_id_token_secret(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("gcp_id_token_secrets", &input.foreign_id),
@@ -297,6 +381,9 @@ impl IronControlClient {
 
     /// Upsert a Postgres DSN secret by ``foreign_id``.
     pub async fn upsert_pg_dsn_secret(&self, input: &PgDsnSecretInput) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_pg_dsn_secret(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("pg_dsn_secrets", &input.foreign_id),
@@ -307,6 +394,9 @@ impl IronControlClient {
 
     /// Upsert an HMAC signing secret by ``foreign_id``.
     pub async fn upsert_hmac_secret(&self, input: &HmacSecretInput) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_hmac_secret(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("hmac_secrets", &input.foreign_id),
@@ -317,6 +407,9 @@ impl IronControlClient {
 
     /// Upsert an AWS auth secret by ``foreign_id``.
     pub async fn upsert_aws_auth_secret(&self, input: &AwsAuthSecretInput) -> Result<SecretRecord> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::upsert_aws_auth_secret(pool, &self.api_key, input).await;
+        }
         self.write(
             Method::PUT,
             &upsert_path("aws_auth_secrets", &input.foreign_id),
@@ -332,6 +425,9 @@ impl IronControlClient {
     /// ``aws_auth_secrets``) — see
     /// [`Grant::secret_target`].
     pub async fn get_secret(&self, collection: &str, oid: &str) -> Result<SecretRecord> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::get_secret(pool, collection, oid).await;
+        }
         let path = format!("{API_PREFIX}/{collection}/{}", urlencoding::encode(oid));
         let resp = self.send(Method::GET, &path, None::<&Value>).await?;
         decode_data(resp, Method::GET, &path).await
@@ -345,6 +441,9 @@ impl IronControlClient {
         collection: &str,
         labels: &[(String, String)],
     ) -> Result<Vec<SecretRecord>> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::list_secrets(pool, collection, labels).await;
+        }
         self.list_collection(collection, labels).await
     }
 
@@ -354,6 +453,8 @@ impl IronControlClient {
     /// route an OID to the bare ``/:id`` endpoint, a ``foreign_id`` to the
     /// lookup route. Returned as a raw [`Value`] so callers can render
     /// arbitrary type-specific fields without modeling each type.
+    ///
+    /// Operator-CLI only: api-rs does not call this, so it stays on HTTP.
     pub async fn get_secret_detail(
         &self,
         collection: &str,
@@ -366,6 +467,9 @@ impl IronControlClient {
     }
 
     // ----- broker credentials ---------------------------------------------
+    //
+    // Broker credentials are managed by the external `centaur-perms` CLI
+    // only; api-rs has no in-process caller, so these stay on HTTP.
 
     /// Upsert a broker credential by ``foreign_id`` (create if absent, update
     /// if not). Re-supplying ``refresh_token`` re-bootstraps the credential.
@@ -411,6 +515,9 @@ impl IronControlClient {
 
     /// Attach a secret to a grantee (principal or role).
     pub async fn create_grant(&self, grantee: &Grantee, secret: &GrantSecret) -> Result<Grant> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::create_grant(pool, &self.api_key, grantee, secret).await;
+        }
         self.write(
             Method::POST,
             &collection_path("grants"),
@@ -422,6 +529,9 @@ impl IronControlClient {
     /// List the grants made directly to a principal (by OID; this sub-resource
     /// route does not resolve ``foreign_id``s).
     pub async fn list_principal_grants(&self, principal: &str) -> Result<Vec<Grant>> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::list_principal_grants(pool, principal).await;
+        }
         let base = format!(
             "{API_PREFIX}/principals/{}/grants",
             urlencoding::encode(principal)
@@ -432,12 +542,18 @@ impl IronControlClient {
     /// List the grants attached to a role (by OID; this sub-resource route does
     /// not resolve ``foreign_id``s — pass the OID from [`Self::get_role`]).
     pub async fn list_role_grants(&self, role: &str) -> Result<Vec<Grant>> {
+        if let Some(pool) = self.read_pool() {
+            return in_process::list_role_grants(pool, role).await;
+        }
         let base = format!("{API_PREFIX}/roles/{}/grants", urlencoding::encode(role));
         self.paginate(&base).await
     }
 
     /// Revoke a grant by OID.
     pub async fn delete_grant(&self, id: &str) -> Result<()> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::delete_grant(pool, id).await;
+        }
         let path = format!("{API_PREFIX}/grants/{}", urlencoding::encode(id));
         let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
         expect_success(resp, Method::DELETE, &path).await
@@ -456,6 +572,16 @@ impl IronControlClient {
         requester_principal_id: Option<String>,
         labels: std::collections::BTreeMap<String, String>,
     ) -> Result<Proxy> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::create_proxy(
+                pool,
+                &name.into(),
+                &principal_id.into(),
+                requester_principal_id,
+                &labels,
+            )
+            .await;
+        }
         let input = ProxyInput {
             name: name.into(),
             principal_id: principal_id.into(),
@@ -479,6 +605,16 @@ impl IronControlClient {
         requester_principal_id: Option<&str>,
         labels: &std::collections::BTreeMap<String, String>,
     ) -> Result<Proxy> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::assign_proxy_principal(
+                pool,
+                id,
+                principal_id,
+                requester_principal_id,
+                labels,
+            )
+            .await;
+        }
         let path = format!("{API_PREFIX}/proxies/{}", urlencoding::encode(id));
         let body = proxy_assignment_payload(principal_id, requester_principal_id, labels);
         self.write(Method::PATCH, &path, &body).await
@@ -486,6 +622,9 @@ impl IronControlClient {
 
     /// Deregister a proxy by OID.
     pub async fn delete_proxy(&self, id: &str) -> Result<()> {
+        if let Some(pool) = self.write_pool() {
+            return in_process::delete_proxy(pool, id).await;
+        }
         let path = format!("{API_PREFIX}/proxies/{}", urlencoding::encode(id));
         let resp = self.send(Method::DELETE, &path, None::<&Value>).await?;
         expect_success(resp, Method::DELETE, &path).await

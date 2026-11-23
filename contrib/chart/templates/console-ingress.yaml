@@ -1,10 +1,14 @@
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-{{- if $console.ingress.enabled }}
-# Optional Ingress for the console; the controller (Tailscale operator,
-# Cloudflare, ingress-nginx, ...) is installed separately and selected via
-# console.ingress.className. defaultBackend renders the single-backend
-# form some controllers (the Tailscale operator) require instead of host/path
-# rules.
+{{- if and .Values.apiRs.enabled $console.ingress.enabled }}
+{{- $backendName := include "centaur.componentName" (dict "root" . "component" "api-rs") }}
+{{- $backendPort := .Values.apiRs.port }}
+# Optional Ingress for the Console public host; the controller (Tailscale
+# operator, Cloudflare, ingress-nginx, ...) is installed separately and selected
+# via console.ingress.className. api-rs serves the Console on its own port, so
+# the Ingress targets the api-rs Service; the name and labels stay stable so
+# existing controller configuration keeps working. defaultBackend renders the
+# single-backend form some controllers (the Tailscale operator) require instead
+# of host/path rules.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -22,9 +26,9 @@ spec:
   {{- if $console.ingress.defaultBackend }}
   defaultBackend:
     service:
-      name: {{ include "centaur.consoleName" . }}
+      name: {{ $backendName }}
       port:
-        number: {{ $console.service.httpPort }}
+        number: {{ $backendPort }}
   {{- else }}
   rules:
     - {{- if $console.ingress.host }}
@@ -36,9 +40,9 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "centaur.consoleName" . }}
+                name: {{ $backendName }}
                 port:
-                  number: {{ $console.service.httpPort }}
+                  number: {{ $backendPort }}
   {{- end }}
   {{- with $console.ingress.tls }}
   tls:

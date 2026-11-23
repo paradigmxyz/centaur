@@ -49,8 +49,10 @@ on either side of a rolling deploy accept each other's forms.
   `lib/spa_request.rb` and `config/routes/spa.rb`.
 - **Data.** The SPA calls only the console API, `/api/v1/console/*`, with the
   console session cookie (`web/src/lib/api.ts` refuses any other path). It
-  reads the session, CSRF token, nav flags, and one-shot flash from
-  `GET /api/v1/console/me` and sends `X-CSRF-Token` on every write. A `401`
+  reads the session and nav flags from `GET /api/v1/console/me` and sends no
+  CSRF token; the Rust Console checks an exact same-origin `Origin` on unsafe
+  requests. The chart runs the Console in api-rs, so a SPA built from this tree
+  is served and answered by the Rust Console. A `401`
   sends the browser to `/login?return_to=<current page>` and a pending account
   to `/pending` (full page loads); sign-out is `DELETE /api/v1/console/session`.
   See [docs/API.md](docs/API.md#console-api).
@@ -159,6 +161,16 @@ All three providers request the `openid`, `email`, and `profile` scopes. Client 
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 
+## Company Context Syncs
+
+The Console no longer runs Slack DM, Google Docs, or Granola sync jobs. Those
+sources are ingested by [`centaur-company-context`](../../crates/centaur-company-context/),
+which also stores the normalized documents and embeddings. Previously indexed
+content is unchanged, and Google OAuth and broker-credential refresh still run
+as before. The former `CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED` and
+`CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED` switches no longer control any
+Console job; the Helm chart still accepts them for compatibility.
+
 ## Broker Credential Refresh
 
 [`centaur-token-broker`](../token-broker/README.md) refreshes broker
@@ -180,15 +192,19 @@ Rotating any of these keys makes previously encrypted data unreadable. Treat the
 
 ## API
 
-`iron-control` exposes a JSON API under `/api/v1` in three namespaces, each taking exactly one credential:
+The deployed Console API is the Rust one in
+`crates/centaur-api-server/src/console/` (see its `README.md`): every credential
+maps to one capability set and every route declares the capability it requires.
+This Rails tree keeps the reference behavior, the migrations, and the worker.
+`iron-control` exposes the same JSON API under `/api/v1` in three namespaces:
 
 - `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and does not accept the console session cookie.
-- `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie only (`403 session_required` for any bearer key), with the session's CSRF token on writes. Endpoints are admin-only unless documented otherwise.
-- `/api/v1/sandbox/*` takes the sandbox entitlement JWT that `iron-proxy` injects.
+- `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie, with an exact same-origin `Origin` check on writes (no CSRF token), or a sandbox-delegated user credential: a sandbox token from an active admin's Slack DM with the bot. It never accepts an API key (`403 session_required`). Endpoints are admin-only unless documented otherwise.
+- `/api/v1/sandbox/*` takes the single sandbox token that `iron-proxy` injects for the plain per-sandbox resources.
 
 `iron-proxy` instances fetch their configuration from the separate `proxy-sync` service with a proxy bearer token.
 
-See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync), plus the session-only [Console API](docs/API.md#console-api).
+See [docs/API.md](docs/API.md) for the full reference: authentication, request/response conventions, pagination, error formats, the shared secret-source and request-rule shapes, and detailed payloads for every endpoint (static secrets, GCP auth secrets, OAuth token secrets, principals, roles, grants, API keys, proxies, and proxy sync), plus the [Console API](docs/API.md#console-api).
 
 ## Owner-only OAuth apps
 

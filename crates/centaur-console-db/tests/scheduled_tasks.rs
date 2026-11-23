@@ -6,8 +6,6 @@
 //! `scheduled_tasks` table.
 
 use std::{
-    env,
-    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -21,10 +19,9 @@ use centaur_console_db::{
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+
+mod common;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -47,28 +44,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Option<Self> {
-        let Ok(url) = env::var("CONSOLE_DB_TEST_DATABASE_URL") else {
-            assert!(
-                env::var_os("CI").is_none(),
-                "CONSOLE_DB_TEST_DATABASE_URL must be set in CI"
-            );
-            eprintln!(
-                "skipping: set CONSOLE_DB_TEST_DATABASE_URL to a database with Console's schema"
-            );
-            return None;
-        };
+        let admin_pool = common::database().await?;
         let serial = SERIAL.lock().await;
-        let options = PgConnectOptions::from_str(&url)
-            .unwrap()
+        let options = (*admin_pool.connect_options())
+            .clone()
             .options([("default_transaction_read_only", "on")]);
         let pool = PgPoolOptions::new()
             .max_connections(4)
             .connect_with(options)
-            .await
-            .unwrap();
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
             .await
             .unwrap();
         sqlx::query("DELETE FROM scheduled_tasks")
@@ -424,7 +407,7 @@ async fn a_task_that_cannot_deliver_advances_without_blocking_others() {
     let request = starter
         .requests()
         .into_iter()
-        .find(|request| request.task_id == channel_task)
+        .find(|request| request.input["scheduled_task_id"] == json!(oid("tsk", channel_task)))
         .unwrap();
     assert_eq!(request.input["principal"], json!(foreign_id));
     assert_eq!(request.input["channel"], json!(channel));

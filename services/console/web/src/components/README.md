@@ -50,9 +50,9 @@ Related modules outside this folder:
 - `@/lib/api` — `api.get/post/put/patch/delete`, `ApiError` (`status`,
   `reason`, `fieldErrors`), `errorMessage`. Only accepts paths under
   `/api/v1/console/` (`CONSOLE_API_PREFIX`, the session-only console API;
-  the rest of `/api/v1` is the bearer API). Sends `X-CSRF-Token` on writes,
-  redirects to `/login` on 401 and `/pending` for pending accounts, retries
-  once on a stale CSRF token.
+  the rest of `/api/v1` is the bearer API). Sends no CSRF token; the browser's
+  same-origin `Origin` is what the server checks on writes. Redirects to
+  `/login` on 401 and `/pending` for pending accounts.
 - `@/lib/query-keys` — `createQueryKeys("<slice>")` and `sharedKeys`.
 - `@/lib/format` — `truncateMiddle`, `pluralize`, `displayLabel`, time formats.
 - `@/lib/secret-kinds` — secret kind registry, `grantKey`, `secretOptionLabel`,
@@ -63,8 +63,9 @@ Related modules outside this folder:
   write, held in component state.
 - `@/test/utils` — `mockApi`, `apiResponse`, `renderRoute`, `adminMe`,
   `operatorMe` for the SPA tests.
-- Toasts: `import { toast } from "sonner"` (`toast.success` for the legacy
-  flash notice, `toast.error` for alerts).
+- Toasts: `import { toast } from "sonner"` for action results (`toast.success`,
+  `toast.error`). Redirect flash messages are not used; server-rendered pages
+  carry `?error=<code>` instead.
 
 ## Reads and writes
 

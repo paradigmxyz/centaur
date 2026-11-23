@@ -59,7 +59,7 @@ function SkillDetail() {
           <h2 id="skill-instructions-heading" className="mb-3 text-sm font-semibold">
             Instructions
           </h2>
-          <SkillMarkdown html={skill.content_html} />
+          <SkillMarkdown markdown={skill.instructions} />
         </section>
 
         {skill.editors.length > 0 && (

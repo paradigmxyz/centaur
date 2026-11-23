@@ -32,9 +32,13 @@ async fn main() -> Result<(), ServerError> {
         return result;
     }
 
-    let args = Args::parse();
+    let mut args = Args::parse();
     info!(enabled = centaur_api_server::mcp_enabled(), "MCP endpoint");
     let api_auth = ApiAuthConfig::from_env()?;
+    let console_session = args.console_session_config()?;
+    // When api-rs serves the Console, iron-control calls go straight to the
+    // Console database instead of over the bearer API.
+    args.set_console_in_process(console_session.is_some());
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(
         bind_addr = %args.server.bind_addr,
@@ -44,6 +48,12 @@ async fn main() -> Result<(), ServerError> {
     let mut app_state = AppState::unready(api_auth);
     if let Some(pool) = args.console_db() {
         app_state = app_state.with_console_db(pool);
+    }
+    if let Some(pool) = args.console_write_db() {
+        app_state = app_state.with_console_write_db(pool);
+    }
+    if let Some(config) = console_session {
+        app_state = app_state.with_console_session(config);
     }
     let app = build_router_with_app_state(app_state.clone());
     warm_slack_public_channel_cache();
