@@ -27,6 +27,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+centaur-console-db.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }

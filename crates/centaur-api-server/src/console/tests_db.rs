@@ -1688,7 +1688,7 @@ async fn console_session_db_workflow_force_start_uses_in_process_runtime() {
             std::collections::BTreeMap::new(),
         ),
         WorkflowPrincipalRegistrar::new(IronControlClient::new(
-            "http://127.0.0.1:9",
+            fixture.pool.clone(),
             "fake-test-api-key",
         )),
     )

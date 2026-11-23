@@ -1,13 +1,9 @@
 //! In-process implementation of the iron-control admin surface against the
 //! Console database.
 //!
-//! The callers keep using [`crate::IronControlClient`]; when api-rs has the
-//! writable Console pool (the Rust Console is enabled) the client routes each
-//! call through the same `centaur_console_db` functions the ported Console
-//! handlers use. Validation, reconciliation, cache invalidation, and
-//! timestamps therefore stay identical to the HTTP path. Deployments where
-//! Rails still owns the Console keep the HTTP client, and `centaur-perms`
-//! (an external CLI) always uses HTTP.
+//! [`crate::IronControlClient`] routes each call through the same
+//! `centaur_console_db` functions the Console handlers use, so validation,
+//! reconciliation, cache invalidation, and timestamps match the Console API.
 //!
 //! Writes need an operator for Console's `created_by_id` columns. The client
 //! resolves one from `IRON_CONTROL_API_KEY`, exactly as the bearer API would:
@@ -21,16 +17,13 @@ use centaur_console_db::areas::admin::{
 };
 use centaur_console_db::areas::principals::{
     GrantWrite, Grantee as DbGrantee, PermissionWrite, PrincipalError, PrincipalWrite, RoleWrite,
-    assign_role as db_assign_role, create_grant as db_create_grant, destroy_grant,
-    find_role_by_foreign_id, find_role_by_oid, grant_payload, list_grants, load_role_view,
-    principal_roles, remove_role as db_remove_role, upsert_principal as db_upsert_principal,
-    upsert_role as db_upsert_role,
+    assign_role as db_assign_role, create_grant as db_create_grant, grant_payload, list_grants,
+    upsert_principal as db_upsert_principal, upsert_role as db_upsert_role,
     upsert_slack_channel_permission as db_upsert_slack_channel_permission,
 };
 use centaur_console_db::areas::secrets::{
     AwsAuthRequest, HmacRequest, OauthTokenRequest, SecretDocumentPayload, SecretKind, SecretRow,
-    WriteDocument, WriteOptions, WriteTarget, find_secret, list_kind_secrets,
-    write_secret as db_write_secret,
+    WriteDocument, WriteOptions, WriteTarget, write_secret as db_write_secret,
 };
 use centaur_console_db::{find_console_api_key, find_principal};
 use serde::Serialize;
@@ -120,105 +113,6 @@ pub(crate) async fn upsert_role(
     role_from_view(view)
 }
 
-pub(crate) async fn list_principals(
-    pool: &PgPool,
-    labels: &[(String, String)],
-) -> Result<Vec<Principal>> {
-    let ids: Vec<i64> = match label_filter(labels) {
-        Some(filter) => {
-            sqlx::query_scalar(
-                "SELECT id FROM principals WHERE labels @> $1::jsonb \
-                 ORDER BY created_at ASC, id ASC",
-            )
-            .bind(filter)
-            .fetch_all(pool)
-            .await
-        }
-        None => {
-            sqlx::query_scalar("SELECT id FROM principals ORDER BY created_at ASC, id ASC")
-                .fetch_all(pool)
-                .await
-        }
-    }
-    .map_err(|error| IronControlError::ConsoleDb(error.into()))?;
-    let mut principals = Vec::with_capacity(ids.len());
-    for id in ids {
-        principals.push(database::principal(pool, &centaur_console_db::oid("prn", id)).await?);
-    }
-    Ok(principals)
-}
-
-pub(crate) async fn list_roles(pool: &PgPool, labels: &[(String, String)]) -> Result<Vec<Role>> {
-    let ids: Vec<i64> =
-        match label_filter(labels) {
-            Some(filter) => sqlx::query_scalar(
-                "SELECT id FROM roles WHERE labels @> $1::jsonb ORDER BY created_at ASC, id ASC",
-            )
-            .bind(filter)
-            .fetch_all(pool)
-            .await,
-            None => {
-                sqlx::query_scalar("SELECT id FROM roles ORDER BY created_at ASC, id ASC")
-                    .fetch_all(pool)
-                    .await
-            }
-        }
-        .map_err(|error| IronControlError::ConsoleDb(error.into()))?;
-    let mut roles = Vec::with_capacity(ids.len());
-    for id in ids {
-        let view = load_role_view(pool, id)
-            .await
-            .map_err(|error| principal_error("list roles", error))?
-            .ok_or_else(|| not_found("role", &id.to_string()))?;
-        roles.push(role_from_view(view)?);
-    }
-    Ok(roles)
-}
-
-pub(crate) async fn list_secrets(
-    pool: &PgPool,
-    collection: &str,
-    labels: &[(String, String)],
-) -> Result<Vec<SecretRecord>> {
-    let kind = secret_kind(collection)
-        .ok_or_else(|| invalid_data(format!("unknown secret collection {collection}")))?;
-    let labels: BTreeMap<String, String> = labels.iter().cloned().collect();
-    let mut records = Vec::new();
-    let mut page = 1;
-    loop {
-        let found = list_kind_secrets(pool, kind, &labels, page, 100)
-            .await
-            .map_err(IronControlError::ConsoleDb)?;
-        let fetched = found.rows.len();
-        records.extend(found.rows.into_iter().map(secret_record));
-        if fetched < 100 {
-            return Ok(records);
-        }
-        page += 1;
-    }
-}
-
-pub(crate) async fn get_role(pool: &PgPool, role: &str) -> Result<Role> {
-    let view = if role.starts_with(ROLE_OID_PREFIX) {
-        find_role_by_oid(pool, role).await
-    } else {
-        find_role_by_foreign_id(pool, role).await
-    }
-    .map_err(|error| principal_error("get role", error))?;
-    role_from_view(view)
-}
-
-pub(crate) async fn list_principal_roles(pool: &PgPool, principal: &str) -> Result<Vec<Role>> {
-    let id = decode_oid(PRINCIPAL_OID_PREFIX, principal)
-        .ok_or_else(|| not_found("principal", principal))?;
-    let rows = principal_roles(pool, id)
-        .await
-        .map_err(|error| principal_error("list principal roles", error))?;
-    rows.into_iter()
-        .map(|row| role_from_parts(row.id, row.foreign_id, row.name, row.labels))
-        .collect()
-}
-
 pub(crate) async fn assign_role(pool: &PgPool, principal: &str, role: &str) -> Result<()> {
     let principal_id = decode_oid(PRINCIPAL_OID_PREFIX, principal)
         .ok_or_else(|| not_found("principal", principal))?;
@@ -231,23 +125,9 @@ pub(crate) async fn assign_role(pool: &PgPool, principal: &str, role: &str) -> R
         .map_err(|error| principal_error("assign role", error))
 }
 
-pub(crate) async fn unassign_role(pool: &PgPool, principal: &str, role: &str) -> Result<()> {
-    let principal_id = decode_oid(PRINCIPAL_OID_PREFIX, principal)
-        .ok_or_else(|| not_found("principal", principal))?;
-    db_remove_role(pool, principal_id, role)
-        .await
-        .map_err(|error| principal_error("unassign role", error))
-}
-
 pub(crate) async fn list_role_grants(pool: &PgPool, role: &str) -> Result<Vec<Grant>> {
     let id = decode_oid(ROLE_OID_PREFIX, role).ok_or_else(|| not_found("role", role))?;
     grants(pool, DbGrantee::Role(id), "list role grants").await
-}
-
-pub(crate) async fn list_principal_grants(pool: &PgPool, principal: &str) -> Result<Vec<Grant>> {
-    let id = decode_oid(PRINCIPAL_OID_PREFIX, principal)
-        .ok_or_else(|| not_found("principal", principal))?;
-    grants(pool, DbGrantee::Principal(id), "list principal grants").await
 }
 
 async fn grants(pool: &PgPool, grantee: DbGrantee, operation: &'static str) -> Result<Vec<Grant>> {
@@ -274,22 +154,6 @@ pub(crate) async fn create_grant(
     grant_payload(&row)
         .map(grant_from_payload)
         .map_err(|error| principal_error("create grant", error))
-}
-
-pub(crate) async fn delete_grant(pool: &PgPool, id: &str) -> Result<()> {
-    destroy_grant(pool, id)
-        .await
-        .map_err(|error| principal_error("delete grant", error))
-}
-
-pub(crate) async fn get_secret(pool: &PgPool, collection: &str, oid: &str) -> Result<SecretRecord> {
-    let kind = secret_kind(collection)
-        .ok_or_else(|| invalid_data(format!("unknown secret collection {collection}")))?;
-    let row = find_secret(pool, kind, oid)
-        .await
-        .map_err(IronControlError::ConsoleDb)?
-        .ok_or_else(|| not_found(kind.model_name(), oid))?;
-    Ok(secret_record(row))
 }
 
 pub(crate) async fn upsert_static_secret(
@@ -629,12 +493,6 @@ fn deserialize_request<T: DeserializeOwned>(
     })
 }
 
-fn secret_kind(collection: &str) -> Option<SecretKind> {
-    SecretKind::ALL
-        .into_iter()
-        .find(|kind| format!("{}_secrets", kind.slug()) == collection)
-}
-
 fn decode_oid(prefix: &str, oid: &str) -> Option<i64> {
     let prefix = prefix.trim_end_matches('_');
     centaur_console_db::decode_oid(prefix, oid)
@@ -684,18 +542,6 @@ fn write_error(
     }
 }
 
-fn label_filter(labels: &[(String, String)]) -> Option<Value> {
-    if labels.is_empty() {
-        return None;
-    }
-    Some(Value::Object(
-        labels
-            .iter()
-            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-            .collect(),
-    ))
-}
-
 fn string_map(labels: &BTreeMap<String, String>) -> Map<String, Value> {
     labels
         .iter()
@@ -724,15 +570,6 @@ fn string_labels(value: Value) -> Result<BTreeMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn secret_collections_round_trip_to_their_kind() {
-        for kind in SecretKind::ALL {
-            assert_eq!(secret_kind(&format!("{}_secrets", kind.slug())), Some(kind));
-        }
-        assert_eq!(secret_kind("ssh_key_secrets"), Some(SecretKind::SshKey));
-        assert_eq!(secret_kind("nope"), None);
-    }
 
     #[test]
     fn oids_decode_with_the_console_prefix() {

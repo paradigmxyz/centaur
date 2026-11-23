@@ -771,7 +771,6 @@ dependencies = [
  "centaur-iron-proxy",
  "getrandom 0.3.4",
  "hex",
- "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -779,7 +778,6 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
- "urlencoding",
 ]
 
 [[package]]
@@ -802,9 +800,13 @@ dependencies = [
  "centaur-iron-proxy",
  "clap",
  "eyre",
+ "reqwest",
+ "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "toml",
+ "urlencoding",
 ]
 
 [[package]]
@@ -849,6 +851,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.11.1",
+ "sqlx",
  "ssh-key",
  "thiserror 2.0.21",
  "tokio",
@@ -912,6 +915,7 @@ name = "centaur-session-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "centaur-console-db",
  "centaur-iron-control",
  "centaur-sandbox-core",
  "centaur-sandbox-manager",

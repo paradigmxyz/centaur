@@ -145,7 +145,16 @@ pub struct IronControlSettings {
 #[cfg(test)]
 fn test_iron_control_settings() -> IronControlSettings {
     IronControlSettings {
-        client: IronControlClient::new("http://127.0.0.1:1", "test-key"),
+        // No idle timeout or lifetime: the lazy pool then spawns no
+        // maintenance task, so it can be built outside a Tokio runtime.
+        client: IronControlClient::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+                .expect("a lazy pool never connects"),
+            "test-key",
+        ),
         console_url: "http://iron-control".to_owned(),
         control_url: "http://iron-control".to_owned(),
     }

@@ -1,5 +1,5 @@
-//! Reads Console's database directly in place of the equivalent admin API
-//! calls. Console remains the only writer.
+//! Reads from Console's database, resolving identifiers the way the Console
+//! API does.
 
 use std::collections::BTreeMap;
 

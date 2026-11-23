@@ -10,18 +10,19 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use centaur_iron_control::{
-    BrokerCredentialInput, Grant, GrantSecret, Grantee, IdentityInput, IronControlClient,
-    IronControlError, PrincipalInput, Role, RoleSpec, SECRET_TYPES, grant_inputs_to_role,
-    managed_labels,
+    BrokerCredentialInput, Grant, GrantSecret, Grantee, IdentityInput, PrincipalInput, Role,
+    RoleSecretWriter, RoleSpec, SECRET_TYPES, grant_inputs_to_role, managed_labels,
 };
 use centaur_iron_proxy::SourcePolicy;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use eyre::{Result, bail};
 
+mod console_api;
 mod principal;
 mod tools;
 mod translate;
 
+use console_api::ConsoleApi;
 use tools::ParsedSecret;
 
 #[cfg(test)]
@@ -303,7 +304,7 @@ struct RoleGrantArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = IronControlClient::new(&cli.iron_control_url, &cli.iron_control_api_key);
+    let client = ConsoleApi::new(&cli.iron_control_url, &cli.iron_control_api_key);
 
     match &cli.command {
         Command::Principals(cmd) => match cmd {
@@ -335,7 +336,7 @@ async fn main() -> Result<()> {
 // principals
 // ---------------------------------------------------------------------------
 
-async fn principals_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn principals_list(client: &ConsoleApi, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     let mut found = client.list_principals(&labels).await?;
     apply_filter(&mut found, args.filter.as_deref(), |p| {
@@ -356,7 +357,7 @@ async fn principals_list(client: &IronControlClient, args: &FilterArgs) -> Resul
 /// with no secret target. The name lookup is best-effort: if the secret can't
 /// be fetched (e.g. it was deleted out from under the grant), the OID is shown
 /// alone so a dangling grant still surfaces rather than failing the command.
-async fn describe_grant(client: &IronControlClient, grant: &Grant) -> Option<String> {
+async fn describe_grant(client: &ConsoleApi, grant: &Grant) -> Option<String> {
     let (kind, collection, oid) = grant.secret_target()?;
     let label = match client.get_secret(collection, oid).await {
         Ok(record) => record
@@ -371,7 +372,7 @@ async fn describe_grant(client: &IronControlClient, grant: &Grant) -> Option<Str
     Some(format!("{kind} {label} ({oid})"))
 }
 
-async fn principals_show(client: &IronControlClient, args: &PrincipalSelector) -> Result<()> {
+async fn principals_show(client: &ConsoleApi, args: &PrincipalSelector) -> Result<()> {
     let identity = principal::resolve_principal(&args.principal, args.slack_user.as_deref())?;
     let principal = get_principal_or_fail(client, &identity.foreign_id).await?;
     println!(
@@ -429,11 +430,7 @@ async fn principals_show(client: &IronControlClient, args: &PrincipalSelector) -
     Ok(())
 }
 
-async fn principals_grant(
-    cli: &Cli,
-    client: &IronControlClient,
-    args: &PrincipalGrantArgs,
-) -> Result<()> {
+async fn principals_grant(cli: &Cli, client: &ConsoleApi, args: &PrincipalGrantArgs) -> Result<()> {
     if args.tools.is_empty() && args.roles.is_empty() && args.secrets.is_empty() {
         bail!("nothing to grant: pass at least one --tool, --role, or --secret");
     }
@@ -484,7 +481,7 @@ async fn principals_grant(
     Ok(())
 }
 
-async fn principals_revoke(client: &IronControlClient, args: &PrincipalGrantArgs) -> Result<()> {
+async fn principals_revoke(client: &ConsoleApi, args: &PrincipalGrantArgs) -> Result<()> {
     if args.tools.is_empty()
         && args.roles.is_empty()
         && args.secrets.is_empty()
@@ -537,7 +534,7 @@ async fn principals_revoke(client: &IronControlClient, args: &PrincipalGrantArgs
 // roles
 // ---------------------------------------------------------------------------
 
-async fn roles_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn roles_list(client: &ConsoleApi, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     let mut found = client.list_roles(&labels).await?;
     apply_filter(&mut found, args.filter.as_deref(), |r| {
@@ -553,7 +550,7 @@ async fn roles_list(client: &IronControlClient, args: &FilterArgs) -> Result<()>
     Ok(())
 }
 
-async fn roles_show(client: &IronControlClient, args: &RoleSelector) -> Result<()> {
+async fn roles_show(client: &ConsoleApi, args: &RoleSelector) -> Result<()> {
     let role = get_role_or_fail(client, &args.role).await?;
     println!(
         "role: {} ({}) — {}",
@@ -575,7 +572,7 @@ async fn roles_show(client: &IronControlClient, args: &RoleSelector) -> Result<(
     Ok(())
 }
 
-async fn roles_grant(cli: &Cli, client: &IronControlClient, args: &RoleGrantArgs) -> Result<()> {
+async fn roles_grant(cli: &Cli, client: &ConsoleApi, args: &RoleGrantArgs) -> Result<()> {
     if args.secrets.is_empty() && args.tool.is_none() {
         bail!("nothing to grant: pass at least one --secret <OID> or --tool <NAME>");
     }
@@ -638,7 +635,7 @@ fn select_secrets(all: Vec<ParsedSecret>, names: &[String]) -> Result<Vec<Parsed
     Ok(selected)
 }
 
-async fn roles_revoke(client: &IronControlClient, args: &RoleSecretArgs) -> Result<()> {
+async fn roles_revoke(client: &ConsoleApi, args: &RoleSecretArgs) -> Result<()> {
     let role = get_role_or_fail(client, &args.role).await?;
     println!(
         "role: {} ({})",
@@ -660,7 +657,7 @@ async fn roles_revoke(client: &IronControlClient, args: &RoleSecretArgs) -> Resu
 // secrets
 // ---------------------------------------------------------------------------
 
-async fn secrets_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn secrets_list(client: &ConsoleApi, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     // One row per secret across every type: (type, foreign_id, oid, name).
     let mut rows: Vec<(&'static str, Option<String>, String, String)> = Vec::new();
@@ -684,7 +681,7 @@ async fn secrets_list(client: &IronControlClient, args: &FilterArgs) -> Result<(
     Ok(())
 }
 
-async fn secrets_show(client: &IronControlClient, args: &SecretSelector) -> Result<()> {
+async fn secrets_show(client: &ConsoleApi, args: &SecretSelector) -> Result<()> {
     let (label, detail) = fetch_secret_detail(client, &args.secret).await?;
     println!("secret: {} (type {label})", args.secret);
     println!("{}", serde_json::to_string_pretty(&detail)?);
@@ -696,7 +693,7 @@ async fn secrets_show(client: &IronControlClient, args: &SecretSelector) -> Resu
 /// ambiguous across types, so each type's lookup endpoint is tried in turn
 /// until one resolves (404s are skipped).
 async fn fetch_secret_detail(
-    client: &IronControlClient,
+    client: &ConsoleApi,
     ident: &str,
 ) -> Result<(&'static str, serde_json::Value)> {
     if let Some((label, collection, prefix)) = secret_type_for_oid(ident) {
@@ -706,7 +703,7 @@ async fn fetch_secret_detail(
     for (label, collection, prefix) in SECRET_TYPES {
         match client.get_secret_detail(collection, prefix, ident).await {
             Ok(detail) => return Ok((label, detail)),
-            Err(e) if is_status(&e, 404) => continue,
+            Err(e) if e.is_status(404) => continue,
             Err(e) => return Err(e.into()),
         }
     }
@@ -752,7 +749,7 @@ fn print_secrets(rows: &[(&str, Option<String>, String, String)]) {
 // broker credentials
 // ---------------------------------------------------------------------------
 
-async fn broker_create(client: &IronControlClient, args: &BrokerCreateArgs) -> Result<()> {
+async fn broker_create(client: &ConsoleApi, args: &BrokerCreateArgs) -> Result<()> {
     let token_endpoint_headers = args
         .token_endpoint_headers
         .iter()
@@ -788,7 +785,7 @@ async fn broker_create(client: &IronControlClient, args: &BrokerCreateArgs) -> R
     Ok(())
 }
 
-async fn broker_list(client: &IronControlClient, args: &FilterArgs) -> Result<()> {
+async fn broker_list(client: &ConsoleApi, args: &FilterArgs) -> Result<()> {
     let labels = filter_labels(args)?;
     let mut found = client.list_broker_credentials(&labels).await?;
     apply_filter(&mut found, args.filter.as_deref(), |c| {
@@ -821,7 +818,7 @@ async fn broker_list(client: &IronControlClient, args: &FilterArgs) -> Result<()
     Ok(())
 }
 
-async fn broker_show(client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
+async fn broker_show(client: &ConsoleApi, args: &BrokerSelector) -> Result<()> {
     let detail = client
         .get_broker_credential_detail(&args.credential)
         .await?;
@@ -830,7 +827,7 @@ async fn broker_show(client: &IronControlClient, args: &BrokerSelector) -> Resul
     Ok(())
 }
 
-async fn broker_delete(client: &IronControlClient, args: &BrokerSelector) -> Result<()> {
+async fn broker_delete(client: &ConsoleApi, args: &BrokerSelector) -> Result<()> {
     client.delete_broker_credential(&args.credential).await?;
     println!("broker credential {}: deleted", args.credential);
     Ok(())
@@ -913,11 +910,7 @@ fn role_identity(role: &RoleSpec) -> IdentityInput {
 }
 
 /// Grant each secret OID to `grantee`, printing one line per grant.
-async fn grant_secrets(
-    client: &IronControlClient,
-    grantee: &Grantee,
-    oids: &[String],
-) -> Result<()> {
+async fn grant_secrets(client: &ConsoleApi, grantee: &Grantee, oids: &[String]) -> Result<()> {
     for oid in oids {
         let secret = grant_secret_from_oid(oid)?;
         let grant = client.create_grant(grantee, &secret).await?;
@@ -930,7 +923,7 @@ async fn grant_secrets(
 /// printing one line per OID. `missing_note` describes the no-op when an OID
 /// has no matching grant.
 async fn revoke_secrets(
-    client: &IronControlClient,
+    client: &ConsoleApi,
     grants: &[Grant],
     oids: &[String],
     missing_note: &str,
@@ -972,46 +965,42 @@ fn parse_kv(raw: &str, flag: &str) -> Result<(String, String)> {
 /// Ensure the principal exists, returning its OID. Looks it up first so an
 /// existing principal (e.g. one a session created) is never clobbered; creates
 /// it only when absent.
-async fn ensure_principal(client: &IronControlClient, identity: &PrincipalInput) -> Result<String> {
+async fn ensure_principal(client: &ConsoleApi, identity: &PrincipalInput) -> Result<String> {
     match client.get_principal(&identity.foreign_id).await {
         Ok(p) => Ok(p.id),
-        Err(e) if is_status(&e, 404) => Ok(client.upsert_principal(identity).await?.id),
+        Err(e) if e.is_status(404) => Ok(client.upsert_principal(identity).await?.id),
         Err(e) => Err(e.into()),
     }
 }
 
 async fn get_principal_or_fail(
-    client: &IronControlClient,
+    client: &ConsoleApi,
     ident: &str,
 ) -> Result<centaur_iron_control::Principal> {
     match client.get_principal(ident).await {
         Ok(p) => Ok(p),
-        Err(e) if is_status(&e, 404) => bail!("principal {ident:?} not found in iron-control"),
+        Err(e) if e.is_status(404) => bail!("principal {ident:?} not found in iron-control"),
         Err(e) => Err(e.into()),
     }
 }
 
-async fn get_role_or_fail(client: &IronControlClient, role: &str) -> Result<Role> {
+async fn get_role_or_fail(client: &ConsoleApi, role: &str) -> Result<Role> {
     match client.get_role(role).await {
         Ok(r) => Ok(r),
-        Err(e) if is_status(&e, 404) => bail!("role {role:?} not found in iron-control"),
+        Err(e) if e.is_status(404) => bail!("role {role:?} not found in iron-control"),
         Err(e) => Err(e.into()),
     }
 }
 
 /// Assign the role, treating an already-assigned conflict as success.
 async fn assign_role_idempotent(
-    client: &IronControlClient,
+    client: &ConsoleApi,
     principal_id: &str,
     role_id: &str,
 ) -> Result<()> {
     match client.assign_role(principal_id, role_id).await {
         Ok(()) => Ok(()),
-        Err(e) if is_status(&e, 409) || is_status(&e, 422) => Ok(()),
+        Err(e) if e.is_status(409) || e.is_status(422) => Ok(()),
         Err(e) => Err(e.into()),
     }
-}
-
-fn is_status(err: &IronControlError, code: u16) -> bool {
-    matches!(err, IronControlError::Status { status, .. } if *status == code)
 }

@@ -42,13 +42,10 @@ async fn main() -> Result<(), ServerError> {
         return result;
     }
 
-    let mut args = Args::parse();
+    let args = Args::parse();
     info!(enabled = centaur_api_server::mcp_enabled(), "MCP endpoint");
     let api_auth = ApiAuthConfig::from_env()?;
     let console_session = args.console_session_config()?;
-    // When api-rs serves the Console, iron-control calls go straight to the
-    // Console database instead of over the bearer API.
-    args.set_console_in_process(console_session.is_some());
     let listener = TcpListener::bind(args.server.bind_addr).await?;
     info!(
         bind_addr = %args.server.bind_addr,

@@ -23,10 +23,10 @@ use serde_yaml::Value as YamlValue;
 use crate::client::IronControlClient;
 use crate::error::IronControlError;
 use crate::models::{
-    AwsAuthSecretInput, GcpAuthSecretInput, GcpIdTokenSecretInput, GrantSecret, Grantee,
+    AwsAuthSecretInput, GcpAuthSecretInput, GcpIdTokenSecretInput, Grant, GrantSecret, Grantee,
     HmacSecretInput, IdentityInput, InjectConfig, OAuthTokenSecretInput, PgDsnSecretInput,
-    PgDsnSettingInput, PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretSource,
-    StaticSecretInput,
+    PgDsnSettingInput, PgDsnSettingValueFromInput, ReplaceConfig, RequestRule, SecretRecord,
+    SecretSource, StaticSecretInput,
 };
 use crate::util::{managed_labels, slugify};
 
@@ -124,6 +124,49 @@ pub async fn register_role(
     Ok(role_record.id)
 }
 
+/// The Console writes [`grant_inputs_to_role`] makes. [`IronControlClient`]
+/// implements it against the Console database; `centaur-perms` implements it
+/// over the Console's bearer API.
+#[allow(async_fn_in_trait)]
+pub trait RoleSecretWriter {
+    type Error;
+
+    async fn list_role_grants(&self, role: &str) -> Result<Vec<Grant>, Self::Error>;
+    async fn upsert_static_secret(
+        &self,
+        input: &StaticSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn upsert_oauth_token_secret(
+        &self,
+        input: &OAuthTokenSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn upsert_gcp_auth_secret(
+        &self,
+        input: &GcpAuthSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn upsert_gcp_id_token_secret(
+        &self,
+        input: &GcpIdTokenSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn upsert_pg_dsn_secret(
+        &self,
+        input: &PgDsnSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn upsert_hmac_secret(
+        &self,
+        input: &HmacSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn upsert_aws_auth_secret(
+        &self,
+        input: &AwsAuthSecretInput,
+    ) -> Result<SecretRecord, Self::Error>;
+    async fn create_grant(
+        &self,
+        grantee: &Grantee,
+        secret: &GrantSecret,
+    ) -> Result<Grant, Self::Error>;
+}
+
 /// Upsert each secret in ``inputs`` and grant it to the role identified by
 /// ``role_oid``, returning the grant OIDs in input order. Idempotent when the
 /// inputs carry stable ``foreign_id``s: re-running re-upserts each secret and
@@ -131,11 +174,11 @@ pub async fn register_role(
 /// This is the wire-driving half of [`register_role`], factored out so callers
 /// that build [`SecretInput`]s from a source other than an iron-proxy fragment
 /// (e.g. a tool's ``pyproject.toml``) can reuse it.
-pub async fn grant_inputs_to_role(
-    client: &IronControlClient,
+pub async fn grant_inputs_to_role<C: RoleSecretWriter>(
+    client: &C,
     role_oid: &str,
     inputs: Vec<SecretInput>,
-) -> Result<Vec<String>, IronControlError> {
+) -> Result<Vec<String>, C::Error> {
     let existing = client.list_role_grants(role_oid).await?;
     let mut grant_ids = Vec::with_capacity(inputs.len());
     for input in inputs {

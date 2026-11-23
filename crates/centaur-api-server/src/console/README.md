@@ -849,16 +849,12 @@ capability sets. The workspace CI run skips the `console_session_db_` tests
 because it does not load the Console schema; the schema-backed job runs them
 explicitly.
 
-## In-process iron-control calls
+## iron-control calls
 
-When api-rs serves the Console (`CONSOLE_SESSION_SECRET` and
-`CENTAUR_CONSOLE_PUBLIC_URL` are set), `IronControlClient` runs in-process
-against the writable Console pool. `Args::set_console_in_process` selects that
-mode at startup, and `IronControlClient::with_console_write_db` carries the
-pool. The calls resolve to the same `centaur_console_db` functions the Console
+`IronControlClient` (session, warm-pool, workflow, and infra-role
+registration) writes the Console database directly through the writable Console
+pool, so api-rs requires `IRON_CONTROL_DATABASE_URL` and `IRON_CONTROL_API_KEY`.
+The calls resolve to the same `centaur_console_db` functions the Console
 handlers use, so validation, reconciliation, cache invalidation, and timestamps
-match the HTTP API.
-
-Without the Rust Console, and in the external `centaur-perms` CLI, the client
-keeps using the bearer HTTP admin API. That path remains only for deployments
-where Rails still owns the Console; delete it at cutover.
+match the Console API, and writes are attributed to the key's owner. There is
+no HTTP fallback; only the external `centaur-perms` CLI calls the bearer API.
