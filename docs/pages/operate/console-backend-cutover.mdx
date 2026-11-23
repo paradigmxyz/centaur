@@ -27,9 +27,8 @@ unchanged by the upgrade, so the rollback is data-safe (see
 ## Console schema
 
 api-rs owns the Console schema. Its migrations live in
-`crates/centaur-console-db/migrations`, and api-rs applies them at startup
-(`apiRs.runMigrations`) or through `centaur-api-server migrate
---console-database-url`. Rails no longer migrates the Console database.
+`crates/centaur-console-db/migrations`, and api-rs applies them every time it
+starts. Rails no longer migrates the Console database.
 
 The first migration is the schema the last Rails migration produced. On a
 database Rails already migrated, api-rs records that migration as applied
@@ -42,8 +41,8 @@ every Rails version in it, so a rolled-back worker finds nothing to migrate.
 ## Slack channel catalog
 
 api-rs keeps the catalog the Console's channel pickers and Slack delivery checks
-read (`slack_bot_channels`) current when a Slack bot token is configured
-(`CENTAUR_CONSOLE_SLACK_BOT_TOKEN`, or `SLACK_BOT_TOKEN`). Every ten minutes it
+read (`slack_bot_channels`) current when `SLACK_BOT_TOKEN` is set, through the
+same Slack client as its Slack proxy routes. Every ten minutes it
 refreshes the channel list once it is an hour old, and the members of up to 100
 channels whose membership is a day old. Advisory locks keep each refresh to one
 api-rs replica at a time.

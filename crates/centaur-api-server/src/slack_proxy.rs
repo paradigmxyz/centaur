@@ -21,6 +21,10 @@ use crate::{
     routes::{AppState, non_empty_env, positive_env_u64},
 };
 
+mod catalog;
+
+pub use catalog::spawn_slack_channel_catalog_refresh;
+
 const DEFAULT_SLACK_API_URL: &str = "https://slack.com/api";
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_SLACK_FILES_LIST_LIMIT: u16 = 100;

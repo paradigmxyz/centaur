@@ -184,7 +184,7 @@ spec:
       {{- end }}
 {{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
       initContainers:
-        # api-rs owns the Console schema: at startup (RUN_MIGRATIONS) it applies
+        # api-rs owns the Console schema: on every start it applies
         # the Console migrations and bootstraps the initial admin before it
         # registers principals there. The database must exist first, so create
         # it idempotently on the bundled Postgres.

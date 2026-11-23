@@ -108,24 +108,21 @@ async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.database_url).await?;
     store.run_migrations(args.text_search).await?;
     info!(text_search = %args.text_search, "database migrations applied");
-    if let Some(console_db) = args.console_db()? {
-        centaur_console_db::migrate(&console_db).await?;
-        info!("Console database migrations applied");
-    }
     Ok(())
 }
 
-/// api-rs owns Console's schema: migrate it with the session database, then
-/// create the initial operator on a database with no users. Both must finish
-/// before anything below registers principals in it.
+/// api-rs owns Console's schema: migrate it on every start, then create the
+/// initial operator on a database with no users. Both must finish before
+/// anything below registers principals in it. Unlike the session database,
+/// the Console migrates regardless of `RUN_MIGRATIONS`: its migrations need
+/// only the Console role, which owns its tables, and there is no other way to
+/// apply them.
 async fn prepare_console_db(args: &Args) -> Result<(), ServerError> {
     let Some(pool) = args.console_write_db() else {
         return Ok(());
     };
-    if args.server.run_migrations {
-        centaur_console_db::migrate(&pool).await?;
-        info!("Console database migrations applied");
-    }
+    centaur_console_db::migrate(&pool).await?;
+    info!("Console database migrations applied");
     let Some(admin) = args.console_initial_admin() else {
         return Ok(());
     };

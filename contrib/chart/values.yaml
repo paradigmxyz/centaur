@@ -629,9 +629,8 @@ apiRs:
   # Public/local MCP endpoint advertised through OAuth protected-resource
   # metadata. Empty falls back to slackbotv2.mcpPublicUrl.
   mcpPublicUrl: ""
-  # Apply the session and Console database migrations at startup, then create
-  # the initial Console admin on an empty Console database. When false, run
-  # `centaur-api-server migrate --console-database-url ...` before upgrading.
+  # Apply the session database migrations at startup. (The Console database
+  # always migrates at startup, whatever this is set to.)
   runMigrations: true
   # Controls whether a missing automatically derived session principal may be
   # created. "preapproved" admits only principals already present in the

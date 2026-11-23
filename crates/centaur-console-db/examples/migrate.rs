@@ -4,8 +4,7 @@
 //! cargo run -p centaur-console-db --example migrate -- postgresql://...
 //! ```
 //!
-//! Deployments migrate through api-rs (`RUN_MIGRATIONS`, or
-//! `centaur-api-server migrate --console-database-url`).
+//! Deployments migrate through api-rs, which applies them on every start.
 
 use sqlx::postgres::PgPoolOptions;
 

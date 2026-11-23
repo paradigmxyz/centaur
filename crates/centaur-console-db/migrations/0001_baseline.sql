@@ -9,10 +9,6 @@
 -- to a chart that still runs `bin/rails db:prepare` finds nothing to do instead
 -- of loading `schema.rb` over existing tables.
 
---
--- Name: api_client_principals; Type: TABLE; Schema: public; Owner: -
---
-
 CREATE TABLE public.api_client_principals (
     id bigint NOT NULL,
     api_client_id bigint NOT NULL,
@@ -22,10 +18,6 @@ CREATE TABLE public.api_client_principals (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: api_client_principals_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.api_client_principals_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -33,15 +25,7 @@ CREATE SEQUENCE public.api_client_principals_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: api_client_principals_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.api_client_principals_id_seq OWNED BY public.api_client_principals.id;
-
---
--- Name: api_clients; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.api_clients (
     id bigint NOT NULL,
@@ -54,10 +38,6 @@ CREATE TABLE public.api_clients (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: api_clients_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.api_clients_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -65,15 +45,7 @@ CREATE SEQUENCE public.api_clients_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: api_clients_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.api_clients_id_seq OWNED BY public.api_clients.id;
-
---
--- Name: api_keys; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.api_keys (
     id bigint NOT NULL,
@@ -85,10 +57,6 @@ CREATE TABLE public.api_keys (
     user_id bigint NOT NULL
 );
 
---
--- Name: api_keys_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.api_keys_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -96,15 +64,7 @@ CREATE SEQUENCE public.api_keys_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: api_keys_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.api_keys_id_seq OWNED BY public.api_keys.id;
-
---
--- Name: ar_internal_metadata; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.ar_internal_metadata (
     key character varying NOT NULL,
@@ -112,10 +72,6 @@ CREATE TABLE public.ar_internal_metadata (
     created_at timestamp(6) without time zone NOT NULL,
     updated_at timestamp(6) without time zone NOT NULL
 );
-
---
--- Name: aws_auth_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.aws_auth_secrets (
     id bigint NOT NULL,
@@ -130,10 +86,6 @@ CREATE TABLE public.aws_auth_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: aws_auth_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.aws_auth_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -141,15 +93,7 @@ CREATE SEQUENCE public.aws_auth_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: aws_auth_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.aws_auth_secrets_id_seq OWNED BY public.aws_auth_secrets.id;
-
---
--- Name: broker_credentials; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.broker_credentials (
     id bigint NOT NULL,
@@ -187,10 +131,6 @@ CREATE TABLE public.broker_credentials (
     username text
 );
 
---
--- Name: broker_credentials_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.broker_credentials_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -198,15 +138,7 @@ CREATE SEQUENCE public.broker_credentials_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: broker_credentials_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.broker_credentials_id_seq OWNED BY public.broker_credentials.id;
-
---
--- Name: gcp_auth_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.gcp_auth_secrets (
     id bigint NOT NULL,
@@ -222,10 +154,6 @@ CREATE TABLE public.gcp_auth_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: gcp_auth_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.gcp_auth_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -233,15 +161,7 @@ CREATE SEQUENCE public.gcp_auth_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: gcp_auth_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.gcp_auth_secrets_id_seq OWNED BY public.gcp_auth_secrets.id;
-
---
--- Name: gcp_id_token_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.gcp_id_token_secrets (
     id bigint NOT NULL,
@@ -256,10 +176,6 @@ CREATE TABLE public.gcp_id_token_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: gcp_id_token_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.gcp_id_token_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -267,15 +183,7 @@ CREATE SEQUENCE public.gcp_id_token_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: gcp_id_token_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.gcp_id_token_secrets_id_seq OWNED BY public.gcp_id_token_secrets.id;
-
---
--- Name: grants; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.grants (
     id bigint NOT NULL,
@@ -295,10 +203,6 @@ CREATE TABLE public.grants (
     ssh_key_secret_id bigint
 );
 
---
--- Name: grants_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.grants_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -306,15 +210,7 @@ CREATE SEQUENCE public.grants_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: grants_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.grants_id_seq OWNED BY public.grants.id;
-
---
--- Name: hmac_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.hmac_secrets (
     id bigint NOT NULL,
@@ -334,10 +230,6 @@ CREATE TABLE public.hmac_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: hmac_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.hmac_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -345,15 +237,7 @@ CREATE SEQUENCE public.hmac_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: hmac_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.hmac_secrets_id_seq OWNED BY public.hmac_secrets.id;
-
---
--- Name: mcp_oauth_authorization_codes; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.mcp_oauth_authorization_codes (
     id bigint NOT NULL,
@@ -371,10 +255,6 @@ CREATE TABLE public.mcp_oauth_authorization_codes (
     user_id bigint NOT NULL
 );
 
---
--- Name: mcp_oauth_authorization_codes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.mcp_oauth_authorization_codes_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -382,15 +262,7 @@ CREATE SEQUENCE public.mcp_oauth_authorization_codes_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: mcp_oauth_authorization_codes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.mcp_oauth_authorization_codes_id_seq OWNED BY public.mcp_oauth_authorization_codes.id;
-
---
--- Name: mcp_oauth_clients; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.mcp_oauth_clients (
     id bigint NOT NULL,
@@ -405,10 +277,6 @@ CREATE TABLE public.mcp_oauth_clients (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: mcp_oauth_clients_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.mcp_oauth_clients_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -416,15 +284,7 @@ CREATE SEQUENCE public.mcp_oauth_clients_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: mcp_oauth_clients_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.mcp_oauth_clients_id_seq OWNED BY public.mcp_oauth_clients.id;
-
---
--- Name: mcp_oauth_refresh_tokens; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.mcp_oauth_refresh_tokens (
     id bigint NOT NULL,
@@ -441,10 +301,6 @@ CREATE TABLE public.mcp_oauth_refresh_tokens (
     user_id bigint NOT NULL
 );
 
---
--- Name: mcp_oauth_refresh_tokens_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.mcp_oauth_refresh_tokens_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -452,15 +308,7 @@ CREATE SEQUENCE public.mcp_oauth_refresh_tokens_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: mcp_oauth_refresh_tokens_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.mcp_oauth_refresh_tokens_id_seq OWNED BY public.mcp_oauth_refresh_tokens.id;
-
---
--- Name: oauth_apps; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.oauth_apps (
     id bigint NOT NULL,
@@ -481,10 +329,6 @@ CREATE TABLE public.oauth_apps (
     owner_only boolean DEFAULT false NOT NULL
 );
 
---
--- Name: oauth_apps_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.oauth_apps_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -492,15 +336,7 @@ CREATE SEQUENCE public.oauth_apps_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: oauth_apps_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.oauth_apps_id_seq OWNED BY public.oauth_apps.id;
-
---
--- Name: oauth_token_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.oauth_token_secrets (
     id bigint NOT NULL,
@@ -519,10 +355,6 @@ CREATE TABLE public.oauth_token_secrets (
     value_prefix character varying
 );
 
---
--- Name: oauth_token_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.oauth_token_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -530,15 +362,7 @@ CREATE SEQUENCE public.oauth_token_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: oauth_token_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.oauth_token_secrets_id_seq OWNED BY public.oauth_token_secrets.id;
-
---
--- Name: pg_dsn_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.pg_dsn_secrets (
     id bigint NOT NULL,
@@ -554,10 +378,6 @@ CREATE TABLE public.pg_dsn_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: pg_dsn_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.pg_dsn_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -565,15 +385,7 @@ CREATE SEQUENCE public.pg_dsn_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: pg_dsn_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.pg_dsn_secrets_id_seq OWNED BY public.pg_dsn_secrets.id;
-
---
--- Name: principal_roles; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.principal_roles (
     id bigint NOT NULL,
@@ -583,10 +395,6 @@ CREATE TABLE public.principal_roles (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: principal_roles_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.principal_roles_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -594,15 +402,7 @@ CREATE SEQUENCE public.principal_roles_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: principal_roles_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.principal_roles_id_seq OWNED BY public.principal_roles.id;
-
---
--- Name: principal_sync_config_snapshots; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.principal_sync_config_snapshots (
     id bigint NOT NULL,
@@ -613,10 +413,6 @@ CREATE TABLE public.principal_sync_config_snapshots (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: principal_sync_config_snapshots_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.principal_sync_config_snapshots_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -624,15 +420,7 @@ CREATE SEQUENCE public.principal_sync_config_snapshots_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: principal_sync_config_snapshots_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.principal_sync_config_snapshots_id_seq OWNED BY public.principal_sync_config_snapshots.id;
-
---
--- Name: principals; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.principals (
     id bigint NOT NULL,
@@ -657,10 +445,6 @@ CREATE TABLE public.principals (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: principals_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.principals_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -668,15 +452,7 @@ CREATE SEQUENCE public.principals_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: principals_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.principals_id_seq OWNED BY public.principals.id;
-
---
--- Name: proxies; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.proxies (
     id bigint NOT NULL,
@@ -691,10 +467,6 @@ CREATE TABLE public.proxies (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: proxies_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.proxies_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -702,15 +474,7 @@ CREATE SEQUENCE public.proxies_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: proxies_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.proxies_id_seq OWNED BY public.proxies.id;
-
---
--- Name: request_rules; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.request_rules (
     id bigint NOT NULL,
@@ -729,10 +493,6 @@ CREATE TABLE public.request_rules (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: request_rules_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.request_rules_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -740,15 +500,7 @@ CREATE SEQUENCE public.request_rules_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: request_rules_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.request_rules_id_seq OWNED BY public.request_rules.id;
-
---
--- Name: roles; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.roles (
     id bigint NOT NULL,
@@ -761,10 +513,6 @@ CREATE TABLE public.roles (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: roles_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.roles_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -772,15 +520,7 @@ CREATE SEQUENCE public.roles_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: roles_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.roles_id_seq OWNED BY public.roles.id;
-
---
--- Name: scheduled_tasks; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.scheduled_tasks (
     id bigint NOT NULL,
@@ -802,10 +542,6 @@ CREATE TABLE public.scheduled_tasks (
     CONSTRAINT scheduled_tasks_exactly_one_owner CHECK (((author_id IS NULL) <> (principal_id IS NULL)))
 );
 
---
--- Name: scheduled_tasks_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.scheduled_tasks_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -813,23 +549,11 @@ CREATE SEQUENCE public.scheduled_tasks_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: scheduled_tasks_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.scheduled_tasks_id_seq OWNED BY public.scheduled_tasks.id;
-
---
--- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.schema_migrations (
     version character varying NOT NULL
 );
-
---
--- Name: secret_sources; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.secret_sources (
     id bigint NOT NULL,
@@ -852,10 +576,6 @@ CREATE TABLE public.secret_sources (
     CONSTRAINT secret_sources_broker_credential_requires_token_broker CHECK (((broker_credential_id IS NULL) OR ((source_type)::text = 'token_broker'::text)))
 );
 
---
--- Name: secret_sources_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.secret_sources_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -863,15 +583,7 @@ CREATE SEQUENCE public.secret_sources_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: secret_sources_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.secret_sources_id_seq OWNED BY public.secret_sources.id;
-
---
--- Name: skill_editors; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.skill_editors (
     id bigint NOT NULL,
@@ -881,10 +593,6 @@ CREATE TABLE public.skill_editors (
     user_id bigint NOT NULL
 );
 
---
--- Name: skill_editors_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.skill_editors_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -892,15 +600,7 @@ CREATE SEQUENCE public.skill_editors_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: skill_editors_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.skill_editors_id_seq OWNED BY public.skill_editors.id;
-
---
--- Name: skills; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.skills (
     id bigint NOT NULL,
@@ -917,10 +617,6 @@ CREATE TABLE public.skills (
     visibility character varying DEFAULT 'shared'::character varying NOT NULL
 );
 
---
--- Name: skills_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.skills_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -928,15 +624,7 @@ CREATE SEQUENCE public.skills_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: skills_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.skills_id_seq OWNED BY public.skills.id;
-
---
--- Name: slack_bot_channels; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.slack_bot_channels (
     id bigint NOT NULL,
@@ -956,10 +644,6 @@ CREATE TABLE public.slack_bot_channels (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: slack_bot_channels_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.slack_bot_channels_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -967,15 +651,7 @@ CREATE SEQUENCE public.slack_bot_channels_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: slack_bot_channels_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.slack_bot_channels_id_seq OWNED BY public.slack_bot_channels.id;
-
---
--- Name: slack_channel_permissions; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.slack_channel_permissions (
     id bigint NOT NULL,
@@ -990,10 +666,6 @@ CREATE TABLE public.slack_channel_permissions (
     CONSTRAINT slack_channel_permissions_exactly_one_grantee CHECK (((principal_id IS NOT NULL) <> (role_id IS NOT NULL)))
 );
 
---
--- Name: slack_channel_permissions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.slack_channel_permissions_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1001,15 +673,7 @@ CREATE SEQUENCE public.slack_channel_permissions_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: slack_channel_permissions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.slack_channel_permissions_id_seq OWNED BY public.slack_channel_permissions.id;
-
---
--- Name: slack_dm_sync_cursors; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.slack_dm_sync_cursors (
     id bigint NOT NULL,
@@ -1021,10 +685,6 @@ CREATE TABLE public.slack_dm_sync_cursors (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: slack_dm_sync_cursors_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.slack_dm_sync_cursors_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1032,15 +692,7 @@ CREATE SEQUENCE public.slack_dm_sync_cursors_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: slack_dm_sync_cursors_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.slack_dm_sync_cursors_id_seq OWNED BY public.slack_dm_sync_cursors.id;
-
---
--- Name: ssh_key_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.ssh_key_secrets (
     id bigint NOT NULL,
@@ -1055,10 +707,6 @@ CREATE TABLE public.ssh_key_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: ssh_key_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.ssh_key_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1066,15 +714,7 @@ CREATE SEQUENCE public.ssh_key_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: ssh_key_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.ssh_key_secrets_id_seq OWNED BY public.ssh_key_secrets.id;
-
---
--- Name: static_secrets; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.static_secrets (
     id bigint NOT NULL,
@@ -1091,10 +731,6 @@ CREATE TABLE public.static_secrets (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: static_secrets_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.static_secrets_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1102,15 +738,7 @@ CREATE SEQUENCE public.static_secrets_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: static_secrets_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.static_secrets_id_seq OWNED BY public.static_secrets.id;
-
---
--- Name: system_settings; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.system_settings (
     id bigint NOT NULL,
@@ -1125,10 +753,6 @@ CREATE TABLE public.system_settings (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: system_settings_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.system_settings_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1136,15 +760,7 @@ CREATE SEQUENCE public.system_settings_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: system_settings_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.system_settings_id_seq OWNED BY public.system_settings.id;
-
---
--- Name: thread_shares; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.thread_shares (
     id bigint NOT NULL,
@@ -1154,10 +770,6 @@ CREATE TABLE public.thread_shares (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: thread_shares_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.thread_shares_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1165,15 +777,7 @@ CREATE SEQUENCE public.thread_shares_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: thread_shares_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.thread_shares_id_seq OWNED BY public.thread_shares.id;
-
---
--- Name: user_identities; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.user_identities (
     id bigint NOT NULL,
@@ -1187,10 +791,6 @@ CREATE TABLE public.user_identities (
     user_id bigint NOT NULL
 );
 
---
--- Name: user_identities_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.user_identities_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1198,15 +798,7 @@ CREATE SEQUENCE public.user_identities_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: user_identities_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.user_identities_id_seq OWNED BY public.user_identities.id;
-
---
--- Name: users; Type: TABLE; Schema: public; Owner: -
---
 
 CREATE TABLE public.users (
     id bigint NOT NULL,
@@ -1221,10 +813,6 @@ CREATE TABLE public.users (
     updated_at timestamp(6) without time zone NOT NULL
 );
 
---
--- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
 CREATE SEQUENCE public.users_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -1232,1813 +820,676 @@ CREATE SEQUENCE public.users_id_seq
     NO MAXVALUE
     CACHE 1;
 
---
--- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
 ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
-
---
--- Name: api_client_principals id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_client_principals ALTER COLUMN id SET DEFAULT nextval('public.api_client_principals_id_seq'::regclass);
 
---
--- Name: api_clients id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.api_clients ALTER COLUMN id SET DEFAULT nextval('public.api_clients_id_seq'::regclass);
-
---
--- Name: api_keys id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_keys ALTER COLUMN id SET DEFAULT nextval('public.api_keys_id_seq'::regclass);
 
---
--- Name: aws_auth_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.aws_auth_secrets ALTER COLUMN id SET DEFAULT nextval('public.aws_auth_secrets_id_seq'::regclass);
-
---
--- Name: broker_credentials id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.broker_credentials ALTER COLUMN id SET DEFAULT nextval('public.broker_credentials_id_seq'::regclass);
 
---
--- Name: gcp_auth_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.gcp_auth_secrets ALTER COLUMN id SET DEFAULT nextval('public.gcp_auth_secrets_id_seq'::regclass);
-
---
--- Name: gcp_id_token_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.gcp_id_token_secrets ALTER COLUMN id SET DEFAULT nextval('public.gcp_id_token_secrets_id_seq'::regclass);
 
---
--- Name: grants id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.grants ALTER COLUMN id SET DEFAULT nextval('public.grants_id_seq'::regclass);
-
---
--- Name: hmac_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.hmac_secrets ALTER COLUMN id SET DEFAULT nextval('public.hmac_secrets_id_seq'::regclass);
 
---
--- Name: mcp_oauth_authorization_codes id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_authorization_codes ALTER COLUMN id SET DEFAULT nextval('public.mcp_oauth_authorization_codes_id_seq'::regclass);
-
---
--- Name: mcp_oauth_clients id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.mcp_oauth_clients ALTER COLUMN id SET DEFAULT nextval('public.mcp_oauth_clients_id_seq'::regclass);
 
---
--- Name: mcp_oauth_refresh_tokens id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_refresh_tokens ALTER COLUMN id SET DEFAULT nextval('public.mcp_oauth_refresh_tokens_id_seq'::regclass);
-
---
--- Name: oauth_apps id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.oauth_apps ALTER COLUMN id SET DEFAULT nextval('public.oauth_apps_id_seq'::regclass);
 
---
--- Name: oauth_token_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.oauth_token_secrets ALTER COLUMN id SET DEFAULT nextval('public.oauth_token_secrets_id_seq'::regclass);
-
---
--- Name: pg_dsn_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.pg_dsn_secrets ALTER COLUMN id SET DEFAULT nextval('public.pg_dsn_secrets_id_seq'::regclass);
 
---
--- Name: principal_roles id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.principal_roles ALTER COLUMN id SET DEFAULT nextval('public.principal_roles_id_seq'::regclass);
-
---
--- Name: principal_sync_config_snapshots id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.principal_sync_config_snapshots ALTER COLUMN id SET DEFAULT nextval('public.principal_sync_config_snapshots_id_seq'::regclass);
 
---
--- Name: principals id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.principals ALTER COLUMN id SET DEFAULT nextval('public.principals_id_seq'::regclass);
-
---
--- Name: proxies id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.proxies ALTER COLUMN id SET DEFAULT nextval('public.proxies_id_seq'::regclass);
 
---
--- Name: request_rules id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.request_rules ALTER COLUMN id SET DEFAULT nextval('public.request_rules_id_seq'::regclass);
-
---
--- Name: roles id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.roles ALTER COLUMN id SET DEFAULT nextval('public.roles_id_seq'::regclass);
 
---
--- Name: scheduled_tasks id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.scheduled_tasks ALTER COLUMN id SET DEFAULT nextval('public.scheduled_tasks_id_seq'::regclass);
-
---
--- Name: secret_sources id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources ALTER COLUMN id SET DEFAULT nextval('public.secret_sources_id_seq'::regclass);
 
---
--- Name: skill_editors id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.skill_editors ALTER COLUMN id SET DEFAULT nextval('public.skill_editors_id_seq'::regclass);
-
---
--- Name: skills id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.skills ALTER COLUMN id SET DEFAULT nextval('public.skills_id_seq'::regclass);
 
---
--- Name: slack_bot_channels id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.slack_bot_channels ALTER COLUMN id SET DEFAULT nextval('public.slack_bot_channels_id_seq'::regclass);
-
---
--- Name: slack_channel_permissions id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.slack_channel_permissions ALTER COLUMN id SET DEFAULT nextval('public.slack_channel_permissions_id_seq'::regclass);
 
---
--- Name: slack_dm_sync_cursors id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.slack_dm_sync_cursors ALTER COLUMN id SET DEFAULT nextval('public.slack_dm_sync_cursors_id_seq'::regclass);
-
---
--- Name: ssh_key_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.ssh_key_secrets ALTER COLUMN id SET DEFAULT nextval('public.ssh_key_secrets_id_seq'::regclass);
 
---
--- Name: static_secrets id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.static_secrets ALTER COLUMN id SET DEFAULT nextval('public.static_secrets_id_seq'::regclass);
-
---
--- Name: system_settings id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.system_settings ALTER COLUMN id SET DEFAULT nextval('public.system_settings_id_seq'::regclass);
 
---
--- Name: thread_shares id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.thread_shares ALTER COLUMN id SET DEFAULT nextval('public.thread_shares_id_seq'::regclass);
-
---
--- Name: user_identities id; Type: DEFAULT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.user_identities ALTER COLUMN id SET DEFAULT nextval('public.user_identities_id_seq'::regclass);
 
---
--- Name: users id; Type: DEFAULT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
-
---
--- Name: api_client_principals api_client_principals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_client_principals
     ADD CONSTRAINT api_client_principals_pkey PRIMARY KEY (id);
 
---
--- Name: api_clients api_clients_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.api_clients
     ADD CONSTRAINT api_clients_pkey PRIMARY KEY (id);
-
---
--- Name: api_keys api_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_keys
     ADD CONSTRAINT api_keys_pkey PRIMARY KEY (id);
 
---
--- Name: ar_internal_metadata ar_internal_metadata_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.ar_internal_metadata
     ADD CONSTRAINT ar_internal_metadata_pkey PRIMARY KEY (key);
-
---
--- Name: aws_auth_secrets aws_auth_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.aws_auth_secrets
     ADD CONSTRAINT aws_auth_secrets_pkey PRIMARY KEY (id);
 
---
--- Name: broker_credentials broker_credentials_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.broker_credentials
     ADD CONSTRAINT broker_credentials_pkey PRIMARY KEY (id);
-
---
--- Name: gcp_auth_secrets gcp_auth_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.gcp_auth_secrets
     ADD CONSTRAINT gcp_auth_secrets_pkey PRIMARY KEY (id);
 
---
--- Name: gcp_id_token_secrets gcp_id_token_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.gcp_id_token_secrets
     ADD CONSTRAINT gcp_id_token_secrets_pkey PRIMARY KEY (id);
-
---
--- Name: grants grants_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT grants_pkey PRIMARY KEY (id);
 
---
--- Name: hmac_secrets hmac_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.hmac_secrets
     ADD CONSTRAINT hmac_secrets_pkey PRIMARY KEY (id);
-
---
--- Name: mcp_oauth_authorization_codes mcp_oauth_authorization_codes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.mcp_oauth_authorization_codes
     ADD CONSTRAINT mcp_oauth_authorization_codes_pkey PRIMARY KEY (id);
 
---
--- Name: mcp_oauth_clients mcp_oauth_clients_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_clients
     ADD CONSTRAINT mcp_oauth_clients_pkey PRIMARY KEY (id);
-
---
--- Name: mcp_oauth_refresh_tokens mcp_oauth_refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.mcp_oauth_refresh_tokens
     ADD CONSTRAINT mcp_oauth_refresh_tokens_pkey PRIMARY KEY (id);
 
---
--- Name: oauth_apps oauth_apps_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.oauth_apps
     ADD CONSTRAINT oauth_apps_pkey PRIMARY KEY (id);
-
---
--- Name: oauth_token_secrets oauth_token_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.oauth_token_secrets
     ADD CONSTRAINT oauth_token_secrets_pkey PRIMARY KEY (id);
 
---
--- Name: pg_dsn_secrets pg_dsn_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.pg_dsn_secrets
     ADD CONSTRAINT pg_dsn_secrets_pkey PRIMARY KEY (id);
-
---
--- Name: principal_roles principal_roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.principal_roles
     ADD CONSTRAINT principal_roles_pkey PRIMARY KEY (id);
 
---
--- Name: principal_sync_config_snapshots principal_sync_config_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.principal_sync_config_snapshots
     ADD CONSTRAINT principal_sync_config_snapshots_pkey PRIMARY KEY (id);
-
---
--- Name: principals principals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.principals
     ADD CONSTRAINT principals_pkey PRIMARY KEY (id);
 
---
--- Name: proxies proxies_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.proxies
     ADD CONSTRAINT proxies_pkey PRIMARY KEY (id);
-
---
--- Name: request_rules request_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT request_rules_pkey PRIMARY KEY (id);
 
---
--- Name: roles roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.roles
     ADD CONSTRAINT roles_pkey PRIMARY KEY (id);
-
---
--- Name: scheduled_tasks scheduled_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.scheduled_tasks
     ADD CONSTRAINT scheduled_tasks_pkey PRIMARY KEY (id);
 
---
--- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
-
---
--- Name: secret_sources secret_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT secret_sources_pkey PRIMARY KEY (id);
 
---
--- Name: skill_editors skill_editors_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.skill_editors
     ADD CONSTRAINT skill_editors_pkey PRIMARY KEY (id);
-
---
--- Name: skills skills_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.skills
     ADD CONSTRAINT skills_pkey PRIMARY KEY (id);
 
---
--- Name: slack_bot_channels slack_bot_channels_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.slack_bot_channels
     ADD CONSTRAINT slack_bot_channels_pkey PRIMARY KEY (id);
-
---
--- Name: slack_channel_permissions slack_channel_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.slack_channel_permissions
     ADD CONSTRAINT slack_channel_permissions_pkey PRIMARY KEY (id);
 
---
--- Name: slack_dm_sync_cursors slack_dm_sync_cursors_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.slack_dm_sync_cursors
     ADD CONSTRAINT slack_dm_sync_cursors_pkey PRIMARY KEY (id);
-
---
--- Name: ssh_key_secrets ssh_key_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.ssh_key_secrets
     ADD CONSTRAINT ssh_key_secrets_pkey PRIMARY KEY (id);
 
---
--- Name: static_secrets static_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.static_secrets
     ADD CONSTRAINT static_secrets_pkey PRIMARY KEY (id);
-
---
--- Name: system_settings system_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.system_settings
     ADD CONSTRAINT system_settings_pkey PRIMARY KEY (id);
 
---
--- Name: thread_shares thread_shares_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.thread_shares
     ADD CONSTRAINT thread_shares_pkey PRIMARY KEY (id);
-
---
--- Name: user_identities user_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.user_identities
     ADD CONSTRAINT user_identities_pkey PRIMARY KEY (id);
 
---
--- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
 
---
--- Name: idx_principal_sync_snapshots_on_principal_version; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX idx_principal_sync_snapshots_on_principal_version ON public.principal_sync_config_snapshots USING btree (principal_id, principal_cache_version);
-
---
--- Name: idx_slack_permissions_unique_principal_channel; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX idx_slack_permissions_unique_principal_channel ON public.slack_channel_permissions USING btree (principal_id, channel_id) WHERE (principal_id IS NOT NULL);
 
---
--- Name: idx_slack_permissions_unique_role_channel; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX idx_slack_permissions_unique_role_channel ON public.slack_channel_permissions USING btree (role_id, channel_id) WHERE (role_id IS NOT NULL);
-
---
--- Name: index_active_skills_for_catalog; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_active_skills_for_catalog ON public.skills USING btree (visibility, updated_at) WHERE (archived_at IS NULL);
 
---
--- Name: index_active_skills_on_name; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_active_skills_on_name ON public.skills USING btree (name) WHERE (archived_at IS NULL);
-
---
--- Name: index_api_client_principals_on_api_client_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_api_client_principals_on_api_client_id ON public.api_client_principals USING btree (api_client_id);
 
---
--- Name: index_api_client_principals_on_api_client_id_and_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_api_client_principals_on_api_client_id_and_principal_id ON public.api_client_principals USING btree (api_client_id, principal_id);
-
---
--- Name: index_api_client_principals_on_default; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_api_client_principals_on_default ON public.api_client_principals USING btree (api_client_id) WHERE "default";
 
---
--- Name: index_api_client_principals_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_api_client_principals_on_principal_id ON public.api_client_principals USING btree (principal_id);
-
---
--- Name: index_api_clients_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_api_clients_on_created_by_id ON public.api_clients USING btree (created_by_id);
 
---
--- Name: index_api_clients_on_secret_digest; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_api_clients_on_secret_digest ON public.api_clients USING btree (secret_digest);
-
---
--- Name: index_api_keys_on_deleted_at; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_api_keys_on_deleted_at ON public.api_keys USING btree (deleted_at);
 
---
--- Name: index_api_keys_on_token_hash; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_api_keys_on_token_hash ON public.api_keys USING btree (token_hash);
-
---
--- Name: index_api_keys_on_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_api_keys_on_user_id ON public.api_keys USING btree (user_id);
 
---
--- Name: index_aws_auth_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_aws_auth_secrets_on_created_by_id ON public.aws_auth_secrets USING btree (created_by_id);
-
---
--- Name: index_aws_auth_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_aws_auth_secrets_on_foreign_id ON public.aws_auth_secrets USING btree (foreign_id);
 
---
--- Name: index_aws_auth_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_aws_auth_secrets_on_labels ON public.aws_auth_secrets USING gin (labels);
-
---
--- Name: index_broker_credentials_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_broker_credentials_on_created_by_id ON public.broker_credentials USING btree (created_by_id);
 
---
--- Name: index_broker_credentials_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_broker_credentials_on_foreign_id ON public.broker_credentials USING btree (foreign_id);
-
---
--- Name: index_broker_credentials_on_labels; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_broker_credentials_on_labels ON public.broker_credentials USING gin (labels);
 
---
--- Name: index_broker_credentials_on_next_attempt_at; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_broker_credentials_on_next_attempt_at ON public.broker_credentials USING btree (next_attempt_at);
-
---
--- Name: index_broker_credentials_on_oauth_app_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_broker_credentials_on_oauth_app_id ON public.broker_credentials USING btree (oauth_app_id);
 
---
--- Name: index_broker_credentials_on_oauth_app_id_and_provider_subject; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_broker_credentials_on_oauth_app_id_and_provider_subject ON public.broker_credentials USING btree (oauth_app_id, provider_subject) WHERE (provider_subject IS NOT NULL);
-
---
--- Name: index_gcp_auth_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_gcp_auth_secrets_on_created_by_id ON public.gcp_auth_secrets USING btree (created_by_id);
 
---
--- Name: index_gcp_auth_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_gcp_auth_secrets_on_foreign_id ON public.gcp_auth_secrets USING btree (foreign_id);
-
---
--- Name: index_gcp_auth_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_gcp_auth_secrets_on_labels ON public.gcp_auth_secrets USING gin (labels);
 
---
--- Name: index_gcp_id_token_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_gcp_id_token_secrets_on_created_by_id ON public.gcp_id_token_secrets USING btree (created_by_id);
-
---
--- Name: index_gcp_id_token_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_gcp_id_token_secrets_on_foreign_id ON public.gcp_id_token_secrets USING btree (foreign_id);
 
---
--- Name: index_gcp_id_token_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_gcp_id_token_secrets_on_labels ON public.gcp_id_token_secrets USING gin (labels);
-
---
--- Name: index_grants_on_aws_auth_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_grants_on_aws_auth_secret_id ON public.grants USING btree (aws_auth_secret_id);
 
---
--- Name: index_grants_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_grants_on_created_by_id ON public.grants USING btree (created_by_id);
-
---
--- Name: index_grants_on_gcp_auth_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_grants_on_gcp_auth_secret_id ON public.grants USING btree (gcp_auth_secret_id);
 
---
--- Name: index_grants_on_gcp_id_token_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_grants_on_gcp_id_token_secret_id ON public.grants USING btree (gcp_id_token_secret_id);
-
---
--- Name: index_grants_on_hmac_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_grants_on_hmac_secret_id ON public.grants USING btree (hmac_secret_id);
 
---
--- Name: index_grants_on_oauth_token_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_grants_on_oauth_token_secret_id ON public.grants USING btree (oauth_token_secret_id);
-
---
--- Name: index_grants_on_pg_dsn_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_grants_on_pg_dsn_secret_id ON public.grants USING btree (pg_dsn_secret_id);
 
---
--- Name: index_grants_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_grants_on_principal_id ON public.grants USING btree (principal_id);
-
---
--- Name: index_grants_on_role_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_grants_on_role_id ON public.grants USING btree (role_id);
 
---
--- Name: index_grants_on_ssh_key_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_grants_on_ssh_key_secret_id ON public.grants USING btree (ssh_key_secret_id);
-
---
--- Name: index_grants_on_static_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_grants_on_static_secret_id ON public.grants USING btree (static_secret_id);
 
---
--- Name: index_grants_uniq_principal_aws_auth_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_principal_aws_auth_secret ON public.grants USING btree (principal_id, aws_auth_secret_id) WHERE ((principal_id IS NOT NULL) AND (aws_auth_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_principal_gcp_auth_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_principal_gcp_auth_secret ON public.grants USING btree (principal_id, gcp_auth_secret_id) WHERE ((principal_id IS NOT NULL) AND (gcp_auth_secret_id IS NOT NULL));
 
---
--- Name: index_grants_uniq_principal_hmac_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_principal_hmac_secret ON public.grants USING btree (principal_id, hmac_secret_id) WHERE ((principal_id IS NOT NULL) AND (hmac_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_principal_oauth_token_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_principal_oauth_token_secret ON public.grants USING btree (principal_id, oauth_token_secret_id) WHERE ((principal_id IS NOT NULL) AND (oauth_token_secret_id IS NOT NULL));
 
---
--- Name: index_grants_uniq_principal_pg_dsn_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_principal_pg_dsn_secret ON public.grants USING btree (principal_id, pg_dsn_secret_id) WHERE ((principal_id IS NOT NULL) AND (pg_dsn_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_principal_ssh_key_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_principal_ssh_key_secret ON public.grants USING btree (principal_id, ssh_key_secret_id) WHERE ((principal_id IS NOT NULL) AND (ssh_key_secret_id IS NOT NULL));
 
---
--- Name: index_grants_uniq_principal_static_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_principal_static_secret ON public.grants USING btree (principal_id, static_secret_id) WHERE ((principal_id IS NOT NULL) AND (static_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_role_aws_auth_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_role_aws_auth_secret ON public.grants USING btree (role_id, aws_auth_secret_id) WHERE ((role_id IS NOT NULL) AND (aws_auth_secret_id IS NOT NULL));
 
---
--- Name: index_grants_uniq_role_gcp_auth_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_role_gcp_auth_secret ON public.grants USING btree (role_id, gcp_auth_secret_id) WHERE ((role_id IS NOT NULL) AND (gcp_auth_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_role_hmac_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_role_hmac_secret ON public.grants USING btree (role_id, hmac_secret_id) WHERE ((role_id IS NOT NULL) AND (hmac_secret_id IS NOT NULL));
 
---
--- Name: index_grants_uniq_role_oauth_token_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_role_oauth_token_secret ON public.grants USING btree (role_id, oauth_token_secret_id) WHERE ((role_id IS NOT NULL) AND (oauth_token_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_role_pg_dsn_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_role_pg_dsn_secret ON public.grants USING btree (role_id, pg_dsn_secret_id) WHERE ((role_id IS NOT NULL) AND (pg_dsn_secret_id IS NOT NULL));
 
---
--- Name: index_grants_uniq_role_ssh_key_secret; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_grants_uniq_role_ssh_key_secret ON public.grants USING btree (role_id, ssh_key_secret_id) WHERE ((role_id IS NOT NULL) AND (ssh_key_secret_id IS NOT NULL));
-
---
--- Name: index_grants_uniq_role_static_secret; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_grants_uniq_role_static_secret ON public.grants USING btree (role_id, static_secret_id) WHERE ((role_id IS NOT NULL) AND (static_secret_id IS NOT NULL));
 
---
--- Name: index_hmac_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_hmac_secrets_on_created_by_id ON public.hmac_secrets USING btree (created_by_id);
-
---
--- Name: index_hmac_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_hmac_secrets_on_foreign_id ON public.hmac_secrets USING btree (foreign_id);
 
---
--- Name: index_hmac_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_hmac_secrets_on_labels ON public.hmac_secrets USING gin (labels);
-
---
--- Name: index_mcp_oauth_authorization_codes_on_code_hash; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_mcp_oauth_authorization_codes_on_code_hash ON public.mcp_oauth_authorization_codes USING btree (code_hash);
 
---
--- Name: index_mcp_oauth_authorization_codes_on_expires_at; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_mcp_oauth_authorization_codes_on_expires_at ON public.mcp_oauth_authorization_codes USING btree (expires_at);
-
---
--- Name: index_mcp_oauth_authorization_codes_on_mcp_oauth_client_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_mcp_oauth_authorization_codes_on_mcp_oauth_client_id ON public.mcp_oauth_authorization_codes USING btree (mcp_oauth_client_id);
 
---
--- Name: index_mcp_oauth_authorization_codes_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_mcp_oauth_authorization_codes_on_principal_id ON public.mcp_oauth_authorization_codes USING btree (principal_id);
-
---
--- Name: index_mcp_oauth_authorization_codes_on_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_mcp_oauth_authorization_codes_on_user_id ON public.mcp_oauth_authorization_codes USING btree (user_id);
 
---
--- Name: index_mcp_oauth_refresh_tokens_on_expires_at; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_mcp_oauth_refresh_tokens_on_expires_at ON public.mcp_oauth_refresh_tokens USING btree (expires_at);
-
---
--- Name: index_mcp_oauth_refresh_tokens_on_mcp_oauth_client_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_mcp_oauth_refresh_tokens_on_mcp_oauth_client_id ON public.mcp_oauth_refresh_tokens USING btree (mcp_oauth_client_id);
 
---
--- Name: index_mcp_oauth_refresh_tokens_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_mcp_oauth_refresh_tokens_on_principal_id ON public.mcp_oauth_refresh_tokens USING btree (principal_id);
-
---
--- Name: index_mcp_oauth_refresh_tokens_on_token_hash; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_mcp_oauth_refresh_tokens_on_token_hash ON public.mcp_oauth_refresh_tokens USING btree (token_hash);
 
---
--- Name: index_mcp_oauth_refresh_tokens_on_user_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_mcp_oauth_refresh_tokens_on_user_id ON public.mcp_oauth_refresh_tokens USING btree (user_id);
-
---
--- Name: index_oauth_apps_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_oauth_apps_on_created_by_id ON public.oauth_apps USING btree (created_by_id);
 
---
--- Name: index_oauth_apps_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_oauth_apps_on_labels ON public.oauth_apps USING gin (labels);
-
---
--- Name: index_oauth_apps_on_slug; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_oauth_apps_on_slug ON public.oauth_apps USING btree (slug);
 
---
--- Name: index_oauth_token_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_oauth_token_secrets_on_created_by_id ON public.oauth_token_secrets USING btree (created_by_id);
-
---
--- Name: index_oauth_token_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_oauth_token_secrets_on_foreign_id ON public.oauth_token_secrets USING btree (foreign_id);
 
---
--- Name: index_oauth_token_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_oauth_token_secrets_on_labels ON public.oauth_token_secrets USING gin (labels);
-
---
--- Name: index_pg_dsn_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_pg_dsn_secrets_on_created_by_id ON public.pg_dsn_secrets USING btree (created_by_id);
 
---
--- Name: index_pg_dsn_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_pg_dsn_secrets_on_foreign_id ON public.pg_dsn_secrets USING btree (foreign_id);
-
---
--- Name: index_pg_dsn_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_pg_dsn_secrets_on_labels ON public.pg_dsn_secrets USING gin (labels);
 
---
--- Name: index_principal_roles_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principal_roles_on_principal_id ON public.principal_roles USING btree (principal_id);
-
---
--- Name: index_principal_roles_on_principal_id_and_role_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_principal_roles_on_principal_id_and_role_id ON public.principal_roles USING btree (principal_id, role_id);
 
---
--- Name: index_principal_roles_on_role_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principal_roles_on_role_id ON public.principal_roles USING btree (role_id);
-
---
--- Name: index_principal_sync_config_snapshots_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_principal_sync_config_snapshots_on_principal_id ON public.principal_sync_config_snapshots USING btree (principal_id);
 
---
--- Name: index_principal_sync_config_snapshots_on_updated_at; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principal_sync_config_snapshots_on_updated_at ON public.principal_sync_config_snapshots USING btree (updated_at);
-
---
--- Name: index_principals_on_console_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_principals_on_console_user_id ON public.principals USING btree (console_user_id);
 
---
--- Name: index_principals_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principals_on_created_by_id ON public.principals USING btree (created_by_id);
-
---
--- Name: index_principals_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_principals_on_foreign_id ON public.principals USING btree (foreign_id);
 
---
--- Name: index_principals_on_kind; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principals_on_kind ON public.principals USING btree (kind);
-
---
--- Name: index_principals_on_labels; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_principals_on_labels ON public.principals USING gin (labels);
 
---
--- Name: index_principals_on_slack_channel_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principals_on_slack_channel_id ON public.principals USING btree (slack_channel_id);
-
---
--- Name: index_principals_on_slack_email; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_principals_on_slack_email ON public.principals USING btree (slack_email);
 
---
--- Name: index_principals_on_slack_team_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_principals_on_slack_team_id ON public.principals USING btree (slack_team_id);
-
---
--- Name: index_principals_on_slack_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_principals_on_slack_user_id ON public.principals USING btree (slack_user_id);
 
---
--- Name: index_proxies_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_proxies_on_labels ON public.proxies USING gin (labels);
-
---
--- Name: index_proxies_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_proxies_on_principal_id ON public.proxies USING btree (principal_id);
 
---
--- Name: index_proxies_on_requester_principal_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_proxies_on_requester_principal_id ON public.proxies USING btree (requester_principal_id);
-
---
--- Name: index_request_rules_on_aws_auth_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_request_rules_on_aws_auth_secret_id ON public.request_rules USING btree (aws_auth_secret_id);
 
---
--- Name: index_request_rules_on_gcp_auth_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_request_rules_on_gcp_auth_secret_id ON public.request_rules USING btree (gcp_auth_secret_id);
-
---
--- Name: index_request_rules_on_gcp_id_token_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_request_rules_on_gcp_id_token_secret_id ON public.request_rules USING btree (gcp_id_token_secret_id);
 
---
--- Name: index_request_rules_on_hmac_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_request_rules_on_hmac_secret_id ON public.request_rules USING btree (hmac_secret_id);
-
---
--- Name: index_request_rules_on_host; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_request_rules_on_host ON public.request_rules USING btree (host);
 
---
--- Name: index_request_rules_on_oauth_token_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_request_rules_on_oauth_token_secret_id ON public.request_rules USING btree (oauth_token_secret_id);
-
---
--- Name: index_request_rules_on_position; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_request_rules_on_position ON public.request_rules USING btree ("position");
 
---
--- Name: index_request_rules_on_static_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_request_rules_on_static_secret_id ON public.request_rules USING btree (static_secret_id);
-
---
--- Name: index_roles_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_roles_on_created_by_id ON public.roles USING btree (created_by_id);
 
---
--- Name: index_roles_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_roles_on_foreign_id ON public.roles USING btree (foreign_id);
-
---
--- Name: index_roles_on_labels; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_roles_on_labels ON public.roles USING gin (labels);
 
---
--- Name: index_scheduled_tasks_on_author_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_scheduled_tasks_on_author_id ON public.scheduled_tasks USING btree (author_id);
-
---
--- Name: index_scheduled_tasks_on_author_id_and_name; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_scheduled_tasks_on_author_id_and_name ON public.scheduled_tasks USING btree (author_id, name);
 
---
--- Name: index_scheduled_tasks_on_enabled_and_next_run_at; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_scheduled_tasks_on_enabled_and_next_run_at ON public.scheduled_tasks USING btree (enabled, next_run_at);
-
---
--- Name: index_scheduled_tasks_on_principal_id_and_name; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_scheduled_tasks_on_principal_id_and_name ON public.scheduled_tasks USING btree (principal_id, name);
 
---
--- Name: index_secret_sources_on_aws_auth_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_secret_sources_on_aws_auth_secret_id ON public.secret_sources USING btree (aws_auth_secret_id);
-
---
--- Name: index_secret_sources_on_aws_owner_and_role; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_secret_sources_on_aws_owner_and_role ON public.secret_sources USING btree (aws_auth_secret_id, role, role_kind);
 
---
--- Name: index_secret_sources_on_broker_credential_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_secret_sources_on_broker_credential_id ON public.secret_sources USING btree (broker_credential_id);
-
---
--- Name: index_secret_sources_on_gcp_auth_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_secret_sources_on_gcp_auth_secret_id ON public.secret_sources USING btree (gcp_auth_secret_id);
 
---
--- Name: index_secret_sources_on_gcp_id_token_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_secret_sources_on_gcp_id_token_secret_id ON public.secret_sources USING btree (gcp_id_token_secret_id);
-
---
--- Name: index_secret_sources_on_hmac_owner_and_role; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_secret_sources_on_hmac_owner_and_role ON public.secret_sources USING btree (hmac_secret_id, role, role_kind);
 
---
--- Name: index_secret_sources_on_hmac_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_secret_sources_on_hmac_secret_id ON public.secret_sources USING btree (hmac_secret_id);
-
---
--- Name: index_secret_sources_on_oauth_owner_and_role; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_secret_sources_on_oauth_owner_and_role ON public.secret_sources USING btree (oauth_token_secret_id, role, role_kind);
 
---
--- Name: index_secret_sources_on_oauth_token_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_secret_sources_on_oauth_token_secret_id ON public.secret_sources USING btree (oauth_token_secret_id);
-
---
--- Name: index_secret_sources_on_pg_dsn_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_secret_sources_on_pg_dsn_secret_id ON public.secret_sources USING btree (pg_dsn_secret_id);
 
---
--- Name: index_secret_sources_on_source_type; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_secret_sources_on_source_type ON public.secret_sources USING btree (source_type);
-
---
--- Name: index_secret_sources_on_ssh_key_secret_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_secret_sources_on_ssh_key_secret_id ON public.secret_sources USING btree (ssh_key_secret_id);
 
---
--- Name: index_secret_sources_on_static_secret_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_secret_sources_on_static_secret_id ON public.secret_sources USING btree (static_secret_id);
-
---
--- Name: index_skill_editors_on_skill_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_skill_editors_on_skill_id ON public.skill_editors USING btree (skill_id);
 
---
--- Name: index_skill_editors_on_skill_id_and_user_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_skill_editors_on_skill_id_and_user_id ON public.skill_editors USING btree (skill_id, user_id);
-
---
--- Name: index_skill_editors_on_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_skill_editors_on_user_id ON public.skill_editors USING btree (user_id);
 
---
--- Name: index_skills_on_search_vector; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_skills_on_search_vector ON public.skills USING gin (search_vector);
-
---
--- Name: index_skills_on_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_skills_on_user_id ON public.skills USING btree (user_id);
 
---
--- Name: index_slack_bot_channels_for_catalog_search; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_slack_bot_channels_for_catalog_search ON public.slack_bot_channels USING btree (team_id, active, name);
-
---
--- Name: index_slack_bot_channels_on_member_user_ids; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_slack_bot_channels_on_member_user_ids ON public.slack_bot_channels USING gin (member_user_ids);
 
---
--- Name: index_slack_bot_channels_on_team_id_and_channel_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_slack_bot_channels_on_team_id_and_channel_id ON public.slack_bot_channels USING btree (team_id, channel_id);
-
---
--- Name: index_slack_channel_permissions_on_principal_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_slack_channel_permissions_on_principal_id ON public.slack_channel_permissions USING btree (principal_id);
 
---
--- Name: index_slack_dm_sync_cursors_on_oauth_app_slug; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_slack_dm_sync_cursors_on_oauth_app_slug ON public.slack_dm_sync_cursors USING btree (oauth_app_slug);
-
---
--- Name: index_ssh_key_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_ssh_key_secrets_on_created_by_id ON public.ssh_key_secrets USING btree (created_by_id);
 
---
--- Name: index_ssh_key_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_ssh_key_secrets_on_foreign_id ON public.ssh_key_secrets USING btree (foreign_id);
-
---
--- Name: index_ssh_key_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_ssh_key_secrets_on_labels ON public.ssh_key_secrets USING gin (labels);
 
---
--- Name: index_ssh_key_secrets_on_owner_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_ssh_key_secrets_on_owner_id ON public.ssh_key_secrets USING btree (owner_id);
-
---
--- Name: index_static_secrets_on_broker_credential_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_static_secrets_on_broker_credential_id ON public.static_secrets USING btree (broker_credential_id) WHERE (broker_credential_id IS NOT NULL);
 
---
--- Name: index_static_secrets_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_static_secrets_on_created_by_id ON public.static_secrets USING btree (created_by_id);
-
---
--- Name: index_static_secrets_on_foreign_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_static_secrets_on_foreign_id ON public.static_secrets USING btree (foreign_id);
 
---
--- Name: index_static_secrets_on_labels; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_static_secrets_on_labels ON public.static_secrets USING gin (labels);
-
---
--- Name: index_system_settings_on_singleton; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_system_settings_on_singleton ON public.system_settings USING btree (singleton);
 
---
--- Name: index_thread_shares_on_created_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_thread_shares_on_created_by_id ON public.thread_shares USING btree (created_by_id);
-
---
--- Name: index_thread_shares_on_thread_key; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE UNIQUE INDEX index_thread_shares_on_thread_key ON public.thread_shares USING btree (thread_key);
 
---
--- Name: index_user_identities_on_provider_and_subject; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_user_identities_on_provider_and_subject ON public.user_identities USING btree (provider, subject);
-
---
--- Name: index_user_identities_on_user_id; Type: INDEX; Schema: public; Owner: -
---
 
 CREATE INDEX index_user_identities_on_user_id ON public.user_identities USING btree (user_id);
 
---
--- Name: index_users_on_approved_by_id; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE INDEX index_users_on_approved_by_id ON public.users USING btree (approved_by_id);
 
---
--- Name: index_users_on_email; Type: INDEX; Schema: public; Owner: -
---
-
 CREATE UNIQUE INDEX index_users_on_email ON public.users USING btree (email);
-
---
--- Name: proxies fk_rails_0249dfcf26; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.proxies
     ADD CONSTRAINT fk_rails_0249dfcf26 FOREIGN KEY (principal_id) REFERENCES public.principals(id) ON DELETE SET NULL;
 
---
--- Name: oauth_apps fk_rails_0c732e29b9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.oauth_apps
     ADD CONSTRAINT fk_rails_0c732e29b9 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: grants fk_rails_121a65684e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_121a65684e FOREIGN KEY (pg_dsn_secret_id) REFERENCES public.pg_dsn_secrets(id);
 
---
--- Name: principal_sync_config_snapshots fk_rails_24cd97e7f7; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.principal_sync_config_snapshots
     ADD CONSTRAINT fk_rails_24cd97e7f7 FOREIGN KEY (principal_id) REFERENCES public.principals(id) ON DELETE CASCADE;
-
---
--- Name: proxies fk_rails_2687c74a2d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.proxies
     ADD CONSTRAINT fk_rails_2687c74a2d FOREIGN KEY (requester_principal_id) REFERENCES public.principals(id) ON DELETE SET NULL;
 
---
--- Name: skill_editors fk_rails_29394caa42; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.skill_editors
     ADD CONSTRAINT fk_rails_29394caa42 FOREIGN KEY (skill_id) REFERENCES public.skills(id) ON DELETE CASCADE;
-
---
--- Name: principal_roles fk_rails_2b32784326; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.principal_roles
     ADD CONSTRAINT fk_rails_2b32784326 FOREIGN KEY (principal_id) REFERENCES public.principals(id);
 
---
--- Name: scheduled_tasks fk_rails_2e60f66b0e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.scheduled_tasks
     ADD CONSTRAINT fk_rails_2e60f66b0e FOREIGN KEY (principal_id) REFERENCES public.principals(id) ON DELETE CASCADE;
-
---
--- Name: principal_roles fk_rails_311fdbffc1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.principal_roles
     ADD CONSTRAINT fk_rails_311fdbffc1 FOREIGN KEY (role_id) REFERENCES public.roles(id);
 
---
--- Name: hmac_secrets fk_rails_315f80fdf9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.hmac_secrets
     ADD CONSTRAINT fk_rails_315f80fdf9 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: api_keys fk_rails_32c28d0dc2; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_keys
     ADD CONSTRAINT fk_rails_32c28d0dc2 FOREIGN KEY (user_id) REFERENCES public.users(id);
 
---
--- Name: mcp_oauth_authorization_codes fk_rails_35c88d1d71; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_authorization_codes
     ADD CONSTRAINT fk_rails_35c88d1d71 FOREIGN KEY (user_id) REFERENCES public.users(id);
-
---
--- Name: ssh_key_secrets fk_rails_35e6b63ea0; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.ssh_key_secrets
     ADD CONSTRAINT fk_rails_35e6b63ea0 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
 
---
--- Name: grants fk_rails_40e2a762e1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_40e2a762e1 FOREIGN KEY (gcp_auth_secret_id) REFERENCES public.gcp_auth_secrets(id);
-
---
--- Name: grants fk_rails_431f3f478c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_431f3f478c FOREIGN KEY (aws_auth_secret_id) REFERENCES public.aws_auth_secrets(id);
 
---
--- Name: mcp_oauth_refresh_tokens fk_rails_4e98ce39f4; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_refresh_tokens
     ADD CONSTRAINT fk_rails_4e98ce39f4 FOREIGN KEY (principal_id) REFERENCES public.principals(id);
-
---
--- Name: static_secrets fk_rails_5b9195e659; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.static_secrets
     ADD CONSTRAINT fk_rails_5b9195e659 FOREIGN KEY (broker_credential_id) REFERENCES public.broker_credentials(id);
 
---
--- Name: grants fk_rails_6040cb3833; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_6040cb3833 FOREIGN KEY (ssh_key_secret_id) REFERENCES public.ssh_key_secrets(id);
-
---
--- Name: grants fk_rails_65c1988a7d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_65c1988a7d FOREIGN KEY (hmac_secret_id) REFERENCES public.hmac_secrets(id);
 
---
--- Name: secret_sources fk_rails_668a6af06d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_668a6af06d FOREIGN KEY (hmac_secret_id) REFERENCES public.hmac_secrets(id);
-
---
--- Name: user_identities fk_rails_684b0e1ce0; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.user_identities
     ADD CONSTRAINT fk_rails_684b0e1ce0 FOREIGN KEY (user_id) REFERENCES public.users(id);
 
---
--- Name: request_rules fk_rails_69446ec607; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT fk_rails_69446ec607 FOREIGN KEY (oauth_token_secret_id) REFERENCES public.oauth_token_secrets(id);
-
---
--- Name: oauth_token_secrets fk_rails_72dd4117e4; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.oauth_token_secrets
     ADD CONSTRAINT fk_rails_72dd4117e4 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
 
---
--- Name: pg_dsn_secrets fk_rails_7904547f12; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.pg_dsn_secrets
     ADD CONSTRAINT fk_rails_7904547f12 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: mcp_oauth_authorization_codes fk_rails_79417c451c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.mcp_oauth_authorization_codes
     ADD CONSTRAINT fk_rails_79417c451c FOREIGN KEY (principal_id) REFERENCES public.principals(id);
 
---
--- Name: secret_sources fk_rails_7a590ca964; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_7a590ca964 FOREIGN KEY (broker_credential_id) REFERENCES public.broker_credentials(id);
-
---
--- Name: grants fk_rails_7bfa0edf5a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_7bfa0edf5a FOREIGN KEY (created_by_id) REFERENCES public.users(id);
 
---
--- Name: principals fk_rails_7e008279c6; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.principals
     ADD CONSTRAINT fk_rails_7e008279c6 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: secret_sources fk_rails_7e69f0a486; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_7e69f0a486 FOREIGN KEY (ssh_key_secret_id) REFERENCES public.ssh_key_secrets(id);
 
---
--- Name: request_rules fk_rails_7fc7100131; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT fk_rails_7fc7100131 FOREIGN KEY (gcp_id_token_secret_id) REFERENCES public.gcp_id_token_secrets(id);
-
---
--- Name: request_rules fk_rails_7ffd24332a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT fk_rails_7ffd24332a FOREIGN KEY (aws_auth_secret_id) REFERENCES public.aws_auth_secrets(id);
 
---
--- Name: gcp_id_token_secrets fk_rails_82cbf74a22; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.gcp_id_token_secrets
     ADD CONSTRAINT fk_rails_82cbf74a22 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: skill_editors fk_rails_877359093c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.skill_editors
     ADD CONSTRAINT fk_rails_877359093c FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
---
--- Name: principals fk_rails_8906815923; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.principals
     ADD CONSTRAINT fk_rails_8906815923 FOREIGN KEY (console_user_id) REFERENCES public.users(id);
-
---
--- Name: api_clients fk_rails_8d552db7a9; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_clients
     ADD CONSTRAINT fk_rails_8d552db7a9 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
 
---
--- Name: ssh_key_secrets fk_rails_8daf98de8d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.ssh_key_secrets
     ADD CONSTRAINT fk_rails_8daf98de8d FOREIGN KEY (owner_id) REFERENCES public.users(id);
-
---
--- Name: request_rules fk_rails_8f1359f70b; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT fk_rails_8f1359f70b FOREIGN KEY (static_secret_id) REFERENCES public.static_secrets(id);
 
---
--- Name: thread_shares fk_rails_95b08f75a8; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.thread_shares
     ADD CONSTRAINT fk_rails_95b08f75a8 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: api_client_principals fk_rails_9aeeaf3eac; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.api_client_principals
     ADD CONSTRAINT fk_rails_9aeeaf3eac FOREIGN KEY (principal_id) REFERENCES public.principals(id) ON DELETE CASCADE;
 
---
--- Name: users fk_rails_9c2d7e0c9d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT fk_rails_9c2d7e0c9d FOREIGN KEY (approved_by_id) REFERENCES public.users(id);
-
---
--- Name: secret_sources fk_rails_9e8ad7acb6; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_9e8ad7acb6 FOREIGN KEY (pg_dsn_secret_id) REFERENCES public.pg_dsn_secrets(id);
 
---
--- Name: broker_credentials fk_rails_a262ab2994; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.broker_credentials
     ADD CONSTRAINT fk_rails_a262ab2994 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: grants fk_rails_a6619a068a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_a6619a068a FOREIGN KEY (oauth_token_secret_id) REFERENCES public.oauth_token_secrets(id);
 
---
--- Name: grants fk_rails_a6a4a8fae5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_a6a4a8fae5 FOREIGN KEY (gcp_id_token_secret_id) REFERENCES public.gcp_id_token_secrets(id);
-
---
--- Name: broker_credentials fk_rails_aa788a2818; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.broker_credentials
     ADD CONSTRAINT fk_rails_aa788a2818 FOREIGN KEY (oauth_app_id) REFERENCES public.oauth_apps(id);
 
---
--- Name: scheduled_tasks fk_rails_b1ee27eb77; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.scheduled_tasks
     ADD CONSTRAINT fk_rails_b1ee27eb77 FOREIGN KEY (author_id) REFERENCES public.users(id);
-
---
--- Name: secret_sources fk_rails_b3affc42c6; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_b3affc42c6 FOREIGN KEY (oauth_token_secret_id) REFERENCES public.oauth_token_secrets(id);
 
---
--- Name: roles fk_rails_b41292c88f; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.roles
     ADD CONSTRAINT fk_rails_b41292c88f FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: slack_channel_permissions fk_rails_b4f21843d1; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.slack_channel_permissions
     ADD CONSTRAINT fk_rails_b4f21843d1 FOREIGN KEY (principal_id) REFERENCES public.principals(id);
 
---
--- Name: request_rules fk_rails_b6a1124766; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT fk_rails_b6a1124766 FOREIGN KEY (gcp_auth_secret_id) REFERENCES public.gcp_auth_secrets(id);
-
---
--- Name: static_secrets fk_rails_bc4c3626b5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.static_secrets
     ADD CONSTRAINT fk_rails_bc4c3626b5 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
 
---
--- Name: grants fk_rails_d0310fc055; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_d0310fc055 FOREIGN KEY (principal_id) REFERENCES public.principals(id);
-
---
--- Name: secret_sources fk_rails_d394328dc5; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_d394328dc5 FOREIGN KEY (gcp_auth_secret_id) REFERENCES public.gcp_auth_secrets(id);
 
---
--- Name: api_client_principals fk_rails_dbf3ab030a; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.api_client_principals
     ADD CONSTRAINT fk_rails_dbf3ab030a FOREIGN KEY (api_client_id) REFERENCES public.api_clients(id) ON DELETE CASCADE;
-
---
--- Name: slack_channel_permissions fk_rails_deca4f5e0e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.slack_channel_permissions
     ADD CONSTRAINT fk_rails_deca4f5e0e FOREIGN KEY (role_id) REFERENCES public.roles(id);
 
---
--- Name: mcp_oauth_refresh_tokens fk_rails_e12f95ca21; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_refresh_tokens
     ADD CONSTRAINT fk_rails_e12f95ca21 FOREIGN KEY (mcp_oauth_client_id) REFERENCES public.mcp_oauth_clients(id);
-
---
--- Name: secret_sources fk_rails_e20a7e8e88; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_e20a7e8e88 FOREIGN KEY (static_secret_id) REFERENCES public.static_secrets(id);
 
---
--- Name: secret_sources fk_rails_ea35bb0efc; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_ea35bb0efc FOREIGN KEY (aws_auth_secret_id) REFERENCES public.aws_auth_secrets(id);
-
---
--- Name: skills fk_rails_ee47b87d76; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.skills
     ADD CONSTRAINT fk_rails_ee47b87d76 FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
---
--- Name: grants fk_rails_f20ac87bff; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_f20ac87bff FOREIGN KEY (static_secret_id) REFERENCES public.static_secrets(id);
-
---
--- Name: mcp_oauth_refresh_tokens fk_rails_f2f9692a8e; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.mcp_oauth_refresh_tokens
     ADD CONSTRAINT fk_rails_f2f9692a8e FOREIGN KEY (user_id) REFERENCES public.users(id);
 
---
--- Name: gcp_auth_secrets fk_rails_f52493e07c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.gcp_auth_secrets
     ADD CONSTRAINT fk_rails_f52493e07c FOREIGN KEY (created_by_id) REFERENCES public.users(id);
-
---
--- Name: aws_auth_secrets fk_rails_f59f8ceaa7; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.aws_auth_secrets
     ADD CONSTRAINT fk_rails_f59f8ceaa7 FOREIGN KEY (created_by_id) REFERENCES public.users(id);
 
---
--- Name: request_rules fk_rails_f6134f4c3c; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.request_rules
     ADD CONSTRAINT fk_rails_f6134f4c3c FOREIGN KEY (hmac_secret_id) REFERENCES public.hmac_secrets(id);
-
---
--- Name: grants fk_rails_f76a299f8d; Type: FK CONSTRAINT; Schema: public; Owner: -
---
 
 ALTER TABLE ONLY public.grants
     ADD CONSTRAINT fk_rails_f76a299f8d FOREIGN KEY (role_id) REFERENCES public.roles(id);
 
---
--- Name: mcp_oauth_authorization_codes fk_rails_fa3183ab35; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.mcp_oauth_authorization_codes
     ADD CONSTRAINT fk_rails_fa3183ab35 FOREIGN KEY (mcp_oauth_client_id) REFERENCES public.mcp_oauth_clients(id);
 
---
--- Name: secret_sources fk_rails_fec4e94bcd; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
 ALTER TABLE ONLY public.secret_sources
     ADD CONSTRAINT fk_rails_fec4e94bcd FOREIGN KEY (gcp_id_token_secret_id) REFERENCES public.gcp_id_token_secrets(id);
-
 
 INSERT INTO public.schema_migrations (version) VALUES
     ('20260527035805'),

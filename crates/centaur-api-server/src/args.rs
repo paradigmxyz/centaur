@@ -851,26 +851,9 @@ pub(crate) struct MigrateArgs {
     /// backend the database was first migrated with.
     #[arg(long, value_parser = TextSearchBackend::from_str)]
     pub(crate) text_search: TextSearchBackend,
-    /// Postgres URL of the Console database to migrate as well. Same password
-    /// advice as `--database-url`.
-    #[arg(long)]
-    pub(crate) console_database_url: Option<String>,
 }
 
 impl MigrateArgs {
-    /// A writable pool for `--console-database-url`, when given.
-    pub(crate) fn console_db(&self) -> Result<Option<PgPool>, ServerError> {
-        let Some(url) = non_empty(self.console_database_url.as_deref()) else {
-            return Ok(None);
-        };
-        let options = console_write_db_options(url, None)?;
-        Ok(Some(
-            PgPoolOptions::new()
-                .max_connections(1)
-                .connect_lazy_with(options),
-        ))
-    }
-
     /// Parse `migrate` arguments when the command line starts with `migrate`.
     pub(crate) fn from_command_line() -> Option<Self> {
         if env::args_os().nth(1)? != "migrate" {
@@ -2911,22 +2894,6 @@ mod tests {
         .expect("migrate flags parse");
         assert_eq!(args.database_url, "postgres://flag.example/centaur");
         assert_eq!(args.text_search, TextSearchBackend::Paradedb);
-        assert_eq!(args.console_database_url, None);
-
-        let args = MigrateArgs::try_parse_from([
-            "migrate",
-            "--database-url",
-            "postgres://flag.example/centaur",
-            "--text-search",
-            "paradedb",
-            "--console-database-url",
-            "postgres://flag.example/console",
-        ])
-        .expect("migrate flags parse");
-        assert_eq!(
-            args.console_database_url.as_deref(),
-            Some("postgres://flag.example/console")
-        );
 
         for missing in [
             vec!["migrate", "--text-search", "postgres"],

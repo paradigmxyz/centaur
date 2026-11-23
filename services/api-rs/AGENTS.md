@@ -59,7 +59,7 @@ backend directory; add a no-op migration where a backend has nothing to change.
 
 The Console database has its own migrations in
 `crates/centaur-console-db/migrations`, applied by `centaur_console_db::migrate`
-at startup and by `centaur-api-server migrate --console-database-url`. The first
+on every start, independent of `RUN_MIGRATIONS`. The first
 is a baseline of the schema Rails last produced; `migrate` adopts it on a
 database Rails migrated and refuses one Rails left behind. Add Console changes
 as the next numbered file there, not as Rails migrations, and prepare a test
