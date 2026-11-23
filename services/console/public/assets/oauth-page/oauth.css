@@ -1,6 +1,6 @@
 /*
- * Styles for the server-rendered pages (layouts/oauth.html.erb), served from
- * public/ with no asset pipeline. Colours mirror web/src/index.css.
+ * Styles for the server-rendered Console pages (api-rs console/pages.rs),
+ * embedded by api-rs and served under /assets/oauth-page. Colours mirror web/src/index.css.
  */
 
 @font-face {

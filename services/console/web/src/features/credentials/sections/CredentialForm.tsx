@@ -98,7 +98,7 @@ export function defaultValues(credential?: BrokerCredential): CredentialFormValu
     client_secret: "",
     scopes: (credential?.scopes ?? []).join("\n"),
     headers: (credential?.token_endpoint_header_names ?? []).map((name) => ({ key: name, value: "", stored: name })),
-    // BrokerCredential column defaults for a new record.
+    // Broker credential column defaults for a new record.
     early_refresh_fraction: String(credential?.early_refresh_fraction ?? 0.2),
     early_refresh_slack_seconds: String(credential?.early_refresh_slack_seconds ?? 300),
     max_refresh_interval_seconds: String(credential?.max_refresh_interval_seconds ?? 86400),

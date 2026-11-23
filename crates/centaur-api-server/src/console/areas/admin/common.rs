@@ -76,9 +76,9 @@ pub(crate) fn oid<M: ConsoleModel>(oid: &str) -> Result<i64, ConsoleError> {
 
 pub(crate) use crate::console::request::nullable_field;
 
-// Rails' `String#blank?` for a required string attribute lives in the garde
-// rules (`centaur_console_db::validation::rules`), which report it as the
-// model's `can't be blank` message.
+// The blank check for a required string attribute lives in the garde rules
+// (`centaur_console_db::validation::rules`), which report it as the
+// `can't be blank` message.
 
 /// The `details` keys a request body is rejected under, or `None` when it
 /// passes, sorted so a test does not pin report order.

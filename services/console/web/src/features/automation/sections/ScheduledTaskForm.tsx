@@ -17,7 +17,6 @@ import { cn } from "@/lib/utils";
 
 import { deliveryChannelLoader, type ScheduledTask, type ScheduledTaskInput, type SchedulePreset } from "../api";
 
-// ScheduledTask::SCHEDULE_PRESET_LABELS + Custom.
 export const SCHEDULE_PRESET_OPTIONS: { value: SchedulePreset; label: string }[] = [
   { value: "manual", label: "Manual only" },
   { value: "daily", label: "Every day" },
@@ -27,7 +26,7 @@ export const SCHEDULE_PRESET_OPTIONS: { value: SchedulePreset; label: string }[]
   { value: "custom", label: "Custom" },
 ];
 
-// ScheduledTask::CUSTOM_SCHEDULE_DAYS (cron weekday values, Sunday last).
+// Cron weekday values, Sunday last.
 export const CUSTOM_DAYS: [string, string][] = [
   ["Mon", "1"],
   ["Tue", "2"],

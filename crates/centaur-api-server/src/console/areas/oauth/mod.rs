@@ -3,12 +3,6 @@
 //! Console area: OAuth apps, broker credentials, integrations, providers, and
 //! the server-rendered consent flow.
 //!
-//! The Rails behavior lives in `Api::V1::OauthAppsController`,
-//! `Api::V1::BrokerCredentialsController`, their `Console::` subclasses,
-//! `Console::OauthProvidersController`, `Console::IntegrationsController`, the
-//! sandbox OAuth apps index, and `Oauth::FlowsController`, plus the
-//! `Oauth::Providers`/`Oauth::Presets` libraries they use.
-//!
 //! The record routes use the shared abstractions: typed payload structs, the
 //! model descriptors' lookups and 404s, `console::http::list`, `FieldErrors`,
 //! and `ConsoleError` with `?`.
@@ -33,8 +27,7 @@ pub(super) fn error_keys(errors: centaur_console_db::FieldErrors) -> Vec<String>
     keys
 }
 
-/// Tests replace Slack's API origin with a loopback mock, like Rails'
-/// `EnrichCredentialIdentityJob.slack_api_http` and exchange-client doubles.
+/// Tests replace Slack's API origin with a loopback mock.
 #[cfg(test)]
 pub(super) static SLACK_API_BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -159,7 +152,7 @@ pub(crate) fn pages(router: Router<AppState>) -> Router<AppState> {
         .route("/oauth/{slug}/callback", get(flow::callback))
 }
 
-/// Rails' blank?: an empty or whitespace-only string.
+/// An empty or whitespace-only string.
 pub(super) fn blank(value: &str) -> bool {
     value.trim().is_empty()
 }
@@ -174,8 +167,8 @@ pub(super) fn label_filter(params: &ListParams) -> Option<sqlx::types::Json<Valu
     ))))
 }
 
-/// garde rule for a required `String` field: ActiveModel's presence check, which
-/// also rejects a value of only whitespace.
+/// garde rule for a required `String` field: rejects an empty value and one of
+/// only whitespace.
 pub(super) fn present(value: &str, _: &()) -> garde::Result {
     if blank(value) {
         Err(garde::Error::new("can't be blank"))
@@ -187,7 +180,7 @@ pub(super) fn present(value: &str, _: &()) -> garde::Result {
 /// One body field, distinguishing an absent key from an explicit JSON null.
 ///
 /// `null` clears a nullable scalar and is ignored for a hash/array filter, the
-/// same two cases Rails' strong parameters produce; a value of the wrong type
+/// same two cases; a value of the wrong type
 /// is a validation error from the typed extractor instead of a silent cast.
 #[derive(Clone, Debug, Default)]
 pub(super) enum Patch<T> {

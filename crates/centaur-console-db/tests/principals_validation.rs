@@ -7,8 +7,7 @@
 //!
 //! These tests pin what the write paths accept and reject: the field rules are
 //! `garde` validators on the request, while `foreign_id` uniqueness, a stored
-//! non-hash `labels`, and Rails' `will_save_change_to_*` conditions stay in the
-//! write path.
+//! non-hash `labels`, and the changed-field conditions stay in the write path.
 
 use centaur_console_db::{
     areas::principals::{
@@ -181,7 +180,7 @@ async fn a_principal_write_rejects_every_failing_field() {
     fixture.cleanup().await;
 }
 
-/// Rails re-validates a formatted field only when the save changes it, so an
+/// A formatted field is re-validated only when the save changes it, so an
 /// unrelated update of a row that already holds an unformatted value succeeds.
 #[tokio::test]
 async fn an_update_only_revalidates_the_fields_it_changes() {
@@ -246,10 +245,10 @@ async fn an_update_only_revalidates_the_fields_it_changes() {
     fixture.cleanup().await;
 }
 
-/// Rails' `link_console_user_by_slack_email` runs only when the upsert body
-/// carries `slack_email`: a `slack_dm` principal is linked when that explicit
-/// email matches a Console user, an explicit non-matching email clears the
-/// link, and an omitted (or blank) email leaves the stored link alone.
+/// Linking a console user by Slack email runs only when the upsert body carries
+/// `slack_email`: a `slack_dm` principal is linked when that explicit email
+/// matches a Console user, an explicit non-matching email clears the link, and
+/// an omitted (or blank) email leaves the stored link alone.
 #[tokio::test]
 async fn a_slack_dm_upsert_links_console_user_only_from_an_explicit_email() {
     let Some(fixture) = Fixture::new().await else {
@@ -316,7 +315,7 @@ async fn a_slack_dm_upsert_links_console_user_only_from_an_explicit_email() {
     .unwrap();
     assert_eq!(view.row.console_user_id, Some(fixture.user_id));
 
-    // An explicit null (or blank) email is not `present?`, so it keeps the link.
+    // An explicit null (or blank) email is blank, so it keeps the link.
     let (view, _) = upsert_principal(
         &fixture.pool,
         &foreign_id,
@@ -474,7 +473,7 @@ async fn permission_rows_are_validated_after_normalization() {
     .unwrap_err();
     assert_eq!(keys(errors), ["base", "channel_id"]);
 
-    // Only the first failing row is reported, as Rails renders one record.
+    // Only the first failing row is reported: the payload renders one record.
     let errors = replace_slack_channel_permissions(
         &fixture.pool,
         owner,

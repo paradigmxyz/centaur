@@ -6,19 +6,12 @@ on:
   push:
     branches: [ main ]
 
-defaults:
-  run:
-    working-directory: services/console
-
 jobs:
   console_changes:
     name: Detect Console CI changes
     runs-on: depot-ubuntu-24.04
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
-    defaults:
-      run:
-        working-directory: .
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,7 +32,7 @@ jobs:
             changed_files="$(git diff --name-only origin/main...HEAD)"
           fi
 
-          if printf '%s\n' "${changed_files}" | grep -Eq '^(services/console/|crates/centaur-token-broker/providers\.json$|\.github/workflows/console-ci\.yml$|pnpm-lock\.yaml$|package\.json$|pnpm-workspace\.yaml$)'; then
+          if printf '%s\n' "${changed_files}" | grep -Eq '^(services/console/|\.github/workflows/console-ci\.yml$|pnpm-lock\.yaml$|package\.json$|pnpm-workspace\.yaml$)'; then
             echo "relevant=true" >>"${GITHUB_OUTPUT}"
           else
             echo "relevant=false" >>"${GITHUB_OUTPUT}"
@@ -83,117 +76,6 @@ jobs:
       - name: Build
         run: pnpm build
 
-  scan_ruby:
-    runs-on: depot-ubuntu-24.04
-    needs: console_changes
-    if: needs.console_changes.outputs.relevant == 'true'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
-      - name: Scan for common Rails security vulnerabilities using static analysis
-        run: |
-          # --ensure-latest (added by bin/brakeman) fails on new upstream releases;
-          # enforce it only on pushes to main so PRs and the merge queue aren't blocked.
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            bin/brakeman --no-pager
-          else
-            bundle exec brakeman --no-pager
-          fi
-
-  lint:
-    runs-on: depot-ubuntu-24.04-16
-    needs: console_changes
-    if: needs.console_changes.outputs.relevant == 'true'
-    env:
-      RUBOCOP_CACHE_ROOT: ${{ github.workspace }}/services/console/tmp/rubocop
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
-      - name: Prepare RuboCop cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        env:
-          DEPENDENCIES_HASH: ${{ hashFiles('services/console/.ruby-version', 'services/console/**/.rubocop.yml', 'services/console/**/.rubocop_todo.yml', 'services/console/Gemfile.lock') }}
-        with:
-          path: ${{ env.RUBOCOP_CACHE_ROOT }}
-          key: rubocop-${{ runner.os }}-${{ env.DEPENDENCIES_HASH }}-${{ github.ref_name == github.event.repository.default_branch && github.run_id || 'default' }}
-          restore-keys: |
-            rubocop-${{ runner.os }}-${{ env.DEPENDENCIES_HASH }}-
-
-      - name: Lint code for consistent style
-        run: bin/rubocop -f github
-
-  test:
-    runs-on: depot-ubuntu-24.04-16
-    needs: console_changes
-    if: needs.console_changes.outputs.relevant == 'true'
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: --health-cmd="pg_isready -U postgres" --health-interval=10s --health-timeout=5s --health-retries=5
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
-      - name: Verify migrations match the checked-in schema
-        env:
-          RAILS_ENV: test
-          IRON_CONTROL_DB_HOST: localhost
-          IRON_CONTROL_DB_PORT: 5432
-          IRON_CONTROL_DB_USERNAME: postgres
-          IRON_CONTROL_DB_PASSWORD: postgres
-        run: |
-          bin/rails db:create db:migrate
-          git diff --exit-code -- db/schema.rb
-
-      - name: Run tests
-        env:
-          RAILS_ENV: test
-          IRON_CONTROL_DB_HOST: localhost
-          IRON_CONTROL_DB_PORT: 5432
-          IRON_CONTROL_DB_USERNAME: postgres
-          IRON_CONTROL_DB_PASSWORD: postgres
-          # RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
-        run: bin/rails db:test:prepare test
-
-      - name: Validate seeds
-        env:
-          RAILS_ENV: test
-          IRON_CONTROL_DB_HOST: localhost
-          IRON_CONTROL_DB_PORT: 5432
-          IRON_CONTROL_DB_USERNAME: postgres
-          IRON_CONTROL_DB_PASSWORD: postgres
-        run: bin/rails db:seed:replant
-
   console-ci-success:
     name: Console CI success
     runs-on: depot-ubuntu-24.04
@@ -201,16 +83,10 @@ jobs:
     needs:
       - console_changes
       - web
-      - scan_ruby
-      - lint
-      - test
     timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: .
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          allowed-skips: web, scan_ruby, lint, test
+          allowed-skips: web
           jobs: ${{ toJSON(needs) }}

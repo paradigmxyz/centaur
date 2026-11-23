@@ -1,5 +1,5 @@
 // Sign-in is a step of the MCP OAuth flow, so /login and /pending stay
-// server-rendered by Rails (layouts/oauth) rather than SPA routes.
+// server-rendered by api-rs (console/pages.rs) rather than SPA routes.
 import type { FeatureModule } from "@/app/types";
 
 const authPages: FeatureModule = {

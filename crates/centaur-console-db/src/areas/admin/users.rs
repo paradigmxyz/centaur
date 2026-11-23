@@ -1,6 +1,5 @@
 //! Console's Users page: every console user, and the approve/disable/promote/
-//! demote actions. Disabling also revokes the user's MCP OAuth refresh tokens,
-//! as `User#after_update` does.
+//! demote actions. Disabling also revokes the user's MCP OAuth refresh tokens.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,7 +24,7 @@ pub struct UserRow {
     pub admin: bool,
     pub approved_at: Option<PrimitiveDateTime>,
     pub approved_by: Option<ApproverRow>,
-    /// Identity providers, de-duplicated and sorted as Rails' `uniq.sort`.
+    /// Identity providers, de-duplicated and sorted.
     pub identity_providers: Vec<String>,
     pub created_at: PrimitiveDateTime,
     pub updated_at: PrimitiveDateTime,
@@ -128,7 +127,7 @@ pub async fn admin_user(pool: &PgPool, id: i64) -> Result<Option<UserRow>> {
     Ok(Some(user))
 }
 
-/// `User#approve!(by:)`: activate the account and record the approver.
+/// Activate the account and record the approver.
 ///
 /// `approved_at` is the database clock, so this stays a plain statement; the
 /// shared update helpers only bind values the caller already has.
@@ -144,8 +143,8 @@ pub async fn approve_user(pool: &PgPool, id: i64, approver_id: i64) -> Result<()
     Ok(())
 }
 
-/// Disable the account and revoke its usable MCP OAuth refresh tokens, which
-/// Rails does from an `after_update` callback inside the same transaction.
+/// Disable the account and revoke its usable MCP OAuth refresh tokens, in the
+/// same transaction.
 pub async fn disable_user(pool: &PgPool, id: i64) -> Result<()> {
     let mut transaction = pool.begin().await?;
     sqlx::query(&write::update_sql(UserModel::TABLE, &["status"]))
@@ -153,8 +152,8 @@ pub async fn disable_user(pool: &PgPool, id: i64) -> Result<()> {
         .bind(id)
         .execute(&mut *transaction)
         .await?;
-    // Rails' `revoke_mcp_oauth_refresh_tokens!` stamps both time columns, so it
-    // is not an ordinary timestamped attribute update.
+    // Revocation stamps both time columns, so it is not an ordinary timestamped
+    // attribute update.
     sqlx::query(
         "UPDATE mcp_oauth_refresh_tokens SET revoked_at = now(), updated_at = now() \
          WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()",

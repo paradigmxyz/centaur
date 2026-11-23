@@ -71,12 +71,12 @@ Optional Teams ingress bootstrap (consumed when teamsbot.enabled=true):
 
 Console bootstrap:
   IRON_CONTROL_DATABASE_URL    overrides the derived DSN (default points at the
-                               bundled Postgres server with no database path, so
-                               Rails resolves db names from its database.yml)
+                               bundled Postgres server with no database path;
+                               the database name comes from console.database.name)
   IRON_CONTROL_INITIAL_USER_EMAIL
                                initial admin email (default admin@centaur.local)
-  The initial password, the three ActiveRecord encryption keys, and
-  SECRET_KEY_BASE are auto-generated when absent (never rotated in place).
+  The initial password, the Console encryption keys, and
+  IRON_CONTROL_SECRET_KEY_BASE are auto-generated when absent (never rotated in place).
   Operator API keys are created on the Console's API Keys page.
 
 Note: harness access-token modes (sandbox.codexAuthMode / claudeCodeAuthMode
@@ -228,15 +228,15 @@ if secret_exists centaur-infra-env; then
     fi
   fi
   # iron-control keys: top up only when absent so we never rotate them out from
-  # under a running pod (its ActiveRecord-encrypted data would become
+  # under a running pod (the Console's encrypted records would become
   # undecryptable). Generated values mirror the create path.
   if ! secret_key_present IRON_CONTROL_DATABASE_URL; then
     if [[ -n "${IRON_CONTROL_DATABASE_URL:-}" ]]; then
       ic_db_url="$IRON_CONTROL_DATABASE_URL"
     else
       # Reuse the same Postgres host/credentials as the API's DATABASE_URL but
-      # strip the database path, so Rails resolves the database name from the
-      # image's database.yml. Avoids decoding the password ourselves.
+      # strip the database path; the services take the database name from
+      # console.database.name. Avoids decoding the password ourselves.
       existing_db_url="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env \
         -o 'jsonpath={.data.DATABASE_URL}' | openssl base64 -d -A)"
       ic_db_url="${existing_db_url%/ai_v2}"
@@ -252,9 +252,6 @@ if secret_exists centaur-infra-env; then
   fi
   if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY; then
     patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
-  fi
-  if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY; then
-    patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY\":\"$(rand_hex | base64 | tr -d '\n')\"")
   fi
   if ! secret_key_present IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT; then
     patch_data+=("\"IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT\":\"$(rand_hex | base64 | tr -d '\n')\"")
@@ -297,8 +294,8 @@ else
   POSTGRES_PASSWORD="$(rand_hex)"
   DATABASE_URL="postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432/ai_v2"
   # iron-control runs against a dedicated logical DB on the same Postgres. The
-  # URL carries connection info only (no database path) so Rails resolves each
-  # connection's database name from the image's database.yml. Override via the
+  # URL carries connection info only (no database path); the services take the
+  # database name from console.database.name. Override via the
   # IRON_CONTROL_DATABASE_URL env var to point at an external server.
   IRON_CONTROL_DATABASE_URL="${IRON_CONTROL_DATABASE_URL:-postgresql://tempo:${POSTGRES_PASSWORD}@centaur-centaur-postgres:5432}"
   IRON_CONTROL_INITIAL_USER_EMAIL="${IRON_CONTROL_INITIAL_USER_EMAIL:-admin@centaur.local}"
@@ -316,7 +313,6 @@ else
     --from-literal=IRON_CONTROL_INITIAL_USER_EMAIL="$IRON_CONTROL_INITIAL_USER_EMAIL"
     --from-literal=IRON_CONTROL_INITIAL_USER_PASSWORD="$(rand_hex)"
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY="$(rand_hex)"
-    --from-literal=IRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY="$(rand_hex)"
     --from-literal=IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT="$(rand_hex)"
     --from-literal=IRON_CONTROL_SECRET_KEY_BASE="$(rand_hex)$(rand_hex)"
     --from-literal=CENTAUR_JWT_SIGNING_SECRET="$(rand_hex)$(rand_hex)"

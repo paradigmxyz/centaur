@@ -1,5 +1,3 @@
-// Mirrors SecretKinds::SECRET_KINDS (app/controllers/concerns/secret_kinds.rb).
-
 export const SECRET_KINDS = {
   static: { label: "Static", form: true },
   gcp_auth: { label: "GCP Auth", form: true },
@@ -24,7 +22,7 @@ export function grantKey(kind: SecretKind): `${SecretKind}_secret_id` {
   return `${kind}_secret_id`;
 }
 
-/** Friendly labels for secret source backends (ConsoleController::SOURCE_TYPE_LABELS). */
+/** Friendly labels for secret source backends. */
 export const SOURCE_TYPE_LABELS: Record<string, string> = {
   env: "Env",
   aws_sm: "AWS-SM",

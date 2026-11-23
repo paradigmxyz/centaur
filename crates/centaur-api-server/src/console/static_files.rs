@@ -3,8 +3,8 @@
 //!
 //! Nothing here reads the session, the database, or request state; it is a
 //! static mount behind the Console host router. `services/console/web` builds
-//! content-hashed assets into `services/console/public/spa/assets` and the
-//! shell into `services/console/spa-shell/index.html`; the api-rs image copies
+//! the shell into `services/console/public/spa/index.html` and content-hashed
+//! assets into `services/console/public/spa/assets`; the api-rs image copies
 //! both and points `CENTAUR_CONSOLE_SPA_SHELL`, `CENTAUR_CONSOLE_SPA_ASSETS`,
 //! and `CENTAUR_CONSOLE_PUBLIC_ROOT` at them. A checkout defaults to the
 //! repository paths.
@@ -64,7 +64,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 pub(crate) fn spa_shell_path() -> PathBuf {
     env_path("CENTAUR_CONSOLE_SPA_SHELL")
-        .unwrap_or_else(|| console_root().join("spa-shell/index.html"))
+        .unwrap_or_else(|| console_root().join("public/spa/index.html"))
 }
 
 fn spa_assets_root() -> PathBuf {
@@ -174,9 +174,12 @@ mod tests {
     #[tokio::test]
     async fn static_files_carry_their_cache_and_csp_policies() {
         let dir = tempfile::tempdir().unwrap();
-        let shell = dir.path().join("index.html");
+        // The build layout: the shell sits beside its assets directory.
+        let spa = dir.path().join("spa");
+        std::fs::create_dir(&spa).unwrap();
+        let shell = spa.join("index.html");
         std::fs::write(&shell, "<!doctype html><title>shell</title>").unwrap();
-        let assets = dir.path().join("assets");
+        let assets = spa.join("assets");
         std::fs::create_dir(&assets).unwrap();
         std::fs::write(assets.join("index-abc123.js"), "console.log(1)").unwrap();
         let public = dir.path().join("public");
@@ -203,7 +206,7 @@ mod tests {
             header(&response, CACHE_CONTROL),
             Some(SPA_ASSET_CACHE_CONTROL)
         );
-        for path in ["/spa/assets/missing.js", "/spa/assets/../index.html"] {
+        for path in ["/spa/assets/missing.js"] {
             let response = get_path(&app, path).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
             assert_eq!(header(&response, CACHE_CONTROL), None, "{path}");
@@ -215,7 +218,12 @@ mod tests {
             header(&response, CACHE_CONTROL),
             Some(PUBLIC_ASSET_CACHE_CONTROL)
         );
-        for path in ["/offline.html", "/manifest.json", "/service-worker.js"] {
+        // The shell is reachable only through the shell routes, with the CSP.
+        for path in [
+            "/spa/index.html",
+            "/spa/assets/../index.html",
+            "/index.html",
+        ] {
             let response = get_path(&app, path).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }

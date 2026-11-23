@@ -1,19 +1,19 @@
 //! Request-document parsing and model validation for the secret kinds the
 //! console and its APIs write.
 //!
-//! The Rails controllers share `SecretDocumentWrites`: they permit a small set
-//! of scalar fields plus `labels` / kind-specific filters, build the nested
-//! source and rules in memory, and validate every record before touching the
-//! database. This module rebuilds that document in Rust and validates the whole
-//! document before any write. Messages are plain Console text, not copies of
-//! Rails' validator or `json_schemer` wording; nested errors are reported under
-//! path keys (`source.config`, `rules[0].cidr`) so the SPA can show them beside
-//! the field that failed.
+//! One document writer covers every secret kind the console and its APIs write:
+//! a small set of scalar fields plus `labels` / kind-specific filters, with the
+//! nested source and rules built in memory and every record validated before the
+//! database is touched. This module builds that document in Rust and validates
+//! the whole document before any write. Messages are plain Console text, not
+//! copies of a validator's or JSON Schema's wording; nested errors are reported
+//! under path keys (`source.config`, `rules[0].cidr`) so the SPA can show them
+//! beside the field that failed.
 //!
 //! [`SecretDocumentPayload`] is the typed wire document: every field is the
 //! JSON type the column accepts, so a numeric `name` or a `labels` array is a
-//! 422 from the request extractor instead of an ActiveRecord-style cast. The
-//! nested schema checks below stay because they are real model validations.
+//! 422 from the request extractor instead of an implicit cast. The nested schema
+//! checks below stay because they are real model validations.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -33,11 +33,11 @@ use super::{SecretFields, SecretKind, SecretRow};
 /// A write failure the API layer turns into the matching HTTP error.
 #[derive(Debug)]
 pub enum WriteError {
-    /// `ActiveRecord::RecordNotFound`; the message is rendered verbatim.
+    /// A missing row; the message is rendered verbatim.
     NotFound(String),
-    /// `ActiveRecord::RecordInvalid`; `details` already has the exact keys.
+    /// An invalid record; `details` already has the exact keys.
     Validation(Value),
-    /// `ActionController::BadRequest` (e.g. `data` missing).
+    /// A malformed request (e.g. `data` missing).
     BadRequest(String),
     /// Anything unexpected.
     Internal(Error),
@@ -57,7 +57,7 @@ impl From<Error> for WriteError {
 
 /// Ordered validation errors. The secret validators were the first users of
 /// this shape; it is now the shared [`crate::FieldErrors`], so the console and
-/// the data layer render the same `errors.as_json()`.
+/// the data layer render the same `details` value.
 pub use crate::errors::FieldErrors as Errors;
 
 /// Whether a PATCH that omits an inline source's `secret` retains the stored
@@ -166,10 +166,9 @@ impl<'de> Deserialize<'de> for Scalar {
     }
 }
 
-/// A permitted parameter value: a scalar, or an array of scalars. Console's
-/// strong parameters keep exactly that shape inside `labels`, source `config`,
-/// and settings `value_from` hashes; nested hashes are a request error instead
-/// of being silently dropped.
+/// A permitted parameter value: a scalar, or an array of scalars. `labels`,
+/// source `config`, and settings `value_from` hashes keep exactly that shape;
+/// nested hashes are a request error instead of being silently dropped.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParamValue {
     Scalar(Scalar),
@@ -537,8 +536,8 @@ impl Document {
             kind,
             SecretKind::Static | SecretKind::GcpAuth | SecretKind::GcpIdToken
         );
-        // `attrs[key].present?` in Rails: an empty `{...}` hash is absent, any
-        // key (even with a null value) builds a source that validation checks.
+        // An empty `{...}` hash is absent; any key (even with a null value)
+        // builds a source that validation checks.
         let source = payload.source_for(kind).filter(|source| {
             source.config.is_some() || source.source_type.is_some() || source.secret.is_some()
         });
@@ -632,8 +631,8 @@ impl Document {
         Ok(document)
     }
 
-    /// Applies `CredentialProfiles::Registry` defaults (only github_token has
-    /// one): canonical replace config and the default host rules.
+    /// Applies the credential profile's defaults (only github_token has one):
+    /// canonical replace config and the default host rules.
     fn apply_kind_defaults(&mut self) {
         let DocumentFields::Static {
             kind,
@@ -1516,8 +1515,8 @@ pub(crate) fn value_to_string(value: &Value) -> String {
     }
 }
 
-/// Quotes a value plainly. Rails' `String#inspect` escaping is not part of the
-/// API contract, so a name with a quote or a backslash is shown as-is.
+/// Quotes a value plainly. Escaping is not part of the API contract, so a name
+/// with a quote or a backslash is shown as-is.
 fn quote(value: &str) -> String {
     format!("\"{value}\"")
 }
@@ -1529,7 +1528,7 @@ fn quote_value(value: &Value) -> String {
     }
 }
 
-/// ActiveSupport's `blank?` for the JSON values the document carries.
+/// Blankness for the JSON values the document carries.
 pub(crate) fn ruby_blank(value: &Value) -> bool {
     match value {
         Value::Null => true,
@@ -1549,7 +1548,7 @@ pub(crate) fn blank(value: Option<&str>) -> bool {
     value.is_none_or(|text| text.trim().is_empty())
 }
 
-/// Decrypts an inline source value (`SecretSource#secret` is AR-encrypted).
+/// Decrypts an inline source value (`secret_sources.secret` is encrypted).
 pub fn decrypt(value: &str) -> Result<String> {
     crate::areas::encryption::decrypt(value)
 }

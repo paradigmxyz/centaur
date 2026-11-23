@@ -94,9 +94,9 @@ spec:
               value: {{ include "centaur.consoleUrl" . | quote }}
             # Proxies inject the sandbox token into requests to these hosts in
             # addition to CENTAUR_API_URL's and CENTAUR_CONSOLE_URL's. The
-            # compatibility Console Service also routes to api-rs, and sandboxes
-            # created before the Console moved there still call it by that name,
-            # so it needs the token too.
+            # compatibility Console Service also routes to api-rs, and connectors
+            # and tools default to it when CENTAUR_CONSOLE_URL is unset, so it
+            # needs the token too.
 {{- $proxyHosts := list (include "centaur.consoleName" .) }}
 {{- if $companyContext.enabled }}
 {{- $proxyHosts = append $proxyHosts (include "centaur.componentName" (dict "root" . "component" "company-context")) }}

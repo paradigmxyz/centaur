@@ -571,8 +571,6 @@ async fn role_and_direct_grants_resolve_to_the_strongest_priority() {
     assert_eq!(transform_names(&body), vec!["gcp_auth"]);
 }
 
-// Before the Rails resolver was removed, the parity test confirmed Console
-// resolved this scenario identically.
 #[tokio::test]
 async fn conflicting_credentials_resolve_like_console() {
     let Some(f) = Fixture::new().await else {

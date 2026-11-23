@@ -1,6 +1,6 @@
 //! Console's singleton system settings and the roles assigned by default to new
-//! principals. `Role.replace_default_assignments!` runs in the same transaction
-//! as the settings write, as the controller's `update` does.
+//! principals. The default-role replacement runs in the same transaction as the
+//! settings write.
 
 use sqlx::PgPool;
 use sqlx::postgres::PgConnection;
@@ -67,7 +67,7 @@ fn missing() -> crate::Error {
     crate::Error::InvalidData("system settings row is missing".to_owned())
 }
 
-/// Console's `SystemSetting.instance`, created on first read like Rails.
+/// Console's single settings row, created on first read.
 pub async fn system_setting(pool: &PgPool) -> Result<SystemSettingRow> {
     let query = format!(
         "SELECT {SETTING_COLUMNS} FROM {} WHERE singleton ORDER BY id LIMIT 1",
@@ -89,10 +89,9 @@ pub async fn system_setting(pool: &PgPool) -> Result<SystemSettingRow> {
     record.ok_or_else(missing)
 }
 
-/// `@system_setting.save!` followed by `Role.replace_default_assignments!` in
-/// one transaction. An unchanged settings write is skipped so `updated_at` keeps
-/// its value, and the default roles are only replaced when the request sent
-/// `default_role_ids`.
+/// Saves the settings, then replaces the default roles, in one transaction. An
+/// unchanged settings write is skipped so `updated_at` keeps its value, and the
+/// default roles are only replaced when the request sent `default_role_ids`.
 pub async fn write_system_settings(
     pool: &PgPool,
     id: i64,
@@ -153,8 +152,7 @@ pub async fn existing_role_ids(pool: &PgPool, role_ids: &[i64]) -> Result<Vec<i6
     )
 }
 
-/// `Role.replace_default_assignments!`: make exactly `role_ids` the roles new
-/// principals receive.
+/// Make exactly `role_ids` the roles new principals receive.
 pub async fn replace_default_roles(pool: &PgPool, role_ids: &[i64]) -> Result<()> {
     let mut transaction = pool.begin().await?;
     replace_roles_in(&mut transaction, role_ids).await?;

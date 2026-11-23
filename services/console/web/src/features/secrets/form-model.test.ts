@@ -105,7 +105,7 @@ describe("secret form model", () => {
     });
   });
 
-  it("formats error details like the legacy summary", () => {
+  it("formats error details as a summary", () => {
     expect(
       errorMessages({
         base: ["must define one of inject_config or replace_config"],

@@ -1,10 +1,9 @@
 //! Post-connect Slack identity enrichment.
 //!
-//! Port of `Oauth::EnrichCredentialIdentityJob`. Rails enqueues it after a Slack
-//! consent, then renames the broker credential and its auto-created wrapper
-//! secret from the Slack profile. The job is asynchronous, but its failure can
-//! never fail the consent, so the Rust flow runs it inline and logs any failure
-//! instead of surfacing it. Live exchanges and both profile calls use the same
+//! After a Slack consent, it renames the broker credential and its auto-created
+//! wrapper secret from the Slack profile. Its failure can never fail the
+//! consent, so the flow runs it inline and logs any failure instead of
+//! surfacing it. Live exchanges and both profile calls use the same
 //! [`super::http`] client as the rest of the OAuth area.
 
 use std::time::Duration;
@@ -29,7 +28,7 @@ struct SlackProfile {
     email: Option<String>,
 }
 
-/// Runs the enrichment job's work for a freshly connected credential. It
+/// Runs enrichment for a freshly connected credential. It
 /// returns an error only so the caller can log it; the credential is already
 /// connected and the caller must ignore the failure.
 pub(super) async fn enrich_after_connect(pool: &PgPool, credential_id: i64) -> Result<(), String> {
@@ -86,8 +85,8 @@ pub(super) async fn enrich_after_connect(pool: &PgPool, credential_id: i64) -> R
         .map_err(|error| error.to_string())
 }
 
-/// `slack_profile`: the Slack profile lookup is best-effort. A transport or
-/// payload failure returns whatever was learned so far, like the job's rescue.
+/// The Slack profile lookup is best-effort. A transport or
+/// payload failure returns whatever was learned so far.
 async fn slack_profile(access_token: &str, subject: &str, scopes: &[String]) -> SlackProfile {
     let mut profile = SlackProfile::default();
     profile.name = match auth_test_user(access_token).await {
@@ -133,7 +132,7 @@ async fn slack_profile(access_token: &str, subject: &str, scopes: &[String]) -> 
     profile
 }
 
-/// `auth_test_user`: Slack's `auth.test` username, or nil unless the call
+/// Slack's `auth.test` username, or `None` unless the call
 /// reported `"ok": true`.
 async fn auth_test_user(access_token: &str) -> Result<Option<String>, reqwest::Error> {
     let Some(response) = slack_api(AUTH_TEST_PATH, access_token, None).await? else {
@@ -145,7 +144,7 @@ async fn auth_test_user(access_token: &str) -> Result<Option<String>, reqwest::E
     Ok(present_string(response.get("user")))
 }
 
-/// `slack_api`: a bearer POST whose JSON body is optional. HTTP status is not
+/// A bearer POST whose JSON body is optional. HTTP status is not
 /// interpreted here; Slack reports failure in the body.
 async fn slack_api(
     path: &str,
@@ -166,7 +165,7 @@ async fn slack_api(
     Ok(response.json())
 }
 
-/// Ruby's `value.presence`: nil for a missing or blank string.
+/// `None` for a missing or blank string.
 fn present_string(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),

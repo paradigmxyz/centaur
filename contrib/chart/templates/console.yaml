@@ -1,7 +1,7 @@
 {{- if .Values.apiRs.enabled }}
 {{- $console := include "centaur.consoleValues" . | fromYaml }}
-# console — compatibility Service for the Console, which api-rs now serves. The
-# chart runs no Rails web pod: the Console host, its JSON API, the SPA, the MCP
+# console — compatibility Service for the Console, which api-rs serves. The
+# Console host, its JSON API, the SPA, the MCP
 # OAuth endpoints, and the bearer/sandbox APIs all answer from the api-rs
 # listener (see templates/apirs.yaml and
 # crates/centaur-api-server/src/console/README.md).

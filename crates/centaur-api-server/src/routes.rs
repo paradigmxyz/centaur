@@ -72,14 +72,10 @@ pub struct AppState {
     /// Console's database, read-only, for API client authentication and the
     /// turn path.
     console_db: Option<PgPool>,
-    /// A second Console pool without the read-only default, for the ported
+    /// A second Console pool without the read-only default, for the
     /// Console handlers. Their handlers prefer it and fall back to the
     /// read-only pool when only that one is configured.
     console_write_db: Option<PgPool>,
-    /// The database holding api-rs's read-only workflow run view. Production
-    /// uses the runtime pool; the Console differential harness points this at
-    /// its cloned workflow database.
-    workflow_db: Option<PgPool>,
     /// Rust-issued Console sessions, when the console API layer is enabled.
     console_session: Option<ConsoleSessionConfig>,
 }
@@ -99,7 +95,6 @@ impl AppState {
             auth,
             console_db: None,
             console_write_db: None,
-            workflow_db: None,
             console_session: None,
         }
     }
@@ -117,16 +112,9 @@ impl AppState {
         self
     }
 
-    /// Sets the writable pool used by the ported Console handlers.
+    /// Sets the writable pool used by the Console handlers.
     pub fn with_console_write_db(mut self, pool: PgPool) -> Self {
         self.console_write_db = Some(pool);
-        self
-    }
-
-    /// Points the Console workflow dashboard at the database publishing
-    /// `centaur_readonly_workflow_runs`. Without it the runtime pool is used.
-    pub fn with_workflow_db(mut self, pool: PgPool) -> Self {
-        self.workflow_db = Some(pool);
         self
     }
 
@@ -158,16 +146,6 @@ impl AppState {
 
     pub(crate) fn console_session(&self) -> Option<&ConsoleSessionConfig> {
         self.console_session.as_ref()
-    }
-
-    /// The pool holding the published workflow run view. Production uses the
-    /// same database as the runtime; tests and the differential harness can
-    /// attach a separate one.
-    pub(crate) fn workflow_db(&self) -> Result<PgPool, ApiError> {
-        match &self.workflow_db {
-            Some(pool) => Ok(pool.clone()),
-            None => self.pool(),
-        }
     }
 
     pub fn ready(

@@ -1,5 +1,5 @@
-//! Port of Console's OAuth provider strategies (`services/console/lib/oauth`)
-//! and of the code-exchange error type they raise.
+//! Console's OAuth provider strategies and the code-exchange error type they
+//! raise.
 //!
 //! A provider owns the IdP-specific parts of the consent flow: endpoints, the
 //! extra authorization parameters, how to parse the granted scopes, and how to
@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 
 use super::http::{self, HttpResponse};
 
-/// `Broker::ExchangeError`: a consent-flow failure that is shown as the result
-/// page's reason (the OAuth error code when present, else the stage).
+/// A consent-flow failure that is shown as the result page's reason (the OAuth
+/// error code when present, else the stage).
 #[derive(Clone, Debug)]
 pub(crate) struct ExchangeError {
     pub(crate) stage: &'static str,
@@ -42,7 +42,7 @@ impl ExchangeError {
     }
 }
 
-/// The normalized success result of `Broker::AuthorizationCodeClient#exchange`.
+/// The normalized success result of a code exchange.
 #[derive(Clone, Debug)]
 pub(crate) struct CodeExchangeResult {
     pub(crate) access_token: String,
@@ -80,7 +80,7 @@ impl Identity {
 }
 
 /// The registry order is the console provider list; the first entry is the
-/// form default. Matches `Oauth::Providers.registry`.
+/// form default.
 pub(crate) const PROVIDER_KEYS: [&str; 10] = [
     "attio",
     "custom",
@@ -476,9 +476,8 @@ impl Provider {
     /// The canonical `custom` inject configuration, or the profile-owned
     /// replacement configuration for the GitHub profile.
     ///
-    /// Keyed on the wrapping secret's *kind*, not the provider key: Rails
-    /// (`Oauth::FlowsController#ensure_wrapping_secret`) gives every
-    /// `custom`-kind wrapper the Bearer inject config, whichever provider
+    /// Keyed on the wrapping secret's *kind*, not the provider key: every
+    /// `custom`-kind wrapper gets the Bearer inject config, whichever provider
     /// minted it. Only profile kinds (GitHub's `github_token`) bring their own
     /// configuration, which the flow applies.
     pub(crate) fn wrapping_secret_config(&self) -> (Option<Value>, Option<Value>) {
@@ -1131,8 +1130,8 @@ fn access_token_claims(access_token: &str) -> Result<Map<String, Value>, Exchang
         .map_err(|_| ExchangeError::with_code("parse", "invalid_identity_response"))
 }
 
-/// The custom provider's config keys as `OauthApp#provider_config_valid` sees
-/// them: an app's `provider_config` field. [`garde::Validate`] appends every
+/// The custom provider's config keys, from an app's `provider_config` field.
+/// [`garde::Validate`] appends every
 /// message the model adds, in its order, so this one field can report several
 /// errors (garde's field rules otherwise return one).
 #[derive(Clone, Debug)]
@@ -1456,9 +1455,9 @@ mod tests {
         }
     }
 
-    /// Rails' `ensure_wrapping_secret`: every `custom`-kind wrapper (any provider
-    /// but GitHub) injects `Authorization: Bearer`; GitHub's `github_token`
-    /// profile brings its own replace config, applied by the flow.
+    /// Every `custom`-kind wrapper (any provider but GitHub) injects
+    /// `Authorization: Bearer`; GitHub's `github_token` profile brings its own
+    /// replace config, applied by the flow.
     #[test]
     fn every_custom_kind_wrapper_injects_a_bearer_token() {
         let bearer = json!({"header": "Authorization", "formatter": "Bearer {{ .Value }}"});

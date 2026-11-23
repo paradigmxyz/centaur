@@ -1,6 +1,5 @@
-//! Keeps the Console's Slack channel catalog current (port of Rails'
-//! `SlackChannelCatalogRefreshJob` and `SlackChannelCatalogMembershipRefreshJob`),
-//! through the Slack client the proxy routes use.
+//! Keeps the Console's Slack channel catalog current through the Slack client
+//! the proxy routes use.
 //!
 //! Every [`PASS_INTERVAL`] a pass refreshes the channel list once it is an
 //! hour old, then the members of up to [`MEMBERSHIP_BATCH_SIZE`] channels whose
@@ -21,7 +20,7 @@ use tracing::{info, warn};
 use super::{SlackFileProxyConfig, http_client, slack_api_call, slack_proxy_config};
 use crate::ApiError;
 
-/// Slack's own "try again later" error codes (`SlackApi::TRANSIENT_ERRORS`).
+/// Slack's own "try again later" error codes.
 const TRANSIENT_SLACK_ERRORS: [&str; 2] = ["fatal_error", "internal_error"];
 
 /// Why a Slack call failed, as the refresh decides what to do about it.
@@ -132,7 +131,7 @@ async fn with_lock(
     result
 }
 
-/// `SlackChannelCatalogSync#sync_channels`: replace the catalog with every
+/// Replace the catalog with every
 /// channel the bot can see.
 async fn sync_channels(pool: &PgPool, config: &SlackFileProxyConfig) -> Result<usize, ApiError> {
     let identity = call(config, "auth.test", &[])
@@ -165,7 +164,7 @@ async fn sync_channels(pool: &PgPool, config: &SlackFileProxyConfig) -> Result<u
     Ok(channels.len())
 }
 
-/// `SlackChannelCatalogSync#sync_memberships`: refresh a batch of stale
+/// Refresh a batch of stale
 /// memberships. A channel Slack refuses keeps the error and waits out the
 /// retry interval; when Slack or the network is in trouble, the pass stops
 /// and the channel is retried next pass.
@@ -241,7 +240,7 @@ async fn pages(
     }
 }
 
-/// `SlackChannelCatalogSync#parse_channel`: a named channel with a `C`/`G` ID.
+/// A named channel with a `C`/`G` ID.
 fn parse_channel(channel: &Value) -> Option<RemoteChannel> {
     let text = |key: &str| {
         channel

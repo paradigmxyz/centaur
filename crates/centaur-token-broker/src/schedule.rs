@@ -1,6 +1,5 @@
-//! When to refresh next. Console's `BrokerCredential#compute_next_attempt_at`
-//! schedules a credential's first refresh after the consent flow with the same
-//! formula, without the one-minute minimum interval.
+//! When to refresh next. Console schedules a credential's first refresh after the
+//! consent flow with the same formula, without the one-minute minimum interval.
 
 use chrono::{NaiveDateTime, TimeDelta};
 

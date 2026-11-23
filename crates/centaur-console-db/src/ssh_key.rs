@@ -1,15 +1,13 @@
-//! `app/services/ssh_key.rb`: private-key validation, public-key derivation,
-//! and fingerprints for the two Console SSH key paths.
+//! Private-key validation, public-key derivation, and fingerprints for the two
+//! Console SSH key paths.
 //!
-//! Rails hands a pasted key to `Net::SSH::KeyFactory.load_data_private_key`,
-//! which reads OpenSSH-format keys and, through `OpenSSL::PKey.read`, every PEM
-//! private-key encoding OpenSSL understands: PKCS#1 RSA, SEC1 EC, and PKCS#8.
-//! The bearer `ssh_key_secrets` API and the console `me/ssh_key` page share
-//! this module so their accept/reject set, stored public key, and fingerprints
-//! cannot drift.
+//! A pasted key may be OpenSSH format or any PEM private-key encoding: PKCS#1
+//! RSA, SEC1 EC, and PKCS#8. The bearer `ssh_key_secrets` API and the console
+//! `me/ssh_key` page share this module so their accept/reject set, stored public
+//! key, and fingerprints cannot drift.
 //!
 //! Only public material is derived here. Submitted private-key bytes are never
-//! returned, logged, or copied into an error message, exactly as in Rails.
+//! returned, logged, or copied into an error message.
 //!
 //! Known deviation: an EC PEM key that omits its public point is reported as
 //! unreadable instead of having its point computed from the private scalar.
@@ -18,7 +16,7 @@
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
-/// `SshKey::MAX_BYTES`.
+/// The largest accepted private key, in bytes.
 pub const MAX_BYTES: usize = 64 * 1024;
 
 pub const BLANK_MESSAGE: &str = "Paste your private key, including its BEGIN and END lines.";
@@ -34,7 +32,7 @@ pub const UNSUPPORTED_TYPE_MESSAGE: &str =
 pub const UNREADABLE_MESSAGE: &str =
     "This key could not be read. Copy the entire private key file, including both header lines.";
 
-/// `SshKey::SUPPORTED_TYPES`.
+/// The supported OpenSSH key types.
 pub const SUPPORTED_TYPES: [&str; 5] = [
     "ssh-ed25519",
     "ssh-rsa",
@@ -43,14 +41,14 @@ pub const SUPPORTED_TYPES: [&str; 5] = [
     "ecdsa-sha2-nistp521",
 ];
 
-/// `SshKey.normalize`: CRLF/CR to LF, strip, and end with one newline.
+/// CRLF/CR to LF, strip, and end with one newline.
 pub fn normalize_private_key(value: &str) -> String {
     let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
     format!("{}\n", normalized.trim())
 }
 
-/// `SshKey.public_key`: the `<type> <base64>` OpenSSH public key, or the exact
-/// Console error message. Messages never include the submitted key.
+/// The `<type> <base64>` OpenSSH public key, or the exact Console error
+/// message. Messages never include the submitted key.
 pub fn derive_public_key(private_key: &str) -> Result<String, String> {
     if private_key.trim().is_empty() {
         return Err(BLANK_MESSAGE.to_owned());
@@ -72,8 +70,8 @@ pub fn derive_public_key(private_key: &str) -> Result<String, String> {
     if key.contains("BEGIN ENCRYPTED PRIVATE KEY") || key.contains("Proc-Type: 4,ENCRYPTED") {
         return Err(PASSPHRASE_MESSAGE.to_owned());
     }
-    // `KeyFactory.classify_key` dispatches OpenSSH-format keys to net-ssh's
-    // loader and everything else to `OpenSSL::PKey.read`.
+    // OpenSSH-format keys go to the OpenSSH loader; every other PEM label goes
+    // to the PEM reader.
     if key.contains("-----BEGIN OPENSSH PRIVATE KEY-----") {
         openssh_public_key(&key)
     } else {
@@ -81,8 +79,8 @@ pub fn derive_public_key(private_key: &str) -> Result<String, String> {
     }
 }
 
-/// `SshKey.fingerprint`: the OpenSSH `SHA256:` fingerprint without padding.
-/// `None` where Rails' `SshKey::Invalid` makes `key_fingerprint` nil.
+/// The OpenSSH `SHA256:` fingerprint without padding. `None` when the key is
+/// not a supported type.
 pub fn fingerprint(public_key: &str) -> Option<String> {
     let mut parts = public_key.split_whitespace();
     let algorithm = parts.next()?;
@@ -98,8 +96,7 @@ pub fn fingerprint(public_key: &str) -> Option<String> {
     Some(format!("SHA256:{}", encoded.trim_end_matches('=')))
 }
 
-/// `SshKeySecret#public_key_supported`: a supported type and an OpenSSH
-/// base64 body (`\A[A-Za-z0-9+/]+={0,2}\z`).
+/// A supported type and an OpenSSH base64 body (`^[A-Za-z0-9+/]+={0,2}$`).
 pub fn supported_public_key(value: &str) -> bool {
     let mut parts = value.split_whitespace();
     let (Some(algorithm), Some(body)) = (parts.next(), parts.next()) else {
@@ -124,8 +121,7 @@ fn openssh_base64(value: &str) -> bool {
         && padding.bytes().all(|byte| byte == b'=')
 }
 
-/// `OpenSSHPrivateKeyType`: net-ssh's OpenSSH loader, which also carries the
-/// passphrase-protected form.
+/// The OpenSSH private-key form, including its passphrase-protected variant.
 fn openssh_public_key(key: &str) -> Result<String, String> {
     let parsed = ssh_key::PrivateKey::from_openssh(key).map_err(|_| unreadable())?;
     // A bcrypt-KDF key parses without its passphrase; refuse before anything
@@ -136,7 +132,7 @@ fn openssh_public_key(key: &str) -> Result<String, String> {
     key_string(parsed.public_key())
 }
 
-/// Everything `OpenSSL::PKey.read` accepts, dispatched by PEM label.
+/// Every PEM private-key form, dispatched by label.
 fn pem_public_key(key: &str) -> Result<String, String> {
     let (label, der) = pem_body(key).ok_or_else(unreadable)?;
     match label {
@@ -210,8 +206,7 @@ fn ec_public_key(der: &[u8], algorithm_curve: Option<&[u8]>) -> Result<String, S
         return Err(unreadable());
     };
     let Some((algorithm, curve)) = curve_for_oid(oid) else {
-        // net-ssh renders an unknown curve as `ecdsa-sha2-`, which is not a
-        // supported type either.
+        // An unknown curve has no supported algorithm name either.
         return Err(UNSUPPORTED_TYPE_MESSAGE.to_owned());
     };
     let Some(point) = point else {
@@ -258,8 +253,7 @@ fn pkcs8_public_key(der: &[u8]) -> Result<String, String> {
             };
             ec_public_key(private_key, curve)
         }
-        // Ed25519, X25519, and friends parse into a generic `OpenSSL::PKey`
-        // with no `ssh_type`, which Rails reports as unreadable.
+        // Ed25519, X25519, and friends have no SSH type, so they are unreadable.
         _ => Err(unreadable()),
     }
 }
@@ -267,8 +261,8 @@ fn pkcs8_public_key(der: &[u8]) -> Result<String, String> {
 /// `<algorithm> <base64 key data>` for a parsed public key.
 fn key_string(public: &ssh_key::PublicKey) -> Result<String, String> {
     let openssh = public.to_openssh().map_err(|_| unreadable())?;
-    // `to_openssh` keeps the key's comment; Rails derives "<type> <base64>"
-    // from the key blob only.
+    // `to_openssh` keeps the key's comment; the stored public key is
+    // "<type> <base64>" only.
     let mut parts = openssh.split_whitespace();
     let (Some(algorithm), Some(body)) = (parts.next(), parts.next()) else {
         return Err(unreadable());
@@ -283,8 +277,7 @@ fn unreadable() -> String {
     UNREADABLE_MESSAGE.to_owned()
 }
 
-/// `id-rsaEncryption` and `id-RSASSA-PSS`, which `OpenSSL::PKey.read` reads as
-/// RSA keys.
+/// `id-rsaEncryption` and `id-RSASSA-PSS`, both read as RSA keys.
 const RSA_ENCRYPTION_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 const RSASSA_PSS_OID: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a];
 const EC_PUBLIC_KEY_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
@@ -292,8 +285,8 @@ const PRIME256V1_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 const SECP384R1_OID: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
 const SECP521R1_OID: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x23];
 
-/// net-ssh's `CurveNameAliasInv`: the curve name and SSH algorithm for a curve
-/// OID. Unknown curves have no alias, so they are unsupported types.
+/// The curve name and SSH algorithm for a curve OID. Unknown curves have no
+/// alias, so they are unsupported types.
 fn curve_for_oid(oid: &[u8]) -> Option<(&'static str, &'static str)> {
     match oid {
         PRIME256V1_OID => Some(("ecdsa-sha2-nistp256", "nistp256")),
@@ -374,11 +367,9 @@ fn bit_string(value: &[u8]) -> Option<&[u8]> {
     Some(point)
 }
 
-/// Parser tests. The differential harness compares the full accept/reject set
-/// and every derived key against Rails. These cases cover what it cannot reach:
-/// the structurally malformed DER bodies a request can still send and the
-/// public-key shape rules. One case per PEM parse branch stays here against the
-/// net-ssh oracle because the differential harness is not part of the repository.
+/// Parser tests: the structurally malformed DER bodies a request can still send,
+/// the public-key shape rules, and one case per PEM parse branch against
+/// fixtures that keep stored fingerprints stable.
 #[cfg(test)]
 mod tests {
     use super::*;

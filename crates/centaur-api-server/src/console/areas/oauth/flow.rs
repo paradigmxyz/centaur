@@ -1,9 +1,8 @@
 //! The server-rendered OAuth consent flow: `/oauth/:slug/start` and
 //! `/oauth/:slug/callback`.
 //!
-//! Port of `Oauth::FlowsController` and its supporting services. The signed
-//! state and the browser-binding cookie are carried in the same AES-256-GCM
-//! envelope as the Rust Console session cookie, so both halves share one
+//! The signed state and the browser-binding cookie are carried in the same
+//! AES-256-GCM envelope as the Console session cookie, so both halves share one
 //! secret without introducing a second key. The state and cookie are
 //! flow-scoped: the state is bound to the app, user, scopes, nonce, and the
 //! app's provider-config digest, and expires after ten minutes.
@@ -81,8 +80,7 @@ struct PageContext {
     user: ConsoleUser,
 }
 
-/// Runs `ApplicationController`'s `require_login` and `require_active_account`
-/// callbacks in order.
+/// Runs the login and active-account gates in order.
 async fn gate(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Result<PageContext, Response> {
     let Some(config) = state.console_session().cloned() else {
         return Err(crate::ApiError::ServiceUnavailable(
@@ -152,7 +150,7 @@ fn provider_config_digest(config: &Map<String, Value>) -> String {
     hex::encode(sha2::Sha256::digest(json.as_bytes()))
 }
 
-/// Ruby's `Array#|`: first-occurrence order.
+/// Union with first-occurrence order.
 fn union(left: Vec<String>, right: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut result = left;
     for value in right {
@@ -329,7 +327,6 @@ fn authorization_url(
     Some(url.to_string())
 }
 
-/// `Broker::AuthorizationCodeClient#exchange`.
 async fn exchange_code(
     provider: &Provider,
     app: &DbOauthApp,
@@ -736,10 +733,10 @@ pub(super) async fn callback(
         Ok(context) => context,
         Err(response) => return response,
     };
-    // Rails deletes the flow cookie inside `read_and_clear_flow_cookie`, which
-    // runs only after the signed state has been verified: a callback rejected
-    // for a bad state leaves the cookie in place. Mirror that exactly by letting
-    // the inner handler raise the flag where Rails deletes.
+    // The flow cookie is cleared inside `read_and_clear_flow_cookie`, which runs
+    // only after the signed state has been verified: a callback rejected for a
+    // bad state leaves the cookie in place. Let the inner handler raise the flag
+    // at the point of deletion.
     let mut clear_flow = false;
     let mut response =
         match callback_inner(&state, &context, &slug, &query, &headers, &mut clear_flow).await {
@@ -791,7 +788,7 @@ async fn callback_inner(
         ));
     }
 
-    // `read_and_clear_flow_cookie`: the cookie is dropped from here on, even
+    // The cookie is dropped from here on, even
     // when it is missing or fails the nonce check.
     *clear_flow = true;
     let Some(flow) = read_flow_cookie(&context.config, headers) else {
@@ -891,8 +888,8 @@ async fn callback_inner(
     .await
     {
         Ok(credential_id) => {
-            // Rails enqueues `Oauth::EnrichCredentialIdentityJob` here. Its
-            // failure must never fail the connect, so log and continue.
+            // Identity enrichment runs here. Its failure must never fail the
+            // connect, so log and continue.
             if app.provider == SLACK_KEY
                 && let Err(error) = super::enrich::enrich_after_connect(&pool, credential_id).await
             {

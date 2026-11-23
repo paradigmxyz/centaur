@@ -1,4 +1,4 @@
-//! `ConsoleUserPrincipalProvisioner` against a Postgres database holding
+//! Console-user principal provisioning against a Postgres database holding
 //! Console's schema.
 //!
 //! Set `CONSOLE_DB_TEST_DATABASE_URL` to a database migrated with
@@ -10,8 +10,7 @@
 //! The MCP consent flow and the scheduled-task author hook both provision a
 //! console-user principal; these tests pin the row that provisioner writes
 //! (labels, `created_by`, the `user-mcp` and default role assignments, and the
-//! sync-config cache version Rails' callbacks produce) so neither path can
-//! drift.
+//! sync-config cache version the write produces) so neither path can drift.
 
 use centaur_console_db::{
     ConsoleUser, ConsoleUserStatus, areas::auth_pages::provision_user_principal,
@@ -185,11 +184,10 @@ async fn provisions_the_rails_row_and_assignments() {
     assert_eq!(
         labels,
         json!({ "managed-by": "centaur", "centaur.sandbox_repo_cache": "all" }),
-        "Rails' apply_sandbox_repo_cache_label plus managed-by"
+        "the sandbox repo-cache label plus managed-by"
     );
     // The principal insert itself leaves the version at 0; the `user-mcp`
-    // PrincipalRole insert bumps it once (`SyncConfigCacheInvalidation`).
-    // `assign_default_roles` uses `insert_all!`, so it does not bump.
+    // PrincipalRole insert bumps it once, and the default-role insert does not.
     assert_eq!(version, 1);
     let roles = fixture.role_ids(principal.id).await;
     assert!(
@@ -216,8 +214,7 @@ async fn reprovisioning_is_idempotent_and_updates_like_rails() {
     let roles = fixture.role_ids(first.id).await;
     assert!(roles.contains(&"user-mcp".to_owned()));
 
-    // An unchanged re-run writes nothing (`save! if principal.changed?`) and so
-    // produces no extra invalidation.
+    // An unchanged re-run writes nothing and so produces no extra invalidation.
     let again = provision_user_principal(&fixture.pool, &fixture.user(Some("First")))
         .await
         .unwrap();
@@ -225,8 +222,7 @@ async fn reprovisioning_is_idempotent_and_updates_like_rails() {
     let (_, _, _, _, version) = fixture.principal(first.id).await;
     assert_eq!(version, 1);
 
-    // A changed name is a sync-config field, so Rails' `before_commit` bumps the
-    // version once.
+    // A changed name is a sync-config field, so it bumps the version once.
     let renamed = provision_user_principal(&fixture.pool, &fixture.user(Some("Second")))
         .await
         .unwrap();
@@ -237,7 +233,7 @@ async fn reprovisioning_is_idempotent_and_updates_like_rails() {
         labels,
         json!({ "managed-by": "centaur", "centaur.sandbox_repo_cache": "all" })
     );
-    // Role assignments survive the update unchanged; `assign_user_mcp_role`
+    // Role assignments survive the update unchanged; the `user-mcp` assignment
     // only runs for a newly created principal.
     assert_eq!(fixture.role_ids(first.id).await, roles);
     fixture.cleanup(&[first.id]).await;

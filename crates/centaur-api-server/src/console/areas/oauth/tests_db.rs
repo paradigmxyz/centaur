@@ -898,7 +898,7 @@ async fn slack_consent_enriches_identity_and_tolerates_provider_error() {
         .expect("set the Slack API mock base before the first Slack request");
 
     // A successful Slack consent sets the credential and its wrapper secret to
-    // the profile Slack returns, like `Oauth::EnrichCredentialIdentityJob`.
+    // the profile Slack returns.
     let slug = fixture.slug("slack-enrich");
     let app_id = insert_app(
         &fixture.pool,

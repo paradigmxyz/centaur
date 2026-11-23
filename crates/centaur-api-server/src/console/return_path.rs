@@ -62,10 +62,6 @@ mod tests {
                 "/mcp/oauth/authorize?client_id=moc_1&state=x",
             ),
             (
-                "/mcp/oauth/authorize.html?client_id=moc_1&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&scope=a+b",
-                "/mcp/oauth/authorize.html?client_id=moc_1&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&scope=a+b",
-            ),
-            (
                 "/oauth/google/start?scopes=a+b",
                 "/oauth/google/start?scopes=a+b",
             ),
@@ -75,16 +71,8 @@ mod tests {
                 "/oauth/acme.google_v2-x/start",
             ),
             (
-                "/oauth/google/start.html?x=1",
-                "/oauth/google/start.html?x=1",
-            ),
-            (
                 "/oauth/google/callback?code=x&state=y",
                 "/oauth/google/callback?code=x&state=y",
-            ),
-            (
-                "/oauth/google/callback.html?code=x",
-                "/oauth/google/callback.html?code=x",
             ),
             ("/api/v1/me", "/api/v1/me"),
         ] {

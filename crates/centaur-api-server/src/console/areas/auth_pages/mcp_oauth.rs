@@ -1,13 +1,13 @@
 //! MCP OAuth authorization server: metadata, dynamic client registration, the
 //! server-rendered consent page, and the token endpoint.
 //!
-//! Ports `Mcp::OauthController`. Responses keep the wire contract of the Rails
-//! endpoint: identical metadata, redirect errors, consent form fields, JSON
-//! error messages, and `Cache-Control: no-store` on every token response.
+//! Responses keep the Console endpoint's wire contract: identical metadata,
+//! redirect errors, consent form fields, JSON error messages, and
+//! `Cache-Control: no-store` on every token response.
 //!
-//! Requests are typed per endpoint instead of read out of Rails' merged
-//! params: registration takes the RFC 7591 JSON body, the token endpoint takes
-//! the RFC 6749 form body, and the consent page takes typed query/form fields.
+//! Requests are typed per endpoint instead of a merged params hash:
+//! registration takes the RFC 7591 JSON body, the token endpoint takes the
+//! RFC 6749 form body, and the consent page takes typed query/form fields.
 
 use axum::{
     extract::{OriginalUri, State},
@@ -185,7 +185,7 @@ pub(super) async fn metadata(State(state): State<AppState>, _headers: HeaderMap)
     )
 }
 
-/// The authorization-server metadata document, with Rails' fields.
+/// The authorization-server metadata document.
 #[derive(serde::Serialize)]
 struct MetadataPayload {
     issuer: String,
@@ -259,7 +259,7 @@ pub(super) async fn register(
     server_page((StatusCode::CREATED, axum::Json(body)).into_response())
 }
 
-/// The created client Rails' `register` renders.
+/// The created client.
 #[derive(serde::Serialize)]
 struct ClientPayload {
     client_id: String,
@@ -271,7 +271,7 @@ struct ClientPayload {
     token_endpoint_auth_method: &'static str,
 }
 
-/// The registration metadata Rails kept from the request parameters. An absent
+/// The registration metadata kept from the request parameters. An absent
 /// or `null` field is dropped; any other value is stored as sent.
 fn registration_metadata(request: &RegisterRequest) -> Value {
     let mut metadata = serde_json::Map::new();
@@ -407,7 +407,7 @@ pub(super) async fn token(
 ) -> Response {
     let _config = console_config(&state);
     // The TTL is a strict positive integer now: an invalid value is this
-    // endpoint's own 400 in the RFC 6749 error body, not Ruby's silent `to_i`
+    // endpoint's own 400 in the RFC 6749 error body, not a silent
     // prefix/fallback. Check it before a grant can consume a code.
     let ttl = match access_token_ttl_seconds() {
         Ok(ttl) => ttl,
@@ -704,7 +704,7 @@ async fn render_token_response(
     )
 }
 
-/// The access token's claim set, with the fields `Mcp::Jwt.encode` receives.
+/// The access token's claim set.
 #[derive(serde::Serialize)]
 struct AccessTokenClaims<'a> {
     iss: String,
@@ -739,9 +739,9 @@ fn random_hex(bytes: usize) -> String {
 }
 
 /// The access-token lifetime. The environment value is a strict positive
-/// integer; an invalid value is a 400 from the token endpoint instead of
-/// Ruby's `String#to_i` prefix, which read `"3600s"` as 3600 and fell back to
-/// the default for anything non-positive.
+/// integer; an invalid value is a 400 from the token endpoint instead of a
+/// prefix parse that read `"3600s"` as 3600 and fell back to the default for
+/// anything non-positive.
 fn access_token_ttl_seconds() -> Result<i64, String> {
     let raw = std::env::var("CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS")
         .ok()
@@ -784,8 +784,8 @@ impl Authorization {
 
 // The checks in this function stay hand-written. Each failure is an OAuth error
 // response that names an error code and, when the client is known and the
-// redirect URI is registered, redirects to it; Rails stops at the first check it
-// reaches, and one of them (`redirect_uri`) needs the stored client. garde's
+// redirect URI is registered, redirects to it; the checks stop at the first one
+// reached, and one of them (`redirect_uri`) needs the stored client. garde's
 // report carries neither an error code nor a redirect target and aggregates
 // instead of stopping, so the rules that are expressible (`response_type` is
 // `code`, `code_challenge_method` is `S256`, `code_challenge` is present, the
@@ -959,16 +959,13 @@ fn no_store(mut response: Response) -> Response {
 }
 
 /// A consent-form post must carry the configured Console public origin
-/// verbatim. Unlike Rails' form origin check, a missing Origin and
-/// `Origin: null` are both refused, matching the console JSON API.
+/// verbatim. A missing Origin and `Origin: null` are both refused, matching
+/// the console JSON API.
 fn origin_valid(headers: &HeaderMap, config: &ConsoleSessionConfig) -> bool {
     request_origin(headers) == Some(config.public_origin())
 }
 
 fn csrf_rejection() -> Response {
-    // Rails answered a consent forgery rejection with its static
-    // `public/422.html`; the port renders the shared server-page error template
-    // with the same 422 status.
     crate::console::pages::server_error_page(
         StatusCode::UNPROCESSABLE_ENTITY,
         "Your request was rejected",
@@ -1013,8 +1010,7 @@ fn pkce_valid(challenge: &str, verifier: &str) -> bool {
 
 fn resolve_requested_resource(requested: Option<&str>) -> Option<String> {
     let configured = normalize_mcp_resource_url(&configured_mcp_resource_url()?)?;
-    // Rails uses `params[:resource].presence`: blank values defer to the
-    // configured resource.
+    // Blank values defer to the configured resource.
     if let Some(requested) = requested.filter(|value| !value.trim().is_empty())
         && normalize_mcp_resource_url(requested).as_deref() != Some(configured.as_str())
     {

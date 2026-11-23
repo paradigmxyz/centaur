@@ -5,21 +5,12 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 
-// Rails serves the production build from services/console/public/spa, so
-// built asset URLs live under /spa/. The dev server runs at / and proxies the
-// Rails-owned paths below to `bin/rails server`.
-const railsUrl = process.env.CONSOLE_RAILS_URL ?? "http://localhost:3000";
-const railsPaths = [
-  "/api",
-  "/login",
-  "/logout",
-  "/pending",
-  "/auth",
-  "/oauth",
-  "/mcp",
-  "/.well-known",
-  "/up",
-];
+// api-rs serves the production build: the shell at
+// services/console/public/spa/index.html (with the Content-Security-Policy) and
+// hashed assets under /spa/assets. The dev server runs at / and proxies the
+// server-owned paths below to the Console host of a running api-rs.
+const apiUrl = process.env.CONSOLE_API_URL ?? "http://localhost:3000";
+const apiPaths = ["/api", "/login", "/logout", "/pending", "/auth", "/oauth", "/mcp", "/.well-known"];
 
 // theme-boot.js must run before first paint as a classic script. The CSP has
 // no inline allowance, so emit it as a hashed asset and inject a <script src>.
@@ -59,46 +50,20 @@ function themeBootScript(): Plugin {
   };
 }
 
-// Rails serves public/ without a CSP, so the built index.html must not live
-// there: move it to spa-shell/, where only SpaController serves it (with the CSP).
-const SHELL_DIR = path.resolve(import.meta.dirname, "../spa-shell");
-
-function moveShellOutOfPublic(): Plugin {
-  let outDir = "";
-  return {
-    name: "console-shell-out-of-public",
-    apply: "build",
-    configResolved(config) {
-      outDir = path.resolve(config.root, config.build.outDir);
-    },
-    closeBundle() {
-      const built = path.join(outDir, "index.html");
-      if (!fs.existsSync(built)) return;
-      fs.mkdirSync(SHELL_DIR, { recursive: true });
-      fs.copyFileSync(built, path.join(SHELL_DIR, "index.html"));
-      fs.rmSync(built);
-    },
-  };
-}
-
 export default defineConfig(({ command }) => ({
   base: command === "build" ? "/spa/" : "/",
-  plugins: [react(), tailwindcss(), themeBootScript(), moveShellOutOfPublic()],
+  plugins: [react(), tailwindcss(), themeBootScript()],
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
-  // Favicons; Rails serves them in production.
+  // Favicons and the server-rendered page assets; api-rs serves them in production.
   publicDir: command === "build" ? false : "../public",
   server: {
     port: 5173,
     proxy: Object.fromEntries(
-      railsPaths.map((p) => [
-        p,
-        {
-          target: railsUrl,
-          changeOrigin: false,
-        },
-      ]),
+      // Keep the Host header: api-rs routes the Console by host, and its
+      // CENTAUR_CONSOLE_PUBLIC_URL must be this dev server's origin.
+      apiPaths.map((p) => [p, { target: apiUrl, changeOrigin: false }]),
     ),
   },
   build: {

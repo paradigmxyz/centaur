@@ -1,4 +1,4 @@
-//! Console data access, one module per area of the Rust Console port.
+//! Console data access, one module per area.
 
 pub mod admin;
 pub mod auth_pages;

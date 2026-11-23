@@ -2,9 +2,9 @@
 # Context is the repo root (see Justfile `_build-api-rs`) so the runtime stage can
 # bake the shared `tools/` tree used for iron-proxy fragment and secret discovery.
 
-# Build the Console SPA exactly like services/console/Dockerfile: hashed assets
-# into services/console/public/spa and the shell into services/console/spa-shell.
-# The runtime image serves both from disk; api-rs embeds no web bundle.
+# Build the Console SPA: the shell and hashed assets into
+# services/console/public/spa. The runtime image serves both from disk; api-rs
+# embeds no web bundle.
 FROM docker.io/library/node:24-slim AS web
 WORKDIR /repo
 RUN npm install -g pnpm@10.34.9
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
 COPY services/console/web/ services/console/web/
 RUN pnpm -C services/console/web build \
     && find services/console/public/spa/assets -type f -name '*.map' -delete \
-    && test -f services/console/spa-shell/index.html
+    && test -f services/console/public/spa/index.html
 
 FROM rust:1-bookworm AS builder
 # aws-lc-rs (the rustls crypto provider) builds native code, so the builder
@@ -82,18 +82,16 @@ COPY tools/ /app/tools/
 # No Python runs here: the workflow discovery service and workflow-host
 # sandboxes run workflow code from the agent image.
 # The built Console web app and the root public files its shell fetches. Source
-# maps are removed in the web stage; the shell is copied out of public/ so only
-# the Console shell route serves it, with the CSP.
-COPY --from=web /repo/services/console/spa-shell/ /app/services/console/spa-shell/
-COPY --from=web /repo/services/console/public/spa/assets/ /app/services/console/public/spa/assets/
+# maps are removed in the web stage. Only the Console shell route serves
+# index.html, with the CSP; /spa/assets serves the assets directory alone.
+COPY --from=web /repo/services/console/public/spa/ /app/services/console/public/spa/
 COPY services/console/public/icon-dark.svg \
      services/console/public/icon-light.svg \
-     services/console/public/icon.svg \
      services/console/public/robots.txt \
      /app/services/console/public/
 # The Console static paths default to a checkout; the image points them at the
 # baked copies above. Override any of them through apiRs.extraEnv when needed.
-ENV CENTAUR_CONSOLE_SPA_SHELL=/app/services/console/spa-shell/index.html
+ENV CENTAUR_CONSOLE_SPA_SHELL=/app/services/console/public/spa/index.html
 ENV CENTAUR_CONSOLE_SPA_ASSETS=/app/services/console/public/spa/assets
 ENV CENTAUR_CONSOLE_PUBLIC_ROOT=/app/services/console/public
 # Infra + harness auth secrets are embedded in the binary at compile time

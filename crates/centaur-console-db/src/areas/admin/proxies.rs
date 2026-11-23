@@ -90,8 +90,7 @@ pub async fn create_proxy(
         .await?)
 }
 
-/// Apply `change`. An update that changes nothing leaves `updated_at` alone, as
-/// an ActiveRecord save with no dirty attributes does.
+/// Apply `change`. An update that changes nothing leaves `updated_at` alone.
 ///
 /// The assignment timestamps are stamped (or cleared) by the database only when
 /// their principal changes, which a column-value update cannot express.

@@ -1,13 +1,11 @@
 //! Console's sync-config cache invalidation.
 //!
 //! A principal's proxy configuration is cached and rebuilt when
-//! `principals.sync_config_cache_version` changes. Rails runs that invalidation
-//! from model callbacks (`SyncConfigCacheInvalidation`, `SyncConfigOwner`,
-//! `Grant`, `BrokerCredential`) and counts **one increment per saved or
-//! destroyed record**, not per affected principal. The port writes rows with
-//! SQL instead of models, so every write path states the invalidations its
-//! callbacks would have produced, at the same point in its transaction and with
-//! the same number of increments.
+//! `principals.sync_config_cache_version` changes. That bump is **one increment
+//! per saved or destroyed record**, not per affected principal. Rows are
+//! written with SQL instead of models, so every write path states the
+//! invalidations its change requires, at the same point in its transaction and
+//! with the same number of increments.
 //!
 //! There is exactly one entry point, [`invalidate`], and one [`Scope`] per kind
 //! of affected row:
@@ -59,8 +57,8 @@ pub enum Scope<'a> {
 
 /// Bumps `sync_config_cache_version` for the principals `scope` reaches.
 ///
-/// Runs inside the caller's transaction; call it at the point Rails' callback
-/// would fire, before the commit.
+/// Runs inside the caller's transaction; call it at the point the change is
+/// made, before the commit.
 pub async fn invalidate(connection: &mut PgConnection, scope: Scope<'_>) -> Result<()> {
     match scope {
         Scope::Principal(id) => bump_principals(connection, &[id]).await,
@@ -75,7 +73,7 @@ pub async fn invalidate(connection: &mut PgConnection, scope: Scope<'_>) -> Resu
     }
 }
 
-/// Rails' `bump_sync_config_cache_versions`: one increment per principal.
+/// Bumps each listed principal once.
 async fn bump_principals(connection: &mut PgConnection, ids: &[i64]) -> Result<()> {
     let mut ids = ids.to_vec();
     ids.sort_unstable();
@@ -148,8 +146,7 @@ async fn bump_secret(
     Ok(())
 }
 
-/// Rails' `BrokerCredential#bump_referencing_principal_sync_config_versions`,
-/// run from `before_commit` whenever `access_token`, `dead`, `last_refresh`, or
+/// Runs before the commit whenever `access_token`, `dead`, `last_refresh`, or
 /// `expires_at` changed. It is the same invalidation `centaur-token-broker`
 /// performs after a token refresh.
 async fn bump_broker_credential(connection: &mut PgConnection, credential_id: i64) -> Result<()> {

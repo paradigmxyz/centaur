@@ -282,7 +282,7 @@ async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<ProxyRow, ConsoleError> 
         .ok_or_else(ProxyModel::not_found)?)
 }
 
-/// `Principal.find_by_oid!`: an unknown or malformed reference is a 404.
+/// Resolve a principal reference: an unknown or malformed one is a 404.
 async fn resolve_principal(pool: &sqlx::PgPool, reference: &str) -> Result<i64, ConsoleError> {
     Ok(
         find_principal(pool, common::oid::<PrincipalModel>(reference)?)
@@ -292,8 +292,8 @@ async fn resolve_principal(pool: &sqlx::PgPool, reference: &str) -> Result<i64, 
     )
 }
 
-/// `attrs[:principal_id].present?`: only a non-blank reference names a
-/// principal. The reference itself is passed through unmasked.
+/// Only a non-blank reference names a principal. The reference itself is
+/// passed through unmasked.
 fn principal_reference(reference: Option<&str>) -> Option<&str> {
     reference.filter(|reference| !reference.trim().is_empty())
 }

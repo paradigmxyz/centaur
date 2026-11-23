@@ -2,7 +2,7 @@
 
 `iron-control` is the control plane for [`iron-proxy`](https://github.com/ironsh/iron-proxy), a forwarding proxy that adds credentials to outbound HTTP requests. Applications route their traffic through `iron-proxy` and never hold the secrets themselves. `iron-control` stores the credentials, decides which proxy may use which credential on which requests, and hands each proxy its configuration.
 
-It is a Rails application backed by Postgres. It provides a JSON API, an operator console, and encryption at rest for the secrets it stores.
+api-rs serves it from Postgres: a JSON API, an operator console, and encryption at rest for the secrets it stores. The server code is in [`crates/centaur-api-server/src/console/`](../../crates/centaur-api-server/src/console/README.md) and [`crates/centaur-console-db`](../../crates/centaur-console-db/); this directory holds the operator UI (`web/`), the static files api-rs serves (`public/`), and the API reference (`docs/API.md`).
 
 ## What It Does
 
@@ -33,98 +33,85 @@ Operators manage credentials, principals, roles, and grants through the API or t
 The operator console is a React SPA in [`web/`](web/) (Vite, TypeScript,
 shadcn/ui on Tailwind CSS, React Router, TanStack Query) that uses the same
 JSON API. The login, pending-approval, MCP OAuth consent, and broker OAuth
-result pages stay server-rendered by Rails, so installed MCP clients keep the
-behaviour they were built against, sign-in works without JavaScript, and pods
-on either side of a rolling deploy accept each other's forms.
+result pages are server-rendered by api-rs, so installed MCP clients keep the
+protocol behaviour they were built against and sign-in works without
+JavaScript.
 
-- **Serving.** `pnpm -C web build` writes content-hashed assets to
-  `public/spa` (URLs under `/spa/`) and the HTML shell to
-  `spa-shell/index.html`. The shell is kept outside `public/` because the
-  static file server would serve it without the Content-Security-Policy.
-  `SpaController` returns it (`no-cache`) for any browser `GET`/`HEAD`
-  navigation no Rails route claims, and React Router renders the page,
-  including not-found. `/api`, `/rails`, `/spa`, `/assets`, `/.well-known`,
-  `/up`, `/mcp`, `/oauth`, `/auth`, `/login`, `/logout`, and `/pending` never
-  get the shell; unknown paths there return the JSON 404. See
-  `lib/spa_request.rb` and `config/routes/spa.rb`.
+- **Serving.** `pnpm -C web build` writes the shell to `public/spa/index.html`
+  and content-hashed assets to `public/spa/assets` (URLs under `/spa/`). api-rs
+  serves the shell (`no-cache`, with the Content-Security-Policy) for `/` and
+  every `/console/...` path, and React Router renders the page, including
+  not-found. Nothing serves `/spa/index.html` directly. See
+  `crates/centaur-api-server/src/console/static_files.rs`.
 - **Data.** The SPA calls only the console API, `/api/v1/console/*`, with the
   console session cookie (`web/src/lib/api.ts` refuses any other path). It
   reads the session and nav flags from `GET /api/v1/console/me` and sends no
-  CSRF token; the Rust Console checks an exact same-origin `Origin` on unsafe
-  requests. The chart runs the Console in api-rs, so a SPA built from this tree
-  is served and answered by the Rust Console. A `401`
-  sends the browser to `/login?return_to=<current page>` and a pending account
-  to `/pending` (full page loads); sign-out is `DELETE /api/v1/console/session`.
-  See [docs/API.md](docs/API.md#console-api).
-- **Rails-owned browser routes**, answering with redirects or JSON:
-  `/auth/:provider/{start,callback}` (SSO), `/oauth/:slug/{start,callback}`
-  (broker OAuth consent), `/mcp/oauth/{authorize,token,register}` and the
-  `/.well-known` metadata (MCP OAuth), `/launch` (PWA protocol handler), and
-  `/manifest` / `/service-worker` (PWA files from `config/pwa`).
-- **Server-rendered pages.** `GET /login` (SSO buttons and the password form),
-  `POST /login`, and `DELETE /logout` (standard Rails forms with an
-  authenticity token), `GET /pending`, the MCP consent page
-  (`GET`/`POST /mcp/oauth/authorize`), and the failure page of
-  `/oauth/:slug/{start,callback}`. After sign-in `/login` returns to the
-  remembered page, such as the authorize URL with its query. See
-  [docs/API.md](docs/API.md#console-auth-pages). They use
-  `layouts/oauth.html.erb` and plain CSS from `public/assets/oauth-page` (the SPA's
-  colours, dark by default, light under `prefers-color-scheme: light`), with no
-  asset pipeline or JavaScript.
+  CSRF token; api-rs checks an exact same-origin `Origin` on unsafe requests. A
+  `401` sends the browser to `/login?return_to=<current page>` and a pending
+  account to `/pending` (full page loads); sign-out is
+  `DELETE /api/v1/console/session`. See
+  [docs/API.md](docs/API.md#console-api).
+- **Server routes**, answering with pages, redirects, or JSON:
+  `/login`, `/logout`, `/pending`, `/auth/:provider/{start,callback}` (SSO),
+  `/oauth/:slug/{start,callback}` (broker OAuth consent),
+  `/mcp/oauth/{authorize,token,register}` and the `/.well-known` metadata (MCP
+  OAuth). The server-rendered pages use plain CSS from
+  `public/assets/oauth-page` (the SPA's colours, dark by default, light under
+  `prefers-color-scheme: light`), embedded into api-rs, with no JavaScript. See
+  [docs/API.md](docs/API.md#console-auth-pages).
 
 ## Local Development
 
-Console runs on stock PostgreSQL 16, including managed services such as RDS
-and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`,
-Node.js with pnpm (the versions CI uses are in
-`.github/workflows/console-ci.yml`), and Overmind or Foreman, then run:
+Install Node.js with pnpm (the versions CI uses are in
+`.github/workflows/console-ci.yml`). From the repository root:
 
 ```bash
-just dev
+pnpm install --frozen-lockfile --filter @centaur/console-web
+pnpm -C services/console/web typecheck
+pnpm -C services/console/web lint
+pnpm -C services/console/web test
+pnpm -C services/console/web build
 ```
 
-This installs the gem and SPA dependencies, starts a persistent `postgres:16`
-container named `centaur-console-postgres`, exposes it on `127.0.0.1:55432`,
-prepares the Rails database, and starts Rails (`:3000`) and the Vite dev server
-(`:5173`). Browse `http://localhost:5173`; Vite proxies the API and the
-Rails-owned browser routes to Rails. Database files are
-retained in the `centaur-console-postgres-data` Docker volume between runs.
+To run the SPA against a live Console, start the local stack (`just up`) and
+forward the Console Service:
 
-To test the SPA as Rails serves it in production, run `just web-build` and
-browse `http://localhost:3000`.
+```bash
+kubectl port-forward -n <namespace> service/<release>-centaur-console 3000:3000
+pnpm -C services/console/web dev
+```
 
-`just ci` (or `bin/ci`) runs the full local CI sequence: RuboCop, the gem
-audit, Brakeman, the SPA's typecheck, lint, tests, and build, the Rails tests,
-and seed validation.
+The Vite dev server (`http://localhost:5173`) proxies the API and server routes
+to `CONSOLE_API_URL` (default `http://localhost:3000`) and keeps the browser's
+`Host` header. api-rs selects the Console by host and checks writes against an
+exact `Origin`, so set `console.publicUrl: http://localhost:5173` in your local
+values while using the dev server. Sign in with the initial user's
+`IRON_CONTROL_INITIAL_USER_EMAIL` / `IRON_CONTROL_INITIAL_USER_PASSWORD` from
+the infra Secret.
 
-To use an existing PostgreSQL server instead, set
-`CENTAUR_CONSOLE_DB_HOST`, `CENTAUR_CONSOLE_DB_PORT`,
-`CENTAUR_CONSOLE_DB_USERNAME`, and `CENTAUR_CONSOLE_DB_PASSWORD`, then set
-`CENTAUR_CONSOLE_MANAGE_POSTGRES=false` so `just dev` does not start Docker.
+The dev server sends no Content-Security-Policy; after a policy, dependency, or
+`index.html` change, check the built SPA as api-rs serves it.
 
 ## Environment Variables
 
-All of the console's environment variables use the `CENTAUR_CONSOLE_` prefix. For backwards compatibility, every variable also resolves from the legacy `IRON_CONTROL_` name when the `CENTAUR_CONSOLE_` one is unset, so existing deployments keep working until they migrate. The `CENTAUR_CONSOLE_` name wins when both are set.
-
-For local development, sign in through the normal login page at
-`http://localhost:5173/login` (Vite proxies it to Rails) or
-`http://localhost:3000/login` with the seeded initial user's
-`CENTAUR_CONSOLE_INITIAL_USER_EMAIL` / `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`
-credentials, the same as every other environment.
+api-rs reads the Console settings below from `CENTAUR_CONSOLE_*` variables. The
+chart mounts them from the shared infra Secret, where the older ones keep their
+original `IRON_CONTROL_*` keys.
 
 ## First Boot
 
-The console requires an authenticated user and API key before any API endpoint will respond. To bootstrap a fresh deployment without a console, set the following environment variables on startup:
+The console requires an authenticated user before any API endpoint will respond. To bootstrap a fresh deployment, set the following environment variables on api-rs:
 
 | Variable                          | Required | Description                                                                                              |
 | --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
 | `CENTAUR_CONSOLE_INITIAL_USER_EMAIL`    | yes      | Email for the initial user.                                                                              |
 | `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD` | yes      | Password for the initial user (minimum 12 characters).                                                   |
-| `CENTAUR_CONSOLE_INITIAL_API_KEY`       | no       | Plaintext API key for the initial user. Must match `iak_` followed by 64 lowercase hex characters (a 32-byte hex string). If omitted, a token is generated and logged once at startup. |
+
+Operators create API keys on the Console's API Keys page.
 
 Behavior:
 
-- Bootstrap runs after Rails initialization on every boot, but is a no-op if any user already exists. It is safe to leave the env vars set across rolling restarts.
+- Bootstrap runs at api-rs startup on every boot, but is a no-op if any user already exists. It is safe to leave the env vars set across rolling restarts.
 - If `CENTAUR_CONSOLE_INITIAL_USER_EMAIL` is set without `CENTAUR_CONSOLE_INITIAL_USER_PASSWORD`, the process exits with a clear error.
 - Concurrent pods racing the first boot are serialized with a Postgres advisory lock; exactly one user is created.
 
@@ -136,7 +123,7 @@ The operator console supports email and password sign-in by default. To add Goog
 
 | Variable                              | Required | Description                                                                                 |
 | ------------------------------------- | -------- | ------------------------------------------------------------------------------------------- |
-| `CENTAUR_CONSOLE_PUBLIC_URL`             | recommended | Public origin for this deployment, for example `https://control.example.com`. Use this when `iron-control` runs behind a proxy or load balancer whose internal host does not match the public URL. |
+| `CENTAUR_CONSOLE_PUBLIC_URL`             | recommended | Public origin for this deployment, for example `https://control.example.com`. Required: api-rs selects the Console by this host and checks writes against this origin. |
 | `CENTAUR_CONSOLE_GOOGLE_CLIENT_ID`       | for Google | Google OAuth client ID for console login.                                                    |
 | `CENTAUR_CONSOLE_GOOGLE_CLIENT_SECRET`   | for Google | Google OAuth client secret for console login.                                                |
 | `CENTAUR_CONSOLE_SLACK_CLIENT_ID`        | for Slack | Slack OpenID Connect client ID for console login.                                            |
@@ -157,7 +144,7 @@ Register these callback URLs with the provider:
 
 The Okta application must use the authorization-code flow with PKCE and the RS256 ID-token signing algorithm; request the `openid`, `email`, and `profile` scopes. The Console discovers the authorization, token, UserInfo, and JWKS endpoints from the issuer. It verifies each ID token's signature, issuer, audience, expiry, issued-at time, and nonce, then requires UserInfo to return the same subject and a verified email before signing a user in.
 
-All three providers request the `openid`, `email`, and `profile` scopes. Client credentials may also be stored in Rails credentials under `console_auth.<provider>.client_id` and `console_auth.<provider>.client_secret`, but environment variables take precedence. Okta's issuer and token-endpoint authentication method may likewise be stored at `console_auth.okta.issuer` and `console_auth.okta.token_endpoint_auth_method`.
+All three providers request the `openid`, `email`, and `profile` scopes.
 
 Google OAuth consent apps for broker credentials are configured separately in the console under **OAuth Apps**. Those app callbacks use `/oauth/<slug>/callback` and currently support Google only; Slack support here applies to operator console sign-in.
 
@@ -167,9 +154,7 @@ The Console no longer runs Slack DM, Google Docs, or Granola sync jobs. Those
 sources are ingested by [`centaur-company-context`](../../crates/centaur-company-context/),
 which also stores the normalized documents and embeddings. Previously indexed
 content is unchanged, and Google OAuth and broker-credential refresh still run
-as before. The former `CENTAUR_CONSOLE_GOOGLE_DOCS_SYNC_ENABLED` and
-`CENTAUR_CONSOLE_COMPANY_CONTEXT_V1_ENABLED` switches no longer control any
-Console job; the Helm chart still accepts them for compatibility.
+as before.
 
 ## Broker Credential Refresh
 
@@ -178,25 +163,23 @@ credentials; the Console only creates and administers them.
 
 ## Encryption Keys
 
-`iron-control` uses ActiveRecord encryption to protect secrets stored in the control plane (for example, the `control_plane` secret source type). The following environment variables configure the encryption keys:
+The Console encrypts secrets stored in the control plane (for example, the `control_plane` secret source type, SSH keys, and broker tokens) in the Active Record encryption format, which existing databases already hold. api-rs reads these keys; proxy-sync, token-broker, and company-context read the same values under their `IRON_CONTROL_AR_ENCRYPTION_*` names:
 
 | Variable                                 | Required           | Description                                  |
 | ---------------------------------------- | ------------------ | -------------------------------------------- |
-| `CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY`         | yes (in production) | Primary key used for non-deterministic encryption. |
-| `CENTAUR_CONSOLE_AR_ENCRYPTION_DETERMINISTIC_KEY`   | yes (in production) | Key used for deterministic encryption.       |
-| `CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT` | yes (in production) | Salt used to derive per-attribute keys.      |
+| `CENTAUR_CONSOLE_AR_ENCRYPTION_PRIMARY_KEY`         | yes | Primary key used for non-deterministic encryption. |
+| `CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT` | yes | Salt used to derive per-attribute keys.      |
 
-Generate suitable values with `bin/rails db:encryption:init` and store them in your secret manager. In production, the process refuses to boot if any of the three are missing. In `development` and `test`, fixed fallback values are used so the suite runs without configuration.
+The chart mounts them from `IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY` and `IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT`, which local bootstrap generates when absent. A request that needs encryption fails when they are missing.
 
-Rotating any of these keys makes previously encrypted data unreadable. Treat them as long-lived secrets and back them up alongside other production credentials.
+Rotating either key makes previously encrypted data unreadable. Treat them as long-lived secrets and back them up alongside other production credentials.
 
 ## API
 
 The deployed Console API is the Rust one in
 `crates/centaur-api-server/src/console/` (see its `README.md`): every credential
 maps to one capability set and every route declares the capability it requires.
-This Rails tree keeps the reference behavior, the migrations, and the worker.
-`iron-control` exposes the same JSON API under `/api/v1` in three namespaces:
+It exposes the JSON API under `/api/v1` in three namespaces:
 
 - `/api/v1/*` is the operator API for machine callers. It takes an API key sent as a bearer token (`Authorization: Bearer iak_...`) whose owner is an active admin, and does not accept the console session cookie.
 - `/api/v1/console/*` is the console API that the SPA calls. It takes the console session cookie, with an exact same-origin `Origin` check on writes (no CSRF token), or a sandbox-delegated user credential: a sandbox token from an active admin's Slack DM with the bot. It never accepts an API key (`403 session_required`). Endpoints are admin-only unless documented otherwise.

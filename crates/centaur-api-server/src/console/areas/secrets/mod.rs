@@ -16,7 +16,7 @@
 //!
 //! Persistence, document parsing, and validation all live in
 //! `centaur_console_db::areas::secrets`; this module only turns HTTP into those
-//! calls and renders Rails-compatible payloads.
+//! calls and renders the Console payloads.
 
 mod payloads;
 
@@ -139,7 +139,7 @@ macro_rules! register_kinds {
 }
 
 /// `GET /api/v1/console/secrets` filters. Pagination and `labels[key]` come
-/// from [`ListParams`], so Rails' integer parsing and clamping are unchanged.
+/// from [`ListParams`], so the integer parsing and clamping are unchanged.
 #[derive(Debug, Deserialize)]
 struct ConsoleIndexQuery {
     #[serde(default)]
@@ -395,7 +395,7 @@ async fn console_destroy<K: EditableKind>(
 /// agent, and an OAuth credential is managed by the consent flow.
 const SANDBOX_REFUSED_SOURCE_TYPES: [&str; 2] = ["control_plane", "token_broker"];
 
-/// Rails' `SandboxAdminSecretWrites`: a Slack DM sandbox acting for an admin may
+/// A Slack DM sandbox acting for an admin may
 /// only point a secret at an external store, never supply an inline
 /// (`control_plane`) value or an OAuth (`token_broker`) credential.
 #[allow(clippy::result_large_err)] // The error is the HTTP response this handler returns.
@@ -419,7 +419,7 @@ fn refuse_sandbox_source(
     }
 }
 
-/// The update half of `SandboxAdminSecretWrites`: updates address an existing
+/// The update half of sandbox admin secret writes: updates address an existing
 /// secret by oid, and a secret backed by an OAuth credential stays read-only.
 async fn refuse_sandbox_update(
     pool: &PgPool,
@@ -552,7 +552,7 @@ async fn bearer_lookup<K: SecretRoutes>(
 }
 
 /// A personal SSH key may only be edited by its owner. A missing record is left
-/// to the write, so its 404 matches Rails'.
+/// to the write, so its 404 comes from there.
 async fn refuse_personal_key(
     pool: &PgPool,
     kind: SecretKind,
@@ -612,8 +612,8 @@ fn console_options(retain_inline_secret: bool, clear_foreign_id: bool) -> WriteO
     }
 }
 
-/// Rails treats an `:id` with the model's oid prefix as an oid that must exist,
-/// and anything else as a foreign id upsert (`resolve_for_upsert`).
+/// An `:id` with the model's oid prefix is an oid that must exist, and anything
+/// else is a foreign id upsert (`resolve_for_upsert`).
 fn target_for(kind: SecretKind, id: &str) -> WriteTarget {
     if id.starts_with(&format!("{}_", kind.oid_prefix())) {
         WriteTarget::Oid(id.to_owned())
@@ -622,8 +622,8 @@ fn target_for(kind: SecretKind, id: &str) -> WriteTarget {
     }
 }
 
-/// A collection path that only accepts writes answers a stray read the way the
-/// Rails router does: not found, rather than axum's method-not-allowed.
+/// A collection path that only accepts writes answers a stray read with not
+/// found, rather than axum's method-not-allowed.
 async fn missing_route() -> Response {
     ConsoleError::not_found("not found").into_response()
 }

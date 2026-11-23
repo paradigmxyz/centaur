@@ -836,7 +836,7 @@ mod tests {
                 "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,
                 "token_use": "console_service",
             }),
-            // The retired Rails Console service token.
+            // A retired Console service token.
             json!({
                 "iss": "centaur-console", "sub": "centaur-console", "aud": "centaur-api",
                 "iat": 1_700_000_000i64, "exp": 4_102_444_800i64,

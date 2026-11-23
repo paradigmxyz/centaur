@@ -1,11 +1,10 @@
 //! The stateless Console session cookie.
 //!
-//! Console used to sign Rails session cookies; the Rust port issues its own
-//! AES-256-GCM cookie named `_centaur_console_session`. The payload carries
-//! the user id, its issue time, and an optional return path. It is encrypted
-//! with an authenticated cipher, so tampering, a wrong key, or an expired cookie
-//! is simply an anonymous request. Unsafe requests are protected by an exact
-//! `Origin` check, not by a token in this payload.
+//! It is an AES-256-GCM cookie named `_centaur_console_session`. The payload
+//! carries the user id, its issue time, and an optional return path. It is
+//! encrypted with an authenticated cipher, so tampering, a wrong key, or an
+//! expired cookie is simply an anonymous request. Unsafe requests are protected
+//! by an exact `Origin` check, not by a token in this payload.
 //!
 //! Cookie shape: `v1.<base64url nonce>.<base64url ciphertext+tag>`. The
 //! version is also part of the AEAD associated data, so a future version can
@@ -70,8 +69,8 @@ impl SessionCookieConfig {
         derive_key(&self.secret, label)
     }
 
-    /// Decodes the last cookie with the Console name (Rack's duplicate-cookie
-    /// behavior), if it is authentic and still inside its 30-day lifetime.
+    /// Decodes the last cookie with the Console name (duplicate cookies resolve
+    /// that way), if it is authentic and still inside its 30-day lifetime.
     pub(crate) fn session_from_headers(&self, headers: &HeaderMap) -> Option<ConsoleSession> {
         let value = cookie_value(headers, SESSION_COOKIE_NAME)?;
         self.decode(value)
@@ -245,7 +244,7 @@ impl ConsoleSession {
 }
 
 pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    // Rack parses duplicate cookie names into a hash, so the last one wins.
+    // Duplicate cookie names resolve so the last one wins.
     headers
         .get_all(COOKIE)
         .iter()

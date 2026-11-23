@@ -115,11 +115,6 @@ export function toPayload(values: OauthAppFormValues, isNew: boolean, configKeys
   return payload;
 }
 
-/** Rails `"github".capitalize` -> "Github". */
-function capitalize(key: string) {
-  return key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
-}
-
 interface OauthAppFormProps {
   app?: OauthApp;
   providers: OauthProvider[];
@@ -176,7 +171,7 @@ export function OauthAppForm({ app, providers, submitLabel, cancelTo, onSubmit }
               control={form.control}
               name="provider"
               label="Provider *"
-              options={providers.map((p) => ({ value: p.key, label: capitalize(p.key) }))}
+              options={providers.map((p) => ({ value: p.key, label: p.display_name }))}
             />
             <TextField
               control={form.control}

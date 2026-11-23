@@ -49,8 +49,8 @@ impl GoogleProduct {
     }
 }
 
-/// The credential ID the Slack app's bot token syncs under. Rails assigns
-/// broker credentials positive IDs, so it cannot collide with one.
+/// The credential ID the Slack app's bot token syncs under. Broker credentials
+/// get positive IDs, so it cannot collide with one.
 pub const SLACK_BOT_CREDENTIAL_ID: i64 = 0;
 /// Conversation types the bot token syncs. Direct messages with the bot are
 /// left out: no principal is the bot, so none could see them.
@@ -140,7 +140,7 @@ impl ConsoleCredentials {
             .max_connections(5)
             .connect_with(options)
             .await
-            .context("connect to Rails Console database")?;
+            .context("connect to Console database")?;
         let credentials = Self {
             pool,
             encryption: Arc::new(ActiveRecordEncryption::new(
@@ -199,7 +199,7 @@ impl ConsoleCredentials {
         .bind(self.google_user_emails(product))
         .fetch_all(&self.pool)
         .await
-        .context("list Google broker credentials from Rails Console")?;
+        .context("list Google broker credentials from Console")?;
 
         let mut ids = Vec::new();
         for row in rows {
@@ -236,7 +236,7 @@ impl ConsoleCredentials {
         .bind(self.google_user_emails(product))
         .fetch_all(&self.pool)
         .await
-        .context("list retained Google broker credentials from Rails Console")
+        .context("list retained Google broker credentials from Console")
     }
 
     pub async fn google_credential(
@@ -271,7 +271,7 @@ impl ConsoleCredentials {
         .bind(self.google_user_emails(product))
         .fetch_optional(&self.pool)
         .await
-        .context("load Google broker credential from Rails Console")?
+        .context("load Google broker credential from Console")?
         .with_context(|| format!("Google broker credential {credential_id} is not syncable"))?;
 
         let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
@@ -328,7 +328,7 @@ impl ConsoleCredentials {
         .bind(&self.granola_user_emails)
         .fetch_all(&self.pool)
         .await
-        .context("list Granola broker credentials from Rails Console")
+        .context("list Granola broker credentials from Console")
     }
 
     pub async fn retained_granola_credential_ids(&self) -> Result<Vec<i64>> {
@@ -351,7 +351,7 @@ impl ConsoleCredentials {
         .bind(&self.granola_user_emails)
         .fetch_all(&self.pool)
         .await
-        .context("list retained Granola broker credentials from Rails Console")
+        .context("list retained Granola broker credentials from Console")
     }
 
     pub async fn granola_credential(&self, credential_id: i64) -> Result<GranolaCredential> {
@@ -379,7 +379,7 @@ impl ConsoleCredentials {
         .bind(&self.granola_user_emails)
         .fetch_optional(&self.pool)
         .await
-        .context("load Granola broker credential from Rails Console")?
+        .context("load Granola broker credential from Console")?
         .with_context(|| format!("Granola broker credential {credential_id} is not syncable"))?;
 
         let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
@@ -427,7 +427,7 @@ impl ConsoleCredentials {
         .bind(&self.slack_user_ids)
         .fetch_all(&self.pool)
         .await
-        .context("list Slack broker credentials from Rails Console")?;
+        .context("list Slack broker credentials from Console")?;
 
         let mut ids = Vec::new();
         if self.slack_bot_syncs().await? {
@@ -467,7 +467,7 @@ impl ConsoleCredentials {
         .bind(&self.slack_user_ids)
         .fetch_all(&self.pool)
         .await
-        .context("list retained Slack broker credentials from Rails Console")?;
+        .context("list retained Slack broker credentials from Console")?;
         if self.slack_bot_syncs().await? {
             ids.insert(0, SLACK_BOT_CREDENTIAL_ID);
         }
@@ -549,7 +549,7 @@ impl ConsoleCredentials {
         .bind(&self.slack_user_ids)
         .fetch_optional(&self.pool)
         .await
-        .context("load Slack broker credential from Rails Console")?
+        .context("load Slack broker credential from Console")?
         .with_context(|| format!("Slack broker credential {credential_id} is not syncable"))?;
 
         let expires_at: Option<NaiveDateTime> = row.try_get("expires_at")?;
@@ -634,7 +634,7 @@ impl ConsoleCredentials {
         .bind(&self.slack_oauth_app_slug)
         .fetch_optional(&self.pool)
         .await
-        .context("load principal from Rails Console")
+        .context("load principal from Console")
     }
 
     pub async fn ready(&self) -> bool {

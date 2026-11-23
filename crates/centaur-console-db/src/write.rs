@@ -1,7 +1,7 @@
 //! Timestamped writes for Console's tables.
 //!
-//! Every Console table carries `created_at`/`updated_at`. Rails sets both on
-//! insert and bumps `updated_at` on update **only when a column actually
+//! Every Console table carries `created_at`/`updated_at`. Both are set on
+//! insert, and `updated_at` is bumped on update **only when a column actually
 //! changes**: an unchanged `update` is a no-op, so `updated_at` keeps its value.
 //! The SPA sorts on `updated_at`, so the difference is observable.
 //!
@@ -22,9 +22,9 @@
 //! sqlx::query(&sql).bind(name).bind(scopes).bind(id).execute(pool).await?;
 //! ```
 //!
-//! A write that intentionally keeps `updated_at` (Rails'
-//! `update_column`/`update_columns`, a soft delete setting only `deleted_at`)
-//! stays a plain statement in its area; do not route it through these helpers.
+//! A write that intentionally keeps `updated_at` (a partial column write, a
+//! soft delete setting only `deleted_at`) stays a plain statement in its area;
+//! do not route it through these helpers.
 //! [`update_where_sql`] is the same update addressed by a column other than the
 //! primary key.
 
@@ -60,8 +60,7 @@ pub fn update_sql(table: &str, columns: &[&str]) -> String {
 
 /// Like [`update_sql`], but only when at least one of `columns` changes value:
 /// `... WHERE id = $k AND (<columns>) IS DISTINCT FROM (<bindings>)`. An
-/// unchanged write affects no rows and leaves `updated_at` alone, which is
-/// Rails' dirty tracking.
+/// unchanged write affects no rows and leaves `updated_at` alone.
 pub fn update_changed_sql(table: &str, columns: &[&str]) -> String {
     update_with(table, columns, Some(columns))
 }
@@ -122,7 +121,7 @@ fn ident(column: &str) -> String {
     format!("\"{column}\"")
 }
 
-/// `UPDATE <table> SET updated_at = now() WHERE id = $1`, Rails' `touch`.
+/// `UPDATE <table> SET updated_at = now() WHERE id = $1`, a touch.
 pub fn touch_sql(table: &str) -> String {
     format!("UPDATE {table} SET updated_at = now() WHERE id = $1")
 }

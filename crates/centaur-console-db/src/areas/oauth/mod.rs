@@ -1,12 +1,9 @@
 //! Data access for the OAuth area: Console's `oauth_apps` and
 //! `broker_credentials`, plus the wrappers the consent flow creates.
 //!
-//! Rails owns the same tables through `OauthApp` and `BrokerCredential`
-//! (`services/console/app/models`). The port keeps the model's validation
-//! messages and the controller payloads identical, so the SPA and the
-//! differential harness see no difference: this module only maps rows,
-//! encrypts/decrypts write-only attributes with the same Active Record
-//! encryption scheme, and runs the queries the handlers need.
+//! This module only maps rows, encrypts/decrypts write-only attributes with the
+//! Active Record encryption format existing rows use, and runs the queries the
+//! handlers need.
 //!
 //! The rows derive [`sqlx::FromRow`] and are read with `query_as`, the table
 //! descriptors are [`OauthAppModel`]/[`BrokerCredentialModel`], inserts and
@@ -38,22 +35,21 @@ use crate::model::{
 use crate::timestamp;
 use crate::write;
 
-/// `BrokerCredential::REFRESH_FLOOR_SECONDS`.
+/// The shortest early-refresh slack, in seconds.
 pub const REFRESH_FLOOR_SECONDS: i64 = 60;
-/// `BrokerCredential::DEFAULT_EXPIRES_IN_SECONDS`.
+/// The default credential lifetime, in seconds.
 pub const DEFAULT_EXPIRES_IN_SECONDS: i64 = 5 * 60;
-/// `BrokerCredential::DEFAULT_EARLY_REFRESH_SLACK_SECONDS`.
+/// The default early-refresh slack, in seconds.
 pub const DEFAULT_EARLY_REFRESH_SLACK_SECONDS: i32 = 300;
-/// `BrokerCredential::DEFAULT_EARLY_REFRESH_FRACTION`.
+/// The default early-refresh fraction of the credential's lifetime.
 pub const DEFAULT_EARLY_REFRESH_FRACTION: f64 = 0.2;
-/// `BrokerCredential::DEFAULT_MAX_REFRESH_INTERVAL_SECONDS`.
+/// The default ceiling between refreshes, in seconds.
 pub const DEFAULT_MAX_REFRESH_INTERVAL_SECONDS: i32 = 86_400;
-/// `BrokerCredential::PREQIN_TOKEN_ENDPOINT`.
+/// The Preqin token endpoint.
 pub const PREQIN_TOKEN_ENDPOINT: &str = "https://api.preqin.com/connect/token";
-/// `Oauth::Disconnect::DEAD_REASON`.
+/// The dead reason recorded on disconnect.
 pub const DISCONNECTED_DEAD_REASON: &str = "disconnected";
-/// Rails' URL-safe identifier format shared by `OauthApp` and
-/// `BrokerCredential`.
+/// The URL-safe identifier format shared by OAuth apps and broker credentials.
 pub const URL_SAFE_MESSAGE: &str =
     "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)";
 
@@ -65,7 +61,7 @@ pub fn url_safe(value: &str) -> bool {
 }
 
 /// Active Record encryption for the write-only attributes in this area, keyed
-/// from the same `CENTAUR_CONSOLE_AR_ENCRYPTION_*` settings Rails reads.
+/// from the same `CENTAUR_CONSOLE_AR_ENCRYPTION_*` settings.
 pub struct OauthEncryption {
     inner: ActiveRecordEncryption,
 }
@@ -85,9 +81,9 @@ impl OauthEncryption {
         }
     }
 
-    /// The deployment's keys. Absent keys mean the port cannot read or write
-    /// encrypted attributes; handlers treat that as a configuration failure
-    /// rather than silently storing plaintext. The environment is read in
+    /// The deployment's keys. Absent keys mean encrypted attributes cannot be
+    /// read or written; handlers treat that as a configuration failure rather
+    /// than silently storing plaintext. The environment is read in
     /// `areas::encryption` only.
     pub fn from_env() -> Option<Self> {
         let (primary_key, salt) = super::encryption::keys().ok()?;
@@ -215,7 +211,7 @@ pub async fn enabled_oauth_apps(pool: &PgPool, include_shared: bool) -> Result<V
     .await?)
 }
 
-/// A new `oauth_apps` row. Timestamps come from the insert helper, like Rails'.
+/// A new `oauth_apps` row. Timestamps come from the insert helper.
 pub struct NewOauthApp {
     pub slug: String,
     pub description: Option<String>,
@@ -334,8 +330,8 @@ pub struct BrokerCredential {
     pub username: Option<String>,
     pub password: Option<String>,
     pub api_key: Option<String>,
-    /// `serialize :token_endpoint_headers, coder: JSON` plus `encrypts`, so the
-    /// column holds an encrypted JSON document of header names to values.
+    /// Encrypted JSON: the column holds an encrypted JSON document of header
+    /// names to values.
     pub token_endpoint_headers: Option<String>,
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
@@ -372,7 +368,8 @@ pub const APP_CREDENTIAL_LIST_FROM: &str = "FROM broker_credentials \
 pub const APP_CREDENTIAL_LIST_ORDER: &str = "ORDER BY created_at ASC, id ASC";
 
 impl BrokerCredential {
-    /// Rails' `status`: `dead`, `bootstrapping` (never refreshed), or `live`.
+    /// The computed status: `dead`, `bootstrapping` (never refreshed), or
+    /// `live`.
     pub fn status(&self) -> &'static str {
         if self.dead {
             "dead"
@@ -384,7 +381,7 @@ impl BrokerCredential {
     }
 
     /// The decrypted `token_endpoint_headers` object. A malformed value is an
-    /// invalid row, not a credential the port can refresh with.
+    /// invalid row, not a credential that can be refreshed with.
     pub fn token_endpoint_headers(
         &self,
         encryption: &OauthEncryption,
@@ -471,7 +468,7 @@ pub async fn oauth_app_for_credential(
 /// A user's connections on the Integrations page: credentials they minted,
 /// ones whose IdP email matches their console login, and (for shared apps) any
 /// admin-connected account. Oldest first, so the caller's newest-wins map keeps
-/// the same record Rails' `index_by` does.
+/// the last connection per app.
 pub async fn connections_for_user(
     pool: &PgPool,
     user_id: i64,
@@ -582,8 +579,8 @@ pub async fn insert_broker_credential(
 }
 
 /// The replace-style write the CRUD handlers apply to an existing credential.
-/// The handler merges the existing row with the body (so omitted and explicit
-/// null values behave like Rails' strong parameters) and hands the complete
+/// The handler merges the existing row with the body (so an omitted key keeps
+/// the stored value and an explicit null clears it) and hands the complete
 /// result here; encrypted fields are already ciphertext.
 pub async fn update_broker_credential(
     pool: &PgPool,
@@ -660,7 +657,7 @@ pub async fn update_broker_credential(
             .await?;
     }
     // Reviving a dead credential changes `dead`, which is a sync-config
-    // relevant change for Rails' `before_commit` invalidation.
+    // relevant change, so the credential's scope is invalidated.
     if values.reset_refresh_state && was_dead == Some(true) {
         invalidate::invalidate(&mut tx, Scope::BrokerCredential(id)).await?;
     }
@@ -668,8 +665,7 @@ pub async fn update_broker_credential(
     Ok(())
 }
 
-/// Rails' `has_one :static_secret, dependent: :nullify` followed by the row
-/// delete.
+/// Clears the secret's `broker_credential_id`, then deletes the row.
 pub async fn delete_broker_credential(pool: &PgPool, id: i64) -> Result<()> {
     let mut tx = pool.begin().await?;
     let sql = write::update_where_sql(
@@ -695,9 +691,9 @@ pub struct DisconnectedTokens {
     pub access_token: Option<String>,
 }
 
-/// Rails' `Oauth::Disconnect`: clear local access under the credential's row
-/// lock, then let the caller revoke the captured tokens outside the
-/// transaction. Returns `None` when the row is gone.
+/// Clear local access under the credential's row lock, then let the caller
+/// revoke the captured tokens outside the transaction. Returns `None` when the
+/// row is gone.
 pub async fn disconnect_broker_credential(
     pool: &PgPool,
     id: i64,
@@ -746,7 +742,7 @@ pub async fn disconnect_broker_credential(
         .execute(&mut *tx)
         .await?;
     // Clearing the tokens under the lock always changes `access_token`, `dead`,
-    // and `expires_at`, so Rails' `before_commit` invalidation always runs.
+    // and `expires_at`, so the credential's scope is always invalidated.
     invalidate::invalidate(&mut tx, Scope::BrokerCredential(id)).await?;
     tx.commit().await?;
     Ok(Some(tokens))
@@ -777,7 +773,8 @@ pub async fn user_has_ssh_key(pool: &PgPool, user_id: i64) -> Result<bool> {
     Ok(count > 0)
 }
 
-/// Rails' `BrokerCredential#compute_next_attempt_at`.
+/// The next refresh attempt: the early-refresh time, capped by the maximum
+/// refresh interval.
 pub fn compute_next_attempt_at(
     expires_at: Option<PrimitiveDateTime>,
     last_refresh: Option<PrimitiveDateTime>,
@@ -822,8 +819,8 @@ mod tests {
             now + Duration::seconds(3600 - 720)
         );
         // The 60s floor wins over a tiny fraction, so a credential expiring in
-        // 30s is already past its early-refresh time. Rails does not clamp the
-        // result to the current time.
+        // 30s is already past its early-refresh time. The result is not clamped
+        // to the current time.
         assert_eq!(
             compute_next_attempt_at(
                 Some(now + Duration::seconds(30)),

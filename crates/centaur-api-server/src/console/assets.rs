@@ -1,9 +1,8 @@
 //! The static files behind the server-rendered sign-in and OAuth pages.
 //!
-//! Console serves `services/console/public/assets/oauth-page` through Rails'
-//! `public/` handler, with a content digest in each URL
-//! (`OauthPageAssets.path`). The Rust port embeds the same files and serves
-//! them at the same paths so forms rendered by either version keep loading.
+//! Console serves `services/console/public/assets/oauth-page`, with a content
+//! digest in each URL. The binary embeds the files and serves them at the same
+//! paths so rendered forms keep loading.
 
 use axum::{
     Router,
@@ -67,8 +66,7 @@ pub(crate) fn path(name: &str) -> Option<String> {
     ))
 }
 
-/// `config.public_file_server.headers` in the console's production
-/// environment: `public, max-age=#{1.year.to_i}`.
+/// Public asset cache policy: `public, max-age=31556952` (one year).
 pub(crate) const PUBLIC_ASSET_CACHE_CONTROL: &str = "public, max-age=31556952";
 
 fn digest(bytes: &[u8]) -> String {
@@ -82,8 +80,8 @@ async fn serve_asset(Path(name): Path<String>) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, asset.content_type)
-        // `public_file_server.headers` in the reference: `1.year.to_i` seconds,
-        // no `immutable`. Keep both the lifetime and the directive list equal.
+        // One year in seconds, no `immutable`. Keep both the lifetime and the
+        // directive list equal.
         .header(header::CACHE_CONTROL, PUBLIC_ASSET_CACHE_CONTROL)
         .body(Body::from(asset.bytes))
         .expect("valid static asset response")

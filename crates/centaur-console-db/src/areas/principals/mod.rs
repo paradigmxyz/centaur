@@ -1,11 +1,9 @@
 //! Console's principals area: principals, roles, grants, role assignments,
 //! and Slack channel permissions.
 //!
-//! The query shapes and payloads mirror `services/console`'s controllers and
-//! models closely enough that the console compatibility harness sees the same
-//! bytes. Writes that Rails performs through model callbacks (default roles,
-//! sync-config cache bumps, credential reconciliation) happen here inside the
-//! same transaction.
+//! Side-effect writes (default roles, sync-config cache bumps, credential
+//! reconciliation) happen here inside the same transaction as the change that
+//! causes them.
 //!
 //! Rows derive [`sqlx::FromRow`] and are read with `query_as`; lookups go
 //! through [`crate::model`] descriptors, timestamps render through
@@ -51,13 +49,12 @@ use crate::FieldErrors;
 use crate::areas::secrets::SecretKind;
 use crate::model::ConsoleModel;
 
-/// A failure in the principals area, carrying the HTTP meaning the Rails
-/// controller would render.
+/// A failure in the principals area, carrying the HTTP meaning a route renders.
 #[derive(Debug)]
 pub enum PrincipalError {
     NotFound(String),
     BadRequest(String),
-    /// `record.errors.as_json()` rendered under `details`.
+    /// Validation messages rendered under `details`.
     Validation(FieldErrors),
     Internal(String),
     Database(sqlx::Error),
@@ -359,7 +356,7 @@ impl Default for PrincipalRowDefaults {
     }
 }
 
-/// Rails' `sanitize_sql_like` for an ILIKE pattern.
+/// An ILIKE pattern that escapes `\`, `%`, and `_` in `query`.
 pub fn like_pattern(query: &str) -> String {
     let mut pattern = String::with_capacity(query.len() + 2);
     pattern.push('%');

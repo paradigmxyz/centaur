@@ -1,5 +1,5 @@
-//! Writes for the principals area, including the model callbacks Rails runs
-//! around them (default roles, sync-config cache bumps, reconciliation).
+//! Writes for the principals area, including the side effects that go with them
+//! (default roles, sync-config cache bumps, reconciliation).
 
 use std::collections::BTreeSet;
 
@@ -175,8 +175,8 @@ impl PrincipalDraft {
         Ok(())
     }
 
-    /// `Principal#link_console_user_by_slack_email`, called only when the body
-    /// carried a `slack_email` key.
+    /// Links the console user by Slack email, called only when the body carried
+    /// a `slack_email` key.
     async fn link_console_user(&mut self, conn: &mut PgConnection) -> Result<()> {
         if self.kind.as_deref() != Some("slack_dm") {
             return Ok(());
@@ -228,18 +228,16 @@ impl PrincipalDraft {
                 != Some(original.sandbox_workflows_write_enabled)
     }
 
-    /// The `foreign_id` the model validates: a blank one is no foreign id at
-    /// all.
+    /// The `foreign_id` a write validates: a blank one is no foreign id at all.
     fn non_blank_foreign_id(&self) -> Option<&str> {
         self.foreign_id
             .as_deref()
             .filter(|foreign_id| !foreign_id.trim().is_empty())
     }
 
-    /// Rails' `will_save_change_to_<attribute>`: a format validation runs only
-    /// on a value this write carried *and* changed, so the stored value of an
-    /// untouched or re-sent field is not re-checked. `None` is both "no rule"
-    /// and ActiveModel's `allow_nil: true` for a cleared field.
+    /// A format validation runs only on a value this write carried *and*
+    /// changed, so the stored value of an untouched or re-sent field is not
+    /// re-checked. `None` is both "no rule" and "cleared field".
     fn revalidated(&self, attribute: &str) -> Option<&str> {
         let original = self.original.as_ref();
         let (current, stored) = match attribute {
@@ -388,7 +386,7 @@ async fn assign_default_roles(conn: &mut PgConnection, principal_id: i64) -> Res
     Ok(())
 }
 
-/// Applies a merged principal draft and runs the callbacks a save fires:
+/// Applies a merged principal draft and runs the side effects a save fires:
 /// default roles on insert, a sync-config bump on a changed update, the
 /// submitted permission set, and credential reconciliation.
 async fn persist_principal(
@@ -849,14 +847,13 @@ fn normalized_rows(rows: &[PermissionWrite]) -> Vec<PermissionDraft> {
 
 /// One channel's permission flags, normalized and ready to validate and write.
 ///
-/// Rails validates the record this becomes, after normalization, so the field
-/// rules are attributes on this draft rather than on the request row.
+/// The record this becomes is validated after normalization, so the field rules
+/// are attributes on this draft rather than on the request row.
 #[derive(Clone, Debug, garde::Validate)]
 #[garde(allow_unvalidated)]
 #[garde(custom(at_least_one_permission))]
 struct PermissionDraft {
-    /// Already `to_s.strip.upcase`d, as Rails' `normalize_channel_id` does
-    /// before validation.
+    /// Already trimmed and upper-cased, before validation.
     #[garde(custom(super::rules::channel_id))]
     channel_id: String,
     upload_enabled: bool,
@@ -909,7 +906,7 @@ impl PermissionDraft {
     }
 }
 
-/// `SlackChannelPermission#at_least_one_permission`.
+/// At least one of the permission flags is enabled.
 fn at_least_one_permission(row: &PermissionDraft, _: &()) -> garde::Result {
     if row.any_enabled() {
         return Ok(());

@@ -326,18 +326,6 @@ spec:
           port: {{ .Values.ironProxy.service.pgPort }}
         - protocol: TCP
           port: {{ .Values.ironProxy.service.managementPort }}
-    # console control plane: register principals/roles/grants and per-sandbox
-    # proxies. The Console handlers are served by api-rs itself and
-    # IRON_CONTROL_URL points at this Service, so allow self-egress for any
-    # admin-client call that still goes over HTTP (centaur-perms, the HTTP client
-    # path).
-    - to:
-        - podSelector:
-            matchLabels:
-{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
-      ports:
-        - protocol: TCP
-          port: {{ .Values.apiRs.port }}
     # The workflow discovery service, which imports workflow modules for api-rs.
     - to:
         - podSelector:

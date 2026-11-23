@@ -117,8 +117,8 @@ pub(super) fn login_redirect_with_csp(
     pages::redirect(&format!("/login?error={error}"), &cookies, Some(csp))
 }
 
-/// Resolve the signed-in user for the authorization endpoint, applying the same
-/// status gate as `ApplicationController`. Returns `Err(response)` when the
+/// Resolve the signed-in user for the authorization endpoint, applying the
+/// status gate. Returns `Err(response)` when the
 /// request has already been answered with a redirect.
 #[allow(clippy::result_large_err)]
 pub(super) async fn require_active_user(
@@ -183,7 +183,7 @@ pub(super) fn callback_url(base: &str, provider: &str) -> String {
     absolute_url(base, &format!("/auth/{provider}/callback"))
 }
 
-/// `URI.join(base, path).to_s`: an absolute path replaces any base path.
+/// An absolute path replaces any base path.
 pub(super) fn absolute_url(base: &str, path: &str) -> String {
     let Ok(mut url) = url::Url::parse(base) else {
         return format!("{}{}", base.trim_end_matches('/'), path);

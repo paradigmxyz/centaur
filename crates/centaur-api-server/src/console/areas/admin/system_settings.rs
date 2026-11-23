@@ -3,8 +3,7 @@
 //! The settings row is a singleton with deployment-wide defaults for new
 //! principals; `default_role_ids` replaces the set of roles new principals
 //! receive. The allowlist itself lives with the session store, which is what
-//! Slackbot reads, so these handlers edit it through [`PgSessionStore`] exactly
-//! as `CentaurApiClient` would.
+//! Slackbot reads, so these handlers edit it through [`PgSessionStore`].
 
 use axum::{extract::State, http::StatusCode, response::Response, routing::get};
 use centaur_console_db::ConsoleUser;
@@ -28,7 +27,6 @@ use crate::{
     slack_external_teams::normalize_slack_external_team_ids,
 };
 
-/// `Principal::SANDBOX_REPO_CACHE_VALUES`.
 const REPO_CACHE_VALUES: [&str; 3] = ["none", "public", "all"];
 
 /// A settings write. An absent key leaves its column alone; an explicit `null`
@@ -206,7 +204,7 @@ async fn resolve_default_role_ids(
     Ok(found)
 }
 
-/// `Array(attrs[:default_role_ids]).map(&:to_s).compact_blank.uniq`.
+/// Trim each id, drop blanks, and deduplicate.
 fn default_role_oids(role_ids: Vec<String>) -> Vec<String> {
     let mut oids: Vec<String> = Vec::new();
     for oid in role_ids {
@@ -305,8 +303,8 @@ fn requested_team_ids(input: Option<SlackTeamIdInput>) -> Vec<String> {
 }
 
 /// The allowlist lives in api-rs's own database (the session store), not in
-/// Console's: Rails reached it through the Centaur API, and api-rs serves it
-/// from `AppState::pool()` (see `crate::slack_external_teams`).
+/// Console's, and is served from `AppState::pool()` (see
+/// `crate::slack_external_teams`).
 fn session_db(state: &AppState) -> Result<sqlx::PgPool, ()> {
     state.pool().map_err(|error| {
         tracing::warn!(error = %error, "console_slack_external_team_ids_store_unavailable");

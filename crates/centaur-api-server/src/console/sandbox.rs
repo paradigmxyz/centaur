@@ -96,9 +96,8 @@ pub(crate) struct SandboxClaims {
     pub(crate) sub: String,
     // The JWT layer validates the standard claims; a missing or non-string
     // binding claim reaches the proxy lookup and becomes "invalid sandbox
-    // token", matching `SandboxTokenAuthentication` (Ruby only compares the
-    // payload values, so a numeric claim is a mismatch rather than a decode
-    // error).
+    // token". Only the payload values are compared, so a numeric claim is a
+    // mismatch rather than a decode error.
     #[serde(default, deserialize_with = "string_claim")]
     pub(crate) sandbox_id: String,
     #[serde(default, deserialize_with = "string_claim")]
@@ -109,7 +108,7 @@ pub(crate) struct SandboxClaims {
     pub(crate) slack: SandboxSlackClaims,
     #[serde(default)]
     pub(crate) console_delegate: bool,
-    /// Ruby's JWT rejects a numeric `iat` in the future. Not required.
+    /// A numeric `iat` in the future is rejected by the JWT layer. Not required.
     #[serde(default)]
     pub(crate) iat: Option<serde_json::Value>,
 }
@@ -266,7 +265,7 @@ async fn delegated_admin(
         .flatten())
 }
 
-/// `CentaurJwt::Hs256.decode`: HS256 signature, expiry, audience, and issuer.
+/// HS256 signature, expiry, audience, and issuer checks.
 pub(crate) fn verify_sandbox_token(
     token: &str,
     config: &SandboxJwtConfig,
@@ -284,7 +283,7 @@ pub(crate) fn verify_sandbox_token(
     )
     .ok()?
     .claims;
-    // `JWT.decode` verifies `iat` when present (jsonwebtoken 11 does not).
+    // `iat` is verified when present (jsonwebtoken 11 does not).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
