@@ -306,7 +306,7 @@ async fn validate_principal(conn: &mut PgConnection, draft: &PrincipalDraft) -> 
         .fetch_one(&mut *conn)
         .await?;
         if taken {
-            validation.add("foreign_id", "has already been taken");
+            validation.add("foreign_id", FOREIGN_ID_TAKEN);
         }
     }
 
@@ -447,7 +447,14 @@ pub async fn upsert_principal(
     write: &PrincipalWrite,
     created_by: i64,
 ) -> Result<(super::PrincipalView, bool)> {
-    let (row, was_new) = upsert_principal_once(pool, identifier, write, created_by).await?;
+    let (row, was_new) = match upsert_principal_once(pool, identifier, write, created_by).await {
+        // Two first-time upserts of one foreign id race to insert it; the loser
+        // retries once and updates the row the winner created.
+        Err(error) if lost_insert_race(&error, identifier, PRINCIPAL_RESERVED_PREFIX) => {
+            upsert_principal_once(pool, identifier, write, created_by).await?
+        }
+        result => result?,
+    };
     let view = load_principal_view(pool, row.id)
         .await?
         .ok_or_else(|| PrincipalError::Internal("principal vanished after upsert".to_owned()))?;
@@ -571,7 +578,7 @@ async fn validate_role(conn: &mut PgConnection, draft: &RoleDraft) -> Result<()>
         .fetch_one(&mut *conn)
         .await?;
         if taken {
-            validation.add("foreign_id", "has already been taken");
+            validation.add("foreign_id", FOREIGN_ID_TAKEN);
         }
     }
 
@@ -668,6 +675,45 @@ pub async fn upsert_role(
     write: &RoleWrite,
     created_by: i64,
 ) -> Result<(super::RoleView, bool)> {
+    let (row, was_new) = match upsert_role_once(pool, identifier, write, created_by).await {
+        // As for principals: the loser of a first-insert race retries once.
+        Err(error) if lost_insert_race(&error, identifier, ROLE_RESERVED_PREFIX) => {
+            upsert_role_once(pool, identifier, write, created_by).await?
+        }
+        result => result?,
+    };
+    let view = load_role_view(pool, row.id)
+        .await?
+        .ok_or_else(|| PrincipalError::Internal("role vanished after upsert".to_owned()))?;
+    Ok((view, was_new))
+}
+
+const FOREIGN_ID_TAKEN: &str = "has already been taken";
+
+/// An upsert addressed by foreign id (not by oid) that lost a first-insert race:
+/// another request created the same record after our read. Depending on timing
+/// that surfaces as the uniqueness check's error or as the unique index's.
+fn lost_insert_race(error: &PrincipalError, identifier: &str, reserved_prefix: &str) -> bool {
+    if identifier.starts_with(reserved_prefix) {
+        return false;
+    }
+    match error {
+        PrincipalError::Database(sqlx::Error::Database(database)) => {
+            database.code().as_deref() == Some("23505")
+        }
+        PrincipalError::Validation(errors) => errors.entries().any(|(attribute, messages)| {
+            attribute == "foreign_id" && messages.iter().any(|message| message == FOREIGN_ID_TAKEN)
+        }),
+        _ => false,
+    }
+}
+
+async fn upsert_role_once(
+    pool: &PgPool,
+    identifier: &str,
+    write: &RoleWrite,
+    created_by: i64,
+) -> Result<(RoleRow, bool)> {
     let mut tx = pool.begin().await?;
     let (draft, was_new) = if identifier.starts_with(ROLE_RESERVED_PREFIX) {
         let row = model::find_by_oid::<model::Role, RoleRow, _>(&mut *tx, identifier)
@@ -685,10 +731,7 @@ pub async fn upsert_role(
     };
     let row = persist_role(&mut tx, draft, write, was_new).await?;
     tx.commit().await?;
-    let view = load_role_view(pool, row.id)
-        .await?
-        .ok_or_else(|| PrincipalError::Internal("role vanished after upsert".to_owned()))?;
-    Ok((view, was_new))
+    Ok((row, was_new))
 }
 
 pub async fn delete_role(pool: &PgPool, view: &super::RoleView) -> Result<()> {

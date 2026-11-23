@@ -517,3 +517,74 @@ async fn permission_rows_are_validated_after_normalization() {
 
     fixture.cleanup().await;
 }
+
+/// Concurrent first-time upserts of one foreign id (api-rs registers the same
+/// Slack requester from parallel turns) all succeed and leave one row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_upserts_of_one_foreign_id_all_succeed() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with((*fixture.pool.connect_options()).clone())
+        .await
+        .unwrap();
+
+    let principal = fixture.name("race-principal");
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let (pool, principal, user) = (pool.clone(), principal.clone(), fixture.user_id);
+        tasks.spawn(async move {
+            upsert_principal(
+                &pool,
+                &principal,
+                &PrincipalWrite {
+                    name: Some(Some("Race".to_owned())),
+                    kind: Some(Some("workflow".to_owned())),
+                    ..PrincipalWrite::default()
+                },
+                user,
+            )
+            .await
+            .map(|(_, was_new)| was_new)
+        });
+    }
+    let mut created = 0;
+    while let Some(result) = tasks.join_next().await {
+        created += usize::from(result.unwrap().expect("every upsert succeeds"));
+    }
+    assert_eq!(created, 1, "exactly one upsert creates the principal");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM principals WHERE foreign_id = $1")
+        .bind(&principal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    let role = fixture.name("race-role");
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let (pool, role, user) = (pool.clone(), role.clone(), fixture.user_id);
+        tasks.spawn(async move {
+            upsert_role(
+                &pool,
+                &role,
+                &RoleWrite {
+                    name: Some(Some("Race".to_owned())),
+                    ..RoleWrite::default()
+                },
+                user,
+            )
+            .await
+            .map(|(_, was_new)| was_new)
+        });
+    }
+    let mut created = 0;
+    while let Some(result) = tasks.join_next().await {
+        created += usize::from(result.unwrap().expect("every upsert succeeds"));
+    }
+    assert_eq!(created, 1, "exactly one upsert creates the role");
+
+    fixture.cleanup().await;
+}
