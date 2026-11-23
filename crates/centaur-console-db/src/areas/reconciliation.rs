@@ -1,14 +1,11 @@
-//! Port of Console's `PrincipalCredentialReconciliation`
-//! (`services/console/app/services/principal_credential_reconciliation.rb`).
+//! Console's principal credential reconciliation.
 //!
-//! Rails runs it from model callbacks on several areas' records. In Rust the
-//! callers invoke it explicitly, inside the same transaction as the write:
+//! Callers invoke it explicitly, inside the same transaction as the write:
 //!
 //! - after a principal is created or its identity changes: [`apply_for_principal`]
-//!   (Rails: `Principal` after-commit, `PrincipalSyncConfig`, `UserIdentity`)
 //! - after a broker credential (or its wrapper static secret) is created or
-//!   changes: [`apply_for_credential`] (Rails: `BrokerCredential`, `StaticSecret`)
-//! - when validating a direct grant: [`connection_owner`] (Rails: `Grant`)
+//!   changes: [`apply_for_credential`]
+//! - when validating a direct grant: [`connection_owner`]
 
 use serde_json::Value;
 use sqlx::PgConnection;

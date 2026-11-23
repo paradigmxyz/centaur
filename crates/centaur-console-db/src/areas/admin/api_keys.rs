@@ -66,8 +66,8 @@ pub async fn create_api_key(
     Ok(row)
 }
 
-/// `ApiKey#soft_delete!`: keep the row for auditing, drop it from every scope.
-/// A soft delete writes the column directly, so `updated_at` keeps its value.
+/// Keep the row for auditing, drop it from every scope. A soft delete writes the
+/// column directly, so `updated_at` keeps its value.
 pub async fn soft_delete_api_key(pool: &PgPool, id: i64) -> Result<()> {
     model::delete::<ApiKeyModel, _>(pool, id).await?;
     Ok(())

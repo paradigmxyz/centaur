@@ -10,7 +10,7 @@ export const credentialKeys = createQueryKeys("credentials");
 export const GRANTS = ["refresh_token", "client_credentials", "password", "preqin"] as const;
 export type Grant = (typeof GRANTS)[number];
 
-/** BrokerCredential::PREQIN_TOKEN_ENDPOINT */
+/** Preqin's token endpoint. */
 export const PREQIN_TOKEN_ENDPOINT = "https://api.preqin.com/connect/token";
 
 export type CredentialStatus = "live" | "dead" | "bootstrapping";

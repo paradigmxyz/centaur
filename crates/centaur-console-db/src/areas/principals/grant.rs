@@ -88,7 +88,7 @@ async fn load_grant_by_oid(pool: &PgPool, oid: &str) -> Result<GrantRow> {
         .ok_or_else(model::Grant::not_found)?)
 }
 
-/// `GrantsController#serialize` without the console `grantable` summary.
+/// A grant payload, without the console `grantable` summary.
 #[derive(Clone, Debug, Serialize)]
 pub struct GrantPayload {
     pub id: String,
@@ -226,10 +226,10 @@ async fn resolve_grantee(pool: &PgPool, write: &GrantWrite) -> Result<Option<Gra
     }))
 }
 
-/// `GrantsController#render_missing`: every field of a grant body is a reference
-/// the database has to resolve, so these rules are checked here rather than in
-/// garde attributes, and Rails resolves the grantee before the grantable (so a
-/// body with neither reports the grantee alone).
+/// Every field of a grant body is a reference the database has to resolve, so
+/// these rules are checked here rather than in garde attributes, and the grantee
+/// is resolved before the grantable (so a body with neither reports the grantee
+/// alone).
 fn missing_reference(names: &[&str]) -> PrincipalError {
     let mut errors = FieldErrors::new();
     errors.add_base(format!("must reference one of {}", names.join(", ")));
@@ -449,10 +449,9 @@ pub struct EffectiveGrantPayload {
     pub roles: Vec<RoleSummaryPayload>,
 }
 
-/// `PrincipalEffectiveGrantsPage` plus the concern's payload.
+/// The effective grants page for a principal.
 ///
-/// Returns `(data, page, total)`; the page is clamped to the last one, as Rails'
-/// `page` helper does.
+/// Returns `(data, page, total)`; the page is clamped to the last one.
 pub async fn effective_grants(
     pool: &PgPool,
     principal_id: i64,
@@ -473,8 +472,8 @@ pub async fn effective_grants(
             continue;
         }
         let take = limit.min(count - offset);
-        // `remaining` in Rails is shared across kinds; the loop breaks once the
-        // page is full, so `take` is bounded by the page size here as well.
+        // `remaining` is shared across kinds; the loop breaks once the page is
+        // full, so `take` is bounded by the page size as well.
         let records = page_records(pool, principal_id, kind, offset, take).await?;
         if !records.is_empty() {
             let ids: Vec<i64> = records.iter().map(|(id, _, _)| *id).collect();

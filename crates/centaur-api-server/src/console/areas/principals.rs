@@ -87,7 +87,7 @@ struct RoleListQuery {
     q: Option<String>,
 }
 
-/// The scalar query parameters of the Slack channel picker. `ids[]` is a Rack
+/// The scalar query parameters of the Slack channel picker. `ids[]` is an
 /// array parameter, so it stays on the raw query string.
 #[derive(Debug, Default, Deserialize)]
 struct SlackChannelsQuery {
@@ -359,7 +359,7 @@ async fn console_list_principals(
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
     let params = ListParams::from_query(&raw)?;
-    // A blank `sort` is no sort at all, as `params[:sort].present?` is.
+    // A blank `sort` is no sort at all.
     let sort = query
         .sort
         .as_deref()
@@ -445,7 +445,7 @@ async fn remove_role_response(
 ) -> Result<Response, ConsoleError> {
     let pool = pool(state)?;
     let principal = principal_view(&pool, principal_id).await?;
-    // Resolve the role first so an unknown role is a 404, like Rails.
+    // Resolve the role first so an unknown role is a 404.
     role_view(&pool, role_oid).await?;
     centaur_console_db::areas::principals::remove_role(&pool, principal.row.id, role_oid).await?;
     Ok(no_content())
@@ -595,7 +595,7 @@ async fn console_slack_channels(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, ConsoleError> {
     let pool = pool(&state)?;
-    // `ids[]` is Rack's array form, which a flat typed struct cannot express.
+    // `ids[]` is an array form, which a flat typed struct cannot express.
     let ids: Vec<String> =
         url::form_urlencoded::parse(raw.as_deref().unwrap_or_default().as_bytes())
             .filter(|(key, _)| key == "ids[]")
@@ -618,9 +618,9 @@ async fn console_slack_channels(
     Ok(response)
 }
 
-/// The `exclude_owner` selector: `principal:<oid>` or `role:<oid>`. Rails
-/// answers another shape with `ActionController::BadRequest` (a plain 400);
-/// whether the oid resolves is a database question this still answers.
+/// The `exclude_owner` selector: `principal:<oid>` or `role:<oid>`. Another
+/// shape is a plain 400; whether the oid resolves is a database question this
+/// still answers.
 async fn exclude_owner(
     pool: &sqlx::PgPool,
     raw: Option<&str>,
@@ -1036,7 +1036,7 @@ async fn effective_grants_response(
     let pagination = Pagination::from_query(raw)?;
     let (data, page, total) =
         effective_grants(&pool, view.row.id, pagination.page, pagination.limit).await?;
-    // Rails renders `total_pages = 0` for an empty page, unlike the page
+    // An empty page renders `total_pages = 0`, unlike the page
     // clamp, which always allows page 1.
     let total_pages = if total == 0 {
         0

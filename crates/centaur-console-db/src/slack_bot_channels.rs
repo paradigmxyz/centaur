@@ -1,7 +1,6 @@
 //! The Slack channel catalog: the channels the Slack bot can see, and each
-//! active channel's members. api-rs refreshes it from Slack (port of Rails'
-//! `SlackChannelCatalogSync`); the Console's channel pickers and access checks
-//! read it.
+//! active channel's members. api-rs refreshes it from Slack; the Console's
+//! channel pickers and access checks read it.
 
 use sqlx::{PgPool, Row};
 

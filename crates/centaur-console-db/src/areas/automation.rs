@@ -1,13 +1,11 @@
 //! Console data access for the automation area: scheduled tasks.
 //!
-//! Ports `ScheduledTask` (schedule presets, labels, cron normalization and its
-//! validations), `ScheduledTaskConsoleAttributes`, the console/sandbox task
-//! payloads, `SlackDeliveryPolicy`, and the parts of
-//! `ConsoleUserPrincipalProvisioner` a task write needs.
+//! Covers schedule presets, labels, cron normalization and its validations, the
+//! console/sandbox task payloads, the Slack delivery policy, and the parts of
+//! console-user principal provisioning a task write needs.
 //!
-//! Rails runs the principal provisioner and `PrincipalCredentialReconciliation`
-//! from after-commit callbacks. The ported write path calls them explicitly, in
-//! the same transaction as the write.
+//! The write path calls the principal provisioner and the credential
+//! reconciliation explicitly, in the same transaction as the write.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -28,15 +26,14 @@ use crate::{
 
 /// Console's default timezone for a task that does not name one.
 pub const DEFAULT_TIMEZONE: &str = "America/Los_Angeles";
-/// `ScheduledTask::SCHEDULE_PRESETS`: the presets the console form offers, as
-/// the cron expression each means.
+/// The presets the console form offers, as the cron expression each means.
 pub const SCHEDULE_PRESETS: [(&str, &str); 4] = [
     ("daily", "0 9 * * *"),
     ("weekdays", "0 9 * * 1-5"),
     ("mondays", "0 9 * * 1"),
     ("fridays", "0 9 * * 5"),
 ];
-/// `ScheduledTask::CUSTOM_SCHEDULE_DAYS`, in the order the console shows them.
+/// The weekday names of a custom schedule, in the order the console shows them.
 const CUSTOM_SCHEDULE_DAYS: [(&str, &str); 7] = [
     ("Mon", "1"),
     ("Tue", "2"),
@@ -46,10 +43,10 @@ const CUSTOM_SCHEDULE_DAYS: [(&str, &str); 7] = [
     ("Sat", "6"),
     ("Sun", "0"),
 ];
-/// `ScheduledTasksController::MAX_CHANNEL_OPTIONS`.
+/// The most channel options a task payload lists.
 pub const MAX_CHANNEL_OPTIONS: i64 = 20;
 
-/// `ScheduledTaskConsoleAttributes::INVALID_CUSTOM_SCHEDULE`.
+/// The message for a custom schedule the user typed but cannot parse.
 pub const INVALID_CUSTOM_SCHEDULE: &str = "invalid custom schedule";
 const SCHEDULE_INVALID: &str = "is not a valid five-field cron schedule";
 const DELIVERY_UNAVAILABLE: &str = "is not available to the author";
@@ -60,7 +57,7 @@ const TASK_COLUMNS: &str = "id, name, prompt, author_id, principal_id, delivery_
      cron_expression, timezone, enabled, next_run_at, last_enqueued_at, last_run_id, \
      last_run_at, last_error, created_at, updated_at";
 
-/// A `scheduled_tasks` row. Timestamps are naive UTC, as Rails stores them.
+/// A `scheduled_tasks` row. Timestamps are naive UTC.
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct ScheduledTask {
     pub id: i64,
@@ -133,7 +130,8 @@ async fn query_tasks(pool: &PgPool, query: &str, owner: i64) -> Result<Vec<Sched
 // Payloads
 // ---------------------------------------------------------------------------
 
-/// The `#name` labels of the channels `tasks` deliver to, keyed by channel id.
+/// The `#`-prefixed names of the channels `tasks` deliver to, keyed by channel
+/// id.
 async fn channel_names(pool: &PgPool, tasks: &[ScheduledTask]) -> Result<HashMap<String, String>> {
     let channels: Vec<String> = tasks
         .iter()
@@ -462,8 +460,8 @@ pub fn sandbox_payload(task: &ScheduledTask) -> SandboxTaskPayload {
 // Schedules
 // ---------------------------------------------------------------------------
 
-/// `ScheduledTask#schedule_preset`: a stored preset expression, otherwise
-/// `custom`, otherwise `manual` for a task without a cron expression.
+/// The preset a stored expression matches, otherwise `custom`, otherwise
+/// `manual` for a task without a cron expression.
 pub fn schedule_preset_for(cron_expression: Option<&str>) -> &'static str {
     let Some(cron) = cron_expression.filter(|cron| !cron.is_empty()) else {
         return "manual";
@@ -474,7 +472,7 @@ pub fn schedule_preset_for(cron_expression: Option<&str>) -> &'static str {
         .map_or("custom", |(preset, _)| preset)
 }
 
-/// `ScheduledTask#schedule_label`.
+/// The human label of a stored cron expression.
 pub fn schedule_label(cron_expression: Option<&str>) -> String {
     let Some(cron) = cron_expression.filter(|cron| !cron.is_empty()) else {
         return "Manual only".to_owned();
@@ -488,8 +486,8 @@ pub fn schedule_label(cron_expression: Option<&str>) -> String {
     }
 }
 
-/// `ScheduledTask#simple_weekly_schedule`: the days (as Console stores them)
-/// and the time of day a weekly cron expression means.
+/// The days (as Console stores them) and the time of day a weekly cron
+/// expression means.
 fn simple_weekly(cron: &str) -> Option<(Vec<String>, String)> {
     let fields: Vec<&str> = cron.split_whitespace().collect();
     let [minute, hour, monthdays, months, weekdays] = fields[..] else {
@@ -515,8 +513,8 @@ fn parse_number(field: &str, max: u8) -> Option<u8> {
     (value <= max).then_some(value)
 }
 
-/// `ScheduledTask#expand_schedule_days`: the selected days as Console's
-/// day values, in the order the console form shows them.
+/// The selected days as Console's day values, in the order the console form
+/// shows them.
 fn expand_schedule_days(day_expression: &str) -> Vec<String> {
     let selected: Vec<String> = if day_expression == "*" {
         return CUSTOM_SCHEDULE_DAYS
@@ -558,7 +556,7 @@ fn day_value(day: u8) -> String {
     (day as char).to_string()
 }
 
-/// `ScheduledTask#custom_schedule_label`: "Mon, Wed at 2:30 PM PT".
+/// The custom label, e.g. "Mon, Wed at 2:30 PM PT".
 fn custom_schedule_label(cron: &str) -> Option<String> {
     let (days, time) = simple_weekly(cron)?;
     let labels = CUSTOM_SCHEDULE_DAYS
@@ -581,7 +579,7 @@ fn custom_schedule_label(cron: &str) -> Option<String> {
 }
 
 impl ScheduledTask {
-    /// `ScheduledTask#custom_schedule_days`.
+    /// The days a custom expression selects.
     pub fn custom_schedule_days(&self) -> Vec<String> {
         self.cron_expression
             .as_deref()
@@ -590,7 +588,7 @@ impl ScheduledTask {
             .unwrap_or_default()
     }
 
-    /// `ScheduledTask#custom_schedule_time`.
+    /// The time of day a custom expression selects.
     pub fn custom_schedule_time(&self) -> String {
         self.cron_expression
             .as_deref()
@@ -599,18 +597,18 @@ impl ScheduledTask {
             .unwrap_or_else(|| "09:00".to_owned())
     }
 
-    /// `ScheduledTask#schedule_preset`.
+    /// The preset this task's expression matches.
     pub fn schedule_preset(&self) -> &'static str {
         schedule_preset_for(self.cron_expression.as_deref())
     }
 
-    /// `ScheduledTask#schedule_label`.
+    /// The human label of this task's expression.
     pub fn schedule_label(&self) -> String {
         schedule_label(self.cron_expression.as_deref())
     }
 }
 
-/// `ScheduledTask.cron_for`: the cron expression a console submission asks for.
+/// The cron expression a console submission asks for.
 pub fn cron_for(
     preset: &str,
     custom_expression: Option<&str>,
@@ -709,7 +707,7 @@ impl TaskWrite {
     }
 }
 
-/// `ScheduledTasksController#catalog_error`.
+/// The catalog-loading or team-mismatch error a task write reports, if any.
 pub async fn catalog_error(pool: &PgPool, policy: &SlackPolicy) -> Result<Option<String>> {
     if let Some(error) = super::principals::slack_catalog_error(pool).await? {
         return Ok(Some(error.to_owned()));
@@ -885,10 +883,9 @@ pub(crate) async fn slack_policy(
     })
 }
 
-/// The Slack id format behind `Principal::SLACK_USER_ID_FORMAT`,
-/// `Principal::SLACK_TEAM_ID_FORMAT`, and
-/// `ScheduledTask::DELIVERY_DESTINATION_FORMAT`: one of `prefixes`, then
-/// uppercase alphanumerics, at least nine characters in all.
+/// The Slack id format shared by user ids, team ids, and delivery
+/// destinations: one of `prefixes`, then uppercase alphanumerics, at least nine
+/// characters in all.
 pub(crate) fn slack_id_valid(value: &str, prefixes: &[u8]) -> bool {
     let bytes = value.as_bytes();
     bytes.first().is_some_and(|first| prefixes.contains(first))
@@ -898,22 +895,22 @@ pub(crate) fn slack_id_valid(value: &str, prefixes: &[u8]) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
 }
 
-/// `Principal::SLACK_USER_ID_FORMAT`; `USLACK` is Console's bot identity.
+/// The user-id format; `USLACK` is Console's bot identity.
 pub(crate) fn slack_user_id_valid(value: &str) -> bool {
     value == "USLACK" || slack_id_valid(value, b"UW")
 }
 
-/// `Principal::SLACK_TEAM_ID_FORMAT`.
+/// The team-id format.
 pub(crate) fn slack_team_id_valid(value: &str) -> bool {
     slack_id_valid(value, b"TE")
 }
 
-/// `ScheduledTask::DELIVERY_DESTINATION_FORMAT`.
+/// The delivery-destination format.
 fn delivery_destination_valid(value: &str) -> bool {
     slack_id_valid(value, b"CDGUW")
 }
 
-/// `SlackDeliveryPolicy#allowed?`.
+/// Whether the destination is one the policy allows.
 async fn delivery_destination_available(
     connection: &mut PgConnection,
     owner: TaskOwner,
@@ -967,10 +964,8 @@ async fn delivery_destination_available(
 // Principal provisioning
 // ---------------------------------------------------------------------------
 
-/// The Console principal a task's author runs as, provisioning it the way
-/// Rails' after-commit hook does: `ScheduledTask#provision_author_principal`
-/// calls the same `ConsoleUserPrincipalProvisioner` the MCP consent path does,
-/// so this delegates to that single implementation.
+/// The Console principal a task's author runs as, provisioned through the same
+/// path the MCP consent flow uses.
 pub async fn provision_author_principal(pool: &PgPool, user_id: i64) -> Result<Option<i64>> {
     Ok(
         super::auth_pages::provision_console_user_principal(pool, user_id)
@@ -979,8 +974,8 @@ pub async fn provision_author_principal(pool: &PgPool, user_id: i64) -> Result<O
     )
 }
 
-/// The label set `Principal` writes for a provisioned console user:
-/// `apply_sandbox_repo_cache_label` plus the managed-by marker.
+/// The label set a provisioned console user's principal carries: the repo-cache
+/// label plus the managed-by marker.
 pub(crate) fn principal_labels(labels: &Value, repo_cache: &str) -> Value {
     let mut labels = labels.as_object().cloned().unwrap_or_default();
     labels.insert("managed-by".to_owned(), Value::String("centaur".to_owned()));
@@ -995,8 +990,7 @@ pub(crate) fn principal_labels(labels: &Value, repo_cache: &str) -> Value {
 // Task writes
 // ---------------------------------------------------------------------------
 
-/// Creates a task for `owner`: `create` and `create!` for a console or sandbox
-/// submission.
+/// Creates a task for `owner` from a console or sandbox submission.
 pub async fn create_task(pool: &PgPool, owner: TaskOwner, draft: TaskDraft) -> Result<TaskWrite> {
     Ok(save_task(pool, owner, None, draft)
         .await?
@@ -1014,8 +1008,8 @@ pub async fn update_task(
     save_task(pool, owner, Some(id), draft).await
 }
 
-/// `destroy`: the task and, through the author association, nothing else. The
-/// owner's scope is part of the delete, so another owner's task is not found.
+/// Deletes the task, and nothing else: the owner's scope is part of the delete,
+/// so another owner's task is not found.
 pub async fn delete_task(pool: &PgPool, owner: TaskOwner, id: i64) -> Result<bool> {
     let mut tx = begin_write(pool).await?;
     let deleted = match owner {
@@ -1180,8 +1174,8 @@ async fn save_task(
         Some(existing) => {
             wrote = true;
             // The owner's scope selected the row, and `FOR UPDATE` holds it, so
-            // the update only needs the id. `changed` above is Rails' dirty
-            // tracking: an unchanged write never reaches this statement.
+            // the update only needs the id. `changed` above is the dirty check:
+            // an unchanged write never reaches this statement.
             let sql = format!(
                 "{} RETURNING {TASK_COLUMNS}",
                 write::update_sql(
@@ -1245,7 +1239,7 @@ async fn save_task(
         }
     };
     tx.commit().await?;
-    // `after_commit :provision_author_principal, on: %i[create update], if: :author`
+    // Provision the author's principal after the commit, on create or update.
     if wrote && let TaskOwner::Author(author_id) = owner {
         provision_author_principal(pool, author_id).await?;
     }
@@ -1261,19 +1255,19 @@ async fn save_task(
 /// [`validate`].
 #[derive(Debug, garde::Validate)]
 struct Candidate {
-    // `validates :name, presence: true, length: { maximum: 100 }`
+    // A present name of at most 100 characters.
     #[garde(custom(rules::present_not_blank), length(chars, max = 100))]
     name: Option<String>,
-    // `validates :prompt, presence: true, length: { maximum: 64.kilobytes }`
+    // A present prompt of at most 64 KiB.
     #[garde(length(chars, min = 1, max = 65536))]
     prompt: String,
-    // `presence` + `format`.
+    // Present, and a Slack channel or user id.
     #[garde(length(chars, min = 1), pattern(r"^[CDGUW][A-Z0-9]{8,}$"))]
     delivery_channel: String,
-    // `validate :cron_schedule_is_valid`, which reads the record's timezone.
+    // Valid cron, read in the record's timezone.
     #[garde(custom(task_rules::cron_schedule(self.timezone.as_deref())))]
     cron_expression: Option<String>,
-    // `validates :timezone, presence: true, inclusion: { in: IANA names }`
+    // Present, and an IANA timezone name.
     #[garde(
         custom(rules::present_not_blank),
         custom(task_rules::timezone_included)
@@ -1310,11 +1304,11 @@ impl From<Option<ScheduledTask>> for Candidate {
     }
 }
 
-/// `ScheduledTask`'s field rules that garde has no built-in for.
+/// The field rules garde has no built-in for.
 mod task_rules {
     use super::{SCHEDULE_INVALID, TIMEZONE_INVALID, cron_valid};
 
-    /// `validates :timezone, inclusion: { in: TZInfo::Timezone.all_identifiers }`.
+    /// The timezone must be an IANA identifier.
     pub(super) fn timezone_included(value: &Option<String>, _: &()) -> garde::Result {
         match value.as_deref() {
             Some(timezone)
@@ -1326,8 +1320,7 @@ mod task_rules {
         }
     }
 
-    /// `validate :cron_schedule_is_valid`, which parses the expression in the
-    /// record's timezone.
+    /// The expression must parse in the record's timezone.
     pub(super) fn cron_schedule(
         timezone: Option<&str>,
     ) -> impl FnOnce(&Option<String>, &()) -> garde::Result + '_ {
@@ -1343,8 +1336,8 @@ mod task_rules {
     }
 }
 
-/// `ScheduledTask`'s validations: [`Candidate`]'s field rules, then the two that
-/// need the database: a name another task of the same owner already holds, and a
+/// The task validations: [`Candidate`]'s field rules, then the two that need the
+/// database: a name another task of the same owner already holds, and a
 /// destination the owner cannot deliver to.
 async fn validate(
     tx: &mut Transaction<'static, Postgres>,
@@ -1354,7 +1347,7 @@ async fn validate(
 ) -> Result<FieldErrors> {
     let mut validation = Validation::new();
     validation.check(candidate);
-    // `uniqueness: { scope: :author_id }` / `{ scope: :principal_id }`
+    // The name is unique per owner, by author or by principal.
     if let Some(name) = candidate.name.as_deref().filter(|name| !name.is_empty()) {
         let id = exclude_id.unwrap_or_default();
         let taken: bool = match owner {
@@ -1411,13 +1404,13 @@ pub(crate) async fn begin_write(pool: &PgPool) -> Result<Transaction<'static, Po
 // Workflow dashboard reads
 // ---------------------------------------------------------------------------
 //
-// Ports the workbook half of `WorkflowDashboard`: the run rows come from the
-// read-only view api-rs publishes (`CentaurWorkflowRun`), while schedules and
-// run detail stay with the workflow runtime.
+// The run rows come from the read-only view api-rs publishes
+// (`CentaurWorkflowRun`), while schedules and run detail stay with the workflow
+// runtime.
 
 /// The view api-rs publishes for Console's workflow pages.
 pub const WORKFLOW_RUNS_VIEW: &str = "centaur_readonly_workflow_runs";
-/// `WorkflowDashboard::PER_PAGE`.
+/// The page size of the workflow dashboard.
 pub const WORKFLOW_PAGE_SIZE: i64 = 50;
 
 const RECENCY_SQL: &str = "coalesce(completed_at, failed_at, cancelled_at, started_at, \
@@ -1468,7 +1461,7 @@ pub struct WorkflowRunRow {
 }
 
 impl WorkflowRunRow {
-    /// `CentaurWorkflowRun#display_status`.
+    /// The display status of a run.
     pub fn display_status(&self) -> String {
         if self.cancelled_at.is_some() {
             return "cancelled".to_owned();
@@ -1488,7 +1481,7 @@ impl WorkflowRunRow {
         }
     }
 
-    /// `CentaurWorkflowRun#workflow_key`.
+    /// The workflow key of a run.
     pub fn workflow_key(&self) -> Option<String> {
         self.workflow_name
             .as_deref()
@@ -1497,18 +1490,18 @@ impl WorkflowRunRow {
             .map(str::to_owned)
     }
 
-    /// `CentaurWorkflowRun#workflow_name_label`.
+    /// The workflow name label of a run.
     pub fn workflow_name_label(&self) -> String {
         self.workflow_key()
             .unwrap_or_else(|| "unknown workflow".to_owned())
     }
 
-    /// `CentaurWorkflowRun#queue_label`.
+    /// The queue label of a run.
     pub fn queue_label(&self) -> String {
         queue_label(self.queue_name.as_deref())
     }
 
-    /// `CentaurWorkflowRun#started_or_created_at`.
+    /// When a run started, or when it was created.
     pub fn started_or_created_at(&self) -> Option<&str> {
         self.started_at
             .as_deref()
@@ -1516,7 +1509,7 @@ impl WorkflowRunRow {
             .or(self.created_at.as_deref())
     }
 
-    /// `CentaurWorkflowRun#terminal_at`.
+    /// When a run reached a terminal state.
     pub fn terminal_at(&self) -> Option<&str> {
         self.completed_at
             .as_deref()
@@ -1524,7 +1517,7 @@ impl WorkflowRunRow {
             .or(self.cancelled_at.as_deref())
     }
 
-    /// `CentaurWorkflowRun#recency_at`, as the sortable ISO 8601 string.
+    /// The run's recency, as the sortable ISO 8601 string.
     pub fn recency_at(&self) -> Option<&str> {
         self.terminal_at()
             .or(self.started_at.as_deref())
@@ -1616,7 +1609,7 @@ pub fn workflow_schedule_label(schedule: &Value) -> Option<String> {
     }
 }
 
-/// `CentaurWorkflowRun.available?`: whether Console's run view exists.
+/// Whether Console's run view exists.
 pub async fn workflow_database_available(pool: &PgPool) -> Result<bool> {
     let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
         .bind(WORKFLOW_RUNS_VIEW)
@@ -1793,16 +1786,16 @@ fn workflow_scope(status: Option<&str>, queue: Option<&str>) -> String {
 // Skills
 // ---------------------------------------------------------------------------
 //
-// Ports `Skill`, `SkillEditor`, `SkillAuthoring`, and the catalog scopes.
+// Skills, skill editors, authoring, and the catalog scopes.
 
-/// `Skill::MAX_DOCUMENT_BYTES`.
+/// The largest skill document, in bytes.
 pub const SKILL_MAX_DOCUMENT_BYTES: usize = 64 * 1024;
-/// `Skill::RESERVED_NAMES`.
+/// Names a skill may not take.
 pub const SKILL_RESERVED_NAMES: [&str; 1] = ["search"];
-/// `Api::V1::Console::SkillsController::STALE_MESSAGE`.
+/// The message for a skill write based on stale content.
 pub const SKILL_STALE_MESSAGE: &str =
     "This skill changed since you opened it. Review the latest content before saving.";
-/// `SkillAuthoring`'s editor error.
+/// The error for an editor selection naming an unavailable user.
 pub const SKILL_EDITORS_UNAVAILABLE: &str = "include an unavailable user";
 
 /// A skill row with its author, as the catalog returns it.
@@ -1858,15 +1851,15 @@ impl SkillUser {
 /// Which catalog tab a listing reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillsTab {
-    /// `SkillsController#index`'s directory tab: every shared active skill.
+    /// The directory tab: every shared active skill.
     Directory,
     /// The caller's own and edited skills.
     Mine,
-    /// `Skill.catalog_visible_to`: shared skills plus the caller's own.
+    /// Shared skills plus the caller's own.
     Catalog,
 }
 
-/// `Skill::SEARCH_QUERY`: any term matches, not every term.
+/// Any term matches, not every term.
 const SKILL_SEARCH_QUERY: &str =
     "replace(plainto_tsquery('english', ?)::text, ' & ', ' | ')::tsquery";
 
@@ -1901,7 +1894,7 @@ fn catalog_scope_for(viewer_id: Option<i64>) -> String {
     }
 }
 
-/// `SkillsController#index` / `Skill.catalog_visible_to` + `Skill.search`.
+/// The skill catalog listing: [`SkillsTab`] plus the full-text search.
 pub async fn list_skills(
     pool: &PgPool,
     viewer_id: Option<i64>,
@@ -1911,8 +1904,8 @@ pub async fn list_skills(
     let scope = match (tab, viewer_id) {
         (SkillsTab::Mine, Some(viewer_id)) => editable_scope(&format!("{viewer_id}")),
         (SkillsTab::Mine, None) => "false".to_owned(),
-        // `SkillsController#index`'s directory tab is `Skill.active.shared`,
-        // not the wider catalog scope the show action uses.
+        // The directory tab is the shared active scope, not the wider catalog
+        // scope the show action uses.
         (SkillsTab::Directory, _) => {
             "(skills.archived_at IS NULL AND skills.visibility = 'shared')".to_owned()
         }
@@ -1970,7 +1963,7 @@ pub async fn catalog_skill_by_name(
     Ok(rows.into_iter().next())
 }
 
-/// A skill the caller may edit (`Skill.editable_by`).
+/// A skill the caller may edit.
 pub async fn editable_skill(pool: &PgPool, user_id: i64, reference: &str) -> Result<Option<Skill>> {
     let Some(id) = model::Skill::decode_oid(reference) else {
         return Ok(None);
@@ -1978,8 +1971,7 @@ pub async fn editable_skill(pool: &PgPool, user_id: i64, reference: &str) -> Res
     find_skill(pool, &editable_scope(&format!("{user_id}")), id).await
 }
 
-/// `SkillsController#unshare`'s admin scope: any shared active skill, plus the
-/// admin's own.
+/// The unshare admin scope: any shared active skill, plus the admin's own.
 pub async fn admin_unshareable_skill(
     pool: &PgPool,
     user_id: i64,
@@ -2040,7 +2032,7 @@ pub async fn skill_editors(pool: &PgPool, skill_id: i64) -> Result<Vec<SkillUser
     .await?)
 }
 
-/// `skill.editors.exists?(user)`.
+/// Whether `user` is an editor of the skill.
 pub async fn skill_edited_by(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<bool> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM skill_editors WHERE skill_id = $1 AND user_id = $2)",
@@ -2073,7 +2065,7 @@ pub async fn skill_editor_candidates(
     .await?)
 }
 
-/// `ActiveRecord::Base.sanitize_sql_like`.
+/// Escape `\`, `%`, and `_` for an ILIKE pattern.
 fn escape_like(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -2085,7 +2077,7 @@ fn escape_like(value: &str) -> String {
     escaped
 }
 
-/// `Skill#skill_document`: the SKILL.md Console shows and checksums.
+/// The SKILL.md Console shows and checksums.
 pub fn skill_document(name: &str, description: &str, content: &str) -> String {
     format!(
         "---\nname: {}\ndescription: {}\n---\n\n{content}\n",
@@ -2094,7 +2086,7 @@ pub fn skill_document(name: &str, description: &str, content: &str) -> String {
     )
 }
 
-/// `Skill#checksum`.
+/// The checksum of the skill document.
 pub fn skill_checksum(name: &str, description: &str, content: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(skill_document(name, description, content).as_bytes());
@@ -2147,16 +2139,16 @@ pub struct SkillDraft {
     pub lock_version_supplied: bool,
 }
 
-/// A failed skill write, in the shape the controllers render.
+/// A failed skill write, in the shape a route renders.
 #[derive(Debug)]
 pub enum SkillWriteError {
-    /// `record.errors.as_json` with content reported as `instructions`.
+    /// Validation messages with content reported as `instructions`.
     Invalid(FieldErrors),
-    /// `ActiveRecord::StaleObjectError`.
+    /// The write's `lock_version` is stale.
     Stale,
-    /// `ActiveRecord::RecordNotFound`.
+    /// The skill does not exist.
     Missing,
-    /// `ActiveRecord::RecordNotUnique`.
+    /// The name is already used.
     Conflicts,
     Error(super::super::Error),
 }
@@ -2184,8 +2176,8 @@ impl From<active_record_encryption::Error> for SkillWriteError {
 
 pub type SkillWriteResult<T> = std::result::Result<T, SkillWriteError>;
 
-/// `Skill`'s validations, with `content` errors reported under `content` (the
-/// controllers rename them at the boundary).
+/// The skill validations, with `content` errors reported under `content` (the
+/// routes rename them at the boundary).
 ///
 /// [`SkillAttributes`] is the merged record a write validates: the stored values
 /// for fields the write leaves alone, and the submitted ones otherwise. Every
@@ -2198,7 +2190,7 @@ pub async fn validate_skill(
 ) -> Result<FieldErrors> {
     let mut validation = Validation::new();
     validation.check(&attributes);
-    // `validates :name, uniqueness: { conditions: -> { active } }`
+    // A name no active skill already holds.
     if !attributes.name.is_empty() {
         let taken: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM skills WHERE archived_at IS NULL AND name = $1 \
@@ -2216,39 +2208,38 @@ pub async fn validate_skill(
     Ok(errors)
 }
 
-/// The values `Skill` validates on save: the stored or submitted attributes, and
+/// The values a skill write validates: the stored or submitted attributes, and
 /// the visibility a write asked for.
 #[derive(Debug, garde::Validate)]
 pub struct SkillAttributes<'a> {
-    // `validates :content, presence: true` + `validate :document_size`
+    // A present, non-empty document within the size limit.
     #[garde(
         length(chars, min = 1),
         custom(skill_rules::document_size(self.name, self.description))
     )]
     pub content: &'a str,
-    // `validates :name, presence: true, length: { maximum: 64 },
-    //  format: { with: NAME_FORMAT }, exclusion: { in: RESERVED_NAMES }`
+    // A present name of at most 64 characters: lower-case words joined by
+    // dashes, and not a reserved name.
     #[garde(
         length(chars, min = 1, max = 64),
         pattern(r"^[a-z0-9]+(?:-[a-z0-9]+)*$"),
         custom(skill_rules::name_not_reserved)
     )]
     pub name: &'a str,
-    // `validates :description, presence: true`
+    // A present description.
     #[garde(length(chars, min = 1))]
     pub description: &'a str,
-    // `enum :visibility, ..., validate: true`, whose inclusion rule the
-    // sandbox's create action is the only writer of.
+    // The visibility, which only the sandbox's create action writes.
     #[garde(custom(skill_rules::visibility_included))]
     pub visibility: Option<&'a str>,
 }
 
-/// `Skill`'s field rules that garde has no built-in for.
+/// The field rules garde has no built-in for.
 mod skill_rules {
     use super::{SKILL_MAX_DOCUMENT_BYTES, SKILL_RESERVED_NAMES, skill_document, skill_visibility};
     use crate::validation::rules::INCLUSION_MESSAGE;
 
-    /// `validates :name, exclusion: { in: RESERVED_NAMES }`.
+    /// The name is not reserved.
     pub(super) fn name_not_reserved(value: &str, _: &()) -> garde::Result {
         if SKILL_RESERVED_NAMES.contains(&value) {
             return Err(garde::Error::new("is reserved"));
@@ -2256,7 +2247,7 @@ mod skill_rules {
         Ok(())
     }
 
-    /// `enum :visibility, validate: true`: `private` or `shared` only.
+    /// The visibility is `private` or `shared` only.
     pub(super) fn visibility_included(value: &Option<&str>, _: &()) -> garde::Result {
         match value {
             Some(value) if skill_visibility(value).is_none() => {
@@ -2287,7 +2278,7 @@ pub fn skill_visibility(value: &str) -> Option<&str> {
     matches!(value, "private" | "shared").then_some(value)
 }
 
-/// `SkillAuthoring#resolve_editors`: the active users named by `oids`, and
+/// The active users named by `oids`, and
 /// whether the selection was fully resolvable.
 async fn resolve_editors(
     executor: &mut PgConnection,
@@ -2330,8 +2321,7 @@ async fn resolve_editors(
     Ok((ordered, invalid))
 }
 
-/// `SkillAuthoring#save` for a new skill.
-/// Postgres' `unique_violation`, which Rails raises as `RecordNotUnique`.
+/// Postgres' `unique_violation`.
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(
         error,
@@ -2339,6 +2329,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     )
 }
 
+/// Save a new skill.
 pub async fn create_skill(
     pool: &PgPool,
     owner_id: i64,
@@ -2415,8 +2406,8 @@ fn merged(skill: Option<&Skill>, draft: &SkillDraft) -> (String, String, String)
     )
 }
 
-/// `SkillAuthoring#save`'s shared guard: validate the merged attributes and
-/// refuse the write when either the validation or the editor selection failed.
+/// The shared skill-write guard: validate the merged attributes and refuse the
+/// write when either the validation or the editor selection failed.
 async fn validated(
     executor: &mut PgConnection,
     skill_id: Option<i64>,
@@ -2443,8 +2434,7 @@ async fn validated(
     Ok(())
 }
 
-/// `SkillAuthoring#save` for an existing skill. `editor_oids` of `None` keeps
-/// the current editors.
+/// Updates an existing skill. `editor_oids` of `None` keeps the current editors.
 pub async fn update_skill(
     pool: &PgPool,
     skill: &Skill,
@@ -2521,18 +2511,18 @@ async fn replace_skill_editors(
     Ok(())
 }
 
-/// `Skill#share!`: shared, with `shared_at` preserved.
+/// Share the skill, preserving `shared_at`.
 pub async fn share_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
     set_public(pool, skill_id, true).await
 }
 
-/// `Skill#unshare!`.
+/// Make the skill private again.
 pub async fn unshare_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
     set_public(pool, skill_id, false).await
 }
 
-/// The one visibility write behind both: `share!`/`unshare!` are `update!`, so
-/// they bump the optimistic lock only when an attribute actually changes.
+/// The one visibility write behind both; the optimistic lock is bumped only
+/// when an attribute actually changes.
 async fn set_public(pool: &PgPool, skill_id: i64, shared: bool) -> Result<()> {
     sqlx::query(
         "UPDATE skills SET visibility = $2, \
@@ -2548,7 +2538,7 @@ async fn set_public(pool: &PgPool, skill_id: i64, shared: bool) -> Result<()> {
     Ok(())
 }
 
-/// `Skill#archive!`.
+/// Archive the skill: private, with `shared_at` cleared.
 pub async fn archive_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
     sqlx::query(
         "UPDATE skills SET archived_at = now(), visibility = 'private', shared_at = NULL, \
@@ -2560,8 +2550,7 @@ pub async fn archive_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// `Sandbox::SkillsController#add_editor`: assigns an active user and touches
-/// the skill.
+/// Assign an active user to the skill and touch it.
 pub async fn add_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<()> {
     let mut tx = begin_write(pool).await?;
     let inserted = sqlx::query(
@@ -2579,7 +2568,7 @@ pub async fn add_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> Res
     Ok(())
 }
 
-/// `Sandbox::SkillsController#remove_editor`.
+/// Remove an editor from the skill, returning whether one was removed.
 pub async fn remove_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<bool> {
     let mut tx = begin_write(pool).await?;
     let deleted = sqlx::query("DELETE FROM skill_editors WHERE skill_id = $1 AND user_id = $2")
@@ -2596,8 +2585,7 @@ pub async fn remove_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> 
 }
 
 async fn touch_skill(executor: &mut PgConnection, skill_id: i64) -> Result<()> {
-    // `touch` refreshes `updated_at` and, with optimistic locking enabled,
-    // bumps `lock_version` like any other update.
+    // Refreshes `updated_at` and bumps `lock_version` like any other update.
     sqlx::query(
         "UPDATE skills SET updated_at = now(), lock_version = lock_version + 1 WHERE id = $1",
     )
@@ -2634,15 +2622,15 @@ pub async fn resolve_editor_user(
 // Personal SSH key
 // ---------------------------------------------------------------------------
 //
-// Ports `SshKeySecret` (personal keys), `PersonalSshKeyGrants`, and the
-// `/api/v1/console/me/ssh_key` payload. The private key lives in a
-// `secret_sources` row, encrypted with Console's Active Record encryption keys.
+// Personal SSH keys, their grants, and the `/api/v1/console/me/ssh_key`
+// payload. The private key lives in a `secret_sources` row, encrypted with
+// Console's Active Record encryption keys.
 
-/// `PersonalSshKeysController::DEFAULT_NAME`.
+/// The name a personal SSH key gets when the write sends none.
 pub const PERSONAL_SSH_KEY_DEFAULT_NAME: &str = "My SSH key";
-/// `Grant::DEFAULT_DIRECT_PRIORITY`.
+/// The default priority of a direct grant.
 const DEFAULT_DIRECT_PRIORITY: i32 = 100;
-/// `SshKeySecret::URL_SAFE_FORMAT`, as the message the console renders.
+/// The message an unsupported public key renders.
 pub const PUBLIC_KEY_FORMAT_MESSAGE: &str =
     "must be an Ed25519, RSA, or ECDSA public key in OpenSSH format";
 
@@ -2654,7 +2642,7 @@ pub struct PersonalSshKey {
     pub public_key: String,
     pub created_at: String,
     pub updated_at: String,
-    /// `key_source.present?`: the key still has a stored source.
+    /// Whether the key still has a stored source.
     pub has_private_key: bool,
 }
 
@@ -2681,7 +2669,8 @@ impl PersonalSshKeyGrant {
         model::Grant::oid(self.id)
     }
 
-    /// `grantee.name.presence || grantee.foreign_id.presence || grantee.oid`.
+    /// The first non-empty of `grantee_name`, `grantee_foreign_id`, and the
+    /// grantee oid.
     pub fn label(&self) -> String {
         self.grantee_name
             .as_deref()
@@ -2700,7 +2689,7 @@ const SSH_KEY_COLUMNS: &str = "k.id, k.name, k.public_key, \
      to_char(k.created_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as created_at, \
      to_char(k.updated_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as updated_at";
 
-/// `user.personal_ssh_key`.
+/// The caller's personal SSH key.
 pub async fn personal_ssh_key(pool: &PgPool, owner_id: i64) -> Result<Option<PersonalSshKey>> {
     Ok(sqlx::query_as(&format!(
         "SELECT {SSH_KEY_COLUMNS} FROM ssh_key_secrets k WHERE k.owner_id = $1"
@@ -2802,28 +2791,28 @@ impl PrivateKeyCheck<'_> {
     }
 }
 
-/// `SshKeySecret`'s attributes for a personal key write: the trimmed name, the
-/// key decision the write path computed, and the stored public key.
+/// A personal key write's attributes: the trimmed name, the key decision the
+/// write path computed, and the stored public key.
 #[derive(garde::Validate)]
 struct PersonalKeyRules<'a> {
-    // `validates :name, presence: true, length: { maximum: 100 }`
+    // A present name of at most 100 characters.
     #[garde(length(chars, min = 1, max = 100))]
     name: String,
-    // `validate :private_key_present_and_valid`
+    // A private key that is present and parses.
     #[garde(custom(key_rules::private_key_present_and_valid))]
     private_key: PrivateKeyCheck<'a>,
-    // `validate :public_key_supported`, which skips an unparsable key so only the
-    // private key reports it.
+    // A supported public key, skipped for an unparsable key so only the private
+    // key reports it.
     #[garde(custom(key_rules::public_key_supported(self.private_key.error())))]
     public_key: Option<String>,
 }
 
-/// `SshKeySecret`'s field rules that garde has no built-in for.
+/// The field rules garde has no built-in for.
 mod key_rules {
     use super::{PUBLIC_KEY_FORMAT_MESSAGE, PrivateKeyCheck};
     use crate::validation::rules::BLANK_MESSAGE;
 
-    /// `validate :private_key_present_and_valid`.
+    /// The private key is present and parses.
     pub(super) fn private_key_present_and_valid(
         value: &PrivateKeyCheck<'_>,
         _: &(),
@@ -2835,8 +2824,7 @@ mod key_rules {
         }
     }
 
-    /// `validate :public_key_supported`: a rename keeps the stored key, so its
-    /// public key still has to pass.
+    /// A rename keeps the stored key, so its public key still has to pass.
     pub(super) fn public_key_supported(
         private_key_error: Option<&str>,
     ) -> impl FnOnce(&Option<String>, &()) -> garde::Result + '_ {
@@ -2853,8 +2841,8 @@ mod key_rules {
     }
 }
 
-/// `PersonalSshKeysController#update`: creates or replaces the caller's key.
-/// `submitted` is the pasted private key, when the body sent one.
+/// Creates or replaces the caller's key. `submitted` is the pasted private key,
+/// when the body sent one.
 pub async fn save_personal_ssh_key(
     pool: &PgPool,
     encryption: &active_record_encryption::ActiveRecordEncryption,
@@ -2862,7 +2850,7 @@ pub async fn save_personal_ssh_key(
     name: Option<&str>,
     submitted: Option<&str>,
 ) -> SkillWriteResult<PersonalSshKey> {
-    // An empty value keeps the stored key, as Rails' blank filter does.
+    // An empty value keeps the stored key.
     let derived = submitted
         .filter(|value| !value.is_empty())
         .map(|value| (value, crate::ssh_key::derive_public_key(value)));
@@ -2920,9 +2908,9 @@ pub async fn save_personal_ssh_key(
         }
         _ => false,
     };
-    // A submitted key that failed to parse still created (or replaced) a source
-    // in Rails, so it is the source's own error rather than the blank one, and
-    // it suppresses the public-key rule.
+    // A submitted key that failed to parse still created (or replaced) a source,
+    // so it is the source's own error rather than the blank one, and it
+    // suppresses the public-key rule.
     let private_key_supplied = private_key.is_some() || private_key_error.is_some() || has_source;
     let private_key_check = match (private_key_supplied, private_key_error) {
         (false, _) => PrivateKeyCheck::Missing,
@@ -3005,8 +2993,7 @@ pub async fn save_personal_ssh_key(
         .ok_or(SkillWriteError::Missing)
 }
 
-/// `PersonalSshKeysController#destroy`: removes the key, its source, and every
-/// grant of it.
+/// Removes the key, its source, and every grant of it.
 pub async fn delete_personal_ssh_key(pool: &PgPool, owner_id: i64) -> Result<()> {
     let mut tx = begin_write(pool).await?;
     let ids: Vec<i64> =
@@ -3015,8 +3002,7 @@ pub async fn delete_personal_ssh_key(pool: &PgPool, owner_id: i64) -> Result<()>
             .fetch_all(&mut *tx)
             .await?;
     for id in ids {
-        // Each destroyed grant invalidates its grantee, like `Grant`'s
-        // `before_destroy` invalidation.
+        // Each destroyed grant invalidates its grantee.
         let grants: Vec<(Option<i64>, Option<i64>)> = sqlx::query_as(
             "DELETE FROM grants WHERE ssh_key_secret_id = $1 RETURNING principal_id, role_id",
         )
@@ -3046,8 +3032,7 @@ pub async fn delete_personal_ssh_key(pool: &PgPool, owner_id: i64) -> Result<()>
     Ok(())
 }
 
-/// `PersonalSshKeyGrants#apply_for_user`: grants the caller's key to every
-/// principal that verifiably is the caller.
+/// Grants the caller's key to every principal that verifiably is the caller.
 pub async fn apply_personal_ssh_key_grants(pool: &PgPool, user_id: i64) -> Result<usize> {
     let mut tx = begin_write(pool).await?;
     let key_id: Option<i64> = sqlx::query_scalar(
@@ -3140,7 +3125,7 @@ async fn unambiguous_slack_identity(
     Ok(Some((subject, team_id)))
 }
 
-/// `Principal::SLACK_USER_ID_FORMAT` / `SLACK_TEAM_ID_FORMAT`.
+/// The user-id and team-id formats.
 fn slack_id(value: &str, prefixes: &str) -> bool {
     let mut characters = value.chars();
     let Some(first) = characters.next() else {
@@ -3155,8 +3140,8 @@ fn slack_id(value: &str, prefixes: &str) -> bool {
 // Sandbox permissions
 // ---------------------------------------------------------------------------
 
-/// A sandbox principal's identity and capability flags, as
-/// `Api::V1::Sandbox::PermissionsController` renders them.
+/// A sandbox principal's identity and capability flags, as the sandbox
+/// permissions payload reports them.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SandboxPrincipal {
     pub id: i64,
@@ -3170,23 +3155,22 @@ pub struct SandboxPrincipal {
     pub sandbox_workflows_write_enabled: bool,
 }
 
-/// The effective state of a sandbox principal, as
-/// `Api::V1::Sandbox::PermissionsController` renders it.
+/// The effective state of a sandbox principal.
 #[derive(Debug, Clone)]
 pub struct SandboxPermissions {
     /// The principal row and its capability flags.
     pub principal: SandboxPrincipal,
-    /// `Principal#effective_slack_channel_permissions_payload`.
+    /// The principal's effective channel permissions.
     pub slack_channel_permissions: Vec<SlackChannelPermissionPayload>,
-    /// `oauth_credentials_payload`.
+    /// The principal's OAuth credentials.
     pub oauth_credentials: Vec<OauthCredentialPayload>,
-    /// `Principal#connected_tool_names`.
+    /// The tools the principal is connected to.
     pub connected_tools: Vec<String>,
-    /// `PrincipalSyncConfig.redacted_config_for`.
+    /// The redacted sync config the sandbox receives.
     pub permissions: PermissionsPayload,
 }
 
-/// One entry of `effective_slack_channel_permissions_payload`.
+/// One channel permission entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct SlackChannelPermissionPayload {
     pub channel_id: String,
@@ -3195,7 +3179,7 @@ pub struct SlackChannelPermissionPayload {
     pub history_enabled: bool,
 }
 
-/// One entry of `PermissionsController#oauth_credentials_payload`.
+/// One OAuth credential entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct OauthCredentialPayload {
     pub id: String,
@@ -3208,8 +3192,8 @@ pub struct OauthCredentialPayload {
     pub scopes: Value,
 }
 
-/// `PrincipalSyncConfig.redacted_config_for`: the proxy configuration a sandbox
-/// reports.
+/// The redacted sync config a sandbox reports: the proxy configuration it
+/// receives.
 #[derive(Debug, Clone, Serialize)]
 pub struct PermissionsPayload {
     pub secrets: Vec<Value>,
@@ -3217,7 +3201,7 @@ pub struct PermissionsPayload {
     pub postgres: Vec<Value>,
 }
 
-/// Every attribute `Api::V1::Sandbox::PermissionsController` reports.
+/// Every attribute the sandbox permissions payload reports.
 pub async fn sandbox_permissions(
     pool: &PgPool,
     principal_id: i64,
@@ -3250,7 +3234,7 @@ pub async fn sandbox_permissions(
     }))
 }
 
-/// `Principal#effective_slack_channel_permissions_payload`: direct grants first,
+/// The principal's effective channel permissions: direct grants first,
 /// then role grants, strongest flag winning, orderable by channel.
 async fn slack_channel_permission_payload(
     pool: &PgPool,
@@ -3304,7 +3288,7 @@ struct SlackChannelPermissionRow {
     history_enabled: bool,
 }
 
-/// `PermissionsController#oauth_credentials_payload`.
+/// The principal's OAuth credentials.
 async fn oauth_credential_payload(
     pool: &PgPool,
     principal_id: i64,
@@ -3338,7 +3322,7 @@ async fn oauth_credential_payload(
         if !seen.insert(row.id) {
             continue;
         }
-        // `BrokerCredential#status` derives the state from those columns.
+        // The status derives from those columns.
         let status = if row.dead {
             "dead"
         } else if row.last_refresh.is_none() {
@@ -3374,8 +3358,7 @@ struct OauthCredentialRow {
     scopes: Value,
 }
 
-/// `Principal#connected_tool_names`: the `centaur-tool` label of every granted
-/// credential.
+/// The `centaur-tool` label of every granted credential.
 async fn connected_tool_names(pool: &PgPool, principal_id: i64) -> Result<Vec<String>> {
     let rows: Vec<Value> = sqlx::query_scalar(
         "WITH effective_grants AS ( \

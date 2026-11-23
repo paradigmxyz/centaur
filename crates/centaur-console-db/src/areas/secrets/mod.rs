@@ -59,8 +59,7 @@ macro_rules! secret_kinds {
 
 macro_rules! define_secret_kinds {
     ($(($variant:ident, $marker:ident, $slug:literal, $label:literal)),* $(,)?) => {
-        /// The grantable secret kinds in Console's canonical order
-        /// (`SecretKinds::SECRET_KINDS` and `GrantsController::GRANTABLE_TYPES`).
+        /// The grantable secret kinds in Console's canonical order.
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
         pub enum SecretKind {
             $($variant,)*
@@ -85,8 +84,7 @@ macro_rules! define_secret_kinds {
                 }
             }
 
-            /// The Rails model name (`SecretKinds`' `:model`), which is what a
-            /// `RecordNotFound` renders.
+            /// The model name, which is what a missing row renders.
             pub fn model_name(self) -> &'static str {
                 match self {
                     $(Self::$variant => <model::$marker as ConsoleModel>::NAME,)*
@@ -657,7 +655,7 @@ fn kind_position(kind: SecretKind) -> usize {
         .unwrap_or(0)
 }
 
-/// `ActiveRecord`'s `sanitize_sql_like`, which escapes `\`, `%`, and `_`.
+/// An ILIKE pattern that escapes `\`, `%`, and `_` in `query`.
 fn like_pattern(query: &str) -> String {
     let mut escaped = String::with_capacity(query.len() + 2);
     escaped.push('%');

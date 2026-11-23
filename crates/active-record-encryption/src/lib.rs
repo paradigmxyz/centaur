@@ -64,8 +64,9 @@ impl ActiveRecordEncryption {
         }
     }
 
-    /// Encrypts like a non-deterministic Rails `encrypts` attribute, with the
-    /// current (SHA-256-derived) key and no compression, which Rails reads.
+    /// Encrypts like a non-deterministic Active Record `encrypts` attribute, with
+    /// the current (SHA-256-derived) key and no compression, which Active Record
+    /// reads.
     pub fn encrypt(&self, plaintext: &str) -> Result<String, Error> {
         let nonce =
             Nonce::<U12>::try_generate().map_err(|_| Error("random IV generation failed"))?;

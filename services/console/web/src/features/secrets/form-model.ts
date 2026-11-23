@@ -5,7 +5,7 @@ import { recordToRows, rowsToRecord, type KeyValueRow } from "@/components/form/
 
 import type { FormKind, KindRecord, SourcePayload } from "./api";
 
-/** SecretSource::SOURCE_TYPES with the form's labels. */
+/** The secret source types with the form's labels. */
 export const SOURCE_TYPE_OPTIONS = [
   { value: "env", label: "Env Var" },
   { value: "aws_sm", label: "AWS Secrets Manager" },
@@ -16,7 +16,7 @@ export const SOURCE_TYPE_OPTIONS = [
   { value: "token_broker", label: "Token Broker" },
 ] as const;
 
-/** SecretKinds::SOURCE_REF_KEYS: the config key holding a source's reference. */
+/** The config key holding each source's reference. */
 export const SOURCE_REF_KEYS: Record<string, string> = {
   env: "var",
   aws_sm: "secret_id",
@@ -37,7 +37,7 @@ export const REFERENCE_LABELS: Record<string, string> = {
 
 export const AWS_SOURCE_TYPES = ["aws_sm", "aws_ssm"];
 
-/** RequestRule::HTTP_METHODS + the "*" wildcard (shown as ALL). */
+/** The HTTP methods plus the "*" wildcard (shown as ALL). */
 export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT"] as const;
 export const METHOD_WILDCARD = "*";
 
@@ -115,7 +115,7 @@ export interface SecretFormValues {
 const str = (value: unknown) => (typeof value === "string" ? value : value == null ? "" : String(value));
 const blankToNull = (value: string) => (value.trim() === "" ? null : value.trim());
 
-/** Splits on whitespace and commas (RuleParams#split_terms). */
+/** Splits on whitespace and commas. */
 export function splitTerms(value: string): string[] {
   return value
     .split(/[\s,]+/)
@@ -188,9 +188,9 @@ function settingRow(setting: { name: string; value?: string; value_from?: Record
 }
 
 /**
- * The source payload (BaseSecretsController#build_source). Config keys the
- * form doesn't edit (e.g. with_decryption, token_env) are kept when the backend
- * is unchanged. An inline value is sent only when typed.
+ * The source payload. Config keys the form doesn't edit (e.g. with_decryption,
+ * token_env) are kept when the backend is unchanged. An inline value is sent
+ * only when typed.
  */
 export function sourcePayload(values: SourceValues, stored: SourcePayload | null): Record<string, unknown> {
   const type = values.source_type;
@@ -209,7 +209,7 @@ export function sourcePayload(values: SourceValues, stored: SourcePayload | null
   return payload;
 }
 
-/** Rules with all-blank rows dropped (RuleParams#assign_rules); position comes from order. */
+/** Rules with all-blank rows dropped; position comes from order. */
 export function rulesPayload(rules: RuleValues[]) {
   return rules
     .filter((rule) => rule.host.trim() || rule.cidr.trim() || rule.http_methods.length > 0 || rule.paths.length > 0)
@@ -221,7 +221,7 @@ export function rulesPayload(rules: RuleValues[]) {
     }));
 }
 
-/** Settings with blank-name rows dropped (PgDsnSecretsController#setting_rows). */
+/** Settings with blank-name rows dropped. */
 export function settingsPayload(settings: SettingValues[]) {
   return settings
     .filter((setting) => setting.name.trim())

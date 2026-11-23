@@ -1,12 +1,13 @@
 //! Console's Active Record encryption key, read from the Console service
 //! environment.
 //!
-//! Several Console attributes are AR `encrypts` columns: inline secret values
-//! (`SecretSource#secret`) and personal SSH private keys. The API server writes
-//! them the same way Rails does so Console and the proxy can read them, and it
-//! decrypts a stored value only when a write retains or compares one. This is
-//! the single place that reads the key material; every area shares it, and
-//! missing configuration is an error rather than a silent plaintext write.
+//! Several Console attributes are Active Record `encrypts` columns: inline
+//! secret values (`secret_sources.secret`) and personal SSH private keys. The
+//! API server writes them in that format, so stored ciphertext stays readable
+//! by the proxy, and it decrypts a stored value only when a write retains or
+//! compares one. This is the single place that reads the key material; every
+//! area shares it, and missing configuration is an error rather than a silent
+//! plaintext write.
 
 use std::sync::OnceLock;
 

@@ -9,15 +9,13 @@ afterEach(() => {
 });
 
 describe("api client", () => {
-  it("sends no CSRF token on reads or writes", async () => {
+  it("encodes query arrays and JSON bodies", async () => {
     const mock = mockApi({ "GET /api/v1/console/things": { data: [] }, "POST /api/v1/console/things": { data: { id: "1" } } });
     await api.get("/api/v1/console/things", { q: "a", ids: ["x", "y"], empty: "" });
     await api.post("/api/v1/console/things", { data: { a: 1 } });
 
     const [get, post] = mock.calls();
     expect(get?.url.search).toBe("?q=a&ids%5B%5D=x&ids%5B%5D=y");
-    expect(get?.headers["X-CSRF-Token"]).toBeUndefined();
-    expect(post?.headers["X-CSRF-Token"]).toBeUndefined();
     expect(post?.body).toEqual({ data: { a: 1 } });
   });
 
@@ -28,7 +26,6 @@ describe("api client", () => {
       "/api/v1/me",
       "/api/v1/consolex",
       "/api/v1/sandbox/permissions",
-      "/up",
       "/api/v1/console/../principals",
       "/api/v1/console/%2e%2e/principals",
       "/api/v1/console/..\\principals",

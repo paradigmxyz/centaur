@@ -1,5 +1,5 @@
 //! Console's JSON rendering of `datetime` columns: UTC RFC 3339 with exactly
-//! three fractional digits, which is what ActiveSupport's `as_json` produces.
+//! three fractional digits.
 //!
 //! Console stores every timestamp as `timestamp without time zone` in UTC, so
 //! rows usually carry [`time::PrimitiveDateTime`]; a row that went through
@@ -29,7 +29,7 @@ use serde::{Deserialize, Deserializer, Serializer};
 use serde_json::Value;
 use time::{OffsetDateTime, PrimitiveDateTime, UtcOffset};
 
-/// Rails' `datetime` rendering: `2024-01-02T03:04:05.678Z`.
+/// Console's `datetime` rendering: `2024-01-02T03:04:05.678Z`.
 pub fn format(value: OffsetDateTime) -> String {
     format_primitive(datetime(value))
 }

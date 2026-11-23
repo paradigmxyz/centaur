@@ -60,10 +60,10 @@ backend directory; add a no-op migration where a backend has nothing to change.
 The Console database has its own migrations in
 `crates/centaur-console-db/migrations`, applied by `centaur_console_db::migrate`
 on every start, independent of `RUN_MIGRATIONS`. The first
-is a baseline of the schema Rails last produced; `migrate` adopts it on a
-database Rails migrated and refuses one Rails left behind. Add Console changes
-as the next numbered file there, not as Rails migrations, and prepare a test
-database with `cargo run -p centaur-console-db --example migrate -- <url>`.
+is a baseline of the schema the retired Rails Console last produced; `migrate`
+adopts it on a database the retired Rails Console migrated and refuses one it
+left behind. Add Console changes as the next numbered file there, and prepare a
+test database with `cargo run -p centaur-console-db --example migrate -- <url>`.
 
 Database-backed tests skip when their URL is absent. Point these variables at a
 disposable Postgres as required by the packages you run:

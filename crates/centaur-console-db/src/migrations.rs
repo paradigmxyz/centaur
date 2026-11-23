@@ -1,10 +1,10 @@
 //! Console's schema migrations, which api-rs owns.
 //!
-//! The first migration is a baseline: the schema the last Rails migration
-//! produced. A database Rails already migrated to that point adopts the
-//! baseline without running it; one Rails left behind is refused, because the
-//! Rails data migrations it is missing no longer exist here. Every later
-//! migration runs normally.
+//! The first migration is a baseline: the schema the last migration of the
+//! retired Rails Console produced. A database that Console already migrated to
+//! that point adopts the baseline without running it; one left behind is
+//! refused, because the data migrations it is missing no longer exist here.
+//! Every later migration runs normally.
 
 use std::collections::BTreeSet;
 
@@ -29,7 +29,7 @@ const BASELINE_VERSION: i64 = 1;
 const LOCK_KEY: i64 = 0x636f_6e73_6f6c_6501; // "console" + 1
 
 /// Apply pending Console migrations to the database behind `pool`, adopting a
-/// schema Rails migrated. The pool must allow writes.
+/// schema the retired Rails Console migrated. The pool must allow writes.
 pub async fn migrate(pool: &PgPool) -> Result<()> {
     let mut conn = pool.acquire().await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
@@ -51,8 +51,9 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Rails migration versions the baseline includes, read from the baseline's
-/// own `schema_migrations` insert so the two cannot disagree.
+/// Migration versions the baseline inherits from the retired Rails Console,
+/// read from the baseline's own `schema_migrations` insert so the two cannot
+/// disagree.
 pub fn rails_versions() -> BTreeSet<&'static str> {
     let baseline = MIGRATOR
         .iter()
@@ -70,7 +71,8 @@ pub fn rails_versions() -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Record the baseline as applied when Rails already built this schema.
+/// Record the baseline as applied when the retired Rails Console already built
+/// this schema.
 async fn adopt_rails_schema(conn: &mut PgConnection) -> Result<()> {
     let tracked: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
         .fetch_one(&mut *conn)
@@ -116,8 +118,9 @@ async fn adopt_rails_schema(conn: &mut PgConnection) -> Result<()> {
     if !missing.is_empty() {
         return Err(Error::Schema(format!(
             "the Console database is missing {} Rails migration(s), the first {}; \
-             upgrade through a chart release whose Console worker still runs \
-             `bin/rails db:prepare`, then upgrade again",
+             it was left behind by a Console release older than the api-rs baseline. \
+             Upgrade through a chart release that still ran the Rails Console worker \
+             (before the Console moved to api-rs), then upgrade again",
             missing.len(),
             missing[0],
         )));
@@ -155,31 +158,7 @@ async fn adopt_rails_schema(conn: &mut PgConnection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-
-    #[test]
-    fn baseline_records_every_rails_migration() {
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../services/console/db/migrate"
-        );
-        let Ok(entries) = fs::read_dir(dir) else {
-            // The Rails migrations are gone; nothing left to drift from.
-            return;
-        };
-        let on_disk: BTreeSet<String> = entries
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .filter_map(|name| name.split_once('_').map(|(version, _)| version.to_owned()))
-            .collect();
-        let baseline: BTreeSet<String> = rails_versions().into_iter().map(str::to_owned).collect();
-        assert_eq!(
-            on_disk, baseline,
-            "Console schema changes are api-rs migrations now: add a migration to \
-             crates/centaur-console-db/migrations instead of services/console/db/migrate"
-        );
-    }
 
     #[test]
     fn baseline_is_the_first_migration() {

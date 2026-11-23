@@ -32,8 +32,8 @@ Documents are exposed to retrieval only through the query endpoints; no other da
 - Postgres with the existing Absurd schema and the `vector` extension available. The `pg_search` extension is needed only for the `paradedb` text-search backend.
 - `pdftotext` from Poppler (for PDF sources).
 - `pandoc` 3.8.3 or later (for Office, OpenDocument, RTF, and EPUB Slack files).
-- A Rails Console database containing live per-user Google and Granola OAuth broker credentials.
-- The Active Record encryption primary key and derivation salt used by Rails Console.
+- The Console database containing live per-user Google and Granola OAuth broker credentials.
+- The Console's Active Record-format encryption primary key and derivation salt.
 - An embeddings API key supplied through a Kubernetes Secret.
 
 ## Configuration
@@ -55,7 +55,7 @@ Required:
 The service discovers live per-user broker credentials belonging to the Google
 OAuth app selected by `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` (default
 `google`); Drive sync uses those with the `drive.readonly` scope and Calendar
-sync those with the `calendar.readonly` scope. Rails Console owns refreshing
+sync those with the `calendar.readonly` scope. token-broker owns refreshing
 those tokens; the service decrypts the current access token before each Google
 request. Granola broker credentials are
 selected the same way by `COMPANY_CONTEXT_GRANOLA_OAUTH_APP_SLUG` (default
@@ -183,7 +183,7 @@ The query and custom document endpoints are authenticated with the same principa
 Console mints for api-rs (`Authorization: Bearer <jwt>`); iron-proxy injects it
 into sandbox requests to this service. The token's subject names the principal,
 whose Slack workspace and user ID and granted broker credentials are looked up
-in the Rails Console database. Slack user IDs are workspace-scoped, so a
+in the Console database. Slack user IDs are workspace-scoped, so a
 principal's Slack identity matches only when both its workspace and user ID do. The principal's Google and Granola identities are the
 subjects of the live Google and Granola broker credentials (from
 `COMPANY_CONTEXT_GOOGLE_OAUTH_APP_SLUG` and

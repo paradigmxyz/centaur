@@ -161,9 +161,4 @@ check_migrations \
   '^([0-9]+)_.+\.sql$' \
   "crates/centaur-console-db/migrations"
 
-check_migrations \
-  "Rails console" \
-  '^([0-9]+)_.+\.rb$' \
-  "services/console/db/migrate"
-
 exit "${failed}"

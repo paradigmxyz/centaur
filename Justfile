@@ -77,7 +77,6 @@ build-one service:
       teamsbot) just _build-teamsbot ;;
       agent|sandbox) just _build-agent ;;
       workflow-python) just _build-workflow-python ;;
-      console) just _build-console ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
 
@@ -120,13 +119,6 @@ _build-agent:
 # The Python workflow host ships in the agent image, where workflows run.
 _build-workflow-python:
     just _build-agent
-
-# The Rails console image, which the chart no longer runs (api-rs serves the
-# Console and builds the SPA itself). It builds from the repo root so its SPA
-# can use the pnpm workspace lockfile; services/console/Dockerfile.dockerignore
-# limits the context.
-_build-console:
-    {{docker_build}} -t centaur-console:latest -f services/console/Dockerfile .
 
 # Push locally-built images to the local registry under library/ so k3s pulls
 # them via its docker.io mirror. Used by `just up k3s`. Only changed layers are

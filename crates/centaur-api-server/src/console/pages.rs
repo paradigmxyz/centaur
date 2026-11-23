@@ -1,13 +1,12 @@
 //! The server-rendered Console sign-in pages.
 //!
-//! These port `SessionsController` and `app/views/sessions/*` plus
-//! `layouts/oauth.html.erb`. They intentionally have no JavaScript: sign-in is
-//! a step of the MCP OAuth flow. The form field contract (`email`, `password`;
-//! the pending page's `POST /logout`) is unchanged, but the forms carry no
-//! authenticity token and there is no Rack `_method` override: every unsafe
-//! request must name the Console public origin exactly, and a missing or `null`
-//! Origin is refused. Forms and query parameters are parsed into typed structs,
-//! so a nested `return_to[]` key is simply an unknown field.
+//! They intentionally have no JavaScript: sign-in is a step of the MCP OAuth
+//! flow. The form field contract (`email`, `password`; the pending page's
+//! `POST /logout`) is unchanged, but the forms carry no authenticity token and
+//! there is no `_method` override: every unsafe request must name the Console
+//! public origin exactly, and a missing or `null` Origin is refused. Forms and
+//! query parameters are parsed into typed structs, so a nested `return_to[]` key
+//! is simply an unknown field.
 //!
 //! SSO buttons render from the same enabled-provider set the SSO routes use;
 //! see `src/console/README.md`.
@@ -35,7 +34,7 @@ use crate::{
         DISABLED_MESSAGE, LOGIN_PATH, PENDING_PATH,
         areas::auth_pages::console_config,
         assets,
-        http::{ConsoleError, render_error, request_origin},
+        http::{ConsoleError, request_origin},
         request::{ConsoleForm, ConsoleQuery},
         return_path,
         session_cookie::ConsoleSession,
@@ -91,7 +90,7 @@ pub(crate) fn router() -> Router<AppState> {
 }
 
 /// `GET /login` query parameters. A nested `return_to[]` is an unknown field,
-/// so `return_to` is absent (there is no Rack array sentinel to imitate).
+/// so `return_to` is absent (there is no array sentinel).
 #[derive(Debug, Default, Deserialize)]
 struct LoginQuery {
     #[serde(default)]
@@ -102,7 +101,7 @@ struct LoginQuery {
     error: Option<String>,
 }
 
-/// `POST /login` form fields; `commit` and `utf8` are unknown fields.
+/// `POST /login` form fields; any other field is ignored.
 #[derive(Debug, Default, Deserialize)]
 struct LoginForm {
     #[serde(default)]
@@ -136,7 +135,7 @@ async fn login_page(
     }
     if current.is_none() {
         // A cookie for a deleted user still keeps its remembered return path,
-        // exactly like Rails' nil `current_user`; the id is only replaced on
+        // exactly like an absent current user; the id is only replaced on
         // the next successful sign-in.
         // `new` remembers only `?return_to=`; `?next=` is used just for the
         // redirect of an already signed-in active user.
@@ -175,7 +174,7 @@ async fn current(
     Ok((session, user))
 }
 
-/// Rails' `blank?`-style filter for an optional query value.
+/// A blank-string filter for an optional query value.
 fn present(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
@@ -194,9 +193,8 @@ async fn pending_page(State(state): State<AppState>, headers: HeaderMap) -> Resp
     };
     match user.status {
         ConsoleUserStatus::Active => redirect_with_session(&landing_path(&user), &config, &session),
-        // `SessionsController` skips `require_active_account`, so the holding
-        // page is also what a disabled session sees; the API guard is what
-        // signs it out.
+        // The holding page is also what a disabled session sees; the API guard
+        // is what signs it out.
         ConsoleUserStatus::Pending | ConsoleUserStatus::Disabled => {
             let html = pending_html(&user.email);
             page_response(StatusCode::OK, html, &config, &session)
@@ -283,13 +281,13 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         Ok(current) => current,
         Err(response) => return response,
     };
-    // `SessionsController#destroy` keeps the `require_login` gate: without a
-    // signed-in user (including a stale cookie for a deleted user) the request
-    // redirects instead of rejecting the missing Origin.
+    // Logout keeps the login gate: without a signed-in user (including a stale
+    // cookie for a deleted user) the request redirects instead of rejecting the
+    // missing Origin.
     if session.user_id().is_none() || user.is_none() {
         return redirect(LOGIN_PATH, &[], Some(SERVER_PAGE_CSP));
     }
-    // `require_login` resolves `current_user` from the database before the
+    // The login gate resolves the current user from the database before the
     // origin check runs, so a cookie for a deleted user redirects even without
     // an Origin.
     if !origin_allowed(&headers, &config) {
@@ -314,26 +312,23 @@ async fn icon() -> Response {
 }
 
 /// Every server-rendered form post must carry the configured Console public
-/// origin verbatim. Unlike Rails' form forgery origin check, a missing Origin
-/// and `Origin: null` are both refused; there is no token fallback.
+/// origin verbatim. A missing Origin and `Origin: null` are both refused.
 fn origin_allowed(headers: &HeaderMap, config: &ConsoleSessionConfig) -> bool {
     request_origin(headers) == Some(config.public_origin())
 }
 
+/// A sign-in or sign-out form post without the Console origin. The JSON console
+/// API answers the same failure with 403 and a `csrf` reason instead (see
+/// `console_session.rs`); a browser form gets an HTML page.
 fn csrf_rejection() -> Response {
-    // Rails renders an `InvalidAuthenticityToken` as 422; the JSON console API
-    // uses 403 with a `csrf` reason instead (see `console_session.rs`).
-    let error = ConsoleError::new(
+    server_error_page(
         StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid or missing CSRF token",
+        "Your request was rejected",
+        "The form could not be verified. Go back and try again.",
+        None,
     )
-    .with_reason("csrf");
-    server_page_csp(render_error(error.status, &error.message, error.details))
 }
 
-/// The shared server-rendered error page: the same layout and CSP as the
-/// sign-in, consent, and OAuth result pages, so a browser form post that the
-/// port rejects gets an HTML page instead of Rails' static `public/422.html`.
 /// A server-rendered error page in the OAuth layout, with an optional retry
 /// link.
 pub(crate) fn server_error_page(
@@ -504,7 +499,7 @@ fn login_html(alert: Option<&str>) -> String {
         <input class="oauth-input" autocomplete="current-password" required="required" type="password" name="password" id="password">
       </div>
 
-      <input type="submit" name="commit" value="Sign in" class="oauth-button oauth-button-primary" data-disable-with="Sign in">
+      <input type="submit" value="Sign in" class="oauth-button oauth-button-primary">
     </form>
 "#
         .to_owned()
@@ -679,7 +674,7 @@ mod tests {
             "https://console.example.test".parse().unwrap(),
         );
         assert!(origin_allowed(&headers, &config));
-        // Unlike Rails, an omitted Origin is not accepted.
+        // An omitted Origin is not accepted.
         assert!(!origin_allowed(&HeaderMap::new(), &config));
 
         let mut null_origin = HeaderMap::new();
@@ -807,8 +802,8 @@ mod tests {
             )
             .await
             .unwrap();
-        // Rails' `require_login` runs first: no signed-in user redirects to
-        // the form instead of rejecting the missing Origin.
+        // The login gate runs first: no signed-in user redirects to the form
+        // instead of rejecting the missing Origin.
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers()[LOCATION], "/login");
     }

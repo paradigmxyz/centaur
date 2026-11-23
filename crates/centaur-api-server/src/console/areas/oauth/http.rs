@@ -1,10 +1,10 @@
 //! A small HTTP client for the OAuth area.
 //!
-//! Console's `HttpClient` wraps Net::HTTP with open/read/write timeouts and a
-//! body cap. The consent flow uses it for the code exchange, provider identity
-//! lookups, dynamic client registration, and the optional Mercator claim
-//! lookup. Requests never log URLs with query strings, bodies, or tokens; only
-//! the resulting status reaches a user-facing message.
+//! It applies open/read/write timeouts and a body cap. The consent flow uses it
+//! for the code exchange, provider identity lookups, dynamic client
+//! registration, and the optional Mercator claim lookup. Requests never log
+//! URLs with query strings, bodies, or tokens; only the resulting status reaches
+//! a user-facing message.
 
 use std::time::Duration;
 

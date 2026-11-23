@@ -13,8 +13,8 @@ use crate::{
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// Console's `BrokerCredential.refreshable` with `$1` as the current time: live
-/// credentials that are due and have what their grant needs to refresh.
+/// Refreshable credentials with `$1` as the current time: live credentials that
+/// are due and have what their grant needs to refresh.
 const REFRESHABLE: &str = "broker_credentials.dead = FALSE \
      AND ((broker_credentials.\"grant\" = 'refresh_token' \
            AND (broker_credentials.last_refresh IS NULL OR broker_credentials.refresh_token IS NOT NULL)) \

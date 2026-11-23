@@ -1,9 +1,8 @@
 //! Console SSO: `/auth/:provider/start` and `/auth/:provider/callback`.
 //!
-//! Mirrors `SessionOauthController`, `lib/login`, and
-//! `ConsoleAuth`: a signed state parameter, an encrypted same-site flow cookie
-//! binding the callback to the browser, optional PKCE, and provider-specific
-//! identity extraction. Provisioning SQL lives in `centaur-console-db`.
+//! A signed state parameter, an encrypted same-site flow cookie binding the
+//! callback to the browser, optional PKCE, and provider-specific identity
+//! extraction. Provisioning SQL lives in `centaur-console-db`.
 
 use std::time::Duration;
 
@@ -463,8 +462,7 @@ fn append_query(endpoint: &str, query: &[(&str, String)]) -> String {
         serializer.append_pair(key, value);
     }
     let query = serializer.finish();
-    // Rails assigns `uri.query`, replacing any pre-existing query rather than
-    // appending to it.
+    // The query replaces any pre-existing query rather than appending to it.
     if let Ok(mut url) = Url::parse(endpoint) {
         url.set_query(Some(&query));
         return url.to_string();
@@ -479,8 +477,7 @@ fn append_query(endpoint: &str, query: &[(&str, String)]) -> String {
     url
 }
 
-/// `URI.encode_www_form_component`, which encodes spaces as `+` rather than
-/// `%20`.
+/// Encodes spaces as `+` rather than `%20`.
 fn form_component(value: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .append_pair("value", value)
@@ -617,7 +614,7 @@ fn id_token_identity(
 
 fn decode_claims(id_token: &str) -> Result<Map<String, Value>, ()> {
     let segment = id_token.split('.').nth(1).ok_or(())?;
-    // JWT base64url segments are usually unpadded, but Rails tolerates padding.
+    // JWT base64url segments are usually unpadded, but padding is tolerated.
     let segment = segment.trim_end_matches('=');
     let bytes = URL_SAFE_NO_PAD.decode(segment).map_err(|_| ())?;
     serde_json::from_slice::<Value>(&bytes)
@@ -631,8 +628,8 @@ fn sso_email_allowed(email: Option<&str>) -> bool {
     if domains.is_empty() {
         return true;
     }
-    // Rails uses `email.to_s.strip.downcase.split("@", 2).last`, so an address
-    // without `@` is compared verbatim and a domain list can admit it.
+    // An address without `@` is compared verbatim and a domain list can admit
+    // it.
     let email = email.unwrap_or_default().trim().to_ascii_lowercase();
     let domain = email
         .split_once('@')

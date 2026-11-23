@@ -37,7 +37,6 @@ use crate::{
     },
 };
 
-/// `ApiClient::SCOPES`.
 const SCOPES: [&str; 2] = ["sessions:read", "sessions:write"];
 const SECRET_PREFIX: &str = "acs_";
 const SCOPES_EMPTY_MESSAGE: &str = "must include at least one scope";
@@ -70,13 +69,12 @@ struct UpdateApiClient {
     scopes: Option<Scopes>,
 }
 
-/// `ApiClient#scopes`: Rails' `compact_blank` list, which the model checks as a
+/// The scopes list, which is validated as a
 /// whole (`scopes_supported`) instead of per item, so the two messages are this
 /// type's own [`garde::Validate`] implementation rather than field rules.
 ///
-/// Deserializing is Rails' `Array(fields[:scopes]).compact_blank`: blanks come
-/// out before validation, and a non-array (including a scalar) is a typed
-/// request error, not a coercion.
+/// Deserializing drops blanks before validation, and a non-array (including a
+/// scalar) is a typed request error, not a coercion.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Scopes(Vec<String>);
 
@@ -420,7 +418,7 @@ async fn load_link(
     .ok_or_else(ApiClientPrincipalModel::not_found)?)
 }
 
-/// The reloaded client after a write, as Rails' `render_api_client` does.
+/// The reloaded client after a write.
 async fn reload(pool: &sqlx::PgPool, id: i64) -> Result<ApiClientWithLinks, ConsoleError> {
     api_client(pool, id)
         .await?

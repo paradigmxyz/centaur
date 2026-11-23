@@ -43,7 +43,7 @@ use crate::FieldErrors;
 /// A top-level field keeps its plain name, a nested record is reported under
 /// the path-keyed form the secrets document validators already use
 /// (`source.config`, `rules[0].cidr`), and a rule on the record as a whole is
-/// ActiveModel's `base`.
+/// reported as `base`.
 pub fn detail_key(path: &garde::Path) -> Cow<'_, str> {
     if path.is_empty() {
         Cow::Borrowed(FieldErrors::BASE)
@@ -52,8 +52,8 @@ pub fn detail_key(path: &garde::Path) -> Cow<'_, str> {
     }
 }
 
-/// `errors.as_json()` from a garde report: one array per path, in garde's report
-/// order (a field's messages keep the order its rules ran in).
+/// One array of messages per path, in garde's report order (a field's messages
+/// keep the order its rules ran in).
 impl From<garde::Report> for FieldErrors {
     fn from(report: garde::Report) -> Self {
         let mut errors = Self::new();
@@ -64,10 +64,10 @@ impl From<garde::Report> for FieldErrors {
     }
 }
 
-/// One plain line for a report, for a gate the API answers with Rails'
-/// `ActionController::BadRequest` rather than the 422 field envelope: the first
-/// message, because those gates carry a single rule (the users page's `status`
-/// filter). `None` when the report is empty.
+/// One plain line for a report, for a gate the API answers with a bare 400
+/// rather than the 422 field envelope: the first message, because those gates
+/// carry a single rule (the users page's `status` filter). `None` when the
+/// report is empty.
 pub fn plain_message(report: &garde::Report) -> Option<String> {
     report
         .iter()
@@ -102,9 +102,9 @@ impl<T: garde::Validate + ?Sized> ValidateFields for T {
 /// Collects one request's garde report and the hand-written messages that need
 /// the database or the request context, then fails the handler with all of them.
 ///
-/// Console's controllers check some things before the record is saved (a
-/// referenced principal that does not exist, a `default_role_ids` entry that
-/// names no role) and their errors win over the record's own: append them, call
+/// Console's routes check some things before the record is saved (a referenced
+/// principal that does not exist, a `default_role_ids` entry that names no role)
+/// and their errors win over the record's own: append them, call
 /// [`Self::finish_if_any`], and only then run the record's rules.
 ///
 /// ```ignore
@@ -190,9 +190,9 @@ pub mod rules {
 
     use garde::{Error, Result};
 
-    /// ActiveModel's `:blank` message.
+    /// The blank-field message.
     pub const BLANK_MESSAGE: &str = "can't be blank";
-    /// ActiveModel's `:inclusion` message.
+    /// The inclusion message.
     pub const INCLUSION_MESSAGE: &str = "is not included in the list";
 
     /// Whether `value` matches the static `pattern`, compiling it once. An
@@ -235,8 +235,7 @@ pub mod rules {
     }
 
     /// A PATCH field under an inclusion validation: absent keeps the stored
-    /// value, and an explicit `null` is out of the list, as ActiveModel's
-    /// inclusion validation on a nullable column is.
+    /// value, and an explicit `null` is out of the list.
     pub fn patch_included_in<'a>(
         allowed: &'a [&'a str],
     ) -> impl FnOnce(&Option<Option<String>>, &()) -> Result + 'a {

@@ -28,8 +28,7 @@ Credentials minted by Console's OAuth flows use their OAuth app's client
 credentials and the provider's rules in
 [`providers.json`](../../crates/centaur-token-broker/providers.json): whether
 the refresh re-requests the granted scopes, and whether the client
-authenticates in the form or with HTTP Basic authentication. A Console test fails until every
-Console provider is listed there. A credential whose provider is not listed is
+authenticates in the form or with HTTP Basic authentication. A credential whose provider is not listed is
 retried with backoff.
 
 Each token request times out after the credential's `refresh_timeout_seconds`,

@@ -1,10 +1,4 @@
 //! OAuth app, provider, preset, integration, and provider-detail handlers.
-//!
-//! Ports of `Api::V1::OauthAppsController` and its console subclass,
-//! `Api::V1::Console::OauthProvidersController`,
-//! `Api::V1::Console::IntegrationsController`, the sandbox OAuth apps index,
-//! and the service objects behind them (`ConsoleIntegrations`,
-//! `OauthPresetSetup`, `OauthAppProviderDetails`).
 
 use std::collections::HashMap;
 
@@ -117,8 +111,7 @@ const APP_CREDENTIAL_LIST: ListSource = ListSource::new(
     2,
 );
 
-/// The `data` object of an OAuth app response
-/// (`OauthAppsController#record_payload`).
+/// The `data` object of an OAuth app response.
 #[derive(Serialize)]
 struct AppPayload {
     id: String,
@@ -945,8 +938,8 @@ pub(super) async fn console_preset(
     };
     let attributes = preset.attributes();
     let pool = pool(&state)?;
-    // Rails resolves an existing app before it validates a standalone preset's
-    // inputs, so a conflicting app wins over an invalid tenant URL.
+    // An existing app is resolved before a standalone preset's inputs are
+    // validated, so a conflicting app wins over an invalid tenant URL.
     let existing = find_oauth_app_by_slug(&pool, &attributes.slug).await?;
     let app = match existing {
         Some(app) => {
@@ -1190,7 +1183,7 @@ pub(super) async fn console_disconnect(
     let tokens = disconnect_broker_credential(&pool, credential.id, &encryption)
         .await?
         .ok_or_else(BrokerCredentialModel::not_found)?;
-    // Rails' after_commit reconciliation on the updated credential.
+    // Reconciliation for the updated credential.
     let mut connection = pool.acquire().await?;
     centaur_console_db::areas::reconciliation::apply_for_credential(&mut connection, credential.id)
         .await?;

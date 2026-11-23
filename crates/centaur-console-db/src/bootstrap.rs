@@ -1,11 +1,10 @@
-//! The initial Console admin (`Iron::Bootstrap`): on a database with no users
-//! other than the system user api-rs writes as,
-//! create the configured operator as an active admin and the default `infra`
-//! role. It does nothing once any operator exists, so it is safe to run on
-//! every start.
+//! The initial Console admin: on a database with no users other than the system
+//! user api-rs writes as, create the configured operator as an active admin and
+//! the default `infra` role. It does nothing once any operator exists, so it is
+//! safe to run on every start.
 //!
-//! Unlike Rails, it creates no API key: the operator signs in and creates one
-//! on the Console's API Keys page.
+//! It creates no API key: the operator signs in and creates one on the Console's
+//! API Keys page.
 
 use sqlx::PgPool;
 
@@ -13,13 +12,12 @@ use crate::SetupError as Error;
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// `Iron::Bootstrap::ADVISORY_LOCK_KEY`, so a Rails process bootstrapping the
-/// same database at the same time waits for this one and finds the user.
-/// Written exactly as the Ruby constant is.
+/// The advisory lock key, so another replica bootstrapping the same database at
+/// the same time waits for this one and finds the user.
 #[allow(clippy::unusual_byte_groupings)]
 const ADVISORY_LOCK_KEY: i64 = 0x1700_B007_C0FFEE & 0x7FFF_FFFF_FFFF_FFFF;
 
-/// `User` validates `length: { minimum: 12 }`.
+/// Minimum password length: 12 characters.
 const MIN_PASSWORD_LENGTH: usize = 12;
 
 /// The operator to create on an empty database.
@@ -69,8 +67,8 @@ pub async fn bootstrap_initial_admin(pool: &PgPool, admin: &InitialAdmin) -> Res
         return Ok(Bootstrap::Existing);
     }
 
-    // Validated only when creating, as Rails did: an existing deployment whose
-    // configured values no longer pass keeps starting.
+    // Validated only when creating: an existing deployment whose configured
+    // values no longer pass keeps starting.
     let email = admin.email.trim().to_lowercase();
     if email == crate::SYSTEM_USER_EMAIL {
         return Err(Error::Bootstrap(format!(
@@ -88,7 +86,7 @@ pub async fn bootstrap_initial_admin(pool: &PgPool, admin: &InitialAdmin) -> Res
             "the initial Console user's password must be at least {MIN_PASSWORD_LENGTH} characters"
         )));
     }
-    // `has_secure_password` writes `$2a$` digests at bcrypt's default cost.
+    // `$2a$` digests at bcrypt's default cost, like the existing stored digests.
     let digest = bcrypt::hash_with_result(&admin.password, bcrypt::DEFAULT_COST)
         .map_err(|error| Error::Bootstrap(format!("hashing the initial password: {error}")))?
         .format_for_version(bcrypt::Version::TwoA);
@@ -108,7 +106,7 @@ pub async fn bootstrap_initial_admin(pool: &PgPool, admin: &InitialAdmin) -> Res
     Ok(Bootstrap::Created { user_id })
 }
 
-/// `Role.ensure_default_infra!`: the `infra` role, assigned by default.
+/// The `infra` role, assigned by default.
 async fn ensure_default_infra_role(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     created_by: i64,
@@ -133,8 +131,8 @@ async fn ensure_default_infra_role(
     Ok(())
 }
 
-/// A simplified `URI::MailTo::EMAIL_REGEXP`: one `@`, a non-empty local part,
-/// and a domain of non-empty dot-separated labels.
+/// A simplified email shape: one `@`, a non-empty local part, and a domain of
+/// non-empty dot-separated labels.
 fn valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;

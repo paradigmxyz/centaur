@@ -1,4 +1,4 @@
-/** Ruby's String#capitalize for provider names ("google" -> "Google"). */
+/** Capitalizes provider names ("google" -> "Google"). */
 export function providerLabel(provider: string): string {
   return provider.charAt(0).toUpperCase() + provider.slice(1).toLowerCase();
 }

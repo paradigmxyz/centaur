@@ -142,8 +142,7 @@ pub async fn write_secret(
     }
 }
 
-/// `RecordNotUnique` is retried once for an upsert addressed by foreign id,
-/// exactly like `assign_upsert_with_retry`.
+/// A unique violation is retried once for an upsert addressed by foreign id.
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(database) if database.code().as_deref() == Some("23505"))
 }
@@ -812,8 +811,7 @@ async fn persist_parent(
         .execute(&mut **transaction)
         .await?;
     if let ForeignIdValue::Set(foreign_id) = &document.foreign_id {
-        // Rails' `update_columns(foreign_id:)`: the identity changes without a
-        // second `updated_at` bump.
+        // The identity changes without a second `updated_at` bump.
         sqlx::query(&format!(
             "UPDATE {} SET foreign_id = $1 WHERE id = $2",
             kind.table()
@@ -910,10 +908,10 @@ async fn replace_nested(
 // Equivalence
 // ---------------------------------------------------------------------------
 
-/// `SyncConfigReplacement.equivalent?`: the identity (when the document sets
-/// one), the parent attributes, the sources with their inline plaintext, and the
-/// rules are unchanged. Nested records are compared as sorted documents, so the
-/// order they were stored in does not matter.
+/// Whether the existing row and the document are equivalent: the identity (when
+/// the document sets one), the parent attributes, the sources with their inline
+/// plaintext, and the rules are unchanged. Nested records are compared as sorted
+/// documents, so the order they were stored in does not matter.
 fn equivalent(
     existing: &SecretRow,
     existing_plain: &[Option<String>],
@@ -992,10 +990,10 @@ fn rules_match(existing: &[RuleRow], rules: &[RuleDocument]) -> bool {
     stored == draft
 }
 
-/// `destroy!`: cascades to the secret's sources, rules, and grants. Rails'
-/// `SyncConfigCacheInvalidation` defers the parent's bump to commit, where the
-/// secret's grants are gone and the bump reaches no principal, so the destroyed
-/// grants' own bumps are what reach principals.
+/// Deletes a secret, cascading to its sources, rules, and grants. The parent's
+/// bump is deferred to commit, where the secret's grants are gone and the bump
+/// reaches no principal, so the destroyed grants' own bumps are what reach
+/// principals.
 pub async fn delete_secret(
     pool: &PgPool,
     kind: SecretKind,

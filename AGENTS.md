@@ -77,8 +77,9 @@ Ownership by tree:
 - `services/iron-proxy/`: credential-injecting proxy image and startup config.
 - `services/workflow-python/`: Python workflow compatibility host; durability
   remains in `api-rs`.
-- `services/console/`: credential-control API (Rails) and the operator UI, a
-  React SPA in `services/console/web/`.
+- `services/console/`: the Console operator UI, a React SPA in
+  `services/console/web/`, its static files, and the Console API reference.
+  api-rs serves the Console (`crates/centaur-api-server/src/console/`).
 - `tools/`: independently packaged agent-facing CLI plugins.
 - `connectors/`: experimental Code Mode connectors, run by
   `crates/centaur-codemode` and not yet deployed. Each is a
@@ -140,7 +141,7 @@ Python code targets Python 3.11+ and uses `uv` for environments and commands.
 Follow the local package's import style: service modules generally use
 top-level absolute imports, while independently packaged tool CLIs and optional
 dependencies may deliberately import lazily. Do not mechanically rewrite those
-boundaries. Rust, Ruby, TypeScript, shell, and image-only services have their
+boundaries. Rust, TypeScript, shell, and image-only services have their
 own commands in local guides; there is no single repository-wide lint command
 that accurately validates every service.
 

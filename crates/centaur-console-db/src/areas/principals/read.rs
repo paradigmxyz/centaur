@@ -161,7 +161,7 @@ fn permissions_payload(
     }
 }
 
-/// The bearer payload (`PrincipalsController#record_payload`).
+/// The bearer payload rendered for a principal.
 #[derive(Clone, Debug, Serialize)]
 pub struct PrincipalPayload {
     pub id: String,
@@ -228,7 +228,7 @@ pub fn console_principal_payload(view: &PrincipalView) -> ConsolePrincipalPayloa
     }
 }
 
-/// `RolesController#record_payload`.
+/// The payload rendered for a role.
 #[derive(Clone, Debug, Serialize)]
 pub struct RolePayload {
     pub id: String,
@@ -278,7 +278,7 @@ pub fn slack_channel_option(row: &SlackChannelOption) -> SlackChannelOptionPaylo
     }
 }
 
-/// `SlackChannelCatalogSync.configured?`.
+/// Whether a Slack bot token is configured.
 pub fn slack_catalog_configured() -> bool {
     ["CENTAUR_CONSOLE_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN"]
         .into_iter()
@@ -300,7 +300,7 @@ pub async fn slack_catalog_error(pool: &PgPool) -> crate::Result<Option<&'static
     Ok((!any).then_some("Slack channel catalog is loading. Enter a channel ID or reload shortly."))
 }
 
-/// `Console::SlackChannelsController#channels`.
+/// The channel options of a Slack channel lookup.
 pub async fn slack_channels(
     pool: &PgPool,
     ids: &[String],

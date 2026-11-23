@@ -1,9 +1,9 @@
-//! The Console tables the port addresses, and the lookups and deletes every
-//! area needs.
+//! The Console tables the areas address, and the lookups and deletes every area
+//! needs.
 //!
 //! Each area used to repeat the same three pieces of plumbing for its resource:
-//! the table name, the opaque-id prefix, the Rails model name a 404 renders, and
-//! the `WHERE id = $1` / `WHERE foreign_id = $1` queries. [`ConsoleModel`]
+//! the table name, the opaque-id prefix, the model name a 404 renders, and the
+//! `WHERE id = $1` / `WHERE foreign_id = $1` queries. [`ConsoleModel`]
 //! carries that descriptor as associated constants, and the free functions in
 //! this module run the shared queries against any row type that derives
 //! [`sqlx::FromRow`].
@@ -31,14 +31,14 @@ use crate::oid::{decode_oid, oid};
 ///
 /// The capability constants describe the model rather than the query: they tell
 /// a generic helper whether a column exists and how a delete behaves, so an area
-/// never re-derives it. `SOFT_DELETE_COLUMN` is the column Rails' model scopes
-/// out (`ApiKey#deleted_at`); without one, [`delete`] removes the row.
+/// never re-derives it. `SOFT_DELETE_COLUMN` is the column a soft delete sets
+/// (`deleted_at`); without one, [`delete`] removes the row.
 pub trait ConsoleModel: 'static {
     /// The Postgres table.
     const TABLE: &'static str;
     /// Console's opaque-id prefix (`prn_...`, `role_...`).
     const OID_PREFIX: &'static str;
-    /// The Rails model name; a missing row renders `"<NAME> not found"`.
+    /// The model name; a missing row renders `"<NAME> not found"`.
     const NAME: &'static str;
     /// Whether the table has a unique `foreign_id` column.
     const HAS_FOREIGN_ID: bool = false;
@@ -69,7 +69,7 @@ pub trait ConsoleModel: 'static {
 
 /// The row of `M` whose primary key is `id`, projected as `Row`.
 ///
-/// Soft-deleted rows are not found, matching Rails' model scope.
+/// Soft-deleted rows are not found.
 pub async fn find_by_id<'e, M, Row, E>(executor: E, id: i64) -> Result<Option<Row>>
 where
     M: ConsoleModel,
@@ -139,7 +139,7 @@ where
 ///
 /// This is the plain record delete only. A model with dependent rows or
 /// invalidation callbacks keeps those in its area, which must run them around
-/// this call the way Rails' `destroy` does.
+/// this call.
 pub async fn delete<'e, M, E>(executor: E, id: i64) -> Result<u64>
 where
     M: ConsoleModel,
@@ -157,7 +157,7 @@ where
 }
 
 /// The Console tables the areas address. The doc comment on each marker is the
-/// Rails model whose name a 404 renders; the arguments after it are
+/// model name a 404 renders; the arguments after it are
 /// `table, oid prefix, NAME, has foreign_id, soft-delete column`.
 macro_rules! console_models {
     ($($(#[$doc:meta])* $marker:ident: $table:literal, $prefix:literal, $name:literal,

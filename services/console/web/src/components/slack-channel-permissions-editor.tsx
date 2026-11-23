@@ -23,7 +23,6 @@ export interface SlackChannelPermissionRow {
 
 type Flag = "upload_enabled" | "download_enabled" | "history_enabled";
 
-/** SlackChannelPermission::PERMISSION_FLAGS */
 export const SLACK_PERMISSION_FLAGS: { attribute: Flag; label: string }[] = [
   { attribute: "upload_enabled", label: "Upload" },
   { attribute: "download_enabled", label: "Download" },

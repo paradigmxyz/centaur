@@ -3,16 +3,15 @@
 //!
 //! These kinds are only written through `/api/v1` (the bearer operator API);
 //! the Console SPA does not edit them, so there is no retained-inline-secret or
-//! path-style error-key mode here. The controllers build the whole credential
-//! graph and save it once (`Api::V1::{AwsAuth,OauthToken,Hmac,SshKey}SecretsController`),
-//! which gives this module its shape:
+//! path-style error-key mode here. The write builds the whole credential graph
+//! and saves it once, which gives this module its shape:
 //!
 //! - a document is typed base attributes plus role-keyed sources and positional
 //!   rules, deserialized from the request by the extractors in
-//!   `centaur_api_server::console::request` (no strong-params filtering or
-//!   scalar coercion);
-//! - an unchanged document short-circuits (`SyncConfigReplacement.equivalent?`)
-//!   and keeps the existing nested rows and cache versions;
+//!   `centaur_api_server::console::request` (no parameter filtering or scalar
+//!   coercion);
+//! - an unchanged document short-circuits and keeps the existing nested rows and
+//!   cache versions;
 //! - a document is validated before anything is written, then the parent and
 //!   every nested record are replaced in one transaction, and each saved or
 //!   destroyed record bumps the sync-config version of the principals the
@@ -45,7 +44,7 @@ const FAMILY: super::write::Family = super::write::Family::Bearer;
 ///
 /// The wire shape is typed: a non-object block, a non-string `secret`, or a
 /// non-object `config` is a validation error at the extractor instead of being
-/// dropped or coerced the way strong params would.
+/// dropped or coerced.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SourceInput {
     #[serde(default)]
@@ -57,7 +56,7 @@ pub struct SourceInput {
 }
 
 impl SourceInput {
-    /// An empty block is absent (`next if src.blank?`).
+    /// An empty block is absent.
     fn is_blank(&self) -> bool {
         self.source_type.is_none() && self.secret.is_none() && self.config.is_empty()
     }
@@ -197,7 +196,7 @@ pub struct HmacRequest {
     #[serde(default)]
     #[garde(custom(required_string))]
     pub signature_message: Option<String>,
-    /// Strictly a JSON boolean: no ActiveModel casting of `"true"` or `1`.
+    /// Strictly a JSON boolean: no implicit casting of `"true"` or `1`.
     #[serde(default)]
     #[garde(skip)]
     pub allow_chunked_body: Option<bool>,
@@ -319,8 +318,8 @@ pub async fn write_secret(
     .await
 }
 
-/// `BaseController#resolve_for_upsert`: a PUT addressed by a foreign id creates
-/// the record with that identity when the body omits one.
+/// A PUT addressed by a foreign id creates the record with that identity when
+/// the body omits one.
 fn apply_target_foreign_id(
     document: &mut Document,
     target: &WriteTarget,

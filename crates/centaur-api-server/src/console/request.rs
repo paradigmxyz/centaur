@@ -42,8 +42,7 @@ pub(crate) struct ConsoleQuery<T>(pub(crate) T);
 /// A URL-encoded form body deserialized into `T`.
 ///
 /// Form structs are flat: a nested key such as `return_to[]` is an unknown
-/// field and is ignored, matching the decision to drop the Rack `return_to[]`
-/// sentinel imitation.
+/// field and is ignored; there is no `return_to[]` sentinel.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ConsoleForm<T>(pub(crate) T);
 
@@ -136,8 +135,8 @@ fn missing_data() -> ConsoleError {
     ConsoleError::bad_request(MISSING_DATA_MESSAGE)
 }
 
-/// The plain replacement for Rails' `ParameterMissing` text. The status stays a
-/// 400 in every namespace; only the framework-specific wording is dropped.
+/// The plain 400 message for a missing `data` object. The status stays a 400 in
+/// every namespace.
 pub(crate) const MISSING_DATA_MESSAGE: &str = "missing required \"data\" object";
 
 fn parse_urlencoded<T: DeserializeOwned>(raw: &str) -> Result<T, ConsoleError> {
@@ -292,7 +291,7 @@ mod tests {
             Some(true)
         );
 
-        // No ActiveModel casting: a JSON string is not a boolean.
+        // No casting: a JSON string is not a boolean.
         let error = data_request(r#"{"data":{"name":"role","enabled":"true"}}"#)
             .await
             .unwrap_err();

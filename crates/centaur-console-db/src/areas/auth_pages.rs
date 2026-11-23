@@ -2,10 +2,10 @@
 //! clients, authorization codes, refresh tokens, and the console-user principal
 //! that MCP tokens name.
 //!
-//! The row shapes and validity rules follow the Rails models `User`,
-//! `UserIdentity`, `McpOauthClient`, `McpOauthAuthorizationCode`,
-//! `McpOauthRefreshToken`, and `ConsoleUserPrincipalProvisioner`. Tokens are
-//! stored only as SHA-256 digests and returned to the caller once, in plaintext.
+//! The row shapes and validity rules follow Console's `User`, `UserIdentity`,
+//! `McpOauthClient`, `McpOauthAuthorizationCode`, `McpOauthRefreshToken` models
+//! and the console-user principal provisioner. Tokens are stored only as
+//! SHA-256 digests and returned to the caller once, in plaintext.
 //!
 //! Projections derive [`sqlx::FromRow`] and are read with `query_as`; the MCP
 //! client and the console-user principal are addressed through their
@@ -28,16 +28,16 @@ use crate::model::{self, ConsoleModel, McpOauthClient, Principal, PrincipalRole,
 use crate::write;
 use crate::{ConsoleUser, Result, find_console_user};
 
-/// `McpOauthClient::DEFAULT_GRANT_TYPES`.
+/// The default MCP client grant types.
 pub const DEFAULT_GRANT_TYPES: [&str; 2] = ["authorization_code", "refresh_token"];
-/// `McpOauthClient::DEFAULT_RESPONSE_TYPES`.
+/// The default MCP client response types.
 pub const DEFAULT_RESPONSE_TYPES: [&str; 1] = ["code"];
-/// `McpOauthClient::DEFAULT_SCOPES`.
+/// The default MCP client scopes.
 pub const DEFAULT_SCOPES: [&str; 1] = ["mcp:tools"];
 
-/// `McpOauthAuthorizationCode::CODE_TTL` (10 minutes).
+/// Authorization code lifetime: 10 minutes.
 pub const AUTHORIZATION_CODE_TTL_SECONDS: i64 = 10 * 60;
-/// `McpOauthRefreshToken::DEFAULT_TTL` (90 days).
+/// Refresh token lifetime: 90 days.
 pub const REFRESH_TOKEN_TTL_SECONDS: i64 = 90 * 24 * 60 * 60;
 
 const AUTHORIZATION_CODE_PREFIX: &str = "mcpauth_";
@@ -136,8 +136,8 @@ pub async fn link_or_provision_user(
             .map(str::to_owned)
             .or_else(|| previous_team_id.clone());
         slack_identity_changed = provider == "slack" && effective_team_id != previous_team_id;
-        // Rails's `identity_attributes` only assigns a provider-supplied
-        // `team_id`; keeping the stored value otherwise is the same write.
+        // Only a provider-supplied `team_id` is assigned; keeping the stored
+        // value otherwise is the same write.
         let sql = write::update_sql(
             model::UserIdentity::TABLE,
             &["email", "email_verified", "team_id"],
@@ -150,7 +150,7 @@ pub async fn link_or_provision_user(
             .execute(&mut *tx)
             .await?;
         if let Some(name) = name {
-            // `User#name.blank?` is a `WHERE`, not a column list; the helpers
+            // An empty `users.name` is a `WHERE`, not a column list; the helpers
             // only shape the timestamped assignments of a plain `id` update.
             sqlx::query(
                 "UPDATE users SET name = $2, updated_at = now() \
@@ -282,8 +282,8 @@ impl McpClient {
         McpOauthClient::oid(self.id)
     }
 
-    /// `McpOauthClient#redirect_uri_allowed?`: exact match, plus RFC 8252
-    /// loopback matching that ignores the registered port.
+    /// Exact match, plus RFC 8252 loopback matching that ignores the
+    /// registered port.
     pub fn redirect_uri_allowed(&self, uri: &str) -> bool {
         if !allowed_redirect_uri(uri) {
             return false;
@@ -503,8 +503,8 @@ pub async fn find_usable_refresh_token(
     .await?)
 }
 
-/// `User#revoke_mcp_oauth_refresh_tokens!`. `revoked_at` is a server clock
-/// value, so the statement stays plain SQL.
+/// Revokes every usable refresh token of the user. `revoked_at` is a server
+/// clock value, so the statement stays plain SQL.
 pub async fn revoke_refresh_tokens_for_user(pool: &PgPool, user_id: i64) -> Result<()> {
     sqlx::query(
         "UPDATE mcp_oauth_refresh_tokens \
@@ -517,8 +517,8 @@ pub async fn revoke_refresh_tokens_for_user(pool: &PgPool, user_id: i64) -> Resu
     Ok(())
 }
 
-/// `McpOauthClient#touch(:last_used_at)`. The touched column is a server clock
-/// value, so the statement stays plain SQL.
+/// Touches `last_used_at`. The touched column is a server clock value, so the
+/// statement stays plain SQL.
 pub async fn touch_mcp_client_last_used(pool: &PgPool, id: i64) -> Result<()> {
     sqlx::query(
         "UPDATE mcp_oauth_clients SET last_used_at = now(), updated_at = now() WHERE id = $1",
@@ -536,16 +536,15 @@ pub struct UserPrincipal {
     pub foreign_id: String,
 }
 
-/// `ConsoleUserPrincipalProvisioner::MAX_ATTEMPTS`.
+/// The provisioning retry budget.
 const PROVISION_MAX_ATTEMPTS: u32 = 3;
 
-/// `ConsoleUserPrincipalProvisioner`: find or create the console-user principal
-/// for `user`, and seed the `user-mcp` role on first creation.
+/// Find or create the console-user principal for `user`, and seed the
+/// `user-mcp` role on first creation.
 ///
-/// Concurrent callers for one user race to insert the same `foreign_id`;
-/// `ConsoleUserPrincipalProvisioner` retries `RecordNotUnique` (and the same
-/// race seen as a uniqueness validation), so this retries Postgres'
-/// `unique_violation` and finds the winner's row on the next attempt.
+/// Concurrent callers for one user race to insert the same `foreign_id`, so
+/// this retries Postgres' `unique_violation` and finds the winner's row on the
+/// next attempt.
 pub async fn provision_user_principal(pool: &PgPool, user: &ConsoleUser) -> Result<UserPrincipal> {
     let mut attempts = 0;
     loop {
@@ -561,8 +560,8 @@ pub async fn provision_user_principal(pool: &PgPool, user: &ConsoleUser) -> Resu
     }
 }
 
-/// `ConsoleUserPrincipalProvisioner.call(user)` addressed by user id: the
-/// `ScheduledTask` author path. Returns `None` when the user no longer exists.
+/// The provisioner addressed by user id: the `ScheduledTask` author path.
+/// Returns `None` when the user no longer exists.
 ///
 /// This is the same provisioner the MCP consent path calls, so both paths write
 /// an identical principal row and the same role assignments.
@@ -576,7 +575,7 @@ pub(crate) async fn provision_console_user_principal(
     provision_user_principal(pool, &user).await.map(Some)
 }
 
-/// Postgres' `unique_violation`, which Rails raises as `RecordNotUnique`.
+/// Postgres' `unique_violation`.
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(
         error,
@@ -592,8 +591,7 @@ async fn provision_user_principal_once(pool: &PgPool, user: &ConsoleUser) -> Res
 }
 
 /// The provisioner's transaction body. Shared by every path that provisions a
-/// console-user principal so they cannot drift from
-/// `ConsoleUserPrincipalProvisioner`.
+/// console-user principal so they cannot drift.
 async fn provision_principal_in_tx(
     tx: &mut PgConnection,
     user: &ConsoleUser,
@@ -615,10 +613,9 @@ async fn provision_principal_in_tx(
             let saved_foreign_id = row.foreign_id;
             let (slack_user_id, slack_team_id) =
                 unambiguous_slack_identity(&mut *tx, user.id).await?;
-            // `assign_attributes(slack_identity_fields)` merges only the fields
-            // it found, so an absent identity leaves a stored link alone, and
-            // `apply_sandbox_repo_cache_label` re-derives the label from the
-            // row's own capability value.
+            // Only the identity fields that were found are merged, so an absent
+            // identity leaves a stored link alone, and the repo-cache label is
+            // re-derived from the row's own capability value.
             let next_slack_user_id = slack_user_id.as_deref().or(row.slack_user_id.as_deref());
             let next_slack_team_id = slack_team_id.as_deref().or(row.slack_team_id.as_deref());
             let labels = principal_labels(&row.labels, &row.sandbox_repo_cache);
@@ -647,8 +644,8 @@ async fn provision_principal_in_tx(
                 .bind(&labels)
                 .execute(&mut *tx)
                 .await?;
-                // `Principal`'s `before_commit` bumps its own cache version
-                // when a sync-config field changes.
+                // A sync-config field change bumps the principal's own cache
+                // version.
                 invalidate::invalidate(&mut *tx, Scope::Principal(id)).await?;
             }
             (id, saved_foreign_id, false)
@@ -689,7 +686,7 @@ async fn provision_principal_in_tx(
     };
 
     if newly_created {
-        // `after_create :assign_default_roles`: `insert_all!`, so it produces no
+        // Assigning the default roles is a set-style insert, so it produces no
         // per-record sync-config invalidation.
         sqlx::query(
             "INSERT INTO principal_roles (principal_id, role_id, created_at, updated_at) \
@@ -730,8 +727,7 @@ fn managed_by_labels() -> Value {
 }
 
 async fn seed_user_mcp_role(tx: &mut PgConnection, user_id: i64, principal_id: i64) -> Result<()> {
-    // `Role.create_with(...).find_or_create_by!(foreign_id:)`: existing roles
-    // keep their name and labels.
+    // An existing role keeps its name and labels.
     let role_sql = format!(
         "{} ON CONFLICT (foreign_id) DO NOTHING",
         write::insert_sql(
@@ -832,7 +828,7 @@ fn slack_team_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
 }
 
-/// `URI::MailTo::EMAIL_REGEXP`, which `User` applies when creating an SSO user.
+/// The email shape an SSO user's address is checked against.
 fn valid_console_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
@@ -862,7 +858,7 @@ fn valid_console_email(email: &str) -> bool {
     })
 }
 
-/// `ConsoleUserPrincipalProvisioner#foreign_id`.
+/// The console-user principal's `foreign_id` for an email.
 pub fn console_user_foreign_id(email: &str) -> String {
     let normalized = email.trim().to_lowercase();
     let mut safe = String::new();
@@ -882,7 +878,7 @@ pub fn console_user_foreign_id(email: &str) -> String {
     format!("console-user-{safe}-{}", &digest[..12])
 }
 
-/// `McpOauthClient.allowed_redirect_uri?`.
+/// Whether a client may use `value` as a redirect URI.
 pub fn allowed_redirect_uri(value: &str) -> bool {
     if value.contains('*') {
         return false;

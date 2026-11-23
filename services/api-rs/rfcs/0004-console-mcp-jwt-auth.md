@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: TBD
-Target: `services/console`, `services/api-rs`
+Target: `services/console/web`, `services/api-rs`
 
 ## Summary
 

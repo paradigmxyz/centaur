@@ -2,8 +2,8 @@
 //!
 //! Console accepts standard five-field cron (`minute hour day-of-month month
 //! day-of-week`): numbers, three-letter month and weekday names, `*`, ranges,
-//! steps, and lists. It validates them with the Ruby `fugit` gem, so the next
-//! run computed here follows Fugit's reading of that grammar:
+//! steps, and lists. Existing schedules were validated by fugit, and the next
+//! run computed here follows that grammar:
 //!
 //! - `0` and `7` are both Sunday.
 //! - When both day fields are restricted, a day matching either one runs, as
@@ -323,8 +323,7 @@ mod tests {
         assert!(Schedule::parse("0 9 * * *", "Europe/Bogus").is_err());
     }
 
-    /// Expected times are `Fugit::Cron.parse("#{expression} #{zone}").next_time(after)`
-    /// from fugit 1.14.
+    /// Expected times come from fugit 1.14.
     #[test]
     fn next_times_match_fugit() {
         let cases = [

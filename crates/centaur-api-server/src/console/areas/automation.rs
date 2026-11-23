@@ -5,8 +5,7 @@
 //! database work lives in [`centaur_console_db::areas::automation`]; the
 //! handlers here only turn HTTP into those calls and back.
 
-// Rails renders errors as the response itself, so a fallible handler's error
-// type is the same `Response` as its success type.
+// A fallible handler's error type is the same `Response` as its success type.
 #![allow(clippy::result_large_err)]
 
 use active_record_encryption::ActiveRecordEncryption;
@@ -28,8 +27,8 @@ use centaur_console_db::{
         User as UserModel,
     },
     scheduled_tasks::{self, ManualRun, RunRequest, StartError},
-    // `app/services/ssh_key.rb`, shared with the bearer `ssh_key_secrets` area
-    // so the two Console SSH key paths cannot drift.
+    // Shared with the bearer `ssh_key_secrets` area so the two Console SSH key
+    // paths cannot drift.
     ssh_key::{derive_public_key, fingerprint},
     validation::ValidateFields,
 };
@@ -162,7 +161,7 @@ fn pool(state: &AppState) -> Result<sqlx::PgPool, ApiError> {
 }
 
 /// Console's 404 for a record the caller may not see: the model descriptor's
-/// plain message, never Rails' SQL-ish `find_by_oid!`/`find_by!` relation text.
+/// plain message, never SQL-ish relation text.
 fn record_not_found(model: centaur_console_db::Error) -> Response {
     ConsoleError::from(model).into_response()
 }
@@ -363,7 +362,6 @@ async fn console_channel_options(
     Ok(no_store(Json(body).into_response()))
 }
 
-/// `ScheduledTasksController#slack_channel_options`' response.
 #[derive(Serialize)]
 struct ChannelOptionsPayload {
     data: Vec<db::ChannelOption>,
@@ -384,9 +382,8 @@ struct ChannelOptionsQuery {
     q: Option<String>,
 }
 
-/// `ScheduledTaskConsoleAttributes`' permitted input: only the fields the form
-/// sends are changed, so a partial update keeps the stored schedule and
-/// destination.
+/// The permitted input: only the fields the form sends are changed, so a
+/// partial update keeps the stored schedule and destination.
 #[derive(Debug, Default, serde::Deserialize)]
 struct ConsoleTaskData {
     #[serde(default, deserialize_with = "nullable_field")]
@@ -409,7 +406,6 @@ struct ConsoleTaskData {
     custom_days: Option<Vec<String>>,
 }
 
-/// `ScheduledTaskConsoleAttributes.call`.
 async fn console_draft(
     pool: &sqlx::PgPool,
     author_id: i64,
@@ -689,12 +685,11 @@ async fn sandbox_principal(
         .map_err(internal)
 }
 
-/// `Sandbox::ScheduledTasksController::PERSONAL_OWNER`.
+/// The `owner` value that asks for a personal task.
 const PERSONAL_OWNER: &str = "me";
 
-/// `Sandbox::ScheduledTasksController#valid_owner_param?`: whether this request
-/// asked for a personal task. Any other owner value, and an owner on anything
-/// but create, is rejected before the actor checks.
+/// Whether this request asked for a personal task. Any other owner value, and
+/// an owner on anything but create, is rejected before the actor checks.
 fn requested_owner(data: Option<&SandboxTaskData>, creating: bool) -> Result<bool, ConsoleError> {
     let Some(data) = data else {
         return Ok(false);
@@ -818,7 +813,7 @@ async fn personal_channel_author(
     Ok(matches.then_some(user.id))
 }
 
-/// `require_task_owner!`: the one 403 every refused sandbox actor gets.
+/// The one 403 every refused sandbox actor gets.
 fn sandbox_forbidden() -> Response {
     no_store(
         ConsoleError::new(
@@ -829,7 +824,6 @@ fn sandbox_forbidden() -> Response {
     )
 }
 
-/// `Sandbox::ScheduledTasksController#task_attributes`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct SandboxTaskData {
     #[serde(default, deserialize_with = "nullable_field")]
@@ -843,7 +837,7 @@ struct SandboxTaskData {
     #[serde(default)]
     enabled: Option<bool>,
     /// `data.owner`; `"me"` asks for a personal task. Left as a `Value` so a
-    /// non-string owner is the controller's 422, not a typed-request 400.
+    /// non-string owner is a 422, not a typed-request 400.
     #[serde(default)]
     owner: Value,
 }
@@ -931,7 +925,6 @@ fn sandbox_write_response(write: db::TaskWrite, status: StatusCode) -> Response 
 // Console: /api/v1/console/workflows
 // ---------------------------------------------------------------------------
 
-/// `WorkflowDashboard::Unavailable`'s message.
 const WORKFLOW_UNAVAILABLE_MESSAGE: &str = "Workflow database is unavailable. \
      Console needs the API workflow read-only views to show runs.";
 
@@ -954,9 +947,9 @@ fn workflow_reason(status: StatusCode, message: &str) -> Response {
     )
 }
 
-/// The pool holding api-rs's published run view, or Rails' 503.
+/// The pool holding api-rs's published run view, or a 503.
 async fn dashboard_pool(state: &AppState) -> Result<sqlx::PgPool, Response> {
-    let Ok(pool) = state.workflow_db() else {
+    let Ok(pool) = state.pool() else {
         return Err(workflow_unavailable());
     };
     match db::workflow_database_available(&pool).await {
@@ -969,7 +962,7 @@ async fn workflows_index(
     State(state): State<AppState>,
     ConsoleQuery(query): ConsoleQuery<PageQuery>,
 ) -> Result<Response, Response> {
-    // Rails evaluates `pagination_page` before the database work.
+    // Resolve the page before the database work.
     let page = page_param(query.page.as_deref())?;
     let pool = dashboard_pool(&state).await?;
     let total = db::workflow_count(&pool)
@@ -1080,7 +1073,7 @@ async fn workflows_create_run(
 ) -> Result<Response, Response> {
     // The workflow runtime is in-process in api-rs; a missing runtime is the
     // workflow control plane being unavailable, so it keeps the API error
-    // envelope Rails uses for `CentaurApiClient` failures.
+    // envelope.
     let workflows = state
         .workflows()
         .map_err(|error| workflow_reason(StatusCode::BAD_GATEWAY, &error.to_string()))?;
@@ -1129,7 +1122,7 @@ struct RunsQuery {
     queue: Option<String>,
 }
 
-/// `Api::BaseController#pagination_page`: a non-integer page keeps Console's 400.
+/// A non-integer page keeps Console's 400.
 fn page_param(raw: Option<&str>) -> Result<i64, Response> {
     let Some(raw) = raw.filter(|value| !value.is_empty()) else {
         return Ok(1);
@@ -1142,16 +1135,16 @@ fn page_param(raw: Option<&str>) -> Result<i64, Response> {
     }
 }
 
-/// Rails rescues the dashboard's reads and renders `workflow_database_unavailable`;
+/// The dashboard's reads render `workflow_database_unavailable`;
 /// the read error itself is only visible in the pod log.
 fn workflow_load_failed(error: &impl std::fmt::Display) -> Response {
     tracing::warn!(%error, "console workflow dashboard read failed");
     workflow_unavailable()
 }
 
-/// `WorkflowDashboard#page_meta`. The dashboard pages in whole workflow or run
-/// counts, so `total_pages` is at least 1 and `page` is clamped into it, unlike
-/// the Console index pagination in `console::http`.
+/// The dashboard pages in whole workflow or run counts, so `total_pages` is at
+/// least 1 and `page` is clamped into it, unlike the Console index pagination in
+/// `console::http`.
 #[derive(Serialize)]
 struct PageMeta {
     page: i64,
@@ -1172,14 +1165,12 @@ impl PageMeta {
     }
 }
 
-/// `WorkflowDashboard#create`'s response.
 #[derive(Serialize)]
 struct RunCreatedPayload {
     run_id: String,
     created: bool,
 }
 
-/// `WorkflowDashboard.duration_label`.
 fn duration_label(run: &db::WorkflowRunRow) -> String {
     let started_at = run.started_or_created_at();
     let finished_at = run.terminal_at();
@@ -1192,8 +1183,7 @@ fn duration_label(run: &db::WorkflowRunRow) -> String {
     distance_of_time_in_words(started_at, finished_at)
 }
 
-/// `ActionController::Base.helpers.distance_of_time_in_words`, for the run
-/// durations the console shows.
+/// The human-readable duration, for the run durations the console shows.
 fn distance_of_time_in_words(from: &str, to: &str) -> String {
     let parse = |value: &str| {
         time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
@@ -1215,7 +1205,7 @@ fn distance_of_time_in_words(from: &str, to: &str) -> String {
     format!("{count} {unit}{plural}")
 }
 
-/// `WorkflowDashboard#run_timing`: the fields every run row carries.
+/// The fields every run row carries.
 #[derive(Serialize)]
 struct RunTiming<'a> {
     status: String,
@@ -1243,7 +1233,6 @@ impl<'a> RunTiming<'a> {
     }
 }
 
-/// `WorkflowDashboard#run_row`.
 #[derive(Serialize)]
 struct RunRowPayload<'a> {
     run_id: Option<&'a str>,
@@ -1262,8 +1251,7 @@ impl<'a> RunRowPayload<'a> {
     }
 }
 
-/// `WorkflowDashboard#workflow_row`: the latest run of a workflow with each of
-/// its queues.
+/// The latest run of a workflow with each of its queues.
 #[derive(Serialize)]
 struct WorkflowRow<'a> {
     workflow_key: Option<String>,
@@ -1296,7 +1284,6 @@ impl<'a> WorkflowQueueRow<'a> {
     }
 }
 
-/// `WorkflowDashboard#workflow_row`.
 fn workflow_row<'a>(
     run: &'a db::WorkflowRunRow,
     queue_runs: Option<&'a Vec<db::WorkflowRunRow>>,
@@ -1312,7 +1299,6 @@ fn workflow_row<'a>(
     }
 }
 
-/// `WorkflowDashboard#overview`.
 #[derive(Serialize)]
 struct OverviewPayload<'a> {
     workflow_key: &'a str,
@@ -1344,7 +1330,6 @@ struct StatusCount {
     count: i64,
 }
 
-/// `WorkflowDashboard#overview`.
 fn overview<'a>(
     workflow_name: &'a str,
     latest_run: &'a db::WorkflowRunRow,
@@ -1381,7 +1366,6 @@ fn overview<'a>(
     }
 }
 
-/// `WorkflowDashboard#ordered_status_counts`.
 fn ordered_status_counts(
     status_counts: &std::collections::BTreeMap<String, i64>,
 ) -> Vec<StatusCount> {
@@ -1424,8 +1408,7 @@ struct SchedulePayload {
     source_url: Option<String>,
 }
 
-/// `WorkflowDashboard#schedule_payload`: the registered schedule without its
-/// input.
+/// The registered schedule without its input.
 fn schedule_payload(schedule: Option<&Value>) -> Option<SchedulePayload> {
     let schedule = schedule?;
     let kind = schedule.get("kind").filter(|kind| kind.is_object());
@@ -1462,7 +1445,7 @@ fn schedule_payload(schedule: Option<&Value>) -> Option<SchedulePayload> {
     })
 }
 
-/// `WorkflowDashboard#schedules_for`: the registered schedule of one workflow,
+/// The registered schedule of one workflow,
 /// `None` when it has none or the workflow runtime is unreachable.
 async fn schedule_for(state: &AppState, workflow_name: &str) -> Option<Value> {
     let workflows = state.workflows().ok()?;
@@ -1473,7 +1456,6 @@ async fn schedule_for(state: &AppState, workflow_name: &str) -> Option<Value> {
         .and_then(|schedule| serde_json::to_value(schedule).ok())
 }
 
-/// `WorkflowDashboard#fetch_run_detail`.
 async fn fetch_run_detail(state: &AppState, run_id: Option<&str>) -> Option<Value> {
     let run_id = run_id.filter(|run_id| !run_id.is_empty())?;
     let workflows = state.workflows().ok()?;
@@ -1489,7 +1471,6 @@ struct DebugRow {
     run_id: Option<String>,
 }
 
-/// `WorkflowDashboard#debug_rows`.
 async fn debug_rows(
     state: &AppState,
     pool: &sqlx::PgPool,
@@ -1532,7 +1513,6 @@ async fn debug_rows(
     rows
 }
 
-/// `WorkflowDashboard#latest_failure_detail`.
 async fn latest_failure_detail(
     state: &AppState,
     pool: &sqlx::PgPool,
@@ -1557,7 +1537,6 @@ async fn latest_failure_detail(
     fetch_run_detail(state, failed.first().and_then(|run| run.run_id.as_deref())).await
 }
 
-/// `WorkflowDashboard#debug_row`.
 fn debug_row(label: &'static str, value: Value, run_id: Option<&str>) -> DebugRow {
     DebugRow {
         label,
@@ -1578,9 +1557,9 @@ enum RunFailure {
     Refused(StartError),
 }
 
-/// `ScheduledTaskRunner.call`: provision the author's principal, then start the
-/// run in-process. A workflow runtime that is not enabled is api-rs's
-/// equivalent of Rails' unreachable control plane.
+/// Provision the author's principal, then start the
+/// run in-process. A workflow runtime that is not enabled is an unreachable
+/// control plane.
 async fn start_run(
     state: &AppState,
     pool: &sqlx::PgPool,
@@ -1597,9 +1576,8 @@ async fn start_run(
                 })
             })?;
     }
-    // Rails reaches api-rs over HTTP for this and lets an unreachable control
-    // plane surface as an unhandled error. In production api-rs serves the
-    // route itself and the in-process runtime is always there.
+    // An unreachable control plane surfaces as an unhandled error. In production
+    // api-rs serves the route itself and the in-process runtime is always there.
     let workflows = match state.workflows() {
         Ok(workflows) => workflows,
         Err(_) => return Err(RunFailure::Unavailable),
@@ -1646,9 +1624,9 @@ async fn start_run(
     }
 }
 
-/// `ScheduledTaskRunErrors#render_run_error`: a 422 explains itself, anything
+/// A 422 explains itself, anything
 /// else means the run could not be started now. A missing control plane is a
-/// 500 in the normal error envelope rather than Rails' framework error page.
+/// 500 in the normal error envelope.
 fn run_error(error: &RunFailure) -> Response {
     match error {
         RunFailure::Unavailable => ConsoleError::new(
@@ -1697,11 +1675,11 @@ struct SandboxSkillSearchQuery {
     /// Parsed by `sandbox_skill_limit`, which keeps Console's 400 message.
     #[serde(default)]
     limit: Option<String>,
-    /// `params.require(:q)`: a required search term.
+    /// A required search term.
     q: String,
 }
 
-/// `user_payload`: the console's shape for a user reference.
+/// The console's shape for a user reference.
 #[derive(Serialize)]
 struct UserPayload<'a> {
     id: String,
@@ -1773,7 +1751,7 @@ struct SkillDetailViewer {
     can_unshare: bool,
 }
 
-/// The console's `skill_detail`: the summary plus the document and its flags.
+/// The console skill detail: the summary plus the document and its flags.
 #[derive(Serialize)]
 struct SkillDetailPayload<'a> {
     #[serde(flatten)]
@@ -1809,9 +1787,9 @@ fn skill_detail<'a>(
     }
 }
 
-/// `permit(:name, :description, :instructions, :lock_version)` plus the sandbox
-/// create action's `:visibility` and the owner's `editor_ids`. Each handler
-/// reads only the fields its Rails action permits.
+/// The writable skill fields (`name`, `description`, `instructions`,
+/// `lock_version`) plus the sandbox create action's `visibility` and the
+/// owner's `editor_ids`. Each handler reads only the fields it permits.
 #[derive(Debug, Default, serde::Deserialize)]
 struct SkillData {
     #[serde(default)]
@@ -1847,7 +1825,7 @@ fn skill_draft(data: &SkillData, lock_version: bool, visibility: bool) -> db::Sk
     draft
 }
 
-/// `render_skill_errors`: content errors reported as `instructions`.
+/// Content errors reported as `instructions`.
 fn skill_validation_response(mut errors: FieldErrors) -> Response {
     errors.rename("content", "instructions");
     ConsoleError::from(errors).into_response()
@@ -1871,8 +1849,8 @@ fn skill_write_error(error: db::SkillWriteError) -> Response {
     }
 }
 
-/// `Api::SandboxBaseController`'s `rescue_from` handlers, which unlike the
-/// console controller do not remap content errors or attach a stale reason.
+/// Sandbox skill write errors: unlike the console handler, do not remap content
+/// errors or attach a stale reason.
 fn sandbox_skill_write_error(error: db::SkillWriteError) -> Response {
     match error {
         db::SkillWriteError::Invalid(errors) => ConsoleError::from(errors).into_response(),
@@ -2079,10 +2057,9 @@ async fn skill_editor_candidates(
 // Sandbox: /api/v1/sandbox/skills
 // ---------------------------------------------------------------------------
 
-/// `Sandbox::SkillsController::MAX_LIMIT`.
 const SANDBOX_SKILL_MAX_LIMIT: i64 = 20;
 
-/// `limit`: an integer clamped to 1..=20, or a 400. The raw value stays a
+/// An integer clamped to 1..=20, or a 400. The raw value stays a
 /// string so the parser keeps Console's message and clamping, like
 /// `Pagination`.
 fn sandbox_skill_limit(limit: Option<&str>) -> Result<i64, ConsoleError> {
@@ -2093,7 +2070,7 @@ fn sandbox_skill_limit(limit: Option<&str>) -> Result<i64, ConsoleError> {
     }
 }
 
-/// `linked_console_user`: the request's principal, when it links an active
+/// The request's principal, when it links an active
 /// console user.
 async fn sandbox_linked_user(
     pool: &sqlx::PgPool,
@@ -2111,7 +2088,6 @@ async fn sandbox_linked_user(
     Ok(user.filter(|user| user.status == ConsoleUserStatus::Active))
 }
 
-/// `require_authoring_user!`.
 fn sandbox_authoring_forbidden() -> Response {
     ConsoleError::new(
         StatusCode::FORBIDDEN,
@@ -2120,8 +2096,7 @@ fn sandbox_authoring_forbidden() -> Response {
     .into_response()
 }
 
-/// `require_authoring_user!` plus `owned_scope`/`editable_scope`'s
-/// `find_by_oid!`: the authoring user and the skill they may write, or the
+/// The authoring user and the skill they may write, or the
 /// response that refuses the request.
 async fn sandbox_authored_skill(
     pool: &sqlx::PgPool,
@@ -2156,7 +2131,6 @@ async fn sandbox_shared(
     Ok(json_data(sandbox_author_payload(&skill)))
 }
 
-/// `Skill#catalog_payload`.
 #[derive(Serialize)]
 struct CatalogPayload<'a> {
     id: String,
@@ -2187,7 +2161,7 @@ impl<'a> CatalogPayload<'a> {
     }
 }
 
-/// `author_payload`: the catalog payload plus the optimistic lock version.
+/// The catalog payload plus the optimistic lock version.
 #[derive(Serialize)]
 struct SandboxAuthorPayload<'a> {
     #[serde(flatten)]
@@ -2239,7 +2213,6 @@ async fn sandbox_editor_payload(
     })
 }
 
-/// `visible_skills.find_by_oid!` / `find_by!(name:)`.
 async fn sandbox_visible_skill(
     pool: &sqlx::PgPool,
     viewer_id: Option<i64>,
@@ -2440,8 +2413,8 @@ async fn sandbox_skills_editors(
     .into_response())
 }
 
-/// `resolve_editor!` within `User.active` (`add_editor`) or any user
-/// (`remove_editor`, whose scope is the skill's editors).
+/// Resolve an editor among active users (adding) or any user (removing, whose
+/// scope is the skill's editors).
 async fn sandbox_resolve_editor(
     pool: &sqlx::PgPool,
     reference: &str,
@@ -2453,16 +2426,16 @@ async fn sandbox_resolve_editor(
     Ok(user.ok_or_else(|| no_store(record_not_found(UserModel::not_found()))))
 }
 
-/// `params.require(:data).require(:user)`: the editor reference.
+/// The editor reference.
 #[derive(Debug, serde::Deserialize, garde::Validate)]
 struct SkillEditorData {
-    // A blank reference is the `is required` error the action raised, not a
+    // A blank reference is an `is required` error, not a
     // lookup of the empty string.
     #[garde(custom(editor_required))]
     user: String,
 }
 
-/// `params.require(:user)`: a required reference, reported under its own key.
+/// A required reference, reported under its own key.
 fn editor_required(value: &str, _: &()) -> garde::Result {
     if value.trim().is_empty() {
         return Err(garde::Error::new("is required"));
@@ -2516,7 +2489,7 @@ async fn sandbox_skills_remove_editor(
         Ok(()) => data.user.trim(),
         Err(errors) => return Ok(invalid(errors)),
     };
-    // `resolve_editor!(skill.editors)`: the user must already be an editor.
+    // The user must already be an editor.
     let editor = match sandbox_resolve_editor(&pool, reference, false).await? {
         Ok(editor) => editor,
         Err(response) => return Ok(response),
@@ -2577,7 +2550,7 @@ impl From<&db::PersonalSshKeyGrant> for SshKeyGrantPayload {
     }
 }
 
-/// `key_payload`: the caller's personal SSH key, saved or unsaved.
+/// The caller's personal SSH key, saved or unsaved.
 #[derive(Serialize)]
 struct SshKeyPayload {
     id: Option<String>,
@@ -2649,7 +2622,7 @@ async fn ssh_key_show(
     ))
 }
 
-/// `permit(:name, :private_key)`: a rename keeps the stored private key, and
+/// A rename keeps the stored private key, and
 /// the key itself is only replaced when the body sends a non-empty value.
 #[derive(Debug, Default, serde::Deserialize)]
 struct PersonalSshKeyData {
@@ -2659,7 +2632,7 @@ struct PersonalSshKeyData {
     private_key: Option<Option<String>>,
 }
 
-/// `params.require(:data)[:private_key]`: the key to check without saving.
+/// The key to check without saving.
 #[derive(Debug, serde::Deserialize)]
 struct SshKeyValidation {
     private_key: String,
@@ -2840,8 +2813,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_records_are_not_found() {
-        // `find_by_oid!`/`find_by!` print the relation's where clause; the port
-        // reports a model 404 in Console's error envelope instead.
+        // A model 404 is reported in Console's error envelope instead of a
+        // relation where clause.
         for not_found in [
             ScheduledTaskModel::not_found(),
             SkillModel::not_found(),
@@ -2855,8 +2828,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_run_runtime_uses_the_error_envelope() {
-        // Rails raises past `render_run_error` here, so it answers with the
-        // framework's error page; the port always renders Console's envelope.
+        // A missing runtime always renders Console's error envelope.
         let response = run_error(&RunFailure::Unavailable);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -2868,7 +2840,7 @@ mod tests {
         assert_eq!(data.name, Some(None));
         assert_eq!(data.enabled, None);
         assert_eq!(data.custom_days, None);
-        // No ActiveModel casting: a string is not a boolean, and a scalar is not
+        // No casting: a string is not a boolean, and a scalar is not
         // an array of days. The extractor reports these under the field path.
         for value in [json!({ "enabled": "true" }), json!({ "custom_days": "1" })] {
             assert!(serde_json::from_value::<ConsoleTaskData>(value).is_err());
@@ -3070,7 +3042,7 @@ mod tests {
         .unwrap();
         assert_eq!(payload["workflow_key"], json!("wf-a"));
         assert_eq!(payload["engine_label"], json!("Codex"));
-        // The fixture finishes before it starts, which Rails reads as instant.
+        // The fixture finishes before it starts, which reads as instant.
         assert_eq!(payload["duration_label"], json!("less than a minute"));
         assert_eq!(payload["run_count"], json!(3));
         assert_eq!(

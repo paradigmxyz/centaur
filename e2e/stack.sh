@@ -177,7 +177,7 @@ wait_for_test_access() {
   # api-rs serves the Console, so the Console NodePort is probed with a Console
   # page. `/login` is the server-rendered sign-in page, selected by the Host
   # matching console.publicUrl (http://127.0.0.1:30082 in e2e/infra/values.yaml);
-  # api-rs has no Rails `/up` health route.
+  # the Console host has no separate health route.
   for _ in $(seq 60); do
     if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30081/readyz 2> /dev/null &&
       curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30082/login 2> /dev/null &&

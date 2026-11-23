@@ -8,7 +8,7 @@
 //!
 //! HTML pages remain server-rendered with the static `public/assets/oauth-page`
 //! files embedded in the binary. The built SPA is served from disk by
-//! `static_files`; the chart runs no Rails web pod.
+//! `static_files`.
 //!
 pub(crate) mod areas;
 mod assets;
@@ -97,8 +97,8 @@ pub(crate) async fn fallback(request: Request) -> Response {
 }
 
 /// Reads a Console environment setting from `CENTAUR_CONSOLE_<suffix>`. A
-/// variable explicitly set to the empty string is returned as-is, matching
-/// `ConsoleEnv`; the legacy `IRON_CONTROL_` prefix is no longer consulted.
+/// variable explicitly set to the empty string is returned as-is; the legacy
+/// `IRON_CONTROL_` prefix is no longer consulted.
 pub(crate) fn console_env(suffix: &str) -> Option<String> {
     std::env::var(format!("CENTAUR_CONSOLE_{suffix}")).ok()
 }
@@ -108,9 +108,8 @@ pub(crate) fn console_env(suffix: &str) -> Option<String> {
 /// [`boolean_setting`] returns a value.
 pub(crate) const BOOLEAN_SETTINGS: &[&str] = &["PASSWORD_LOGIN_ENABLED", "API_CLIENTS_ENABLED"];
 
-/// `ConsoleAuth.password_login_enabled?`: unset means enabled; otherwise the
-/// strict boolean cast, so an explicitly empty value is `None` (falsy, and
-/// `null` in `/me`) rather than `false`.
+/// Unset means enabled; otherwise the strict boolean cast, so an explicitly
+/// empty value is `None` (falsy, and `null` in `/me`) rather than `false`.
 pub(crate) fn password_login_setting() -> Option<bool> {
     match console_env("PASSWORD_LOGIN_ENABLED") {
         None => Some(true),
@@ -122,7 +121,7 @@ pub(crate) fn password_login_enabled() -> bool {
     password_login_setting().unwrap_or(false)
 }
 
-/// `ApiClientsFeature.enabled?`: only an explicit true enables it.
+/// Only an explicit true enables it.
 pub(crate) fn api_clients_enabled() -> bool {
     console_env("API_CLIENTS_ENABLED")
         .as_deref()
@@ -131,9 +130,7 @@ pub(crate) fn api_clients_enabled() -> bool {
 }
 
 /// A Console boolean setting accepts only `true`/`false` (case-insensitive)
-/// and `1`/`0`. ActiveModel's wide boolean cast (`t`, `on`, `yes`, `enabled`,
-/// and every unrecognized value as `true`) is not ported. An explicitly empty
-/// value is a third state, like `ConsoleEnv`'s `presence`: for
+/// and `1`/`0`. An explicitly empty value is a third state: for
 /// `PASSWORD_LOGIN_ENABLED` it disables password login and reports `null`.
 fn boolean_setting(raw: &str) -> Option<bool> {
     if raw.is_empty() {
@@ -444,11 +441,11 @@ mod tests {
         for raw in ["0", "false", "FALSE", "False"] {
             assert_eq!(boolean_setting(raw), Some(false), "{raw:?}");
         }
-        // ActiveModel's wide cast is not ported: these are invalid, not true.
+        // A wide cast is not allowed: these are invalid, not true.
         for raw in ["t", "T", "on", "ON", "yes", "no", "enabled", "2", " "] {
             assert_eq!(boolean_setting(raw), None, "{raw:?}");
         }
-        // An explicitly empty value is ConsoleEnv's `presence` third state.
+        // An explicitly empty value is the third state.
         assert_eq!(boolean_setting(""), None);
     }
 }

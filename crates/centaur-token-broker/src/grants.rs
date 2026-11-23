@@ -62,7 +62,7 @@ pub(crate) enum Outcome {
 
 /// How a Console OAuth provider refreshes: whether the refresh re-requests the
 /// granted scopes, and how the client authenticates. `providers.json` lists
-/// every provider in Console's `Oauth::Providers`, which a Console test checks.
+/// every provider the Console supports.
 #[derive(Clone, Copy, Deserialize)]
 struct Provider {
     refresh_scopes: bool,

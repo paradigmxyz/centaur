@@ -1,11 +1,8 @@
 //! Typed JSON payloads for the secrets area.
 //!
-//! Rails renders a fixed object per record; these structs are that shape. Every
+//! These structs are the fixed object rendered per record. Every
 //! timestamp goes through `centaur_console_db::timestamp`, so the payloads do
-//! not format one by hand. The per-kind record bodies mirror the controllers'
-//! `record_payload` (`Api::V1::{Static,PgDsn,GcpAuth,GcpIdToken,AwsAuth,
-//! OauthToken,Hmac,SshKey}SecretsController`); the console list and detail
-//! bodies mirror `Console::SecretsController`/`SecretConsoleView`.
+//! not format one by hand.
 
 use std::collections::BTreeMap;
 
@@ -410,7 +407,7 @@ impl From<&SecretRow> for SshKeyRecord {
 // Console list and detail
 // ---------------------------------------------------------------------------
 
-/// `GrantableSummary.call` plus the console list's view of a secret.
+/// The grants summary plus the console list's view of a secret.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SecretSummary {
     kind: &'static str,
@@ -463,7 +460,7 @@ pub(crate) fn summary(row: &SecretRow) -> SecretSummary {
     }
 }
 
-/// `SecretConsoleView.raw_segments`' rendered form.
+/// The rendered form of a secret's raw segments.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SourceSegmentPayload {
     role: Option<String>,
@@ -474,7 +471,7 @@ pub(crate) struct SourceSegmentPayload {
     reference: Option<String>,
 }
 
-/// One `SecretConsoleView.configuration` row.
+/// One configuration row.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ConfigurationRow {
     label: &'static str,
@@ -574,7 +571,7 @@ pub(crate) fn grant(grant: &GrantRow, secret: &SecretRow) -> GrantPayload {
 }
 
 // ---------------------------------------------------------------------------
-// SecretConsoleView
+// Secret view
 // ---------------------------------------------------------------------------
 
 fn source_types(row: &SecretRow) -> Vec<String> {
@@ -602,14 +599,14 @@ fn source_label(source_type: &str) -> &str {
     }
 }
 
-/// One `SecretConsoleView.raw_segments` entry.
+/// One raw-segment entry.
 struct SourceSegment {
     role: Option<String>,
     source_type: String,
     reference: Option<String>,
 }
 
-/// `SecretConsoleView.raw_segments`: one entry per source association, or the
+/// One entry per source association, or the
 /// synthetic workload-identity entry of a provider-only GCP auth secret.
 fn raw_segments(row: &SecretRow) -> Vec<SourceSegment> {
     match row.kind {

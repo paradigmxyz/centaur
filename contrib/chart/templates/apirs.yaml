@@ -233,13 +233,13 @@ spec:
             # and the host that selects the Console router.
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ required "console.publicUrl is required: set it to the origin users and MCP clients reach the Console at (for example https://console.example.com)" $console.publicUrl | quote }}
-            # The shared Console secrets keep their Rails-era IRON_CONTROL_* keys
-            # in the Secret and are mounted under the CENTAUR_CONSOLE_* names the
-            # ported handlers read. CONSOLE_SESSION_SECRET is the input api-rs
-            # derives its session-cookie and SSO keys from; it reuses the Console's
-            # existing Rails secret_key_base. api-rs derives with its own PBKDF2
-            # labels, so its keys are independent of the ones Rails derives from
-            # the same value. Rotating it signs every browser out.
+            # The shared Console secrets keep their original IRON_CONTROL_* keys
+            # in the Secret (existing deployments already hold them) and are
+            # mounted under the CENTAUR_CONSOLE_* names api-rs reads.
+            # CONSOLE_SESSION_SECRET is the input api-rs derives its
+            # session-cookie and SSO keys from with its own PBKDF2 labels.
+            # Rotating it signs every browser out. The AR encryption keys decrypt
+            # existing records; never rotate them in place.
             - name: CONSOLE_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
@@ -250,11 +250,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY" .Values.secretManager.envPrefix }}
-            - name: CENTAUR_CONSOLE_AR_ENCRYPTION_DETERMINISTIC_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "centaur.secretEnvName" . }}
-                  key: {{ printf "%sIRON_CONTROL_AR_ENCRYPTION_DETERMINISTIC_KEY" .Values.secretManager.envPrefix }}
             - name: CENTAUR_CONSOLE_AR_ENCRYPTION_KEY_DERIVATION_SALT
               valueFrom:
                 secretKeyRef:

@@ -188,8 +188,8 @@ impl Args {
     pub(crate) fn console_session_config(
         &self,
     ) -> Result<Option<ConsoleSessionConfig>, ServerError> {
-        // Console booleans are strict: a typo is a startup error instead of an
-        // ActiveModel-style guess.
+        // Console booleans are strict: a typo is a startup error instead of a
+        // guess.
         centaur_api_server::validate_boolean_settings().map_err(ServerError::UnsupportedConfig)?;
         ConsoleSessionConfig::from_settings(
             self.console_session.session_secret.as_deref(),
@@ -241,8 +241,8 @@ pub(crate) struct IronControlRuntime {
     pub(crate) workflow_principal_registrar: WorkflowPrincipalRegistrar,
 }
 
-/// The initial Console operator (`Iron::Bootstrap`), created as an active
-/// admin when the Console database has no users.
+/// The initial Console operator, created as an active admin when the Console
+/// database has no users.
 #[derive(Debug, ClapArgs)]
 struct ConsoleBootstrapArgs {
     #[arg(

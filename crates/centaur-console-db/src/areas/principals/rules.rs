@@ -1,11 +1,10 @@
 //! The principals area's `garde` rules.
 //!
 //! The field rules live on the typed request structs in [`super::request`] and
-//! on the normalized permission draft in [`super::write`]. Rails validates the
-//! record a write will store, so `write` builds a request from the merged draft
+//! on the normalized permission draft in [`super::write`]. A write validates the
+//! record it will store, so `write` builds a request from the merged draft
 //! before validating it; a PATCH field the body did not carry, or carried
-//! unchanged, stays absent from that request (ActiveModel's
-//! `will_save_change_to_*`).
+//! unchanged, stays absent from that request.
 //!
 //! `foreign_id` uniqueness needs the database and stays in `write`, as does a
 //! role's stored-labels check. Both are merged with these reports through
@@ -71,7 +70,7 @@ pub(crate) fn formatted(
     }
 }
 
-/// `SlackChannelPermission#channel_id`: presence then format.
+/// A channel id must be present and formatted as one.
 pub(crate) fn channel_id(value: &str, _: &()) -> Result {
     if value.is_empty() {
         return Err(Error::new(BLANK_MESSAGE));

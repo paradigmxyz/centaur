@@ -1,7 +1,6 @@
 //! Broker credential CRUD handlers.
 //!
-//! Port of `Api::V1::BrokerCredentialsController` and its console subclass:
-//! oid/foreign_id addressing, label search, PUT upsert, write-only initial
+//! Oid/foreign_id addressing, label search, PUT upsert, write-only initial
 //! values, and the console's presence-only payload fields. The rotating token
 //! blob is never serialized back.
 
@@ -144,8 +143,7 @@ fn header_names(credential: &BrokerCredential) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The `data` object of a broker credential response
-/// (`BrokerCredentialsController#record_payload`).
+/// The `data` object of a broker credential response.
 #[derive(Serialize)]
 pub(super) struct CredentialPayload {
     id: String,
@@ -743,7 +741,7 @@ async fn save_credential(
         .await?
         .ok_or_else(BrokerCredentialModel::not_found)?;
     if linked {
-        // Rails' after_commit reconciliation on a flow-minted credential.
+        // Reconciliation for a flow-minted credential.
         let mut connection = pool.acquire().await?;
         centaur_console_db::areas::reconciliation::apply_for_credential(&mut connection, id)
             .await?;

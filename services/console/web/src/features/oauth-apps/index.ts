@@ -1,4 +1,4 @@
-// Consent runs on the Rails protocol routes /oauth/:slug/start|callback,
+// Consent runs on the server protocol routes /oauth/:slug/start|callback,
 // linked by full page loads.
 import { Link2 } from "lucide-react";
 

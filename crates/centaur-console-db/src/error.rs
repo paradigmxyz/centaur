@@ -8,7 +8,7 @@ pub enum Error {
     /// A row whose stored data does not have the shape Console writes.
     InvalidData(String),
     /// A row a route named that does not exist. The message is Console's plain
-    /// `"<Model> not found"`, not Rails' SQL-ish `RecordNotFound` text.
+    /// `"<Model> not found"`, not a SQL-ish `RecordNotFound` text.
     NotFound(String),
 }
 

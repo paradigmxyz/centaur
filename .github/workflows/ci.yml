@@ -78,7 +78,6 @@ jobs:
           set_output migration_order \
             '^crates/centaur-session-sqlx/migrations/' \
             '^crates/centaur-session-sqlx/search-migrations/' \
-            '^services/console/db/migrate/' \
             '^crates/centaur-console-db/migrations/' \
             '^\.github/scripts/check-migration-order\.sh$' \
             '^\.github/workflows/ci\.yml$'
@@ -104,7 +103,6 @@ jobs:
             '^crates/active-record-encryption/' \
             '^crates/centaur-proxy-sync/' \
             '^crates/centaur-console-db/' \
-            '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output token_broker_checks \
@@ -112,7 +110,6 @@ jobs:
             '^crates/active-record-encryption/' \
             '^crates/centaur-token-broker/' \
             '^crates/centaur-console-db/' \
-            '^services/console/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^\.github/workflows/ci\.yml$'
           set_output rust_api \
@@ -121,7 +118,7 @@ jobs:
             '^crates/active-record-encryption/' \
             '^crates/centaur-' \
             '^services/api-rs/' \
-            '^services/console/' \
+            '^services/console/public/' \
             '^contrib/chart/charts/agent-sandbox/crds/' \
             '^\.github/scripts/start-test-postgres\.sh$' \
             '^services/workflow-python/' \
@@ -365,14 +362,6 @@ jobs:
       - name: Start test database
         run: .github/scripts/start-test-postgres.sh token-broker-test-postgres 5432 token_broker_test pgvector
 
-      - name: Install Console packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
       # token-broker reads and writes Console's tables directly, so its
       # integration tests run against the schema api-rs migrates.
       - name: Migrate Console schema
@@ -382,19 +371,6 @@ jobs:
         env:
           TOKEN_BROKER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
         run: cargo test --locked -p centaur-token-broker
-
-      # The tests store tokens encrypted by token-broker; Console must read them.
-      - name: Decrypt token-broker's writes with Console
-        working-directory: services/console
-        env:
-          RAILS_ENV: test
-          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/token_broker_test
-        run: |
-          bin/rails runner '
-            credentials = BrokerCredential.where.not(access_token: nil).to_a
-            abort "token-broker tests stored no tokens" if credentials.empty?
-            credentials.each { |credential| [credential.access_token, credential.refresh_token] }
-            puts "Console decrypted #{credentials.size} credentials token-broker wrote"'
 
   rust-api:
     name: Rust API tests
@@ -409,23 +385,6 @@ jobs:
       - name: Start Test Postgres
         run: .github/scripts/start-test-postgres.sh centaur-api-test-postgres 5432 centaur
 
-      - name: Install Console packages
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips libpq-dev
-
-      - uses: ruby/setup-ruby@f9c4492e86def3e644ab32a0ef185eda5b0c20d0 # v1.342.0
-        with:
-          working-directory: services/console
-          bundler-cache: true
-
-      # Rails still carries db/schema.rb until its migrations are deleted;
-      # load it as the reference the api-rs baseline must match.
-      - name: Load Rails Console schema
-        working-directory: services/console
-        env:
-          RAILS_ENV: test
-          CENTAUR_CONSOLE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/console_rails
-        run: bin/rails db:prepare
-
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -436,26 +395,11 @@ jobs:
 
       # api-rs serves the Console from Console's tables, so its Console tests
       # run against the schema api-rs migrates. template0 keeps the ParadeDB
-      # image's demo extensions out of it, as Rails' test databases do.
+      # image's demo extensions out of it.
       - name: Migrate Console schema
         run: |
           docker exec centaur-api-test-postgres createdb -U postgres --template template0 console_test
           cargo run --locked -p centaur-console-db --example migrate -- postgresql://postgres:postgres@localhost:5432/console_test
-
-      # The baseline migration must stay the schema Rails left behind. Later
-      # api-rs migrations change only the api-rs side, so load the baseline
-      # alone for the comparison.
-      - name: Compare Console baseline with Rails
-        run: |
-          docker exec centaur-api-test-postgres createdb -U postgres --template template0 console_baseline
-          docker exec -i centaur-api-test-postgres psql -q -v ON_ERROR_STOP=1 -U postgres -d console_baseline \
-            < crates/centaur-console-db/migrations/0001_baseline.sql
-          dump() {
-            docker exec centaur-api-test-postgres pg_dump -U postgres --schema-only \
-              --no-owner --no-privileges --no-comments "$1" \
-              | grep -vE '^\\(un)?restrict '
-          }
-          diff -u <(dump console_rails) <(dump console_baseline)
 
       - name: Test Absurd SDK
         env:

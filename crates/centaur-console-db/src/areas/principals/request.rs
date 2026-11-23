@@ -1,14 +1,13 @@
 //! Typed request bodies for the principals area.
 //!
 //! Each struct is what the matching endpoint deserializes, so every field is
-//! either its declared JSON type or a validation error. There is no
-//! ActiveRecord-style casting: a string is not a boolean, a number is not a
-//! string, and an unknown field is ignored.
+//! either its declared JSON type or a validation error. There is no implicit
+//! casting: a string is not a boolean, a number is not a string, and an unknown
+//! field is ignored.
 //!
-//! `Option<Option<T>>` keeps Rails' distinction between an omitted key (keep
-//! the stored value) and an explicit `null` (clear it). Fields that Rails'
-//! strong parameters silently dropped when they were not hashes (`labels`)
-//! stay a plain `Option`.
+//! `Option<Option<T>>` keeps the distinction between an omitted key (keep the
+//! stored value) and an explicit `null` (clear it). Fields that were silently
+//! dropped when they were not hashes (`labels`) stay a plain `Option`.
 //!
 //! The field rules are `garde` attributes here. The write paths validate a
 //! request built from the merged draft, because a PATCH validates the record it
@@ -45,7 +44,7 @@ pub struct PermissionWrite {
 }
 
 impl PermissionWrite {
-    /// Rails' `channel_id.to_s.strip.upcase`.
+    /// The normalized channel id: trimmed and upper-cased.
     pub fn channel_id(&self) -> String {
         self.channel_id
             .as_deref()
@@ -126,7 +125,7 @@ pub struct RoleWrite {
 
 /// Body of `PUT /principals|roles/:id/slack_channel_permissions`.
 ///
-/// An absent or null list is an empty replacement, like Rails' controller.
+/// An absent or null list is an empty replacement.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PermissionSetWrite {
     #[serde(default)]
@@ -173,7 +172,7 @@ pub struct GrantWrite {
 }
 
 impl GrantWrite {
-    /// Rails' `attrs[k].present?`: a trimmed, non-blank value.
+    /// A trimmed, non-blank value.
     fn present(value: &Option<String>) -> Option<&str> {
         value
             .as_deref()
@@ -182,8 +181,7 @@ impl GrantWrite {
     }
 
     /// The grantee reference: its `grants` column and the oid it names.
-    /// Principals are resolved before roles, as Rails resolves the grantee
-    /// before the grantable.
+    /// Principals are resolved before roles.
     pub fn grantee(&self) -> Option<(&'static str, &str)> {
         if let Some(oid) = Self::present(&self.principal_id) {
             return Some(("principal_id", oid));

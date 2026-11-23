@@ -1,10 +1,10 @@
 # Rust Console layer
 
-This tree is the foundation for moving the Rails Console (`services/console`)
-into api-rs. It provides the session cookie, the unified credential/capability
-guard, the shared JSON/error helpers, and the sign-in/logout pages. Later area
-ports add routes through the builder here; they do not reimplement
-authentication.
+This tree serves the Console: the session cookie, the unified
+credential/capability guard, the shared JSON/error helpers, the server-rendered
+pages, the static SPA files, and every Console area's routes. New routes go
+through the builder here; they do not reimplement authentication. The SPA and
+the API reference live in `services/console/` (`web/`, `docs/API.md`).
 
 The layer is mounted only when **both** `CONSOLE_SESSION_SECRET` and
 `CENTAUR_CONSOLE_PUBLIC_URL` are configured. `CENTAUR_CONSOLE_PUBLIC_URL`
@@ -72,8 +72,8 @@ cookie.
 - The Kubernetes probes connect to the pod IP, not the public Console host, so
 `/healthz` and `/readyz` being absent on the Console host is intentional. A
 reverse proxy in front of the public host must not retarget probes at it. The
-differential harness binds `http://127.0.0.1:<port>` as the public URL and
-probes `/login` for readiness for the same reason.
+e2e stack probes `/login` on the Console host for readiness for the same
+reason.
 - When the Console layer is disabled (no `CONSOLE_SESSION_SECRET`), no host
 middleware is mounted and the listener serves exactly the api-rs routes it did
 before the port.
@@ -216,18 +216,14 @@ Unsafe methods are protected by an exact `Origin` check, not a CSRF token:
   `POST /logout`, and `POST /mcp/oauth/authorize`), must send `Origin` exactly
   equal to the normalized `CENTAUR_CONSOLE_PUBLIC_URL` origin
   (`scheme://host[:port]`). The pending page's sign-out form posts to
-  `POST /logout` directly: the Rack `_method=delete` override is not ported, and
-  nothing in the tree sends `DELETE /logout`.
+  `POST /logout`; there is no `DELETE /logout`.
 - A missing `Origin`, `Origin: null`, a different origin, or a trailing slash
-  is refused. `Referer` is not a fallback. Rails' form forgery check accepts a
-  missing Origin; the port deliberately does not.
+  is refused. `Referer` is not a fallback.
 - The JSON console API keeps its existing rejection: 403
   `{"error":{"message":"invalid or missing CSRF token","details":{"reason":
-  "csrf"}}}`. Server-rendered forms keep Rails' 422 status with the Console
-  error envelope and the same `csrf` reason.
-- There is no token on `/api/v1/console/me`, no `X-CSRF-Token` header, and no
-  hidden `authenticity_token` field. A submitted `authenticity_token` is an
-  unknown form field and is ignored, so old forms remain decodable.
+  "csrf"}}}`. Server-rendered forms answer with a 422 error page in the
+  server-page layout.
+- There is no CSRF token anywhere. Unknown form fields are ignored.
 - GET and HEAD have no side effects and need no Origin. The cookie keeps
   `HttpOnly; SameSite=Lax`, and every response keeps `frame-ancestors 'none'`.
 
@@ -280,7 +276,7 @@ Rules shared by all four:
 - Unknown fields are ignored. A nested form/query key such as `return_to[]` is
   simply an unknown field, so `return_to` is absent; there is no sentinel value.
 - Field types are strict: a JSON string, number, or `null` is not a boolean, and
-  there is no ActiveModel-style casting. A wrong JSON field type (or a missing
+  there is no implicit casting. A wrong JSON field type (or a missing
   required field in a `ConsoleData`/`ConsoleBody` struct) is a 422
   `{"error":{"message":"validation failed","details":
   {"<field>":["<message>"]}}}`; the details key is the field path, so a handler
@@ -290,7 +286,7 @@ Rules shared by all four:
   non-object `data` value (including `null`, `false`, `true`, numbers, strings,
   and arrays) are a 400 with the plain `missing required "data" object`.
   `ConsoleBody` treats an empty body as `{}`. The same 400 message is used in
-  every namespace; Rails' `ParameterMissing` wording is not ported.
+  every namespace.
 - A PATCH endpoint that must distinguish an absent field (keep the stored value)
   from an explicit `null` (clear it) keeps that distinction in the struct, for
   example with the existing `Patch` enum or with `Option<Option<T>>` plus
@@ -303,8 +299,8 @@ Rules shared by all four:
   `ListParams`.
 
 Pagination stays on `Pagination::from_query`/`ListParams`: `page`/`limit` are
-plain `i64` integers (no Ruby `_` separators, prefix parsing, or unbounded
-integers), with Rails' defaults (1/50) and clamps (page floored at 1, limit
+plain `i64` integers (no `_` separators, prefix parsing, or unbounded
+integers), with defaults (1/50) and clamps (page floored at 1, limit
 1..=200). A non-integer keeps the existing 400 messages
 (`page must be an integer` / `limit must be an integer`). Do not replace them
 with a struct only to make a route "typed".
@@ -353,7 +349,7 @@ needs `garde` (a workspace dependency) and the `ValidateFields` trait.
 | `ValidateFields::validate_fields` | validate and get `Result<(), FieldErrors>`, `?`-ready |
 | `ValidateFields::validate_fields_with` | the same, with the struct's `#[garde(context(..))]` context |
 | `Validation` | collect garde reports *and* hand-written errors: `check`, `check_with`, `extend`, `add`, `add_base`, `finish_if_any`, `into_result` |
-| `plain_message` | the first message of a report, for a gate the API answers with Rails' 400 |
+| `plain_message` | the first message of a report, for a gate the API answers with a plain 400 |
 | `detail_key` | one garde path -> its `details` key |
 | `rules::{present_not_blank, patch_not_blank, patch_included_in}` | the custom validators Console's models share, where garde has no equivalent rule |
 
@@ -367,14 +363,13 @@ principals areas), and a hand-written check all return the same 422.
 - A top-level field keeps its plain name. `#[garde(dive)]` nests with dots and
   `#[garde(inner(..))]` adds indices, which is exactly the path-keyed form the
   secrets document validators already use: `source.config`, `rules[0].cidr`.
-  A rule on the record itself (a container-level `#[garde(custom(..))]`) is
-  ActiveModel's `base`.
+  A rule on the record itself (a container-level `#[garde(custom(..))]`) reports
+  under `base`.
 - garde's derive validates a struct's named fields **alphabetically** (it keeps
   them in a `BTreeMap`) and reports one array per path. Report order and the
-  message text inside an array are not contract: the harness compares the set of
-  `details` keys on a 422. Nothing in the tree reorders a report to a model's
-  declaration order, and nothing reproduces ActiveModel's wording where garde
-  has a built-in rule.
+  message text inside an array are not contract; the set of `details` keys on a
+  422 is. Nothing in the tree reorders a report to a model's
+  declaration order.
 - `#[garde(inner(..))]` reports per item in container order.
 - `custom` receives the field as declared, so a create field (`Option<String>`)
   and a PATCH field (`Option<Option<String>>`) need different validators; that
@@ -391,11 +386,10 @@ neither:
 - uniqueness and ownership (`foreign_id` already taken, another user's row);
 - cross-field rules that need the stored row.
 
-Console's controllers check a reference *before* saving the record, so that
+Console's handlers check a reference *before* saving the record, so that
 failure is reported alone: append it, `finish_if_any()?`, then `check` the
-record. Do not merge a reference failure with field errors Rails never reached
-(`areas/admin/api_clients.rs::create`). A pure query gate that Rails answers
-with `ActionController::BadRequest` keeps its 400 and its plain message:
+record. Do not merge a reference failure with field errors
+(`areas/admin/api_clients.rs::create`). A pure query gate answers 400 with a plain message:
 validate it with garde, then render `plain_message(&report)` through
 `ConsoleError::bad_request` instead of the field envelope (`users::index`'s
 `status` filter).
@@ -403,35 +397,13 @@ validate it with garde, then render `plain_message(&report)` through
 ### Messages
 
 Use garde's rules and its default messages. Validation message text, message
-order, and messages-per-field count are not contract: a `divergence` is needed
-for a changed status, accept/reject decision, route, or `error.details` key set,
-not for different wording in a validation envelope, and nothing in the tree
-reproduces ActiveModel's wording or order to keep a visible string stable.
+order, and messages-per-field count are not contract; a status, an
+accept/reject decision, a route, and the `error.details` key set are.
 Exceptions are one-liners a shared rule needs anyway (`"can't be blank"` via
 `rules::{present_not_blank, patch_not_blank}`, `"is not included in the list"`
 via `rules::patch_included_in`) and an area-specific rule where garde cannot
 express the check (`"must include at least one scope"`), which keeps its own
-string (see the differential harness notes, "Error responses"; the harness used
-for the port is kept outside the repository).
-
-```json
-{
-  "as": "admin",
-  "method": "PATCH",
-  "path": "/api/v1/console/api_clients/${client_one}",
-  "body": { "data": { "scopes": "sessions:write" } },
-  "divergence": {
-    "reason": "typed request: scopes is a JSON array, so a scalar is a 422",
-    "b": { "status": 422 }
-  }
-}
-```
-
-Only the keys under `b` are compared, so declare the keys that changed
-(differential harness, "Intentional divergences"). On a `422`
-validation envelope the harness compares the `error.details` key set, not the
-message strings, so an expectation may carry either the real messages or just
-the field keys.
+string.
 
 ### What garde cannot express
 
@@ -440,16 +412,16 @@ the field keys.
   a newtype with its own `garde::Validate` implementation, because a field rule
   returns one error (`Scopes` in `areas/admin/api_clients.rs`, `Labels` in
   `areas/admin/proxies.rs`). The same shape works for one message per map entry.
-- A value that must be normalized before it is validated (Rails'
-  `compact_blank`): do it in the newtype's `Deserialize` (`Scopes`), so the rule
-  and the write see the same list.
+- A value that must be normalized (blanks dropped) before it is validated: do it
+  in the newtype's `Deserialize` (`Scopes`), so the rule and the write see the
+  same list.
 - A protocol gate that answers neither the 422 envelope nor one plain message:
   an OAuth redirect carrying an error code, chosen by whichever check the
   handler reaches first (the MCP authorize endpoint's `response_type`, PKCE,
   scope, and resource checks). The code and the redirect target are not part of
   a garde report.
 - An attribute name that differs from the parameter name: keep
-  `FieldErrors::rename` (the skills controller reports `content` as
+  `FieldErrors::rename` (the skills handler reports `content` as
   `instructions`).
 - Rules that need the database, the request context, or a stored row: the
   hand-written checks above.
@@ -458,8 +430,8 @@ the field keys.
 
 - `ConsoleError::{bad_request,not_found,unprocessable,validation_failed}`
   produces Console's JSON envelope. `with_reason` and `with_details` add
-  compatibility details; `validation_failed` matches Rails' `"validation
-  failed"` plus `errors.as_json`.
+  compatibility details; `validation_failed` is `"validation
+  failed"` plus the field errors.
 - `json_not_found` is the JSON 404 used by the Console-owned fallback
   (`/console`, `/api/v1`, `/mcp/oauth`, `/oauth`, `/assets/oauth-page`). Other
   unknown paths keep api-rs's empty 404.
@@ -470,7 +442,7 @@ the field keys.
 - `Pagination` reads `page`/`limit` (plain integer, defaults 1/50, limit clamped
   1..=200) and `ListParams` also reads `labels[key]=value` scalars. Its `meta`
   emits `page`, `limit`, `total`, `total_pages`; `total_pages` is 0 for no rows.
-- `request_origin` is Rails' `request.origin`: the `Origin` header only, no
+- `request_origin` is the request origin: the `Origin` header only, no
   `Referer` fallback. Every unsafe console request, JSON or form, requires it to
   equal `CENTAUR_CONSOLE_PUBLIC_URL`'s normalized origin; a missing or `null`
   Origin is rejected.
@@ -479,18 +451,17 @@ the field keys.
   permissions. There is no default cache layer and no `ETag`: nothing in the
   tree sends `If-None-Match`.
 
-### Rails quirks intentionally not ported
+### Behavior deliberately left out
 
-Match Rails' contract, not its implementation accidents. Do not reintroduce:
+These behaviors were dropped. Do not reintroduce:
 
 - SQL-ish 404 text (`Couldn't find X with [WHERE ...]`). A missing record is
-  `not_found("<Model> not found")`; the harness compares a 404 by
-  `error.details.reason` only.
-- Rails' framework 5xx body (`PublicExceptions`, `public/500.html`). The normal
-  error envelope is used and the internal error is logged, never echoed.
+  `not_found("<Model> not found")`.
+- A framework 5xx page. The normal error envelope is used and the internal
+  error is logged, never echoed.
 - Format-suffix route aliases (`/up.json`, `/auth/:provider/callback.html`,
   `/mcp/oauth/token.json`). Register the canonical path only.
-- The Rails `/up` health page: api-rs serves `/healthz`.
+- A `/up` health page: api-rs serves `/healthz`.
 - `/lookup/default/:foreign_id` compatibility aliases; only the canonical
   `/lookup/:foreign_id` lookup remains.
 - Duplicate update verbs. Each resource keeps only the verb its callers send:
@@ -499,22 +470,22 @@ Match Rails' contract, not its implementation accidents. Do not reintroduce:
   e2e); sandbox admin routes take `PATCH` (connectors and tools).
 - Server-side skill Markdown rendering (`content_html`): the API returns the raw
   `instructions` and the SPA renders it with sanitized React Markdown.
-- Ruby `String#inspect` quoting in messages. Quote values plainly.
-- ActiveModel-style casts and strong-parameter silent drops: a field of the
+- Inspect-style quoting in messages. Quote values plainly.
+- Silent type casts and dropped parameters: a field of the
   wrong JSON type is a 422 validation error, and an unknown field is ignored.
-- Rails MIME/Accept negotiation (`request_format`, wildcard/quality handling,
+- MIME/Accept negotiation (`request_format`, wildcard/quality handling,
   format suffixes). A page route always answers HTML, a JSON endpoint always
   answers JSON, and the SPA shell is served for `/` and `/console/...` only.
 - The SPA shell no longer writes `return_to` into the session; the SPA passes
   `?return_to=` to `/login` itself.
-- Ruby `String#to_i` for `CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS` and Rails'
-  `Integer(value, 10)` for pagination. Both are strict now: the TTL must be a
+- Prefix integer parsing for `CENTAUR_MCP_ACCESS_TOKEN_TTL_SECONDS` and
+  pagination. Both are strict now: the TTL must be a
   positive integer or the token endpoint returns its OAuth 400; `page`/`limit`
   must be plain `i64` values.
-- ActiveModel's wide boolean cast for `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED`
+- Wide boolean casts for `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED`
   and `CENTAUR_CONSOLE_API_CLIENTS_ENABLED`. Only `true`/`false`
   (case-insensitive) and `1`/`0` are accepted; an explicitly empty value keeps
-  ConsoleEnv's third state, and anything else is a startup error.
+  the third state, and anything else is a startup error.
 - Id-sequence padding (writing child rows before a parent's validation).
   Validate first, then write everything in one transaction.
 
@@ -525,10 +496,7 @@ Match Rails' contract, not its implementation accidents. Do not reintroduce:
 Writes belong on the writable pool; the read-only pool's behavior is unchanged.
 
 The workflow dashboard reads `centaur_readonly_workflow_runs` through
-`AppState::workflow_db()`, which uses the runtime pool in production.
-`with_workflow_db` attaches a separate read-only database; the differential
-harness used during the port (kept outside the repository) uses it (`CONSOLE_WORKFLOW_DATABASE_URL`) so
-the workflow scenarios exercise the same handlers against seeded rows. Force
+the runtime pool (`AppState::pool()`). Force
 start calls the in-process `WorkflowRuntime` from `AppState::workflows()`; the
 old `CENTAUR_API_URL` TCP probe is gone.
 `centaur-console-db` changes should stay additive so the turn path keeps
@@ -536,11 +504,11 @@ compiling against the same functions.
 
 Every `sync_config_cache_version` bump goes through
 `centaur_console_db::invalidate::invalidate` (see "Abstractions" below). Its
-`Scope::Grantee` covers Rails' `Grant` callbacks: bump every principal the grant
+`Scope::Grantee` covers grants: bump every principal the grant
 reaches, directly or through its role. `Scope::BrokerCredential` bumps every
 principal granted a secret whose `token_broker` source delivers that credential,
-matching `BrokerCredential#bump_referencing_principal_sync_config_versions`;
-call it at the same points Rails runs that `before_commit`. Reconciliation
+matching the principals a credential references;
+call it at the same points that write commits. Reconciliation
 inserts a grant with `ON CONFLICT DO NOTHING` on the
 `(principal_id, static_secret_id)` index, so a race that already created the
 grant is a no-op instead of an error. Ids are compared by insertion rank, so the
@@ -596,7 +564,7 @@ let row: ApiKeyRow = sqlx::query_as("SELECT id, name, created_at, updated_at FRO
 
 ### Timestamps
 
-`centaur_console_db::timestamp` renders Rails' `datetime` JSON: UTC RFC 3339
+`centaur_console_db::timestamp` renders the Console `datetime` JSON: UTC RFC 3339
 with exactly three fractional digits. Use the `serde` modules with
 `#[serde(with = ...)]`:
 
@@ -616,7 +584,7 @@ hand; the old per-area helpers are now wrappers over this module.
 ### Model descriptor
 
 `centaur_console_db::model::ConsoleModel` describes one table: `TABLE`,
-`OID_PREFIX`, `NAME` (the Rails model name a 404 renders), `HAS_FOREIGN_ID`,
+`OID_PREFIX`, `NAME` (the model name a 404 renders), `HAS_FOREIGN_ID`,
 and `SOFT_DELETE_COLUMN`. The markers in that module
 (`model::ApiKey`, `model::Principal`, …) implement it for every Console table
 the routes address. The generic lookups need the area's own `FromRow` row type:
@@ -643,7 +611,7 @@ user's key is not found) keeps its own `WHERE` and uses the marker only for
 
 `centaur_console_db::write` builds the timestamped statements. Inserts always set
 `created_at`/`updated_at`; updates bump `updated_at` **only when a column
-changes**, like Rails' dirty tracking:
+changes**:
 
 ```rust
 let sql = write::insert_returning_sql("api_keys", &["user_id", "name", "token_hash"], KEY_COLUMNS);
@@ -658,7 +626,7 @@ addressed by another column instead of the primary key, for a
 `has_one dependent: :nullify` (`WHERE broker_credential_id = $2`).
 
 Use plain SQL for a write that intentionally keeps `updated_at` (a soft delete
-setting only `deleted_at`, Rails' `update_columns`), a server-clock value on a
+setting only `deleted_at`), a server-clock value on a
 non-timestamp column, an `INSERT ... ON CONFLICT`, or a `COALESCE`/JSONB-merge
 assignment.
 
@@ -668,8 +636,8 @@ assignment.
 sync-config invalidation. One `Scope` per affected row kind: `Principal`,
 `Principals`, `Role`, `Grantee { principal_id, role_id }`,
 `BrokerCredential(id)`, and `Secret { .. }` (built with
-`Scope::secret_write(kind, id, SecretChanges)` or `Scope::secret_delete`). Rails
-counts one increment per saved or destroyed record, so `SecretChanges` carries
+`Scope::secret_write(kind, id, SecretChanges)` or `Scope::secret_delete`). One
+increment is counted per saved or destroyed record, so `SecretChanges` carries
 the destroyed/inserted source and rule counts; do not flatten it to one bump per
 principal.
 
@@ -689,7 +657,7 @@ invalidate::invalidate(
 invalidate::invalidate(&mut tx, Scope::Grantee { principal_id, role_id }).await?;
 ```
 
-Call it inside the same transaction, at the point Rails' callback would fire.
+Call it inside the same transaction, at the point the record is written.
 Pass `&mut *tx` for a transaction.
 
 ### Validation errors
@@ -732,7 +700,7 @@ let mut validation = Validation::new();
 if !reference.is_empty() && principal.is_none() {
     validation.add_base(format!("No principal matches \"{reference}\"."));
 }
-validation.finish_if_any()?; // the reference wins, as it does in Rails
+validation.finish_if_any()?; // the reference wins
 validation.check(&data);
 validation.into_result()?;
 ```
@@ -744,7 +712,7 @@ anything else is a logged opaque 500. Prefer `?` over an area-local
 `write_error`/`failure` match.
 
 `FieldErrors::rename` reports a validator's attribute under the parameter name
-the client reads (the skills controller reports `content` as `instructions`).
+the client reads (the skills handler reports `content` as `instructions`).
 
 ### Lists
 
@@ -783,7 +751,7 @@ a console grant list hydrates each row); pair it with
 ## Pages, assets, and SSO
 
 The built SPA is read from disk: `CENTAUR_CONSOLE_SPA_SHELL` names the shell
-(default `services/console/spa-shell/index.html`), `CENTAUR_CONSOLE_SPA_ASSETS`
+(default `services/console/public/spa/index.html`), `CENTAUR_CONSOLE_SPA_ASSETS`
 the hashed asset root (default `services/console/public/spa/assets`), and
 `CENTAUR_CONSOLE_PUBLIC_ROOT` the root public files (default
 `services/console/public`). The api-rs image builds the SPA and sets all three
@@ -793,28 +761,22 @@ shell for `/` and `/console/...` (`no-cache`, app CSP), `/spa/assets/*`
 (`public, max-age=31536000, immutable`, gzip/brotli), and the root icons
 (public-file cache). The shell is a plain file: a signed-out visitor is sent to
 `/login?return_to=<page>` by the SPA when its first API call returns 401.
-Other paths are not SPA routes and 404. There are no `/manifest` or
-`/service-worker` aliases; the PWA is gone.
+Other paths, including `/spa/index.html`, are not SPA routes and 404, so the
+shell is only ever served with the CSP.
 
-`/login` (GET/POST), `/pending`, and `POST /logout` are server-rendered. Their
-HTML and the OAuth layout are ported from `app/views/sessions/*` and
-`layouts/oauth.html.erb`. Assets are embedded and served at
-`/assets/oauth-page/<name>?v=<digest>`, matching Rails. Form bodies and the
-`?return_to=`/`?next=` query are parsed into the typed
-`LoginForm`/`LoginQuery` structs in `pages.rs`; unknown fields such as
-`return_to[]` or `authenticity_token` are ignored rather than imitated with a
-Rack array sentinel. The pending page's sign-out form posts to `POST /logout`
-with no `_method` field: Rack's method override is not ported and no caller in
-the tree sends `DELETE /logout`. The forms carry no authenticity token; their
-posts are subject to the same exact-Origin check as the JSON API.
+`/login` (GET/POST), `/pending`, and `POST /logout` are server-rendered.
+Assets are embedded and served at `/assets/oauth-page/<name>?v=<digest>`. Form
+bodies and the `?return_to=`/`?next=` query are parsed into the typed
+`LoginForm`/`LoginQuery` structs in `pages.rs`; unknown fields are ignored. The
+forms carry no token; their posts are subject to the same exact-Origin check as
+the JSON API.
 Every rendered response, redirect, and origin rejection from these pages carries
-Rails' narrowed `ServerRenderedPagePolicy` CSP (`script-src 'none'`,
+the narrowed server-page CSP (`script-src 'none'`,
 `style-src 'self'`, no `form-action`); do not relax it. Other server-rendered
 areas (the broker OAuth result pages) reuse the same `SERVER_PAGE_CSP` and
 `server_page_csp` helpers from `pages.rs` instead of copying the policy.
-`pages::server_error_page` is the shared HTML error template: the MCP consent
-form's origin rejection uses it with a 422 instead of Rails' static
-`public/422.html` (or a JSON error envelope).
+`pages::server_error_page` is the shared HTML error template: the sign-in,
+sign-out, and MCP consent forms' origin rejections use it with a 422.
 
 HTML origin failures are 422, not the JSON API's 403 `csrf`. `require_login`
 runs before the origin check, so `/logout` without a signed-in user (or with a
@@ -838,15 +800,13 @@ cargo test --locked -p centaur-api-server console_session
 ```
 
 The DB tests drive the real routers (`build_router_with_app_state`,
-`console::bearer_router`, `sandbox_router`) and cover login -> `/me` -> CSRF write ->
+`console::bearer_router`, `sandbox_router`) and cover login -> `/me` -> Origin-checked write ->
 logout, disabled/pending accounts, bearer owner states, the single sandbox
 token and its live proxy binding, the delegated Console credential, and the
 sandbox secret-write restriction. Unit tests in `host.rs`, `console::tests`,
 `console::guard`, and `auth.rs` pin the public/internal path split, the
 capability catalog and its implication hierarchy, and the credential ->
-capability sets. The workspace CI run skips the `console_session_db_` tests
-because it does not load the Console schema; the schema-backed job runs them
-explicitly.
+capability sets. CI runs them against a migrated Console database.
 
 ## iron-control calls
 

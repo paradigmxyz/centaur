@@ -1216,8 +1216,8 @@ impl JwtVerifier {
     }
 }
 
-/// Mirrors the Rails OpaqueId concern: Sqids with an alphabet shuffled per
-/// prefix and a minimum length of 8.
+/// Opaque IDs: Sqids with an alphabet shuffled per prefix and a minimum length
+/// of 8.
 fn opaque_ids(prefix: &str) -> Sqids {
     let mut alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         .chars()

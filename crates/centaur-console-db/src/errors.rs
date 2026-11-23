@@ -1,11 +1,10 @@
 //! Validation errors for Console records.
 //!
-//! Console's controllers render `record.errors.as_json()` as the `details` of a
-//! `422 {"error":{"message":"validation failed",...}}` response. ActiveModel
-//! keeps one array per attribute, and this type keeps that shape: an ordered
-//! list rather than a map, so messages appended together stay together. `base`
-//! is an ordinary attribute name, as it is in ActiveModel. Attribute order and
-//! message text are not part of the API contract.
+//! Console's API renders `422 {"error":{"message":"validation failed",...}}`
+//! with one array per attribute in `details`, and this type keeps that shape: an
+//! ordered list rather than a map, so messages appended together stay together.
+//! `base` is an ordinary attribute name. Attribute order and message text are
+//! not part of the API contract.
 //!
 //! ```ignore
 //! use centaur_console_db::FieldErrors;
@@ -25,22 +24,22 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
-/// Validation errors, grouped the way ActiveModel groups them: one array per
-/// attribute, messages in the order they were appended.
+/// Validation errors, one array per attribute, messages in the order they were
+/// appended.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldErrors {
     entries: Vec<(String, Vec<String>)>,
 }
 
 impl FieldErrors {
-    /// ActiveModel's attribute for an error on the record as a whole.
+    /// The attribute for an error on the record as a whole.
     pub const BASE: &'static str = "base";
 
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// `errors.add(attribute, message)`; an existing attribute appends.
+    /// Records one message for `attribute`; an existing attribute appends.
     pub fn add(&mut self, attribute: &str, message: impl Into<String>) {
         if let Some((_, messages)) = self
             .entries
@@ -54,7 +53,7 @@ impl FieldErrors {
             .push((attribute.to_owned(), vec![message.into()]));
     }
 
-    /// `errors.add(:base, message)`.
+    /// [`Self::add`] on [`Self::BASE`].
     pub fn add_base(&mut self, message: impl Into<String>) {
         self.add(Self::BASE, message);
     }
@@ -68,9 +67,9 @@ impl FieldErrors {
         }
     }
 
-    /// Renames an attribute in place, so a
-    /// controller can report a validator's attribute under the parameter name
-    /// its client reads (`Skill`'s `content` is `instructions` on the wire).
+    /// Renames an attribute in place, so a route can report a validator's
+    /// attribute under the parameter name its client reads (`content` is
+    /// `instructions` on the wire).
     pub fn rename(&mut self, from: &str, to: &str) {
         let Some(index) = self
             .entries
@@ -103,8 +102,8 @@ impl FieldErrors {
             .map(|(attribute, messages)| (attribute.as_str(), messages.as_slice()))
     }
 
-    /// `record.errors.as_json()`: one array of messages per attribute, in
-    /// append order.
+    /// One array of messages per attribute, in append order: the `details` value
+    /// of a validation response.
     pub fn into_value(self) -> Value {
         let mut map = Map::new();
         for (attribute, messages) in self.entries {
@@ -134,7 +133,7 @@ impl From<FieldErrors> for Value {
     }
 }
 
-/// `errors[:attribute]`, as the areas' validators read it.
+/// The messages of one attribute, as the areas' validators read them.
 impl std::ops::Index<&str> for FieldErrors {
     type Output = [String];
 

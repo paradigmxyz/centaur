@@ -28,7 +28,7 @@ use crate::write;
 pub enum FlowUpsertError {
     Console(crate::Error),
     /// A shared app already has an account, or an owner-only credential belongs
-    /// to someone else. Rails surfaces this as `account_mismatch`.
+    /// to someone else. The API surfaces this as `account_mismatch`.
     AccountMismatch,
     /// A concurrent consent won the unique index.
     UniqueViolation,
@@ -111,9 +111,9 @@ pub struct FlowCredential {
     pub token_endpoint: String,
 }
 
-/// The credential and wrapper secret `Oauth::EnrichCredentialIdentityJob`
-/// reads after a Slack consent. The token stays encrypted; the caller decrypts
-/// it only to make the profile requests.
+/// The credential and wrapper secret the enrichment job reads after a Slack
+/// consent. The token stays encrypted; the caller decrypts it only to make the
+/// profile requests.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct EnrichmentCredential {
     pub id: i64,
@@ -128,9 +128,9 @@ pub struct EnrichmentCredential {
     pub static_secret_name: Option<String>,
 }
 
-/// The credential `Oauth::EnrichCredentialIdentityJob` would find, with its app
-/// and wrapping secret eagerly joined. The job silently does nothing when the
-/// row is gone, so a missing row is `None` rather than an error.
+/// The credential the enrichment job would find, with its app and wrapping
+/// secret eagerly joined. The job silently does nothing when the row is gone,
+/// so a missing row is `None` rather than an error.
 pub async fn find_enrichment_credential(
     pool: &PgPool,
     credential_id: i64,
@@ -151,9 +151,9 @@ pub async fn find_enrichment_credential(
 
 /// Applies the Slack profile the enrichment job looked up: rename the credential
 /// and fill its provider email, then rename the auto-created wrapper secret when
-/// it still carries the generated name. The two Rails `update!` calls each run
-/// their after-commit reconciliation and the wrapper's sync-config invalidation,
-/// so mirror that order inside the transaction.
+/// it still carries the generated name. Each update runs its own reconciliation
+/// and the wrapper's sync-config invalidation, so mirror that order inside the
+/// transaction.
 pub async fn apply_enriched_identity(
     pool: &PgPool,
     credential: &EnrichmentCredential,
@@ -352,8 +352,8 @@ pub async fn upsert_flow_credential(
         .bind(existing.id)
         .execute(&mut *connection)
         .await?;
-    // Re-consent rewrites access_token, expires_at, and last_refresh, so Rails'
-    // `before_commit` sync-config invalidation always runs on this update.
+    // Re-consent rewrites access_token, expires_at, and last_refresh, so the
+    // sync-config invalidation always runs on this update.
     invalidate::invalidate(&mut *connection, Scope::BrokerCredential(existing.id)).await?;
     Ok(existing)
 }

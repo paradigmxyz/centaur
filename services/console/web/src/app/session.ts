@@ -22,7 +22,7 @@ export type NavSection =
 
 export interface Me {
   user: { id: string; email: string; name: string | null; status: "active" | "pending" | "disabled"; admin: boolean };
-  auth_method: "session" | "api_key";
+  auth_method: "session" | "sandbox";
   acting_admin: boolean;
   features: { api_clients: boolean; password_login: boolean };
   nav: Record<NavSection, boolean>;

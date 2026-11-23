@@ -1,6 +1,5 @@
 //! API clients: machine callers of the api-rs session API. The plaintext secret
-//! is issued here and only its SHA-256 digest is stored, matching
-//! `ApiClient#issue_secret`.
+//! is issued here and only its SHA-256 digest is stored.
 
 use sqlx::PgPool;
 use sqlx::types::Json;
@@ -161,8 +160,7 @@ pub async fn create_api_client(
     Ok(id)
 }
 
-/// `ApiClient#update`: the stored row takes the attributes the request carried
-/// and keeps the rest, as the controller's `assign_attributes` does.
+/// The stored row takes the attributes the request carried and keeps the rest.
 pub async fn update_api_client(
     pool: &PgPool,
     id: i64,
@@ -179,7 +177,7 @@ pub async fn update_api_client(
     Ok(())
 }
 
-/// `ApiClient#rotate_secret!`: replace the digest and bump `updated_at`.
+/// Replace the digest and bump `updated_at`.
 pub async fn rotate_api_client_secret(pool: &PgPool, id: i64, secret_digest: &str) -> Result<()> {
     let sql = write::update_sql(ApiClientModel::TABLE, &["secret_digest"]);
     sqlx::query(&sql)
@@ -191,7 +189,7 @@ pub async fn rotate_api_client_secret(pool: &PgPool, id: i64, secret_digest: &st
 }
 
 /// Disabling and enabling stamp or clear `disabled_at`; a no-op value leaves the
-/// row (and its `updated_at`) untouched, as an unchanged `update!` does.
+/// row (and its `updated_at`) untouched.
 ///
 /// The `disabled_at IS NULL` / `IS NOT NULL` guard is what makes a repeat call a
 /// no-op, so this stays a plain statement rather than a bound-value update.
@@ -227,8 +225,8 @@ pub async fn find_api_client_link(
     Ok(record.map(LinkRecord::into_link))
 }
 
-/// `ApiClient#attach_principal!`: attach `principal_id`, making it the default
-/// when the client has none. Re-attaching an attached principal keeps it.
+/// Attach `principal_id`, making it the default when the client has none.
+/// Re-attaching an attached principal keeps it.
 pub async fn attach_api_client_principal(
     pool: &PgPool,
     api_client_id: i64,
@@ -285,14 +283,14 @@ pub async fn attach_api_client_principal(
         })
 }
 
-/// `ApiClient#make_default!`: exactly one link is the default.
+/// Exactly one link is the default.
 pub async fn make_default_api_client_principal(
     pool: &PgPool,
     api_client_id: i64,
     id: i64,
 ) -> Result<Option<ApiClientLink>> {
     let mut transaction = pool.begin().await?;
-    // `update_all` skips timestamps, as Rails' does.
+    // A set-style update skips timestamps.
     sqlx::query(
         "UPDATE api_client_principals SET \"default\" = false \
          WHERE api_client_id = $1 AND \"default\" AND id <> $2",
@@ -313,7 +311,7 @@ pub async fn make_default_api_client_principal(
     find_api_client_link(pool, api_client_id, id).await
 }
 
-/// `ApiClient#destroy!` for one link; the client keeps the rest.
+/// Delete one link; the client keeps the rest.
 pub async fn detach_api_client_principal(pool: &PgPool, api_client_id: i64, id: i64) -> Result<()> {
     sqlx::query("DELETE FROM api_client_principals WHERE id = $1 AND api_client_id = $2")
         .bind(id)
@@ -323,7 +321,7 @@ pub async fn detach_api_client_principal(pool: &PgPool, api_client_id: i64, id: 
     Ok(())
 }
 
-/// `ApiClient#destroy!`: the `api_client_principals` rows cascade.
+/// Delete the client; its `api_client_principals` rows cascade.
 pub async fn delete_api_client(pool: &PgPool, id: i64) -> Result<()> {
     model::delete::<ApiClientModel, _>(pool, id).await?;
     Ok(())

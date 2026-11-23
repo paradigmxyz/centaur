@@ -39,9 +39,9 @@ struct UsersQuery {
 }
 
 impl UsersQuery {
-    /// Rails' `params[:status].present?`: a blank filter is no filter, but the
-    /// stored value is matched exactly (no trimming). The gate already rejected
-    /// an unknown value, so anything else here is blank.
+    /// A blank filter is no filter, but the stored value is matched exactly (no
+    /// trimming). The gate already rejected an unknown value, so anything else
+    /// here is blank.
     fn filter(&self) -> Option<&str> {
         self.status
             .as_deref()
@@ -49,12 +49,11 @@ impl UsersQuery {
     }
 }
 
-/// `User.statuses` inclusion. Rails raises `ActionController::BadRequest` for an
-/// unknown filter, so this gate answers a plain 400 rather than the 422 field
-/// envelope.
+/// The status inclusion rule. An unknown filter answers a plain 400 rather than
+/// the 422 field envelope.
 fn status_filter(value: &Option<String>, _: &()) -> garde::Result {
     match value.as_deref() {
-        // A blank filter is no filter at all, as `params[:status].present?` is.
+        // A blank filter is no filter at all.
         Some(status) if !status.trim().is_empty() && !STATUSES.contains(&status) => Err(
             garde::Error::new(format!("status must be one of {}", STATUSES.join(", "))),
         ),
@@ -219,7 +218,7 @@ async fn load(pool: &sqlx::PgPool, oid: &str) -> Result<UserRow, ConsoleError> {
         .ok_or_else(UserModel::not_found)?)
 }
 
-/// The reloaded row after a write, as Rails' `render_user` does.
+/// The reloaded row after a write.
 async fn render_user(pool: &sqlx::PgPool, id: i64, current: i64) -> Result<Response, ConsoleError> {
     let row = admin_user(pool, id)
         .await?
@@ -267,7 +266,7 @@ mod tests {
             Ok(Some("active".to_owned()))
         );
         assert_eq!(filter(r#"{"status": "bogus"}"#), Err(()));
-        // The filter value itself is not trimmed, as Rails' `where` is not.
+        // The filter value itself is not trimmed.
         assert_eq!(filter(r#"{"status": " active "}"#), Err(()));
     }
 }

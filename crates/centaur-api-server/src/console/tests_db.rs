@@ -292,15 +292,14 @@ async fn console_session_db_login_me_origin_write_and_logout() {
         "forms no longer carry a CSRF token"
     );
 
-    // Rails keeps `require_login` on logout: a signed-out browser is sent back
-    // to the form instead of getting an origin rejection. The port's logout is
-    // `POST /logout`; there is no Rack `_method` override.
+    // Logout keeps the login gate: a signed-out browser is sent back to the
+    // form instead of getting an origin rejection. Logout is `POST /logout`;
+    // there is no `_method` override.
     let response = send(&app, request(Method::POST, "/logout", &[], Body::empty())).await;
     assert_eq!(response.status(), StatusCode::FOUND);
     assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
 
-    // HTML forms keep Rails' 422 for a forgery rejection. The port refuses a
-    // missing Origin, where Rails accepts a valid token without one.
+    // HTML forms answer a missing or cross-site Origin with a 422 page.
     let response = send(
         &app,
         request(
@@ -1291,7 +1290,7 @@ async fn console_session_db_sandbox_admin_jwt_acts_as_console_user() {
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Rails' `SandboxAdminSecretWrites`: a sandbox may point a secret at an
+    // A sandbox may point a secret at an
     // external store, but never supply an inline value or an OAuth credential,
     // never edit an OAuth-backed secret, and never delete a secret.
     let secret_body = |source: Value| {
@@ -1591,10 +1590,8 @@ async fn console_session_db_sandbox_delegate_is_rechecked_live() {
 }
 
 /// The workflow runtime's in-process force-start path, against a real
-/// `WorkflowRuntime` and the absurd queue tables. The differential harness
-/// cannot compare `POST /workflows/:id/runs` because Rails reaches a separate
-/// workflows API there; this proves the Rust handler queues through the
-/// runtime production uses.
+/// `WorkflowRuntime` and the absurd queue tables: the handler queues through
+/// the runtime production uses.
 #[tokio::test]
 async fn console_session_db_workflow_force_start_uses_in_process_runtime() {
     use std::sync::Arc;

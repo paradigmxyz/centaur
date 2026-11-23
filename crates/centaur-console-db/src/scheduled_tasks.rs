@@ -343,8 +343,9 @@ async fn run_input(
     Ok(Ok(Value::Object(input)))
 }
 
-/// `SlackDeliveryPolicy#allowed?`: the author's own DM, a public channel the
-/// bot is in, or a private channel both the author and the bot are in.
+/// Whether the author may deliver to `destination`: their own DM, a public
+/// channel the bot is in, or a private channel both the author and the bot are
+/// in.
 async fn author_may_deliver(
     connection: &mut PgConnection,
     destination: &str,
@@ -391,7 +392,7 @@ async fn bot_channel_available(
     .await?)
 }
 
-/// Rails' `presence`: `None` for a missing or blank string.
+/// The value, or `None` for a missing or blank string.
 fn present(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }

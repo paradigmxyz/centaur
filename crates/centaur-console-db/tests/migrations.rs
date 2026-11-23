@@ -41,7 +41,8 @@ impl Scratch {
         Some(Self { server, name, pool })
     }
 
-    /// The schema exactly as Rails left it: the baseline, without sqlx's table.
+    /// The schema exactly as the retired Rails Console left it: the baseline,
+    /// without sqlx's table.
     async fn load_rails_schema(&self) {
         self.pool.execute(BASELINE).await.unwrap();
     }
@@ -70,8 +71,9 @@ async fn migrates_an_empty_database() {
     };
     migrate(&db.pool).await.unwrap();
     assert!(baseline_recorded(&db.pool).await);
-    // Rails' bookkeeping says it is current, so a rollback to a chart that runs
-    // `bin/rails db:prepare` migrates nothing rather than loading schema.rb.
+    // The retired Rails Console's bookkeeping says it is current, so a rollback
+    // to a chart that runs `db:prepare` migrates nothing rather than loading the
+    // schema dump.
     let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM schema_migrations")
         .fetch_one(&db.pool)
         .await

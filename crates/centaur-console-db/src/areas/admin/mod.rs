@@ -2,8 +2,8 @@
 //! settings with their default roles, API keys, and proxies.
 //!
 //! One submodule per Console resource. Each keeps the ordering, default scopes,
-//! and write-time side effects of the matching Rails model or controller;
-//! response shaping stays in the API layer.
+//! and write-time side effects its routes depend on; response shaping stays in
+//! the API layer.
 
 mod api_clients;
 mod api_keys;

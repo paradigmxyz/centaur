@@ -24,7 +24,6 @@ updates:
     directories:
       - /services/api-rs
       - /services/company-context
-      - /services/console
       - /services/discordbot
       - /services/githubbot
       - /services/iron-proxy
@@ -50,29 +49,6 @@ updates:
       - dependency-name: ubuntu
     groups:
       docker-base-images:
-        patterns:
-          - "*"
-
-  - package-ecosystem: bundler
-    cooldown:
-      default-days: 7
-    directory: /services/console
-    schedule:
-      interval: weekly
-      day: monday
-      time: "09:00"
-      timezone: America/Denver
-    commit-message:
-      prefix: chore
-      include: scope
-    open-pull-requests-limit: 5
-    ignore:
-      # Rails 8.1.4 is broken; see the exclusion in services/console/Gemfile.
-      - dependency-name: rails
-        versions:
-          - "8.1.4"
-    groups:
-      ruby-dependencies:
         patterns:
           - "*"
 

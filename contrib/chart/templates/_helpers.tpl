@@ -262,11 +262,11 @@ In-cluster Service/DNS names use the "console" component (e.g.
 (its name is hardcoded in the Rust binaries); the URL *value* is derived from
 `centaur.consoleUrl`.
 
-The Console is served by api-rs; the chart runs no Rails web pod. The `console`
-Service survives only as a compatibility alias (same name and port, forwarding
-to api-rs) for in-cluster clients with a cached `centaur-console:3000` URL, and
-`centaur.consoleUrl` returns the api-rs Service URL. The chart runs no Rails
-process: api-rs also owns the Console schema and the Slack channel catalog.
+The Console is served by api-rs. The `console` Service survives only as a
+compatibility alias (same name and port, forwarding to api-rs) for in-cluster
+clients that default to `centaur-console:3000`, and `centaur.consoleUrl` returns
+the api-rs Service URL. api-rs also owns the Console schema and the Slack
+channel catalog.
 */ -}}
 {{- define "centaur.consoleValues" -}}
 {{- $console := deepCopy (.Values.console | default dict) -}}

@@ -1,9 +1,8 @@
 //! Shared HTTP shapes for the Console API: Console's error envelope, the
 //! not-found helpers, and the paginated label-search parameters.
 //!
-//! Console's Rails controllers render `{"error":{"message":...}}` (plus
-//! `details` when present); keep that exact shape so the SPA and the
-//! compatibility harness do not need a second error parser.
+//! Errors render `{"error":{"message":...}}` (plus `details` when present);
+//! keep that exact shape, which the SPA, connectors, and tools parse.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -27,7 +26,7 @@ use centaur_console_db::areas::secrets::WriteError;
 pub(crate) const DEFAULT_PAGE_LIMIT: i64 = 50;
 pub(crate) const MAX_PAGE_LIMIT: i64 = 200;
 
-/// A Console API failure with Rails' status and envelope.
+/// A Console API failure with the wire status and envelope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConsoleError {
     pub(crate) status: StatusCode,
@@ -56,8 +55,7 @@ impl ConsoleError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, message)
     }
 
-    /// Rails' `render_validation_error`: `message: "validation failed"` with
-    /// `record.errors.as_json` under `details`.
+    /// `message: "validation failed"` with the field errors under `details`.
     pub(crate) fn validation_failed(details: Value) -> Self {
         Self::unprocessable("validation failed").with_details(details)
     }
@@ -80,7 +78,7 @@ impl ConsoleError {
     }
 }
 
-/// `errors.as_json()` is Console's 422 `details`; a data-layer validator can
+/// The validation errors are Console's 422 `details`; a data-layer validator can
 /// therefore return its `FieldErrors` with `?`.
 impl From<FieldErrors> for ConsoleError {
     fn from(errors: FieldErrors) -> Self {
@@ -153,16 +151,16 @@ pub(crate) fn not_found(message: &str) -> Response {
     render_error(StatusCode::NOT_FOUND, message, None)
 }
 
-/// The JSON fallback for routes outside the Console API. Console's Rails API
-/// answers unknown paths with the same envelope instead of an empty body.
+/// The JSON fallback for routes outside the Console API. Unknown paths get the
+/// same envelope instead of an empty body.
 pub(crate) fn json_not_found() -> Response {
     not_found("not found")
 }
 
-/// A pagination value is a plain signed integer: no Ruby `String#to_i` prefix
-/// parsing, no `Integer(value, 10)` whitespace/underscore separators, and no
-/// arbitrary-precision integers. A value outside `i64` is invalid (a 400), not
-/// saturated. Defaults and the existing clamps are unchanged.
+/// A pagination value is a plain signed integer: no prefix parsing, no
+/// whitespace/underscore separators, and no arbitrary-precision integers. A
+/// value outside `i64` is invalid (a 400), not saturated. Defaults and the
+/// existing clamps are unchanged.
 fn parse_integer(raw: &str) -> Option<i64> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -243,8 +241,8 @@ impl ListParams {
     }
 }
 
-/// Extracts `labels[key]=value` pairs. Rails rejects a non-hash `labels` and
-/// non-scalar values with a 400; urlencoded query strings only produce scalar
+/// Extracts `labels[key]=value` pairs. A non-hash `labels` and non-scalar
+/// values are a 400; urlencoded query strings only produce scalar
 /// strings, so bracket-shaped keys are the whole contract here.
 pub(crate) fn label_filters(
     query: &HashMap<String, String>,
@@ -252,7 +250,7 @@ pub(crate) fn label_filters(
     let mut labels = BTreeMap::new();
     for (key, value) in query {
         if key == "labels" {
-            // A blank `labels=` param is the same as no filter in Rails.
+            // A blank `labels=` param is the same as no filter.
             if value.trim().is_empty() {
                 continue;
             }
@@ -269,8 +267,8 @@ pub(crate) fn label_filters(
                     "labels must be a hash of key=value pairs",
                 ));
             }
-            // `labels[key][nested]=value` is a nested hash/array in Rack, which
-            // Rails refuses because label values must be scalars.
+            // `labels[key][nested]=value` is a nested hash/array, which is
+            // refused because label values must be scalars.
             if let Some((name, _)) = label.split_once(']') {
                 return Err(ConsoleError::bad_request(format!(
                     "label value for {name} must be a scalar"
@@ -475,8 +473,8 @@ pub(crate) fn no_content() -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Rails' `request.origin`: the `Origin` header only, with no `Referer`
-/// fallback. Every unsafe console request, JSON or form, must carry exactly
+/// The request origin: the `Origin` header only, with no `Referer` fallback.
+/// Every unsafe console request, JSON or form, must carry exactly
 /// the configured public origin; a missing or `null` Origin is refused.
 pub(crate) fn request_origin(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -490,8 +488,8 @@ mod tests {
 
     #[test]
     fn pagination_parses_plain_integers_and_keeps_the_clamps() {
-        // Rails' Integer(value, 10) also accepts `_` separators and unbounded
-        // integers; the port requires a plain i64 and keeps the 400 messages.
+        // A plain i64 is required: no `_` separators and no unbounded
+        // integers, with the same 400 messages.
         assert_eq!(
             Pagination::from_optional(Some("2"), Some("1")).unwrap(),
             Pagination { page: 2, limit: 1 }
@@ -500,7 +498,7 @@ mod tests {
             Pagination::from_optional(None, None).unwrap(),
             Pagination { page: 1, limit: 50 }
         );
-        // A blank value keeps Rails' `presence` default.
+        // A blank value keeps the default.
         assert_eq!(
             Pagination::from_optional(Some(" "), Some(" ")).unwrap(),
             Pagination { page: 1, limit: 50 }

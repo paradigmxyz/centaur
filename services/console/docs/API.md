@@ -5,29 +5,25 @@
 | Namespace | Credential | Callers |
 |---|---|---|
 | `/api/v1/*` (this document's resource sections) | Bearer API key | Machine callers: CLIs, api-rs, provisioning scripts |
-| [`/api/v1/console/*`](#console-api) | Console session cookie (Rails checks a CSRF token; the Rust port checks an exact `Origin`), or a sandbox entitlement JWT from an active admin's Slack DM; never an API key | The operator console SPA, and admin Slack DM sandboxes |
+| [`/api/v1/console/*`](#console-api) | Console session cookie (writes need an exact same-origin `Origin`), or a sandbox entitlement JWT from an active admin's Slack DM; never an API key | The operator console SPA, and admin Slack DM sandboxes |
 | `/api/v1/sandbox/*` | Sandbox entitlement JWT injected by `iron-proxy` | Agents inside sandboxes |
 
 The [Console API](#console-api) is documented separately at the end. It reuses several bearer resources with console-only additions; the bearer contract never changes for it.
 
-### Rust port differences
+### Contract notes
 
-The Rust Console in api-rs serves the same contract with the round-6 cuts
-documented in `crates/centaur-api-server/src/console/README.md`:
+api-rs serves this API (`crates/centaur-api-server/src/console/README.md`):
 
 - Unsafe cookie-authenticated requests need an exact Console `Origin`; there is
-  no `X-CSRF-Token`, no hidden `authenticity_token`, and `/me` returns neither
-  `csrf_token` nor `flash`.
-- A server-rendered redirect error is `GET /login?error=<code>` instead of a
-  session flash.
-- Console updates keep only `PATCH`; `me/ssh_key` keeps `PUT`; bearer resources
-  keep `PUT`; proxies keep `PATCH`; sandbox resources keep `PATCH`; Slack
-  permission replacements keep `PUT`. Rails still accepts both verbs.
-- Skill detail returns raw `instructions` only; the SPA renders and sanitizes
-  the markdown (`content_html` is Rails-only).
-- `/up` and `/lookup/default/:foreign_id` are gone; `/lookup/:foreign_id` and
-  api-rs `/healthz` remain. The whole `/api/v1/sandbox/admin/*` family is
-  replaced by the sandbox-delegated console credential.
+  no CSRF token.
+- A server-rendered redirect error is `GET /login?error=<code>`.
+- Console updates use `PATCH`; `me/ssh_key` uses `PUT`; bearer resources use
+  `PUT`; proxies and sandbox resources use `PATCH`; Slack permission
+  replacements use `PUT`.
+- Skill detail returns raw `instructions`; the SPA renders and sanitizes the
+  markdown.
+- Health is api-rs `/healthz`. Foreign-id lookup is `/lookup/:foreign_id`.
+  Admin Slack DM sandboxes use the sandbox-delegated console credential.
 
 - [Authentication](#authentication)
 - [Conventions](#conventions)
@@ -1211,7 +1207,7 @@ The sandbox permissions response includes an `oauth_credentials` array with non-
 
 ### Sandbox-delegated console access
 
-An active admin Console user's Slack DM sandbox may call the [Console API](#console-api) with its sandbox entitlement JWT instead of a session cookie. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. It acts as that Console user with the same admin/active/pending rules as a session: a request without a cookie has no CSRF token or `Origin` requirement, and every other `Authorization` value (including an API key) is still `403 session_required`.
+An active admin Console user's Slack DM sandbox may call the [Console API](#console-api) with its sandbox entitlement JWT instead of a session cookie. The sandbox principal must be a `slack_dm` principal linked to that admin whose Slack team is the bot's workspace, as recorded by the Slack channel catalog. It acts as that Console user with the same admin/active/pending rules as a session: a request without a cookie has no `Origin` requirement, and every other `Authorization` value (including an API key) is still `403 session_required`.
 
 The plain sandbox resources above (`permissions`, `oauth_apps`, `scheduled_tasks`, and `skills`) keep their entitlement-only behavior. There is no `/api/v1/sandbox/admin/*` namespace.
 
@@ -1789,8 +1785,7 @@ Notes on the proxy-sync payload, which differs from the REST representation:
 
 ## Console API
 
-Everything the operator console SPA calls lives under `/api/v1/console`
-(`Api::V1::Console` controllers). These endpoints take the console session
+Everything the operator console SPA calls lives under `/api/v1/console`. These endpoints take the console session
 cookie, or a sandbox-delegated user credential, and never an API key: use the
 bearer resources above for machine callers, which the console API never
 changes. Responses use the same [conventions](#conventions) and
@@ -1804,11 +1799,10 @@ changes. Responses use the same [conventions](#conventions) and
   cookie. No session gets `401` with `details.reason = "session_required"`.
 - **Sandbox delegation.** A sandbox entitlement JWT from an active admin's
   Slack DM with the bot (see [Sandbox-delegated console access](#sandbox-delegated-console-access)) acts as that admin.
-  It has no cookie, so it needs no CSRF token or `Origin`.
-- **CSRF.** Cookie-authenticated requests other than `GET`/`HEAD` must send the session's CSRF token
-  (from [`GET /api/v1/console/me`](#session-endpoints)) as `X-CSRF-Token`, from a
-  same-origin page. A missing or invalid token, or a cross-site `Origin`,
-  returns `403` with `details.reason = "csrf"`.
+  It has no cookie, so it needs no `Origin`.
+- **Origin.** Cookie-authenticated requests other than `GET`/`HEAD` must send
+  an `Origin` exactly equal to the Console public origin. A missing, `null`, or
+  cross-site `Origin` returns `403` with `details.reason = "csrf"`.
 - **Account status.** A disabled account's session is cleared: `401` with
   `details.reason = "account_disabled"`, and the next `/login` page shows
   "Your account is disabled." A pending account gets `403` with
@@ -1835,9 +1829,7 @@ changes. Responses use the same [conventions](#conventions) and
     "user": { "id": "usr_…", "email": "ops@example.com", "name": null, "status": "active", "admin": true },
     "auth_method": "session",
     "acting_admin": true,
-    "csrf_token": "…",
     "features": { "api_clients": false, "password_login": true },
-    "flash": { "notice": "Signed in as ops@example.com." },
     "nav": {
       "control": true, "principals": true, "roles": true, "secrets": true,
       "credentials": true, "oauth_apps": true, "users": true, "api_clients": false,
@@ -1848,54 +1840,52 @@ changes. Responses use the same [conventions](#conventions) and
 }
 ```
 
-`auth_method` is `"session"` for both a session cookie and a sandbox-delegated caller; the credential names the same Console account. `flash` returns, once, any
-`notice`/`alert` left by a redirect-based flow such as SSO or an OAuth
-callback, and is `{}` otherwise.
+`auth_method` is `"session"` for a session cookie and `"sandbox"` for a sandbox-delegated caller; both name the same Console account.
 
 ### Console sign-in and OAuth pages
 
 The login and pending pages, the [MCP OAuth consent](#mcp-oauth-consent) page,
 and the broker OAuth result page ([consent flow](#oauth-consent-flow)) are
-server-rendered by Rails with plain CSS and no JavaScript, because sign-in is a
-step of the MCP OAuth flow. They are not API endpoints or SPA routes.
-Keep their form contract stable so pods on either side of a rolling deploy or
-rollback accept each other's forms.
+server-rendered with plain CSS and no JavaScript, because sign-in is a step of
+the MCP OAuth flow. They are not API endpoints or SPA routes. Keep their URLs
+and form contract stable for installed MCP clients and bookmarked links.
+
+Every form post must send an `Origin` exactly equal to the Console public
+origin; a missing, `null`, or cross-site `Origin` gets a `422` error page.
+There is no CSRF token.
 
 | Method | Path | Access | Description |
 |---|---|---|---|
-| `GET` | `/login` | public | Login page: SSO buttons, the password form, the one-shot flash |
-| `POST` | `/login` | public, authenticity token required | Password sign-in (form post) |
-| `DELETE` | `/logout` | session, authenticity token required | Sign out (form post with `_method=delete`) |
+| `GET` | `/login` | public | Login page: SSO buttons, the password form, and the message for `?error=<code>` |
+| `POST` | `/login` | public | Password sign-in (form post) |
+| `POST` | `/logout` | session | Sign out (form post) |
 | `GET` | `/pending` | pending session | Holding page for an account awaiting approval |
 
 - `GET /login` shows a "Continue with <Provider>" link to
   `/auth/<provider>/start` per configured SSO provider and, unless
-  `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false`, a form posting
-  `authenticity_token`, `email`, and `password` to `/login`. An active session
-  is redirected to `?return_to=` (when allowlisted) or its landing page.
+  `CENTAUR_CONSOLE_PASSWORD_LOGIN_ENABLED=false`, a form posting `email` and
+  `password` to `/login`. An active session is redirected to `?return_to=`
+  (when valid) or its landing page.
 - `?return_to=` (the SPA sends the current page on a `401`) is remembered for
-  the post-login redirect only when it is an allowlisted same-origin path: `/`,
-  `/console…`, `/mcp/oauth/authorize` (or `/mcp/oauth/authorize.html`),
-  `/oauth/<slug>/start`, or `/launch`, query kept, with no scheme, host, `//`,
-  backslashes, control characters, or dot segments. Other values are ignored.
-  Session-gated GET endpoints that bounce a signed-out browser to `/login`
-  remember their path the same way.
+  the post-login redirect only when it is a same-origin path, query kept, with
+  no scheme, host, `//`, backslashes, whitespace, or control characters; dot
+  segments are resolved. Other values are ignored. Session-gated GET endpoints
+  that bounce a signed-out browser to `/login` remember their path the same
+  way.
 - `POST /login` trims the email and matches it case-insensitively. Success
-  resets the session (fixation) and redirects (`302`) to the remembered path or
-  the landing page (`/console/principals` for admins, `/console/integrations`
-  otherwise) with the notice `"Signed in as <email>."`. A pending account is
-  signed in and redirected to `/pending` ("Your account is awaiting
-  approval."). Failures re-render the page: `404` "Email and password sign in
-  is disabled.", `422` "Invalid email or password.", `422` "Your account is
-  disabled.". A missing or invalid authenticity token, or a cross-site
-  `Origin`, is a `422`.
-- `DELETE /logout` (and `DELETE /api/v1/console/session`) clears the session; the
-  former redirects to `/login` and both leave the notice `"Signed out."`.
+  issues a new session and redirects (`302`) to the remembered path or the
+  landing page (`/console/principals` for admins, `/console/integrations`
+  otherwise). A pending account is signed in and redirected to `/pending`.
+  Failures re-render the page: `404` "Email and password sign in is
+  disabled.", `422` "Invalid email or password.", `422` "Your account is
+  disabled.".
+- `POST /logout` (and `DELETE /api/v1/console/session`) clears the session; the
+  former redirects to `/login`.
 - `GET /pending` shows the signed-in email and a sign-out button. Active
   sessions are redirected to their landing page, signed-out browsers to
   `/login`.
-- SSO failures (`/auth/<provider>/*`) and disabled accounts bounced by a
-  Rails-owned route redirect to `/login` with an alert.
+- SSO failures (`/auth/<provider>/*`) and disabled accounts redirect to
+  `/login?error=<code>`, which renders the matching message.
 
 #### MCP OAuth consent
 
@@ -1917,11 +1907,11 @@ resource. Invalid requests redirect to the registered `redirect_uri` with
 client or `redirect_uri` is not trusted. A valid request renders the consent
 page.
 
-The consent page posts a standard Rails form to `POST /mcp/oauth/authorize`
-with `authenticity_token`, the original `response_type`, `client_id`,
+The consent page posts a form to `POST /mcp/oauth/authorize` with the original
+`response_type`, `client_id`,
 `redirect_uri`, `scope`, `state`, `resource`, `code_challenge`,
 `code_challenge_method`, and `decision`. It needs an active console session and
-a valid authenticity token, and is validated again. `decision=approve` issues a
+the Console `Origin`, and is validated again. `decision=approve` issues a
 single-use code and redirects (`302`) to the `redirect_uri` with `code` and
 `state`; any other decision redirects with `error=access_denied`.
 
@@ -2053,7 +2043,7 @@ Console-only actions:
 - `owner_only` apps give each user their own connection, which serves only that user (see the `owner_only` field of [OAuth apps](#oauth-apps)).
 - `presets` lists presets whose app does not exist yet (a provider preset is also hidden once any app uses its provider); empty for non-admins. `inputs` lists the values the admin enters to set one up.
 
-`DELETE /api/v1/console/integrations/connections/:id` (any active user; CSRF) disconnects one of the caller's own connections to a personal app, by credential OID. The tokens are cleared and the credential marked dead first, so proxy sync and token-broker stop using it; then, when the provider has a revocation endpoint (a `custom` app's `revocation_endpoint`), both tokens are revoked there (RFC 7009). Returns `200` with `data: { id, outcome }`, where `outcome` is `revoked`, `local_only` (no revocation endpoint), or `failed` (revocation failed; access in Centaur is still removed). `404` for a credential the caller did not make or of a shared app. Connecting again revives it.
+`DELETE /api/v1/console/integrations/connections/:id` (any active user) disconnects one of the caller's own connections to a personal app, by credential OID. The tokens are cleared and the credential marked dead first, so proxy sync and token-broker stop using it; then, when the provider has a revocation endpoint (a `custom` app's `revocation_endpoint`), both tokens are revoked there (RFC 7009). Returns `200` with `data: { id, outcome }`, where `outcome` is `revoked`, `local_only` (no revocation endpoint), or `failed` (revocation failed; access in Centaur is still removed). `404` for a credential the caller did not make or of a shared app. Connecting again revives it.
 - `ssh_key.configured` reports whether the caller saved a personal SSH key.
 
 #### Console principals

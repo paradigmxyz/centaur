@@ -93,7 +93,7 @@ toolServer:
 # bundled server creates it on first boot; on an external server, create it
 # before installing. api-rs migrates it and bootstraps the initial admin on
 # every start.
-# DATABASE_URL, the bootstrap login, and the ActiveRecord encryption keys are
+# DATABASE_URL, the bootstrap login, and the Active Record encryption keys are
 # injected from the shared infra Secret. Point IRON_CONTROL_DATABASE_URL
 # elsewhere to use an external DB.
 #
@@ -102,12 +102,11 @@ toolServer:
 # on top of these `console` defaults (see the `centaur.consoleValues` helper), so
 # existing values files keep working. Prefer `console` for new configuration.
 console:
-  # The Console is served by api-rs: there is no implementation switch. The
-  # chart runs no Rails web pod; the `console` Service is only a compatibility
-  # alias (same name and port, forwarding to api-rs) for in-cluster clients with
-  # a cached `centaur-console:3000` URL. The chart runs no Rails process: api-rs
-  # owns the Console schema, the initial-admin bootstrap, and the Slack channel
-  # catalog refresh.
+  # The Console is served by api-rs. The `console` Service is only a
+  # compatibility alias (same name and port, forwarding to api-rs) for
+  # in-cluster clients that default to `centaur-console:3000`. api-rs owns the
+  # Console schema, the initial-admin bootstrap, and the Slack channel catalog
+  # refresh.
   #
   # api-rs reads the existing IRON_CONTROL_* Console keys from the shared infra
   # Secret; its session-cookie key is derived from IRON_CONTROL_SECRET_KEY_BASE.
@@ -542,12 +541,12 @@ companyContext:
     # Projects rows written to company_context_system.custom_documents.
     custom:
       enabled: true
-  # Rails Console OAuth app whose live per-user Google broker credentials are
+  # Console OAuth app whose live per-user Google broker credentials are
   # synchronized: those with drive.readonly for Drive and those with
   # calendar.readonly for Calendar. The embeddings API key comes from
   # OPENAI_API_KEY in the shared Kubernetes Secret.
   googleOauthAppSlug: google
-  # Rails Console OAuth app whose live per-user Granola MCP credentials are
+  # Console OAuth app whose live per-user Granola MCP credentials are
   # synchronized.
   granolaOauthAppSlug: granola
   scanIntervalSeconds: 300
