@@ -21,7 +21,7 @@ hex.workspace = true
 opentelemetry.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
-oxc = { version = "0.158", features = ["ast_visit", "codegen", "isolated_declarations", "semantic", "transformer"] }
+oxc = { version = "0.159", features = ["ast_visit", "codegen", "isolated_declarations", "semantic", "transformer"] }
 reqwest = { workspace = true, features = ["gzip", "deflate"] }
 rquickjs = { version = "0.14", features = ["futures", "loader", "parallel"] }
 serde.workspace = true
