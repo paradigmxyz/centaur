@@ -518,7 +518,9 @@ export async function add_reaction(
 /**
  * Write: upload a file from the sandbox (`path`, for example one saved by `download_file` or
  * `files.write`) and share it into `channel`, optionally in a thread. `filename` defaults to the
- * path's last segment; the file is streamed from disk, not read into the cell.
+ * path's last segment; the file is streamed from disk, not read into the cell. Always goes
+ * through Centaur's API (posted by the Centaur bot, scoped to the caller's upload grants), never
+ * with a linked Slack user token.
  *
  * @requires files
  */
@@ -532,42 +534,18 @@ export async function upload_file(
   const filename = args.filename ?? args.path.split(/[\\/]/).pop() ?? "file";
   const title = args.title ?? filename;
   const content_type = mimeFor(filename);
-  const channel = args.channel.trim();
-  if (access(ctx) === "centaur") {
-    const params: Params = {
-      channel_id: channel, filename, title, content_type,
-      initial_comment: args.initial_comment, thread_ts: args.thread_ts,
-    };
-    const res = await ctx.fetch(`${centaurBase(ctx)}/api/slack/files/upload${query(params)}`, {
-      method: "POST",
-      headers: { ...centaurHeaders(ctx), "content-type": content_type },
-      body: { file: args.path },
-    });
-    const body = await readJson(res, "Centaur API /api/slack/files/upload");
-    const file = fileInfo(body.file ?? {});
-    return { file_ids: [typeof body.file_id === "string" ? body.file_id : file.id], files: [file] };
-  }
-  const ticket = await slackPost(ctx, "files.getUploadURLExternal", { filename, length: stat.bytes });
-  const uploadUrl = typeof ticket.upload_url === "string" ? ticket.upload_url : "";
-  const fileId = typeof ticket.file_id === "string" ? ticket.file_id : "";
-  if (!uploadUrl || !fileId) throw new Error("Slack files.getUploadURLExternal returned no upload_url");
-  if (!uploadUrl.startsWith(`https://${FILES_HOST}/`)) {
-    throw new Error(`Slack gave an upload URL at ${uploadUrl}, not https://${FILES_HOST}; refusing to upload there`);
-  }
-  // The upload URL is presigned: no bearer token goes to the file host.
-  const upload = await ctx.fetch(uploadUrl, {
+  // Always through Centaur's API, even with a linked Slack user token: the file is then posted
+  // by the Centaur bot rather than as the user, so Centaur recognises it as its own output.
+  const params: Params = {
+    channel_id: args.channel.trim(), filename, title, content_type,
+    initial_comment: args.initial_comment, thread_ts: args.thread_ts,
+  };
+  const res = await ctx.fetch(`${centaurBase(ctx)}/api/slack/files/upload${query(params)}`, {
     method: "POST",
-    headers: { "content-type": content_type },
+    headers: { ...centaurHeaders(ctx), "content-type": content_type },
     body: { file: args.path },
   });
-  if (!upload.ok) {
-    throw new Error(`uploading ${filename} returned HTTP ${upload.status}: ${(await upload.text()).slice(0, 500)}`);
-  }
-  const completed = await slackPost(ctx, "files.completeUploadExternal", {
-    files: JSON.stringify([{ id: fileId, title }]),
-    channel_id: channel, thread_ts: args.thread_ts, initial_comment: args.initial_comment,
-  });
-  const uploaded = ((completed.files ?? []) as Body[]).map(fileInfo);
-  const ids = uploaded.map((file) => file.id).filter((id) => id);
-  return { file_ids: ids.length > 0 ? ids : [fileId], files: uploaded };
+  const body = await readJson(res, "Centaur API /api/slack/files/upload");
+  const file = fileInfo(body.file ?? {});
+  return { file_ids: [typeof body.file_id === "string" ? body.file_id : file.id], files: [file] };
 }
