@@ -370,7 +370,6 @@ pub enum HarnessType {
     Codex,
     Amp,
     ClaudeCode,
-    Nanocodex,
     Hermes,
     Pi,
     Omp,
@@ -879,10 +878,6 @@ mod tests {
         assert_eq!(HarnessType::from_str("codex").unwrap(), HarnessType::Codex);
         assert_eq!(HarnessType::from_str("amp").unwrap(), HarnessType::Amp);
         assert_eq!(
-            HarnessType::from_str("nanocodex").unwrap(),
-            HarnessType::Nanocodex
-        );
-        assert_eq!(
             HarnessType::from_str("claudecode").unwrap(),
             HarnessType::ClaudeCode
         );
@@ -904,5 +899,6 @@ mod tests {
     #[test]
     fn harness_type_rejects_unsupported_values() {
         assert!(HarnessType::from_str("claude-code").is_err());
+        assert!(HarnessType::from_str("nanocodex").is_err());
     }
 }

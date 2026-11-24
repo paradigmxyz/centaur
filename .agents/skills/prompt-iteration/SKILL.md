@@ -67,8 +67,8 @@ proxy credentials as this session. It differs in these ways:
 - It gets one bare message: no thread history, and none of the context the
   chat ingress adds (sender, channel, attachments). If the prompt reacts to that
   context, write it into the probe message.
-- It bypasses `harness-server`, so Nanocodex subagent tools and the other
-  harnesses (Pi, Amp, Hermes) are not covered.
+- It bypasses `harness-server`, so the other harnesses (Pi, Amp, Hermes) are
+  not covered.
 - It does not show persona selection, persona model pinning, or Slack
   rendering. Those require a deploy, and persona registry edits also need an
   api-rs restart.

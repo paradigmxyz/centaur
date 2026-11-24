@@ -12,7 +12,7 @@
  *
  * Fields are independent. Precedence (in index.ts): per-thread override, then
  * channel default, then deployment default. Setting `harness` restarts a thread
- * onto it like `--claude`/`--codex`; `reasoning` affects Codex, Nanocodex, and Claude Code.
+ * onto it like `--claude`/`--codex`; `reasoning` affects Codex and Claude Code.
  * `persona` applies only when a session is created, like `--persona`.
  */
 

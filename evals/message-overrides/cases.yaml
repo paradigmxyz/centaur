@@ -159,10 +159,6 @@
   vars:
     text: use the pi harness for this task
     harness: pi
-- description: nanocodex harness
-  vars:
-    text: switch to nanocodex and rerun the tests
-    harness: nanocodex
 - description: codex feature request
   vars:
     text: "@bot can you use Codex's /goal?"

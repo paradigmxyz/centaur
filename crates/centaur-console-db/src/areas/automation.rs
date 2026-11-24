@@ -1555,7 +1555,6 @@ pub fn engine_label(harness_type: Option<&str>) -> Option<String> {
         "codex" => "Codex",
         "claudecode" => "Claude Code",
         "amp" => "Amp",
-        "nanocodex" => "Nanocodex",
         "pi" => "Pi",
         "omp" => "OMP",
         other => {

@@ -1548,6 +1548,16 @@ impl PgSessionStore {
                 -- so older api-rs pods can read assignments made by this version.
                 sandbox_api_server_enabled = true,
                 sandbox_last_active_at = now(),
+                -- A legacy nanocodex session becomes Codex with its new sandbox
+                -- (see LEGACY_NANOCODEX_HARNESS). Both cases read the old row.
+                harness_type = case
+                    when harness_type = 'nanocodex' then 'codex'
+                    else harness_type
+                end,
+                harness_thread_id = case
+                    when harness_type = 'nanocodex' then null
+                    else harness_thread_id
+                end,
                 updated_at = now()
             where thread_key = $1
             returning thread_key, title, sandbox_id, sandbox_repo_cache_enabled, sandbox_repo_cache_access, sandbox_observability_enabled, harness_type, harness_thread_id, persona_id, status, iron_control_principal, proxy_labels, sandbox_last_active_at, created_at, updated_at
@@ -2081,6 +2091,13 @@ pub enum SessionStoreError {
     Bm25IndexesPresent { indexes: Vec<String> },
 }
 
+/// Harness type of sessions created before the nanocodex harness was removed.
+/// Such rows are left in place: they load as Codex sessions with no harness
+/// thread or sandbox (Codex cannot resume a Nanocodex run, and the old sandbox
+/// runs the removed harness), and `update_sandbox_assignment` rewrites them to
+/// Codex once a new sandbox is assigned.
+const LEGACY_NANOCODEX_HARNESS: &str = "nanocodex";
+
 #[derive(Debug, FromRow)]
 struct SessionRow {
     thread_key: String,
@@ -2103,7 +2120,16 @@ struct SessionRow {
 impl TryFrom<SessionRow> for Session {
     type Error = SessionStoreError;
 
-    fn try_from(row: SessionRow) -> Result<Self, Self::Error> {
+    fn try_from(mut row: SessionRow) -> Result<Self, Self::Error> {
+        if row.harness_type == LEGACY_NANOCODEX_HARNESS {
+            row.harness_type = HarnessType::Codex.to_string();
+            row.harness_thread_id = None;
+            row.sandbox_id = None;
+            row.sandbox_repo_cache_enabled = None;
+            row.sandbox_repo_cache_access = None;
+            row.sandbox_observability_enabled = None;
+            row.sandbox_last_active_at = None;
+        }
         Ok(Self {
             thread_key: parse_persisted(row.thread_key)?,
             title: row.title,
@@ -2535,6 +2561,70 @@ mod tests {
         .expect("candidate should use backstop");
 
         assert_eq!(candidate.idle_timeout, Duration::from_secs(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_nanocodex_sessions_load_as_codex_until_reassigned() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:nanocodex-{}", Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        sqlx::query(
+            "update sessions set harness_type = 'nanocodex', harness_thread_id = 'nano-run', \
+             sandbox_id = 'sbx-nano', sandbox_repo_cache_enabled = true, \
+             sandbox_observability_enabled = false, sandbox_last_active_at = now() \
+             where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        // Reads hide the Nanocodex thread and sandbox without rewriting the row.
+        let legacy = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(legacy.harness_type, HarnessType::Codex);
+        assert_eq!(legacy.harness_thread_id, None);
+        assert_eq!(legacy.sandbox_id, None);
+        assert_eq!(legacy.sandbox_capabilities, None);
+        let stored: (String, Option<String>) = sqlx::query_as(
+            "select harness_type, harness_thread_id from sessions where thread_key = $1",
+        )
+        .bind(thread_key.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            ("nanocodex".to_owned(), Some("nano-run".to_owned()))
+        );
+
+        // A new sandbox makes it a Codex session whose new thread id sticks.
+        let capabilities = centaur_session_core::SandboxCapabilities {
+            repo_cache: Default::default(),
+            observability_enabled: false,
+        };
+        let assigned = store
+            .update_sandbox_assignment(&thread_key, "sbx-codex", &capabilities)
+            .await
+            .unwrap();
+        assert_eq!(assigned.sandbox_id.as_deref(), Some("sbx-codex"));
+        assert_eq!(assigned.harness_thread_id, None);
+        let resumed = store
+            .update_harness_thread_id(&thread_key, Some("codex-thread"))
+            .await
+            .unwrap();
+        assert_eq!(resumed.harness_type, HarnessType::Codex);
+        assert_eq!(resumed.harness_thread_id.as_deref(), Some("codex-thread"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

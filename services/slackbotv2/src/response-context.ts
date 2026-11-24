@@ -16,7 +16,6 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex',
-  nanocodex: 'Nanocodex',
   pi: 'Pi',
   omp: 'OMP'
 }
@@ -114,19 +113,11 @@ const CODEX_CONFIG = codexConfig as {
 // intentionally absent.
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
-  codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
-  nanocodex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
+  codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
 }
 
-// Nanocodex deliberately shares Codex's default reasoning policy. Its harness
-// adapter consumes the same CODEX_MODEL_REASONING_EFFORT deployment override,
-// and falls back to the baked Codex effort when that override is absent.
 const BAKED_DEFAULT_REASONING: Record<string, string | undefined> = {
   codex:
-    typeof CODEX_CONFIG.model_reasoning_effort === 'string'
-      ? CODEX_CONFIG.model_reasoning_effort
-      : undefined,
-  nanocodex:
     typeof CODEX_CONFIG.model_reasoning_effort === 'string'
       ? CODEX_CONFIG.model_reasoning_effort
       : undefined
@@ -208,10 +199,8 @@ export function effectiveReasoningForHarness(
   if (key === 'claudecode' || key === 'pi' || key === 'omp') {
     return requested?.trim().toLowerCase() || undefined
   }
-  if (key !== 'codex' && key !== 'nanocodex') return undefined
-  const reasoning = requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
-  // Nanocodex has no distinct Minimal level; its adapter maps Minimal to Low.
-  return key === 'nanocodex' && reasoning === 'minimal' ? 'low' : reasoning
+  if (key !== 'codex') return undefined
+  return requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
 }
 
 /** Returns the requested effort only when the selected model supports it. */
@@ -237,18 +226,14 @@ export function reasoningForModel(
     return effort && PI_REASONING_EFFORTS.has(effort) ? effort : undefined
   }
   if (!selectedModel || !effort) return undefined
-  if (harness !== 'codex' && harness !== 'nanocodex') return undefined
-  // Nanocodex maps its compatibility-only Minimal value to Low before it
-  // reaches the Responses API, so validate the effective value against the
-  // selected model while preserving Minimal for the adapter to normalize.
-  const effectiveEffort = harness === 'nanocodex' && effort === 'minimal' ? 'low' : effort
+  if (harness !== 'codex') return undefined
   if (selectedModel === 'gpt-5.6') {
-    return GPT_5_6_REASONING_EFFORTS.has(effectiveEffort) ? effort : undefined
+    return GPT_5_6_REASONING_EFFORTS.has(effort) ? effort : undefined
   }
   const supported = Object.entries(CODEX_REASONING_EFFORTS_BY_MODEL).find(
     ([modelId]) => selectedModel === modelId || selectedModel.startsWith(`${modelId}-20`)
   )?.[1]
-  return supported?.has(effectiveEffort) ? effort : undefined
+  return supported?.has(effort) ? effort : undefined
 }
 
 // Claude model IDs: family, dash-separated version, optional variant words,

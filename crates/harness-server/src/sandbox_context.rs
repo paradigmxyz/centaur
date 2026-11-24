@@ -142,8 +142,8 @@ fn build_context(
 /// failures until `budget` runs out. A 401 is transient: right after a claim
 /// the proxy may not have its new principal's token yet.
 ///
-/// Runs on its own thread because the blocking client cannot run inside the
-/// nanocodex server's async runtime.
+/// Runs on its own thread because the blocking client cannot run inside an
+/// async runtime.
 fn fetch_permissions(
     base_url: &str,
     budget: Duration,

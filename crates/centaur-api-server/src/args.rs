@@ -2699,7 +2699,6 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
-        HarnessType::Nanocodex => "codex",
         HarnessType::Hermes => "hermes",
         // Pi and OMP default to Anthropic when its key is present.
         HarnessType::Pi | HarnessType::Omp => "claude-code",
@@ -2717,7 +2716,7 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
-        HarnessType::Codex | HarnessType::Nanocodex => env::var("CODEX_AUTH_MODE").ok(),
+        HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode | HarnessType::Pi | HarnessType::Omp => {
             env::var("CLAUDE_CODE_AUTH_MODE").ok()
         }
@@ -4524,21 +4523,6 @@ mod tests {
         assert_eq!(
             args.sandbox.iron_proxy.harness.engine,
             HarnessType::ClaudeCode
-        );
-    }
-
-    #[test]
-    fn nanocodex_reuses_the_codex_proxy_fragment() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(&[("CODEX_AUTH_MODE", "access_token")]);
-
-        assert_eq!(
-            harness_fragment_engine_name(&HarnessType::Nanocodex),
-            harness_fragment_engine_name(&HarnessType::Codex)
-        );
-        assert_eq!(
-            harness_auth_mode_env(&HarnessType::Nanocodex).as_deref(),
-            Some("access_token")
         );
     }
 

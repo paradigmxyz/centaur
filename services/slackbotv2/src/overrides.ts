@@ -3,14 +3,14 @@ import { escapeRegExp } from './utils'
 
 /**
  * Inline message directives, restored from the v1 slackbot:
- *   --claude | --claude-code | --amp | --codex | --nanocodex | --pi | --omp
+ *   --claude | --claude-code | --amp | --codex | --pi | --omp
  *                                                  pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
  *   --persona <id> (or --persona=<id>)           pick the persona independently
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex/claude-code/pi/omp)
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/claude-code/pi/omp)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
@@ -59,7 +59,6 @@ const HARNESS_FLAGS: Record<string, string> = {
   claudecode: 'claudecode',
   codex: 'codex',
   hermes: 'hermes',
-  nanocodex: 'nanocodex',
   pi: 'pi',
   omp: 'omp'
 }
@@ -91,7 +90,7 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ])
   )
 
-const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex', 'pi', 'omp'])
+const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'pi', 'omp'])
 const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
 const STRATEGY_REASONING_EFFORTS = new Set([
   'none',
@@ -290,7 +289,6 @@ export function validateStrategyOverrides(
     reasoning =
       harnessType === undefined ||
       harnessType === 'codex' ||
-      harnessType === 'nanocodex' ||
       harnessType === 'pi' ||
       harnessType === 'omp'
         ? normalized
@@ -407,7 +405,10 @@ export function parseEnabledHarnesses(value: string | undefined): string[] | und
   return [...new Set(harnesses)]
 }
 
+// Unknown harnesses (for example one a thread pinned before it was removed)
+// count as disabled so callers fall back to the deployment default.
 export function isHarnessEnabled(harness: string, enabledHarnesses?: readonly string[]): boolean {
+  if (!STRATEGY_HARNESSES.has(harness)) return false
   return enabledHarnesses === undefined || enabledHarnesses.includes(harness)
 }
 

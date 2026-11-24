@@ -25,8 +25,6 @@ pub enum HarnessServerError {
     InvalidBlocksInput { message: String },
     #[error("required environment variable {name} is not set")]
     MissingEnvironment { name: &'static str },
-    #[error("Nanocodex error: {0}")]
-    Nanocodex(String),
     #[error("unknown threadId {thread_id}")]
     UnknownThread { thread_id: String },
     #[error("failed to spawn harness command in {cwd}: {source}")]

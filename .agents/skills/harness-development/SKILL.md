@@ -1,6 +1,6 @@
 ---
 name: harness-development
-description: "Add, modify, or debug Centaur harness-server backends in crates/harness-server. Use when adding a new harness CLI, changing how Codex, Claude Code, Amp, Pi, Nanocodex, or Hermes output is normalized, or investigating harness streaming, interrupt, resume, model, or reasoning-effort behavior."
+description: "Add, modify, or debug Centaur harness-server backends in crates/harness-server. Use when adding a new harness CLI, changing how Codex, Claude Code, Amp, Pi, or Hermes output is normalized, or investigating harness streaming, interrupt, resume, model, or reasoning-effort behavior."
 ---
 
 # Harness Development
@@ -34,8 +34,8 @@ Backends:
   stdin lines, parses stdout lines into typed events, and normalizes them into
   `NormalizedEvent`. `CodexTurnNormalizer` (`turn.rs`) turns those into App
   Server items.
-- `nanocodex.rs`, `hermes.rs`: their own blocks servers (an in-process library
-  and a long-lived JSON-RPC gateway). They also feed `CodexTurnNormalizer`.
+- `hermes.rs`: its own blocks server over a long-lived JSON-RPC gateway. It
+  also feeds `CodexTurnNormalizer`.
 
 ## Adding or changing a backend
 

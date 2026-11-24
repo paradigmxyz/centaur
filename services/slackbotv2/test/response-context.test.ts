@@ -18,7 +18,6 @@ import codexConfig from '../../../harness/codex/config.toml'
 describe('harnessDisplayName', () => {
   test('maps known harness wire values to display names', () => {
     expect(harnessDisplayName('codex')).toBe('Codex')
-    expect(harnessDisplayName('nanocodex')).toBe('Nanocodex')
     expect(harnessDisplayName('claudecode')).toBe('Claude Code')
     expect(harnessDisplayName('amp')).toBe('Amp')
     expect(harnessDisplayName('omp')).toBe('OMP')
@@ -78,26 +77,10 @@ describe('reasoningForModel', () => {
     }
   })
 
-  test('validates Nanocodex against its selected model after mapping minimal to low', () => {
-    for (const [model, supportedEfforts] of Object.entries(effortsByModel)) {
-      for (const effort of allEfforts) {
-        const effectiveEffort = effort === 'minimal' ? 'low' : effort
-        expect(reasoningForModel('nanocodex', model, effort)).toBe(
-          supportedEfforts.includes(effectiveEffort) ? effort : undefined
-        )
-      }
-    }
-  })
-
   test('supports current model aliases and snapshots without widening their effort sets', () => {
     expect(reasoningForModel('codex', 'gpt-5.6', 'max')).toBe('max')
-    expect(reasoningForModel('nanocodex', 'gpt-5.6', 'max')).toBe('max')
     expect(reasoningForModel('codex', 'gpt-5.6-sol-2026-07-01', 'minimal')).toBeUndefined()
-    expect(reasoningForModel('nanocodex', 'gpt-5.6-sol-2026-07-01', 'minimal')).toBe(
-      'minimal'
-    )
     expect(reasoningForModel('codex', 'gpt-5.5-pro-2026-07-01', 'low')).toBeUndefined()
-    expect(reasoningForModel('nanocodex', 'gpt-5.5-pro-2026-07-01', 'low')).toBeUndefined()
     expect(reasoningForModel('codex', 'gpt-5.4-2026-03-05', 'xhigh')).toBe('xhigh')
     expect(reasoningForModel('codex', 'gpt-5.3', 'high')).toBeUndefined()
   })
@@ -146,7 +129,6 @@ describe('defaultModelForHarness', () => {
     expect(bakedCodexModel).toBeTruthy()
     expect(defaultModelForHarness('claudecode')).toBe(bakedClaudeModel)
     expect(defaultModelForHarness('codex')).toBe(bakedCodexModel)
-    expect(defaultModelForHarness('nanocodex')).toBe(bakedCodexModel)
   })
 
   test('prefers the deployment-configured model over the baked default', () => {
@@ -179,22 +161,20 @@ describe('defaultReasoningForHarness', () => {
   const bakedCodexReasoning = (codexConfig as { model_reasoning_effort: string })
     .model_reasoning_effort
 
-  test('shares the baked Codex reasoning default with Nanocodex', () => {
+  test('reads the baked Codex reasoning default', () => {
     expect(bakedCodexReasoning).toBe('medium')
     expect(defaultReasoningForHarness('codex')).toBe(bakedCodexReasoning)
-    expect(defaultReasoningForHarness('nanocodex')).toBe(bakedCodexReasoning)
     expect(defaultReasoningForHarness('claudecode')).toBeUndefined()
   })
 
   test('prefers a deployment-configured Codex-compatible default', () => {
-    const configured = { codex: 'HIGH', nanocodex: 'HIGH' }
+    const configured = { codex: 'HIGH' }
     expect(defaultReasoningForHarness('codex', configured)).toBe('high')
-    expect(defaultReasoningForHarness('nanocodex', configured)).toBe('high')
   })
 
   test('reports the effort the selected harness actually runs', () => {
     expect(effectiveReasoningForHarness('codex', 'xhigh')).toBe('xhigh')
-    expect(effectiveReasoningForHarness('nanocodex', 'minimal')).toBe('low')
+    expect(effectiveReasoningForHarness('codex', 'minimal')).toBe('minimal')
     expect(effectiveReasoningForHarness('claudecode', 'high')).toBe('high')
     expect(effectiveReasoningForHarness('claudecode', undefined)).toBeUndefined()
     expect(effectiveReasoningForHarness('omp', 'max')).toBe('max')
@@ -209,7 +189,6 @@ describe('defaultServiceTierForHarness', () => {
   test('reports the baked Codex service tier only for the Codex harness', () => {
     expect(bakedServiceTier).toBe('fast')
     expect(defaultServiceTierForHarness('codex')).toBe(bakedServiceTier)
-    expect(defaultServiceTierForHarness('nanocodex')).toBeUndefined()
     expect(defaultServiceTierForHarness('claudecode')).toBeUndefined()
   })
 })
@@ -280,17 +259,6 @@ describe('buildSlackResponseContextBlock', () => {
       metadataEnabled: true
     })
     expect(block?.elements[0]?.text).toBe('Claude Code')
-  })
-
-  test('shows the resolved Nanocodex harness', () => {
-    const block = buildSlackResponseContextBlock({
-      harnessType: 'nanocodex',
-      metadataEnabled: true,
-      model: 'gpt-5.6-sol',
-      reasoning: 'low'
-    })
-
-    expect(block?.elements[0]?.text).toBe('Sol 5.6 · Nanocodex · Low')
   })
 
   test('skips the block when metadata and notices are absent', () => {
