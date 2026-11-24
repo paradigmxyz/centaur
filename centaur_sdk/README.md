@@ -26,7 +26,7 @@ In server mode, `secret()` returns stub values that the firewall replaces
 with real credentials in-flight. In CLI mode, configure a backend first:
 
 ```python
-from centaur_sdk.backends import configure, DotEnvBackend
+from centaur_sdk.backends import configure, EnvBackend
 
-configure(DotEnvBackend(".env"))
+configure(EnvBackend())
 ```

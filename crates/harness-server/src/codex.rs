@@ -559,9 +559,7 @@ fn start_or_resume_thread<W: Write>(
     traceparent: Option<&str>,
 ) -> Result<StartedCodexThread> {
     let cwd = env::current_dir()?.display().to_string();
-    let initial_resume = env::var("CODEX_CONTINUE_THREAD_ID")
-        .or_else(|_| env::var("AMP_CONTINUE_THREAD_ID"))
-        .unwrap_or_default();
+    let initial_resume = env::var("CODEX_CONTINUE_THREAD_ID").unwrap_or_default();
     let open = match open {
         OpenThread::New if !initial_resume.trim().is_empty() => {
             OpenThread::Resume(initial_resume.trim())

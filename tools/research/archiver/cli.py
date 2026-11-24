@@ -121,20 +121,6 @@ def _resolve_source_auth_inputs(
     return kind, resolved_account, resolved_password, resolved_email
 
 
-@app.command("init-db")
-def init_db() -> None:
-    """Deprecated: DB setup is not required in extraction-only mode."""
-    print(
-        dump_json(
-            {
-                "status": "error",
-                "error": "init-db is disabled in extraction-only mode",
-            }
-        )
-    )
-    raise typer.Exit(1)
-
-
 @app.command()
 def download(
     source: str = typer.Option(..., help="Source URL (DocSend or Google Drive)"),
@@ -306,45 +292,6 @@ def extract(
     print(dump_json(payload))
     if payload.get("status") != "ok":
         raise typer.Exit(1)
-
-
-@app.command()
-def ingest(
-    manifest: str = typer.Option(..., help="Download manifest JSON"),
-) -> None:
-    """Deprecated alias for parse (extraction-only mode)."""
-    print(dump_json({"status": "warning", "warning": "ingest is deprecated; use parse or extract"}))
-    parse(manifest=manifest)
-
-
-@app.command()
-def search(
-    query: Optional[str] = typer.Argument(None, help="Search query"),
-) -> None:
-    """Disabled in extraction-only mode."""
-    _ = query
-    print(dump_json({"status": "error", "error": "search is disabled in extraction-only mode"}))
-    raise typer.Exit(1)
-
-
-@app.command()
-def status(
-    source: str = typer.Option(..., help="Source URL or file hash"),
-) -> None:
-    """Disabled in extraction-only mode."""
-    _ = source
-    print(dump_json({"status": "error", "error": "status is disabled in extraction-only mode"}))
-    raise typer.Exit(1)
-
-
-@app.command()
-def fetch(
-    chunk_id: int = typer.Option(..., help="Chunk ID from search results"),
-) -> None:
-    """Disabled in extraction-only mode."""
-    _ = chunk_id
-    print(dump_json({"status": "error", "error": "fetch is disabled in extraction-only mode"}))
-    raise typer.Exit(1)
 
 
 if __name__ == "__main__":

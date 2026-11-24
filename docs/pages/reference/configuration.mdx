@@ -13,7 +13,6 @@ Use these as the main extension points:
 | Source | Use |
 | --- | --- |
 | `secretManager.existingSecretName` | Required runtime secrets such as database, Slack, sandbox signing, and 1Password credentials. |
-| `api.extraEnv` | API feature flags, worker tuning, retention, observability, and deployment-specific overrides. |
 | `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `apiRs.nodeSelector`, `apiRs.affinity`, `apiRs.tolerations` | Controls scheduling for api-rs pods, including dedicated tainted node pools. |
@@ -22,7 +21,7 @@ Use these as the main extension points:
 | `postgres.nodeSelector`, `postgres.affinity`, `postgres.tolerations` | Controls scheduling for the bundled PostgreSQL pod. Ensure selected nodes can mount its persistent storage. |
 | `postgres.enabled`, `externalDatabase.*` | Replaces the bundled PostgreSQL with an external server such as RDS or Cloud SQL, scopes NetworkPolicy egress to it, and selects the company-context text-search backend. See [Use an External PostgreSQL](/deploying-in-production#use-an-external-postgresql). |
 | `companyContext.*` | Company-context ingestion service, default off. Formerly `experimentalCompanyContext.*`, still accepted as an alias. Requires `OPENAI_API_KEY`, `SLACK_BOT_TOKEN`, and `CENTAUR_JWT_SIGNING_SECRET`. See [Company Context](/operate/company-context). |
-| `slackbot.extraEnv` | Slackbot HTTP, Slack, feedback, and cross-org behavior. |
+| `slackbotv2.extraEnv` | Slackbot HTTP, Slack, and cross-org behavior. |
 | `sandbox.extraEnv` | Extra variables copied into every sandbox pod through `KUBERNETES_SANDBOX_EXTRA_ENV`. |
 | `overlays.sources` | Ordered repo-cache-backed overlay repos for tools, workflows, skills, and Code Mode connectors; subdirs default to `tools`, `workflows`, `.agents/skills`, and `connectors`. |
 | `overlay.systemPrompt` | Small inline prompt overlay escape hatch. |
@@ -86,29 +85,11 @@ Default roles and default sandbox capabilities are stored in the Console, not
 as Helm values. Configure them in **System Settings** before new principals are
 created. Changing a default does not rewrite existing principals.
 
-## API
-
-| Env var | Set from | Controls |
-| --- | --- | --- |
-| `CENTAUR_DEFAULT_HARNESS` | `api.defaultHarness`. | Default harness for new executions. |
-| `CENTAUR_ENVIRONMENT` | `api.extraEnv` or deployment env. | Environment label in traces and telemetry. |
-| `CENTAUR_LOG_LEVEL`, `LOG_LEVEL` | Helm sets `CENTAUR_LOG_LEVEL=info`; override in `api.extraEnv`. | API log level. |
-| `CENTAUR_SERVICE_NAME` | `api.extraEnv`. | Default API log `service` field. |
-| `SHUTDOWN_DRAIN_TIMEOUT_S` | `api.extraEnv`. | Graceful shutdown wait for in-flight HTTP requests. |
-| `EXECUTION_WORKER_ENABLED` | `api.executionWorkerEnabled`. | Starts the durable agent execution worker. |
-| `WORKFLOW_WORKER_ENABLED` | `api.workflowWorkerEnabled`. | Starts the durable workflow worker. |
-| `WARM_POOL_ENABLED` | `api.warmPoolEnabled`. | Starts warm sandbox replenishment. |
-| `PLUGIN_WATCHER_ENABLED` | `api.pluginWatcherEnabled`. | Enables tool and workflow hot-reload watchers. |
-| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from `overlays.sources[*].toolsSubdir` (default `tools`); fallback to `PLUGINS_DIR`. | Tool discovery paths. |
-| `SLACKBOT_URL` | Chart-rendered Slackbot service URL. | API callback target for Slack delivery. |
-| `FINAL_DELIVERY_MAX_ATTEMPTS`, `FINAL_DELIVERY_READY_GRACE_S` | `api.extraEnv`. | Final-delivery retry and claim timing. |
-| `CENTAUR_ENABLE_GCLOUD_BOOTSTRAP`, `GCP_GCLOUD_CREDENTIAL`, `GCLOUD_PROJECT` | `api.extraEnv` or Secret. | Optional gcloud ADC bootstrap in the API container. |
-| `CLAUDE_MODEL`, `CODEX_MODEL` | `api.extraEnv` or request model override. | Harness model selection defaults. When set via `sandbox.extraEnv`, the chart also mirrors them into slackbotv2 and the Console so their model displays track the deployment. |
-
 ## API-RS
 
 | Env var or value | Set from | Controls |
 | --- | --- | --- |
+| `TOOL_DIRS`, `PLUGINS_DIR` | Chart-rendered from `overlays.sources[*].toolsSubdir` (default `tools`); fallback to `PLUGINS_DIR`. | Tool discovery paths. |
 | `RUST_LOG` | Chart sets `info`; override with `apiRs.extraEnv`. | Rust tracing filter for the API-RS binary and crates. |
 | `OTEL_SERVICE_NAME` | `apiRs.extraEnv`; defaults to `centaur-api-rs`. | OpenTelemetry service name used by trace backends. |
 | `CENTAUR_ENVIRONMENT`, `DEPLOY_ENV`, `ENVIRONMENT` | `apiRs.extraEnv` or deployment env. | Deployment environment resource attribute for telemetry. |
@@ -148,37 +129,14 @@ Sandbox lifecycle:
 There is no separate suspended-only delete timer. Pausing is controlled by the
 per-execution idle timeout; deletion is controlled by sandbox max lifetime.
 
-Execution tuning:
-
-| Env var | Set from | Controls |
-| --- | --- | --- |
-| `EXECUTION_WORKER_CONCURRENCY` | `api.extraEnv`. | Max concurrent execution claims. |
-| `EXECUTION_RESERVED_USER_SLOTS` | `api.extraEnv`. | Worker slots reserved for user-facing requests. |
-| `EXECUTION_WORKER_LEASE_S` | `api.extraEnv`. | Execution claim lease duration. |
-| `EXECUTION_SILENCE_TIMEOUT_S`, `EXECUTION_TOOL_SILENCE_TIMEOUT_S`, `EXECUTION_HARD_TIMEOUT_S` | `api.extraEnv`. | Execution watchdog and absolute timeouts. |
-| `EXECUTION_WATCHDOG_POLL_S`, `EXECUTION_RECONCILE_INTERVAL_S`, `EXECUTION_STALE_RECOVERY_INTERVAL_S` | `api.extraEnv`. | Execution watchdog and reconciliation cadence. |
-| `EXECUTION_RECONCILE_STARTUP_LIMIT` | `api.extraEnv`. | Max interrupted executions recovered at startup. |
-| `EXECUTION_STREAM_EOF_RETRY_DELAY_S` | `api.extraEnv`. | Delay before retrying interrupted sandbox streams. |
-| `THREAD_FAILURE_LOOP_WINDOW_S`, `THREAD_FAILURE_LOOP_THRESHOLD` | `api.extraEnv`. | Repeated thread failure detection. |
-| `IDLE_TTL_S`, `SUSPENDED_RETENTION_S`, `MAX_ACTIVE_SANDBOX_SESSIONS` | `api.extraEnv`. | Sandbox cleanup limits. |
-| `STREAM_EOF_REATTACH_MAX`, `STREAM_EOF_REATTACH_BACKOFF_S` | `api.extraEnv`. | Stream reattach retry behavior. |
-| `SANDBOX_CROSS_THREAD_READS` | `api.extraEnv`. | Lets a sandbox token read any thread it has the key for (messages, status, attachments). Defaults to enabled. Set to `0` to confine reads to the token's own thread. Writes are always confined regardless. |
-
 ## Slackbot
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `NODE_ENV` | Runtime env. | Development route listing and telemetry environment fallback. |
 | `PORT` | Runtime env. | Slackbot HTTP port. |
-| `SLACK_API_URL` | `slackbot.extraEnv`. | Optional Slack Web API base URL override. |
+| `SLACK_API_URL` | `slackbotv2.extraEnv`. | Optional Slack Web API base URL override. |
 | `CENTAUR_API_URL` | Chart-rendered API service URL. | API base URL used by Slackbot. |
-| `CENTAUR_SLACK_EVENTS_PATH` | `slackbot.extraEnv`. | Slack Events API route; defaults to `/api/webhooks/slack`. |
-| `RUNTIME_ERROR_ALERT_CHANNEL` | `slackbot.runtimeErrorAlertChannel`. | Slack channel for runtime error alerts. |
-| `SLACK_EVENT_DEDUP_TTL_MS` | `slackbot.extraEnv`. | Slack event dedupe window. |
-| `SLACK_SIGNATURE_MAX_AGE_SECONDS` | `slackbot.extraEnv`. | Maximum accepted Slack signature age. |
-| `LINEAR_API_KEY` | Secret or `slackbot.extraEnv`. | Enables Slack feedback commands to create Linear issues. |
-| `SLACK_FEEDBACK_COMMANDS`, `SLACK_FEEDBACK_ALLOWED_CHANNELS` | `slackbot.extraEnv`. | Feedback slash commands and optional channel allowlist. |
-| `SLACK_FEEDBACK_LINEAR_TEAM_ID`, `SLACK_FEEDBACK_LINEAR_PROJECT_ID` | `slackbot.extraEnv`. | Linear destination for feedback issues. |
 | `SLACKBOTV2_AGENT_VIEW_ENABLED` | `slackbotv2.agentViewEnabled`. | Enables Slack agent view, threaded DM sessions, and native status and titles. Defaults to `false`. Requires the Slack app migration described in [Quickstart](/quickstart). Subscribe to `agent_session_stopped` for the native Stop button. |
 | `SLACKBOTV2_AUTO_JOIN_CREATED_CHANNELS` | `slackbotv2.autoJoinCreatedChannels`. | Joins newly-created public channels after subscribed `channel_created` events. Requires `channels:read` and `channels:join`. Defaults to `false`. |
 | `SLACKBOTV2_ACK_REACTION_ENABLED` | `slackbotv2.ackReactionEnabled`. | Reacts to mentioned messages that start a turn, then removes the reaction after the assistant response is posted. Requires `reactions:write`. Defaults to `true` and disables itself for the running process if Slack reports the scope is missing. |
@@ -195,8 +153,6 @@ Execution tuning:
 | `SLACKBOTV2_DEFAULT_HARNESS` | `sandbox.harnessEngine`. | Base harness for new Slack threads without an explicit flag or channel default. |
 | `SLACKBOTV2_ENABLED_HARNESSES` | Unrestricted when unset. | Comma-separated harness wire values allowed by Slack routing, set through `slackbotv2.extraEnv`. Disabled message overrides, channel defaults, and sticky threads fall back to the enabled deployment default. |
 | `SLACKBOTV2_CHANNEL_DEFAULTS` | `slackbotv2.channelDefaults`. | Per-channel default persona / harness / model / provider / reasoning as a JSON object keyed by Slack conversation id, where each value is an object of optional `persona`/`harness`/`model`/`provider`/`reasoning` fields (same vocabulary as the inline flags, so `harness: claude`, `provider: bedrock`, and Claude model aliases like `opus` all work), e.g. `{"C0ENG":{"harness":"claude","model":"opus","reasoning":"high"},"C0TRIAGE":{"reasoning":"low"}}`. A model is only meaningful within a harness, so name the harness alongside it. Applied when a message in that channel carries no explicit/sticky per-thread flag (below such a flag, above the deployment/baked default) and forwarded onto the harness input line so it takes effect; setting the harness restarts a thread onto it like a `--claude`/`--codex` flag. `reasoning` affects the Codex, Claude Code, and Pi harnesses. `persona` names a deployed persona and, like `--persona`, applies only when the thread's session is created. Malformed JSON and unrecognized field values are logged and ignored. |
-| `SLACK_TEAM_ID` | `slackbot.extraEnv`. | Workspace team ID (e.g. `T01ABCD2EFG`) used to rewrite `https://*.slack.com/archives/...` URLs in final-delivery messages into native `slack://channel?team=...` deep links that open in the Slack app. Leave unset to keep archive URLs unchanged. |
-| `COMMIT_SHA` | Build/deploy env. | Commit shown in Slackbot metadata. |
 
 ## Teamsbot
 
@@ -224,12 +180,10 @@ API-set variables:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `AGENT_IMAGE` | `sandbox.image.*`. | Sandbox image used by the Kubernetes backend. |
-| `AGENT_API_URL` | Chart-rendered API service URL. | Source for sandbox `CENTAUR_API_URL`; required by Kubernetes backend. |
 | `CENTAUR_API_URL`, `CENTAUR_THREAD_KEY` | API sandbox creation. | API callback and thread key. Warm-pool sandboxes boot without `CENTAUR_THREAD_KEY`; read the sandbox context file instead. |
 | `CENTAUR_SANDBOX_CONTEXT_FILE` | Optional override. | Path of the sandbox context file; defaults to `~/.centaur/sandbox.json`. |
 | `CENTAUR_TURN_TRACE_FILE` | Optional override. | Path of the turn trace file; defaults to `~/.centaur/turn-trace.json`. |
-| `AMP_MODE`, `AMP_THREAD_VISIBILITY`, `AMP_CONTINUE_THREAD_ID` | API env or resume path. | Amp mode and resume behavior. |
+| `AMP_MODE`, `AMP_THREAD_VISIBILITY` | API env. | Amp mode and thread visibility. |
 | `FIREWALL_HOST`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and lowercase variants | API sandbox creation. | Routes sandbox egress through per-sandbox iron-proxy. |
 | `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO` | API sandbox creation. | Trust bundle for proxied TLS. |
 | `PG_PROXY_PASSWORD_<SECRET_NAME>`, `<PG_DSN_SECRET_NAME>` | API per-sandbox proxy creation. | Proxied Postgres credentials for tools that declare `pg_dsn` secrets. |
@@ -252,34 +206,30 @@ Kubernetes backend:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `KUBERNETES_NAMESPACE`, `POD_NAMESPACE`, `KUBERNETES_KUBECONFIG` | Chart namespace, downward API, or `api.extraEnv`. | Kubernetes client namespace/config. |
-| `KUBERNETES_AGENT_IMAGE_PULL_POLICY`, `KUBERNETES_SANDBOX_IMAGE_PULL_SECRETS` | `sandbox.image.pullPolicy`, `global.imagePullSecrets`. | Sandbox image pull behavior. |
 | `SESSION_SANDBOX_RUNTIME_CLASS_NAME` | `sandbox.runtimeClassName`. | RuntimeClass for sandbox and iron-proxy pods (e.g. gVisor). |
 | `SESSION_SANDBOX_SERVICE_ACCOUNT_NAME` | `sandbox.serviceAccountName`. | ServiceAccount for sandbox pods (session, warm, and workflow-host), e.g. for cloud workload identity (EKS IRSA). Must already exist in the namespace; iron-proxy pods are unaffected and `automountServiceAccountToken` stays `false`. Changing it drains retained sandboxes before reuse. |
 | `SESSION_SANDBOX_RESOURCES` | `sandbox.resources`. | Session sandbox pod resources (per-session and warm) as a JSON Kubernetes `ResourceRequirements` object. Arbitrary resource names are preserved, and malformed input fails startup. |
 | `WORKFLOW_HOST_RESOURCES` | `apiRs.workflowHostResources`. | Workflow-host sandbox pod resources as a JSON Kubernetes `ResourceRequirements` object, sized independently of session sandboxes. |
 | `KUBERNETES_IRON_PROXY_RESOURCES` | `ironProxy.resources`. | Per-sandbox iron-proxy pod resources as a JSON Kubernetes `ResourceRequirements` object. |
-| `KUBERNETES_SANDBOX_READY_TIMEOUT_S`, `KUBERNETES_ATTACH_LOG_TAIL_LINES` | `api.extraEnv`. | Sandbox readiness and attach diagnostics. |
 | `SESSION_SANDBOX_RUNNING_LIMIT` | `apiRs.sandboxRunningLimit`. | Best-effort admission gate for sandboxes observed as running, excluding ready warm sandboxes. Creates and resumes at the limit are rejected; existing sandboxes are never evicted. |
 | `SESSION_SANDBOX_CLEANUP_INTERVAL_SECS`, `SESSION_SANDBOX_IDLE_CLEANUP_BACKSTOP_SECS` | `apiRs.sandboxCleanupIntervalSecs`, `apiRs.sandboxIdleCleanupBackstopSecs`. | DB-aware cleanup of unreferenced sandboxes and restart recovery for idle pauses. Persisted `idle_timeout_ms` is honored after restart; the backstop is the fallback for older execution rows without that metadata. |
 | `KUBERNETES_SANDBOX_EXTRA_ENV` | `sandbox.extraEnv`. | JSON list copied into each sandbox. |
 | `KUBERNETES_WORKFLOW_DIRS` | Chart-rendered from `overlays.sources[*].workflowsSubdir` (default `workflows`) using the sandbox repo-cache mount prefix. | Workflow-host sandbox discovery paths. |
 | `KUBERNETES_FIREWALL_CA_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME`, `KUBERNETES_FIREWALL_CA_SECRET_KEY`, `KUBERNETES_FIREWALL_CA_KEY_SECRET_KEY` | `firewall.existingCa*SecretName`, `firewall.existingCa*SecretKey`. | CA material for sandbox/proxy TLS interception. Names select the Secrets (they may be the same); keys select the certificate (default `ca-cert.pem`) and private-key (default `ca-key.pem`) entries. Sandboxes mount only the certificate. |
-| `KUBERNETES_SECRET_ENV_NAME`, `KUBERNETES_SECRET_ENV_PREFIX`, `KUBERNETES_BOOTSTRAP_SECRET_NAME` | `secretManager.*`, `secrets.bootstrapSecretName`. | Secrets read by API-created proxy/sandbox pods. |
-| `KUBERNETES_IRON_PROXY_IMAGE`, `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY`, `KUBERNETES_IRON_PROXY_PORT`, `KUBERNETES_IRON_PROXY_MANAGEMENT_PORT`, `KUBERNETES_IRON_PROXY_HEALTH_PORT` | `ironProxy.*`. | Per-sandbox iron-proxy image and ports. |
+| `KUBERNETES_SECRET_ENV_NAME`, `KUBERNETES_BOOTSTRAP_SECRET_NAME` | `secretManager.*`, `secrets.bootstrapSecretName`. | Secrets read by API-created proxy/sandbox pods. |
+| `KUBERNETES_IRON_PROXY_IMAGE`, `KUBERNETES_IRON_PROXY_IMAGE_PULL_POLICY` | `ironProxy.*`. | Per-sandbox iron-proxy image and ports. |
 | `FIREWALL_MANAGER_SECRET_SOURCE`, `FIREWALL_MANAGER_SECRET_TTL` | `ironProxy.secretSource`, `ironProxy.secretTtl`. | Secret source and cache TTL for rendered proxy config. |
-| `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `api.extraEnv`. | 1Password Connect endpoint details. |
-| `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `api.extraEnv`. | API pod selector for API-managed proxy policies. |
+| `KUBERNETES_OP_CONNECT_HOST`, `KUBERNETES_OP_CONNECT_APP_NAME`, `KUBERNETES_OP_CONNECT_PORT` | Chart helper or `apiRs.extraEnv`. | 1Password Connect endpoint details. |
+| `KUBERNETES_API_POD_LABEL_SELECTOR` | Chart-rendered labels or `apiRs.extraEnv`. | API pod selector for API-managed proxy policies. |
 | `KUBERNETES_IRON_PROXY_SYNC_POD_LABEL_SELECTOR` | Chart-rendered proxy-sync labels or `apiRs.extraEnv`. | Proxy-sync pod selector for API-created proxy egress policies. Defaults to `app.kubernetes.io/component=proxy-sync`; the destination port comes from `IRON_CONTROL_PROXY_SYNC_URL`. |
 | `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_URL`, `KUBERNETES_IRON_PROXY_COMPANY_CONTEXT_POD_LABEL_SELECTOR` | Chart-rendered when `companyContext.enabled`, or `apiRs.extraEnv`. | Company-context query API that API-created proxies may reach, and its pod selector (default `app.kubernetes.io/component=company-context`). The destination port comes from the URL. Unset allows no such egress. |
-| `KUBERNETES_EGRESS_DISCOVERY_ENABLED`, `KUBERNETES_EGRESS_SERVICE_NAMESPACE`, `KUBERNETES_CLUSTER_DOMAIN`, `KUBERNETES_EGRESS_TAILNET_FQDN_ANNOTATION` | `api.egressDiscovery.*`. | Egress service discovery for sandbox NetworkPolicies. |
 | `REPOS_PATH` | `sandbox.reposPath`. | Repo cache path mounted into sandboxes. |
 
 Sandbox entrypoint and wrappers:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `CENTAUR_HARNESS_CONFIG_DIR`, `CENTAUR_HARNESS_ADAPTER` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
+| `CENTAUR_HARNESS_CONFIG_DIR` | Sandbox image or `sandbox.extraEnv`. | Harness config directory and optional adapter executable. |
 | `CENTAUR_SKILL_DIRS` | Chart-rendered from `overlays.sources[*].skillsSubdir` (default `.agents/skills`) through `SESSION_SANDBOX_EXTRA_ENV`. | Ordered skill directories copied into the agent workspace. |
 | `CENTAUR_CODEMODE_CONNECTORS` | Chart-rendered from `overlays.sources[*].connectorsSubdir` (default `connectors`) through `SESSION_SANDBOX_EXTRA_ENV`, appended to the image's `/opt/centaur/connectors` in source order. | Ordered connector roots for the Code Mode sandbox process; a later root shadows earlier ones, and missing roots are skipped. |
 | `COMPANY_CONTEXT_API_URL` | Chart-rendered through `SESSION_SANDBOX_EXTRA_ENV` when `companyContext.enabled`, or `sandbox.extraEnv`. | Company-context query API that the `company_context` Code Mode connector and the `slack search` command call through the sandbox proxy, which injects the sandbox token. Unset disables both. |
@@ -292,24 +242,19 @@ Sandbox entrypoint and wrappers:
 | Custom provider `apiKeyEnv` | The configured iron-proxy secret source. | Bearer token for that provider. Sandboxes receive only a same-name placeholder, and replacement is restricted to the provider's `baseUrl` DNS host. |
 | `CODEX_MODEL_REASONING_SUMMARY` | `sandbox.extraEnv`. | Sets `model_reasoning_summary` in the Codex config (`auto`, `concise`, `detailed`, `none`). Codex >= 0.139 emits no reasoning summaries unless this is set, so renderers show no thinking trace. |
 | `CODEX_MODEL_REASONING_EFFORT` | `sandbox.extraEnv`. | Overrides the Codex `model_reasoning_effort` (baked into `harness/codex/config.toml`). It is mirrored into Slackbot so the first response footer displays the effective level. One of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; an unknown value is ignored (the config default stands). |
-| `CLAUDE_MODEL`, `CLAUDE_CONTINUE_SESSION_ID` | `sandbox.extraEnv` or runtime resume. | Claude model and resume behavior. |
+| `CLAUDE_MODEL`, `CODEX_MODEL` | `sandbox.extraEnv`. | Harness default models. The chart also mirrors them into slackbotv2 and the Console so their model displays track the deployment. |
 | `CENTAUR_PI_MODEL` | `sandbox.extraEnv`. | Pi harness default model (`provider/id`). The chart mirrors it into slackbotv2 so the Slack footer names the model. See [Using the Pi Harness](/extend/pi-harness). |
 | `CENTAUR_OMP_MODEL` | `sandbox.extraEnv`. | OMP harness default model (`provider/modelId`). The chart mirrors it into slackbotv2 so the Slack footer names the model. See [Using the OMP Harness](/extend/omp-harness). |
 | `CLAUDE_CODE_AUTH_MODE` | `sandbox.claudeCodeAuthMode`. | Claude Code auth flow: `api_key` (default, uses `ANTHROPIC_API_KEY`) or `access_token` (Claude.ai Pro or Max via the brokered OAuth login). The chart sets this on api-rs, which propagates it into sandboxes. See [Claude Auth Modes](/deploying-in-production#claude-auth-modes). |
 | `CENTAUR_TELEMETRY_CAPTURE_TRANSCRIPTS` | `sandbox.telemetry.captureTranscripts`; defaults to `false`. | Includes user prompts and assistant responses on harness LLM spans. Usage, cost, status, session association, and tool telemetry do not require transcript capture. |
 | `CENTAUR_TELEMETRY_CAPTURE_TOOL_TRACES` | `sandbox.telemetry.captureToolTraces`; defaults to `false`. | Includes bounded shell commands and workspace-relative working directories on harness tool spans, independently of transcript capture. Tool names, executables, and status are exported either way. |
 | `DEPLOY_ENV`, `ENVIRONMENT`, `TRACEPARENT` | Deployment env or wrapper-generated. | Runtime environment and trace context. |
-| `CALL_TIMEOUT_SECONDS` | Sandbox env before running `call`. | Curl watchdog for API tool calls. |
-| `SLACK_CHANNEL`, `SLACK_THREAD_TS` | Sandbox env. | File-upload helper target. |
 
 ## Workflows
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `WORKFLOW_WORKER_CONCURRENCY`, `WORKFLOW_WORKER_LEASE_S` | `api.extraEnv`. | Workflow worker pool size and lease duration. |
-| `WORKFLOW_RECONCILE_INTERVAL_S`, `WORKFLOW_RESUSPEND_BACKOFF_S` | `api.extraEnv`. | Workflow claim/reclaim cadence. |
-| `WORKFLOW_SCHEDULE_TICK_INTERVAL_S`, `WORKFLOW_SCHEDULE_CATCHUP_LIMIT`, `WORKFLOW_SCHEDULE_MISFIRE_GRACE_S` | `api.extraEnv`. | Scheduled workflow timing and catch-up behavior. |
-| `MY_THREAD_KEY`, `<WORKFLOW_NAME>_THREAD_KEY`, `<WORKFLOW_NAME>_SLACK_CHANNEL` | Workflow-specific env. | Fallback thread/channel targets for workflow agent steps. |
+| `WORKFLOW_WORKER_CONCURRENCY` | `apiRs.extraEnv`. | Workflow worker pool size. |
 | `<WEBHOOK_SECRET_REF>` | API env or Secret named by a workflow `WebhookSpec`. | Signing secret or bearer token for public workflow webhooks, for example `GITHUB_WEBHOOK_SECRET` or a Standard Webhooks `whsec_...` value. |
 
 Company-context search:
@@ -322,11 +267,8 @@ Company-context search:
 
 | Env var | Set from | Controls |
 | --- | --- | --- |
-| `VICTORIAMETRICS_URL`, `VICTORIAMETRICS_PUSH_ENABLED` | `api.extraEnv`, `api.victoriaMetricsPushEnabled`. | Push-based API metrics. |
+| `VICTORIAMETRICS_URL`, `VICTORIAMETRICS_PUSH_ENABLED` | Workflow host env. | Push-based Python workflow host metrics. |
 | `apiRs.metrics.*` | Helm values. | Pull-based scrape metadata for API-RS Prometheus metrics. |
-| `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
-| `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
-| `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
 
 ### Stdout Event Retention
 
