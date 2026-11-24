@@ -493,6 +493,138 @@ fn fake_codex_blocks_mode_resumes_thread_on_the_configured_model() {
     let _ = std::fs::remove_file(fake_codex_log);
 }
 
+/// Runs blocks turns that each carry `recorded-thread` as the session's harness
+/// thread, against an app-server that refuses `thread/resume` with
+/// `resume_refusal` when given. Returns the thread requests the app-server
+/// received, as (method, threadId), and the harness-server's stdout lines.
+fn run_fake_codex_recorded_thread_turns(
+    turns: usize,
+    envs: &[(&str, &str)],
+    resume_refusal: Option<&str>,
+) -> (Vec<(String, Option<String>)>, Vec<Value>) {
+    let fake_codex = temp_path("fake-recorded-thread-codex.sh");
+    let fake_codex_log = temp_path("fake-recorded-thread-codex-requests.jsonl");
+    let mut script = fake_codex_app_server_script(&fake_codex_log);
+    if let Some(message) = resume_refusal {
+        let resumed = "    *'\"method\":\"thread/resume\"'*|*'\"method\":\"thread/fork\"'*)\n      id=$(request_id \"$line\")\n      printf '{\"id\":%s,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}\\n' \"$id\"\n";
+        assert!(script.contains(resumed), "fake codex resume branch moved");
+        script = script.replace(
+            resumed,
+            &format!(
+                "    *'\"method\":\"thread/resume\"'*)\n      id=$(request_id \"$line\")\n      printf '{{\"id\":%s,\"error\":{{\"code\":-32600,\"message\":\"{message}\"}}}}\\n' \"$id\"\n"
+            ),
+        );
+    }
+    std::fs::write(&fake_codex, script).expect("write fake codex script");
+    let mut permissions = std::fs::metadata(&fake_codex)
+        .expect("fake codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_codex, permissions).expect("chmod fake codex script");
+
+    let mut bridge = BridgeProcess::spawn_harness_blocks_envs(
+        Harness::Codex,
+        None,
+        Some((
+            "CODEX_BIN",
+            fake_codex.to_str().expect("utf-8 fake codex path"),
+        )),
+        envs,
+    );
+    for _ in 0..turns {
+        let turn = bridge.run_blocks_user_line(
+            json!({
+                "type": "user",
+                "thread_key": "web:recorded-thread",
+                "harness_thread_id": "recorded-thread",
+                "text": "continue the conversation",
+            }),
+            Duration::from_secs(10),
+        );
+        assert_completed_turn(&turn);
+    }
+    let stdout = bridge
+        .finish_successfully()
+        .iter()
+        .map(|line| serde_json::from_str(line).expect("harness-server stdout JSON"))
+        .collect();
+
+    let requests = std::fs::read_to_string(&fake_codex_log).expect("read fake codex request log");
+    let thread_requests = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("fake codex request JSON"))
+        .filter_map(|request| {
+            let method = request.get("method")?.as_str()?;
+            method.starts_with("thread/").then(|| {
+                (
+                    method.to_owned(),
+                    request
+                        .pointer("/params/threadId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                )
+            })
+        })
+        .collect();
+    let _ = std::fs::remove_file(fake_codex);
+    let _ = std::fs::remove_file(fake_codex_log);
+    (thread_requests, stdout)
+}
+
+#[test]
+fn fake_codex_blocks_mode_resumes_the_thread_recorded_for_the_session() {
+    let (thread_requests, _stdout) = run_fake_codex_recorded_thread_turns(
+        1,
+        &[("CODEX_CONTINUE_THREAD_ID", "configured-thread")],
+        None,
+    );
+
+    assert_eq!(
+        thread_requests,
+        vec![(
+            "thread/resume".to_owned(),
+            Some("recorded-thread".to_owned())
+        )],
+        "a new harness process must resume the recorded thread, not start one"
+    );
+}
+
+#[test]
+fn fake_codex_blocks_mode_starts_a_thread_when_the_recorded_one_cannot_be_resumed() {
+    let (thread_requests, stdout) =
+        run_fake_codex_recorded_thread_turns(2, &[], Some("no rollout found for thread"));
+
+    assert_eq!(
+        thread_requests,
+        vec![
+            (
+                "thread/resume".to_owned(),
+                Some("recorded-thread".to_owned())
+            ),
+            ("thread/start".to_owned(), None),
+        ],
+        "the refused resume falls back to one new thread that later turns keep"
+    );
+    let notices: Vec<&Value> = stdout
+        .iter()
+        .filter(|value| value.get("method").and_then(Value::as_str) == Some("error"))
+        .collect();
+    assert_eq!(notices.len(), 1, "stdout={stdout:?}");
+    assert_eq!(notices[0].pointer("/params/willRetry"), Some(&json!(true)));
+    assert_eq!(
+        notices[0].pointer("/params/threadId"),
+        Some(&json!("recorded-thread"))
+    );
+    assert!(
+        notices[0]
+            .pointer("/params/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("no rollout found for thread")),
+        "the notice must carry the app-server's reason; notice={}",
+        notices[0]
+    );
+}
+
 #[test]
 fn fake_codex_blocks_mode_uses_bedrock_provider_when_selected() {
     let fake_codex = temp_path("fake-bedrock-codex.sh");
