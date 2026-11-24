@@ -35,7 +35,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-codemode _build-token-broker _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent; do
+      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-codemode _build-token-broker _build-brain _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -52,6 +52,7 @@ _build-all-sequential:
     just _build-proxy-sync
     just _build-codemode
     just _build-token-broker
+    just _build-brain
     just _build-iron-proxy
     just _build-slackbotv2
     just _build-linearbot
@@ -69,6 +70,7 @@ build-one service:
       proxy-sync) just _build-proxy-sync ;;
       codemode) just _build-codemode ;;
       token-broker) just _build-token-broker ;;
+      brain) just _build-brain ;;
       iron-proxy) just _build-iron-proxy ;;
       slackbotv2) just _build-slackbotv2 ;;
       linearbot) just _build-linearbot ;;
@@ -94,6 +96,9 @@ _build-codemode:
 
 _build-token-broker:
     {{docker_build}} -t centaur-token-broker:latest -f services/token-broker/Dockerfile .
+
+_build-brain:
+    {{docker_build}} -t centaur-brain:latest -f services/brain/Dockerfile .
 
 _build-iron-proxy:
     {{docker_build}} -t centaur-iron-proxy:latest -f services/iron-proxy/Dockerfile .
@@ -126,7 +131,7 @@ _build-workflow-python:
 _push-registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-brain centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
       target="{{registry}}/library/${img}:latest"
       echo "pushing ${img}:latest -> ${target}..."
       docker tag "${img}:latest" "${target}"
@@ -139,7 +144,7 @@ _push-registry:
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-brain centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done
@@ -161,6 +166,7 @@ deploy:
           --set proxySync.image.repository=ghcr.io/paradigmxyz/centaur/centaur-proxy-sync
           --set codemode.image.repository=ghcr.io/paradigmxyz/centaur/centaur-codemode
           --set tokenBroker.image.repository=ghcr.io/paradigmxyz/centaur/centaur-token-broker
+          --set brain.image.repository=ghcr.io/paradigmxyz/centaur/centaur-brain
           --set ironProxy.image.repository=ghcr.io/paradigmxyz/centaur/centaur-iron-proxy
           --set slackbotv2.image.repository=ghcr.io/paradigmxyz/centaur/centaur-slackbotv2
           --set linearbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-linearbot

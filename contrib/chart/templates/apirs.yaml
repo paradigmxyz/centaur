@@ -354,6 +354,12 @@ spec:
             - name: WORKFLOW_DISCOVERY_URL
               value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "workflow-discovery")) 8090 | quote }}
 {{- end }}
+{{- if and .Values.brain.enabled (not (hasKey .Values.apiRs.extraEnv "CENTAUR_BRAIN_URL")) }}
+            # nanocode harness turns run in the brain, which api-rs treats as a
+            # sandbox backend.
+            - name: CENTAUR_BRAIN_URL
+              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "brain")) .Values.brain.port | quote }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "KUBERNETES_WORKFLOW_DIRS") }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}

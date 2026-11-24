@@ -618,6 +618,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "centaur-brain"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "harness-server",
+ "nanocode",
+ "nanocode-executor",
+ "nanocode-store-sql",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "centaur-codemode"
 version = "0.1.0"
 dependencies = [
@@ -856,6 +878,8 @@ name = "centaur-session-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "bytes",
  "centaur-console-db",
  "centaur-iron-control",
  "centaur-sandbox-core",
@@ -864,6 +888,7 @@ dependencies = [
  "centaur-session-sqlx",
  "centaur-telemetry",
  "dashmap",
+ "eventsource-stream",
  "futures-util",
  "hex",
  "reqwest",
@@ -876,6 +901,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "urlencoding",
  "uuid",
 ]
 
@@ -1627,6 +1653,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "djs-core"
+version = "0.0.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "djs-libm",
+]
+
+[[package]]
+name = "djs-embed"
+version = "0.1.1"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "djs-core",
+ "djs-prelude",
+]
+
+[[package]]
+name = "djs-libm"
+version = "0.0.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+
+[[package]]
+name = "djs-prelude"
+version = "0.0.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "djs-core",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2176,6 +2232,16 @@ checksum = "05f05586d4d4df3d47123207826c40b252728b438a1a07bad3c01ee6bea401df"
 dependencies = [
  "arraydeque",
  "smallvec",
+]
+
+[[package]]
+name = "graviola"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0377ccc5ef095424121430046e475cf06658e23475b1af526655cfad0b86b2"
+dependencies = [
+ "cfg-if",
+ "getrandom 0.4.3",
 ]
 
 [[package]]
@@ -3340,6 +3406,945 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "nanocode"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent",
+ "nanocode-agent-config",
+ "nanocode-agent-core",
+ "nanocode-agent-host",
+ "nanocode-backend-antigravity",
+ "nanocode-backend-claude",
+ "nanocode-backend-codex",
+ "nanocode-code-mode",
+ "nanocode-durability",
+ "nanocode-platform",
+ "nanocode-process-contracts",
+ "nanocode-store-jsonl",
+ "nanocode-subagents",
+ "nanocode-tool-host",
+ "nanocode-tool-runtime",
+ "nanocode-tools",
+ "nanocode-turnlog",
+]
+
+[[package]]
+name = "nanocode-agent"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-config",
+ "nanocode-agent-core",
+ "nanocode-code-mode",
+ "nanocode-digest",
+ "nanocode-durability",
+ "nanocode-platform",
+ "nanocode-subagents",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-tool-host",
+ "nanocode-trace",
+ "nanocode-turnlog",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-agent-config"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-core",
+ "nanocode-durability",
+ "nanocode-process-contracts",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-tool-host",
+]
+
+[[package]]
+name = "nanocode-agent-core"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-types",
+ "nanocode-hedge",
+ "nanocode-home",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-agent-host"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent",
+ "nanocode-agent-core",
+ "nanocode-durability",
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-platform",
+ "nanocode-process",
+ "nanocode-process-contracts",
+ "nanocode-store-jsonl",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-tool-host",
+ "nanocode-tool-runtime",
+ "nanocode-trace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-agent-types"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-tool-contracts",
+ "nanocode-types-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-audio"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-trace",
+]
+
+[[package]]
+name = "nanocode-backend-antigravity"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-config",
+ "nanocode-agent-core",
+ "nanocode-backend-antigravity-client",
+ "nanocode-backend-antigravity-tools",
+ "nanocode-durability",
+ "nanocode-home",
+ "nanocode-platform",
+ "nanocode-process-contracts",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-tool-host",
+ "nanocode-tools",
+ "nanocode-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-backend-antigravity-client"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-google-auth",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-tls",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-backend-antigravity-tools"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-platform",
+ "nanocode-process-contracts",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-backend-claude"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-config",
+ "nanocode-agent-core",
+ "nanocode-backend-claude-client",
+ "nanocode-backend-claude-tools",
+ "nanocode-code-mode",
+ "nanocode-durability",
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-image",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-process",
+ "nanocode-process-contracts",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tool-contracts",
+ "nanocode-tool-host",
+ "nanocode-tools",
+ "nanocode-trace",
+ "nanocode-types",
+ "nanocode-url",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-backend-claude-client"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "memchr",
+ "nanocode-agent-types",
+ "nanocode-bytes",
+ "nanocode-digest",
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+ "nanocode-trace",
+ "nanocode-types-core",
+ "nanocode-url",
+ "serde",
+ "serde_json",
+ "unicode-normalization 0.1.25",
+]
+
+[[package]]
+name = "nanocode-backend-claude-tools"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-home",
+ "nanocode-image",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tools",
+ "nanocode-types-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-backend-codex"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-config",
+ "nanocode-agent-core",
+ "nanocode-backend-codex-client",
+ "nanocode-code-mode",
+ "nanocode-digest",
+ "nanocode-durability",
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-image",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-process",
+ "nanocode-process-contracts",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+ "nanocode-tool-host",
+ "nanocode-tools",
+ "nanocode-trace",
+ "nanocode-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-backend-codex-client"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "memchr",
+ "nanocode-agent-types",
+ "nanocode-audio",
+ "nanocode-bytes",
+ "nanocode-compression",
+ "nanocode-digest",
+ "nanocode-executor",
+ "nanocode-hedge",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-image",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+ "nanocode-trace",
+ "nanocode-types",
+ "nanocode-url",
+ "nanocode-websocket",
+ "nanocode-zstd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-board"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-board-fold",
+ "nanocode-cost-fold",
+ "nanocode-digest",
+ "nanocode-durability-core",
+ "nanocode-partitions",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-turnlog",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-board-fold"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-durability-core",
+ "nanocode-machine",
+ "nanocode-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-bytes"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-code-mode"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-audio",
+ "nanocode-code-mode-engine",
+ "nanocode-digest",
+ "nanocode-image",
+ "nanocode-platform",
+ "nanocode-process-contracts",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-tools",
+ "nanocode-trace",
+ "nanocode-types-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-code-mode-engine"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "djs-embed",
+ "nanocode-digest",
+ "nanocode-executor",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tool-contracts",
+ "nanocode-trace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-compression"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-cost-fold"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-digest"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-dispatch"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-board-fold",
+]
+
+[[package]]
+name = "nanocode-dispatcher"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-board",
+ "nanocode-dispatch",
+ "nanocode-platform",
+]
+
+[[package]]
+name = "nanocode-durability"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-core",
+ "nanocode-durability-core",
+ "nanocode-executor",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-trace",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-durability-core"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-executor"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-io",
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-gif"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+
+[[package]]
+name = "nanocode-google-auth"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "graviola",
+ "nanocode-digest",
+ "nanocode-http",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-url",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-hedge"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-platform",
+ "nanocode-sync",
+ "serde",
+]
+
+[[package]]
+name = "nanocode-home"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-platform",
+ "nanocode-sys",
+ "serde",
+]
+
+[[package]]
+name = "nanocode-http"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-bytes",
+ "nanocode-compression",
+ "nanocode-executor",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+ "nanocode-url",
+ "nanocode-zstd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-image"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "memchr",
+ "nanocode-compression",
+ "nanocode-digest",
+ "nanocode-gif",
+ "nanocode-jpeg",
+ "nanocode-platform",
+ "nanocode-png",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-trace",
+ "nanocode-types-core",
+ "nanocode-webp",
+]
+
+[[package]]
+name = "nanocode-io"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-jpeg"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-machine"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-trace",
+]
+
+[[package]]
+name = "nanocode-macro-support"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+
+[[package]]
+name = "nanocode-mcp"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "memchr",
+ "nanocode-digest",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-trace",
+ "nanocode-url",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-mcp-http"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-executor",
+ "nanocode-http",
+ "nanocode-io",
+ "nanocode-mcp",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-tls",
+ "nanocode-trace",
+ "nanocode-url",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-mcp-tools"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-io",
+ "nanocode-mcp",
+ "nanocode-mcp-http",
+ "nanocode-platform",
+ "nanocode-process",
+ "nanocode-sync",
+ "nanocode-tls",
+ "nanocode-tool-provider",
+ "nanocode-tools",
+ "nanocode-trace",
+ "nanocode-turnlog",
+ "nanocode-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-partitions"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+
+[[package]]
+name = "nanocode-platform"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-executor",
+ "nanocode-sys",
+ "rustls-pki-types",
+ "serde",
+]
+
+[[package]]
+name = "nanocode-png"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-compression",
+]
+
+[[package]]
+name = "nanocode-process"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-process-contracts",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-trace",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-process-contracts"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-home",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-schema"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "memchr",
+ "nanocode-sys",
+ "nanocode-url",
+ "serde",
+ "serde_json",
+ "unicode-normalization 0.1.25",
+]
+
+[[package]]
+name = "nanocode-store-jsonl"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-durability-core",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-trace",
+ "nanocode-zstd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-store-sql"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-durability-core",
+ "nanocode-executor",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+ "nanocode-zstd",
+ "rustls",
+]
+
+[[package]]
+name = "nanocode-subagents"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-agent-core",
+ "nanocode-board",
+ "nanocode-dispatch",
+ "nanocode-dispatcher",
+ "nanocode-durability-core",
+ "nanocode-platform",
+ "nanocode-schema",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-trace",
+ "nanocode-turnlog",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-sync"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-executor",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sys",
+ "serde",
+]
+
+[[package]]
+name = "nanocode-sys"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "djs-libm",
+]
+
+[[package]]
+name = "nanocode-tls"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "graviola",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-trace",
+ "rustls",
+ "rustls-platform-verifier",
+]
+
+[[package]]
+name = "nanocode-tool-contracts"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-types-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-tool-host"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-code-mode",
+ "nanocode-digest",
+ "nanocode-durability-core",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-image",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-tool-contracts",
+ "nanocode-tool-provider",
+ "nanocode-tools",
+ "nanocode-trace",
+ "nanocode-turnlog",
+ "nanocode-types",
+ "nanocode-types-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-tool-provider"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-home",
+ "nanocode-tool-contracts",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-tool-runtime"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-code-mode",
+ "nanocode-durability-core",
+ "nanocode-executor",
+ "nanocode-home",
+ "nanocode-http",
+ "nanocode-io",
+ "nanocode-mcp-tools",
+ "nanocode-platform",
+ "nanocode-process",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+ "nanocode-tool-host",
+ "nanocode-tool-provider",
+ "nanocode-tools",
+ "nanocode-trace",
+ "nanocode-url",
+ "nanocode-websocket",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-tools"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-tool-contracts",
+ "nanocode-tools-macros",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-tools-macros"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-macro-support",
+]
+
+[[package]]
+name = "nanocode-trace"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-turnlog"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-compression",
+ "nanocode-durability-core",
+ "nanocode-partitions",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-types"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-trace",
+ "nanocode-types-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-types-core"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nanocode-url"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+
+[[package]]
+name = "nanocode-webp"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-sys",
+]
+
+[[package]]
+name = "nanocode-websocket"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
+dependencies = [
+ "nanocode-digest",
+ "nanocode-executor",
+ "nanocode-http",
+ "nanocode-io",
+ "nanocode-platform",
+ "nanocode-sync",
+ "nanocode-sys",
+ "nanocode-tls",
+]
+
+[[package]]
+name = "nanocode-zstd"
+version = "0.7.0"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
 
 [[package]]
 name = "nix"
@@ -5862,7 +6867,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b4df3d392d81bd458a8a621b8bffbd2302a12ffe288a9d931670948749463b1"
 dependencies = [
  "unicode-bidi",
- "unicode-normalization",
+ "unicode-normalization 0.1.26",
  "unicode-properties",
 ]
 
@@ -6492,6 +7497,11 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "git+https://github.com/nanocodexyz/nanocode?rev=553d76ee73be6044fe27a8198c6f50d2e54fa202#553d76ee73be6044fe27a8198c6f50d2e54fa202"
 
 [[package]]
 name = "unicode-normalization"

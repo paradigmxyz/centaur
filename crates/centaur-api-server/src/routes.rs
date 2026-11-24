@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    convert::Infallible,
     convert::TryFrom,
     env,
     sync::{Arc, RwLock},
@@ -892,16 +891,33 @@ async fn stream_events(
     Extension(caller): Extension<AuthenticatedCaller>,
     Path(raw_thread_key): Path<String>,
     Query(query): Query<EventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<Response, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
     let runtime = state.runtime()?;
     authorize_principal_session_read(&runtime, &caller, &thread_key).await?;
+    let after_event_id = query.after_event_id.unwrap_or(0);
+    // `nanocode` turns are streamed by the brain. Proxy its SSE body byte for
+    // byte: the framing is already the api-rs framing.
+    if let Some(body) = runtime
+        .stream_brain_events_bytes(&thread_key, after_event_id, query.execution_id.as_deref())
+        .await?
+    {
+        let body = body.map(|chunk| chunk.map_err(std::io::Error::other));
+        let body = if caller.class() == CallerClass::ApiClient {
+            let ended = api_client_read_access_ended(state.console_db()?, caller.clone());
+            end_body_when(body, ended).boxed()
+        } else {
+            body.boxed()
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .header(axum::http::header::CACHE_CONTROL, "no-cache")
+            .body(Body::from_stream(body))
+            .map_err(|error| ApiError::Internal(format!("failed to build event stream: {error}")));
+    }
     let events = runtime
-        .stream_events(
-            &thread_key,
-            query.after_event_id.unwrap_or(0),
-            query.execution_id.as_deref(),
-        )
+        .stream_events(&thread_key, after_event_id, query.execution_id.as_deref())
         .await?;
     let stream = events.map(move |result| {
         // Stream failures are server-side faults: log the details, send the
@@ -930,7 +946,38 @@ async fn stream_events(
     } else {
         stream.boxed()
     };
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// `body`, ended once `ended` resolves. Used for proxied event bodies, where
+/// the last frame is the same opaque stream error a native stream sends.
+fn end_body_when<S>(
+    body: S,
+    ended: impl std::future::Future<Output = ()> + Send + 'static,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+{
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ended = {
+        let cut = cut.clone();
+        async move {
+            ended.await;
+            cut.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    body.take_until(ended).chain(
+        futures_util::stream::once(async move { cut.load(std::sync::atomic::Ordering::SeqCst) })
+            .filter_map(|cut| {
+                futures_util::future::ready(cut.then(|| {
+                    Ok(Bytes::from_static(
+                        b"event: session.stream_error\ndata: {\"error\":\"API client access ended; request a new token\"}\n\n",
+                    ))
+                }))
+            }),
+    )
 }
 
 async fn authorize_principal_session_read(
@@ -1935,5 +1982,35 @@ mod webhook_tests {
         )
         .unwrap_err();
         assert!(matches!(error, ApiError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn proxied_bodies_pass_through_until_the_body_ends() {
+        let body = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"id: 1048704\nevent: session.execution_started\ndata: {}\n\n",
+        ))]);
+        let frames = end_body_when(body, std::future::pending())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].as_ref().unwrap(),
+            &Bytes::from_static(b"id: 1048704\nevent: session.execution_started\ndata: {}\n\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn proxied_bodies_end_with_a_stream_error_when_access_is_revoked() {
+        let body = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"id: 1048704\nevent: session.execution_started\ndata: {}\n\n",
+        ))]);
+        let frames = end_body_when(body, std::future::ready(()))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            String::from_utf8(frames[0].as_ref().unwrap().to_vec()).unwrap(),
+            "event: session.stream_error\ndata: {\"error\":\"API client access ended; request a new token\"}\n\n"
+        );
     }
 }

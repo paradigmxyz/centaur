@@ -33,8 +33,9 @@ use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::{HarnessType, SandboxRepoCacheAccess};
 use centaur_session_runtime::{
-    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
-    SessionPrincipalAdmission, SessionSandboxCleanupConfig, WarmPoolTarget,
+    BrainClient, PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode,
+    SessionEventRetentionConfig, SessionPrincipalAdmission, SessionSandboxCleanupConfig,
+    WarmPoolTarget,
 };
 use centaur_session_sqlx::TextSearchBackend;
 use centaur_workflows::{
@@ -98,6 +99,24 @@ pub(crate) struct Args {
 impl Args {
     pub(crate) async fn sandbox_runtime(&self) -> Result<SandboxRuntime, ServerError> {
         self.sandbox.runtime().await
+    }
+
+    /// Base URL of the out-of-sandbox `nanocode` brain, when configured.
+    pub(crate) fn brain_url(&self) -> Option<String> {
+        self.sandbox.brain_url()
+    }
+
+    /// The `nanocode` brain client, when `CENTAUR_BRAIN_URL` is configured.
+    /// `nanocode` sessions are rejected at admission without one.
+    pub(crate) fn brain_client(&self) -> Result<Option<Arc<BrainClient>>, ServerError> {
+        let Some(url) = self.brain_url() else {
+            return Ok(None);
+        };
+        let client = BrainClient::new(&url).map_err(|error| {
+            ServerError::UnsupportedConfig(format!("invalid CENTAUR_BRAIN_URL: {error}"))
+        })?;
+        info!(url = %client.base_url(), "nanocode sessions run in centaur-brain");
+        Ok(Some(Arc::new(client)))
     }
 
     /// The image Code Mode sandboxes run. Missing or blank falls back to
@@ -918,6 +937,11 @@ struct SandboxArgs {
         default_value = "codex"
     )]
     default_harness: HarnessType,
+    /// Base HTTP URL of the out-of-sandbox `nanocode` brain
+    /// (`centaur-brain`). When set, sessions whose harness is `nanocode` run in
+    /// the brain instead of a sandbox; when unset, creating one is rejected.
+    #[arg(long = "brain-url", env = "CENTAUR_BRAIN_URL")]
+    brain_url: Option<String>,
     #[arg(long = "centaur-default-persona", env = "CENTAUR_DEFAULT_PERSONA")]
     default_persona: Option<String>,
     #[arg(
@@ -1271,6 +1295,10 @@ impl SandboxArgs {
             backend,
             self.container_workload_mode()?,
         ))
+    }
+
+    fn brain_url(&self) -> Option<String> {
+        clean_optional_value(self.brain_url.as_deref())
     }
 
     async fn workflow_host_sandbox_runtime(
@@ -2699,6 +2727,8 @@ fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::Amp => "amp",
         HarnessType::ClaudeCode => "claude-code",
+        // nanocode uses OpenAI credentials, like Codex.
+        HarnessType::Nanocode => "codex",
         HarnessType::Hermes => "hermes",
         // Pi and OMP default to Anthropic when its key is present.
         HarnessType::Pi | HarnessType::Omp => "claude-code",
@@ -2716,7 +2746,7 @@ fn merge_fragment(target: &mut ProxyFragment, source: ProxyFragment) {
 
 fn harness_auth_mode_env(engine: &HarnessType) -> Option<String> {
     match engine {
-        HarnessType::Codex => env::var("CODEX_AUTH_MODE").ok(),
+        HarnessType::Codex | HarnessType::Nanocode => env::var("CODEX_AUTH_MODE").ok(),
         HarnessType::ClaudeCode | HarnessType::Pi | HarnessType::Omp => {
             env::var("CLAUDE_CODE_AUTH_MODE").ok()
         }
@@ -4523,6 +4553,21 @@ mod tests {
         assert_eq!(
             args.sandbox.iron_proxy.harness.engine,
             HarnessType::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn nanocode_reuses_the_codex_proxy_fragment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(&[("CODEX_AUTH_MODE", "access_token")]);
+
+        assert_eq!(
+            harness_fragment_engine_name(&HarnessType::Nanocode),
+            harness_fragment_engine_name(&HarnessType::Codex)
+        );
+        assert_eq!(
+            harness_auth_mode_env(&HarnessType::Nanocode).as_deref(),
+            Some("access_token")
         );
     }
 

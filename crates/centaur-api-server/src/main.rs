@@ -171,9 +171,11 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         tokio::spawn(worker.run());
     }
     let pool = store.pool().clone();
+    let brain = args.brain_client()?;
     let sandbox_runtime = args.sandbox_runtime().await?;
     let iron_control = args.iron_control_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
+        .with_brain(brain)
         .with_session_principal_admission(args.session_principal_admission())
         .with_openai_session_title_generator_from_env();
     runtime = runtime.with_personas(args.persona_registry()?);

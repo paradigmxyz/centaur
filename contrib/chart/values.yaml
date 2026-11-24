@@ -498,6 +498,50 @@ tokenBroker:
     annotations: {}
   resources: {}
 
+# Rust nanocode harness service (`centaur-brain`). Runs `nanocode` turns outside
+# any sandbox and owns their durable turn log; api-rs submits turns and proxies
+# the event stream to it. Off by default, which makes creating a nanocode
+# session fail. See services/brain/README.md.
+#
+# Model traffic is direct HTTPS. Production model egress should go through a
+# dedicated iron-proxy with a model-only principal (follow-up).
+brain:
+  enabled: false
+  replicaCount: 1
+  nodeSelector: {}
+  #   workload: centaur-control-plane
+  affinity: {}
+  tolerations: []
+  image:
+    repository: centaur-brain
+    tag: latest
+    pullPolicy: Always
+  port: 8790
+  # Fallbacks for turns that name no model or reasoning effort.
+  defaultModel: luna
+  defaultThinking: low
+  # Optional OpenAI-compatible API base URL (the Responses API over HTTPS/SSE).
+  # Empty uses the provider default, https://api.openai.com/v1. Useful with an
+  # internal model gateway or a test model server.
+  openaiBaseUrl: ""
+  # Trust the release's internal CA in addition to the image's public roots. The
+  # brain projects only the certificate ($firewall.existingCaSecretName at
+  # $firewall.existingCaSecretKey, never the private key) and loads it through
+  # SSL_CERT_DIR, so provider hostnames that resolve to a service signed by that
+  # CA verify. Off by default; e2e turns it on for its fake model server.
+  trustReleaseCa: false
+  # Optional Postgres DSN for nanocode durability, from an existing Secret. It
+  # must connect as centaur_brain, with a password you choose, to the same
+  # database as api-rs. When set, an init container runs the brain's own
+  # migrations with the shared DATABASE_URL (the nanocode schema and the
+  # centaur_brain role) and sets the role's login password from this DSN on
+  # every start. Empty keeps state in memory, which is local/development only.
+  databaseUrl:
+    existingSecretName: ""
+    secretKey: DATABASE_URL
+  extraEnv: {}
+  resources: {}
+
 # API clients: machine callers, such as eval runners, that exchange a client
 # secret for a session API token at api-rs /oauth/token. Off hides them in the
 # Console, removes the token endpoint, and rejects their existing tokens.

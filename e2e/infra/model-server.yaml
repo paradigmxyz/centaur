@@ -106,3 +106,25 @@ spec:
       ports:
         - protocol: TCP
           port: 8443
+---
+# centaur-brain makes its model calls itself (it has no iron-proxy yet), and
+# likewise may only dial public addresses. Let it reach the model server too.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: e2e-brain-to-model-server
+  namespace: centaur
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: brain
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: centaur-e2e-model
+      ports:
+        - protocol: TCP
+          port: 8443
