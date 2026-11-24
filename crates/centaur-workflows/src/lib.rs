@@ -4384,17 +4384,6 @@ fn agent_turn_result_text(terminal_payload: &Value, output_lines: &[String]) -> 
 
 fn completed_final_answer_text(line: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(line).ok()?;
-    if value.get("type").and_then(Value::as_str) == Some("assistant.message") {
-        let payload = value.get("payload")?;
-        if !matches!(
-            payload.get("phase").and_then(Value::as_str),
-            Some("final_answer" | "answer") | None
-        ) {
-            return None;
-        }
-        return non_empty_text(payload.get("text"));
-    }
-
     if !matches!(
         value.get("method").and_then(Value::as_str),
         Some("item/completed")

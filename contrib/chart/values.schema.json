@@ -445,7 +445,7 @@
             "properties": {
               "harness": {
                 "type": "string",
-                "enum": ["codex", "amp", "claudecode", "nanocodex", "hermes", "pi", "omp"]
+                "enum": ["codex", "amp", "claudecode", "hermes", "pi", "omp"]
               },
               "repoCache": { "type": "string", "enum": ["all", "public", "none"] },
               "persona": { "type": "string", "minLength": 1 },

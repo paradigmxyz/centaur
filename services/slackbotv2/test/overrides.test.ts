@@ -15,6 +15,7 @@ describe('deployment harness allowlist', () => {
   test('validates configured harnesses and preserves unrestricted deployments', () => {
     expect(parseEnabledHarnesses(undefined)).toBeUndefined()
     expect(isHarnessEnabled('amp')).toBe(true)
+    expect(isHarnessEnabled('nanocodex')).toBe(false)
     expect(parseEnabledHarnesses('codex, CLAUDECODE, codex')).toEqual(['codex', 'claudecode'])
     expect(isHarnessEnabled('amp', ['codex', 'claudecode'])).toBe(false)
     expect(isHarnessEnabled('codex', ['codex', 'claudecode'])).toBe(true)
@@ -44,7 +45,6 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--claude-code review this').harnessType).toBe('claudecode')
     expect(extractMessageOverrides('--amp review this').harnessType).toBe('amp')
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
-    expect(extractMessageOverrides('--nanocodex review this').harnessType).toBe('nanocodex')
     expect(extractMessageOverrides('--hermes review this').harnessType).toBe('hermes')
     expect(extractMessageOverrides('--pi review this').harnessType).toBe('pi')
     expect(extractMessageOverrides('--omp review this').harnessType).toBe('omp')
@@ -526,8 +526,9 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: 'max'
     })
-    expect(validateStrategyOverrides({ harness: 'nanocodex', reasoning: 'high' })).toEqual({
-      harnessType: 'nanocodex',
+    expect(validateStrategyOverrides({ harness: 'nanocodex', reasoning: 'high' })).toEqual({})
+    expect(validateStrategyOverrides({ harness: 'codex', reasoning: 'high' })).toEqual({
+      harnessType: 'codex',
       model: undefined,
       provider: undefined,
       reasoning: 'high'
@@ -701,7 +702,7 @@ describe('messageOverridesForText strategy invocation', () => {
     ).resolves.toEqual({ overrides: {} })
   })
 
-  test('handles --nanocodex deterministically before the OpenAI strategy', async () => {
+  test('handles --pi deterministically before the OpenAI strategy', async () => {
     let requestCount = 0
     const strategy = createOpenAiMessageOverridesStrategy({
       apiKey: 'test-key',
@@ -712,10 +713,10 @@ describe('messageOverridesForText strategy invocation', () => {
       model: 'gpt-6-luna'
     })
 
-    await expect(strategy({ text: '--nanocodex review this' })).resolves.toEqual({
+    await expect(strategy({ text: '--pi review this' })).resolves.toEqual({
       cleanedText: 'review this',
       overrides: {
-        harnessType: 'nanocodex',
+        harnessType: 'pi',
         model: undefined,
         provider: undefined,
         reasoning: undefined
@@ -832,16 +833,16 @@ describe('messageOverridesForText strategy invocation', () => {
       fetch: (async () =>
         decisionsResponse({
           selection: 0.97,
-          harness: 'nanocodex',
+          harness: 'pi',
           provider: 'refusal',
           reasoning: 'high'
         })) as unknown as typeof fetch,
       model: 'gpt-6-luna'
     })
 
-    await expect(strategy({ text: 'use nanocodex with high effort' })).resolves.toEqual({
+    await expect(strategy({ text: 'use pi with high effort' })).resolves.toEqual({
       overrides: {
-        harnessType: 'nanocodex',
+        harnessType: 'pi',
         model: undefined,
         provider: undefined,
         reasoning: 'high'

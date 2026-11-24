@@ -160,9 +160,9 @@ export type SlackbotV2Options = {
    */
   channelDefaults?: ChannelDefaults
   /**
-   * Harness for new threads when no --claude/--amp/--codex/--nanocodex/--hermes
-   * flag is given (HarnessType wire value: codex | amp | claudecode |
-   * nanocodex | hermes). Defaults to codex.
+   * Harness for new threads when no --claude/--amp/--codex/--hermes/--pi/--omp
+   * flag is given (HarnessType wire value: codex | amp | claudecode | hermes |
+   * pi | omp). Defaults to codex.
    */
   defaultHarnessType?: string
   enabledHarnesses?: readonly string[]
@@ -174,7 +174,7 @@ export type SlackbotV2Options = {
   generativeUi?: GenerativeUiOptions
   /**
    * Deployment-configured default model per harness wire value (claudecode |
-   * codex | nanocodex | pi | omp), from the CLAUDE_MODEL / CODEX_MODEL /
+   * codex | pi | omp), from the CLAUDE_MODEL / CODEX_MODEL /
    * CENTAUR_PI_MODEL / CENTAUR_OMP_MODEL env vars the chart mirrors
    * out of sandbox.extraEnv. Display/metadata only — never forwarded to the
    * harness. Unset harnesses fall back to the models pinned in this repo's
@@ -434,7 +434,7 @@ export type ForwardSessionInput = {
   personaId?: string
   /** Effective model provider selected by sticky thread flags (--bedrock); codex only. */
   provider?: string
-  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Nanocodex/Claude Code). */
+  /** Per-turn reasoning effort parsed from the `-rsn` flag (Codex/Claude Code). */
   reasoning?: string
   onEventId(eventId: number): void
   openStream: boolean

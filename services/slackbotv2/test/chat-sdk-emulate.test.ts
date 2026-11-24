@@ -1151,13 +1151,13 @@ describe('slackbotv2', () => {
       return mention
     }
 
-    const nanocodexRoot = await sendMention('--nanocodex --subagents start with the native harness')
-    await sendMention('keep thinking without another flag', nanocodexRoot.ts)
+    const codexRoot = await sendMention('--codex --subagents start with the native harness')
+    await sendMention('keep thinking without another flag', codexRoot.ts)
     const defaultRoot = await sendMention('use the configured default model')
 
     expect(codexApi.creates.map(create => create.body.harness_type)).toEqual([
-      'nanocodex',
-      'nanocodex',
+      'codex',
+      'codex',
       'claudecode'
     ])
     expect(codexApi.creates[0]!.body.on_harness_conflict).toBe('restart')
@@ -1165,7 +1165,7 @@ describe('slackbotv2', () => {
     // The explicit flag bypasses the deployed LLM strategy. Only the two
     // unflagged messages consult it.
     expect(strategyRequestCount).toBe(2)
-    expect(JSON.stringify(codexApi.executes[0]!.body)).not.toContain('--nanocodex')
+    expect(JSON.stringify(codexApi.executes[0]!.body)).not.toContain('--codex')
     expect(JSON.stringify(codexApi.executes[0]!.body)).toContain('--subagents')
     expect(JSON.stringify(codexApi.executes[0]!.body)).toContain(
       'start with the native harness'
@@ -1175,7 +1175,7 @@ describe('slackbotv2', () => {
     ) as Record<string, unknown>
     expect(followUpInput.model).toBeUndefined()
     expect(followUpInput.provider).toBeUndefined()
-    // Nanocodex supports Max on its default GPT-5.6 Sol model.
+    // Codex supports Max on its default GPT-5.6 Sol model.
     expect(followUpInput.reasoning).toBe('max')
     const defaultInput = JSON.parse(
       codexApi.executes[2]!.body.input_lines.at(-1)!
@@ -1184,13 +1184,13 @@ describe('slackbotv2', () => {
     // forwarded; the harness applies it to this turn only.
     expect(defaultInput.reasoning).toBe('max')
 
-    const nanocodexState = await sharedState.get<Record<string, unknown>>(
-      `thread-state:${threadKey(nanocodexRoot.ts)}`
+    const codexState = await sharedState.get<Record<string, unknown>>(
+      `thread-state:${threadKey(codexRoot.ts)}`
     )
     const defaultState = await sharedState.get<Record<string, unknown>>(
       `thread-state:${threadKey(defaultRoot.ts)}`
     )
-    expect(nanocodexState?.harnessType).toBe('nanocodex')
+    expect(codexState?.harnessType).toBe('codex')
     expect(defaultState?.harnessType).toBeUndefined()
   })
 

@@ -33,7 +33,6 @@ const HARNESS_FLAGS: Record<string, string> = {
   "claude-code": "claudecode",
   claudecode: "claudecode",
   codex: "codex",
-  nanocodex: "nanocodex",
 };
 
 type ProviderMapping = { provider: string; harnessType: string; model?: string };
