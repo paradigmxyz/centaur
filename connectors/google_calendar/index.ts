@@ -116,11 +116,16 @@ export interface FreeBusyGroup {
  * An existing Zoom meeting to attach as an event's video call: the `meeting` that
  * `zoom.create_meeting` or `zoom.get_meeting` returns, or the same fields by hand. `join_url` is
  * required; `id` (the numeric meeting ID) and `password` (the passcode) are shown in the invite.
+ * `settings.global_dial_in_numbers` and `pstn_password` add a phone dial-in, and `host_email` a
+ * "Meeting host" note, as Zoom's own Calendar add-on shows them.
  */
 export interface ZoomMeetingRef {
   join_url: string;
   id?: number | string;
   password?: string;
+  pstn_password?: string;
+  host_email?: string;
+  settings?: { global_dial_in_numbers?: { number?: string; country?: string; type?: string }[]; [field: string]: unknown };
   [field: string]: unknown;
 }
 
@@ -132,7 +137,11 @@ const MEET_SOLUTION_KEY = "hangoutsMeet";
 // only supports Meet); an existing conference is written directly as conferenceData instead.
 const ADD_ON_SOLUTION_KEY = "addOn";
 const ZOOM_SOLUTION_NAME = "Zoom Meeting";
-// No iconUri: Calendar rejects the event ("Invalid conference data") for icons it can't serve, such as zoom.us URLs.
+// The icon Zoom's Workspace add-on writes. Calendar rejects the event ("Invalid conference data")
+// for icons it does not host, such as https://st1.zoom.us/zoom.ico.
+const ZOOM_ICON_URI =
+  "https://lh3.googleusercontent.com/pw/AM-JKLUkiyTEgH-6DiQP85RGtd_BORvAuFnS9katNMgwYQBJUTiDh12qtQxMJFWYH2Dj30hNsNUrr-kzKMl7jX-Qd0FR7JmVSx-Fhruf8xTPPI-wdsMYez6WJE7tz7KmqsORKBEnBTiILtMJXuMvphqKdB9X=s128-no";
+const ZOOM_JOIN_HELP = "https://support.zoom.us/hc/en-us/articles/201362193-Joining-a-Meeting";
 // An https join link on a Zoom host: zoom.us, an account subdomain, or ZoomGov.
 const ZOOM_URL = /^https:\/\/(?:[a-z0-9-]+\.)*(?:zoom\.us|zoomgov\.com)(?:[/?#]|$)/i;
 const DEFAULT_TIME_ZONE = "UTC";
@@ -191,13 +200,51 @@ function zoomConference(zoom: ZoomMeetingRef): ConferenceData {
   const video: NonNullable<ConferenceData["entryPoints"]>[number] = { entryPointType: "video", uri, label };
   if (meetingId) video.meetingCode = meetingId;
   if (zoom.password) video.passcode = String(zoom.password);
+  const entryPoints: NonNullable<ConferenceData["entryPoints"]> = [video];
+
+  const dialIns = zoom.settings?.global_dial_in_numbers ?? [];
+  const dialIn = dialIns.find((d) => d.type === "tollfree" && d.number) ?? dialIns.find((d) => d.number);
+  const phonePasscode = String(zoom.pstn_password ?? zoom.password ?? "");
+  if (dialIn?.number) {
+    const digits = dialIn.number.replace(/[^\d+]/g, "");
+    const phone: (typeof entryPoints)[number] = {
+      entryPointType: "phone",
+      uri: `tel:${digits}${meetingId ? `,,${meetingId}#` : ""}`,
+      label: dialIn.number,
+    };
+    if (dialIn.country) phone.regionCode = dialIn.country;
+    if (phonePasscode) phone.passcode = phonePasscode;
+    entryPoints.push(phone);
+  }
+  if (meetingId) {
+    const sip: (typeof entryPoints)[number] = {
+      entryPointType: "sip",
+      uri: `sip:${meetingId}@zoomcrc.com`,
+      label: `${meetingId}@zoomcrc.com`,
+    };
+    if (zoom.password) sip.passcode = String(zoom.password);
+    entryPoints.push(sip);
+  }
+  entryPoints.push({ entryPointType: "more", uri: ZOOM_JOIN_HELP });
+
+  const escape = (text: string): string =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const notes: string[] = [];
+  if (zoom.host_email) {
+    const host = escape(String(zoom.host_email));
+    notes.push(`Meeting host: <a href="mailto:${host}">${host}</a>`);
+  }
+  notes.push(`Join Zoom Meeting: <br /><a href="${escape(uri)}">${escape(uri)}</a>`);
+
   return {
     conferenceId: meetingId || label,
     conferenceSolution: {
       key: { type: ADD_ON_SOLUTION_KEY },
       name: ZOOM_SOLUTION_NAME,
+      iconUri: ZOOM_ICON_URI,
     },
-    entryPoints: [video],
+    entryPoints,
+    notes: notes.join("<br /><br />"),
   };
 }
 
