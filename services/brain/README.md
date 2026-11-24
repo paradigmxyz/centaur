@@ -27,7 +27,9 @@ Thread keys are percent-encoded path segments.
 | `GET /v1/threads/{thread_key}/events?after_event_id=N[&execution_id=R]` | The thread's session event stream, in the same SSE format as api-rs `/api/session/{key}/events`. |
 
 `input_line` is one blocks-protocol user line, as api-rs would write it to a
-harness. The request id is the execution id clients see.
+harness. The request id is the execution id clients see. A thread gets a fresh
+UUIDv7 nanocode session id the first time it appears, recorded in
+`nanocode.thread_sessions` (in memory without a database).
 
 ## Event stream
 

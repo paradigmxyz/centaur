@@ -52,25 +52,32 @@ pub struct Config {
     pub anthropic_base_url: Option<String>,
 }
 
+/// A Centaur thread and the nanocode session that holds it.
+#[derive(Clone, Debug)]
+pub struct ThreadRef {
+    pub key: String,
+    pub session_id: String,
+}
+
 pub enum Command {
     Submit {
-        thread_key: String,
+        thread: ThreadRef,
         request_id: String,
         input_line: Value,
         steer: bool,
         reply: oneshot::Sender<Result<SubmitOutcome, SubmitError>>,
     },
     Interrupt {
-        thread_key: String,
+        thread: ThreadRef,
         reply: oneshot::Sender<Result<Option<String>, String>>,
     },
     Page {
-        thread_key: String,
+        thread: ThreadRef,
         after: u64,
         reply: oneshot::Sender<Result<Page, String>>,
     },
     Status {
-        thread_key: String,
+        thread: ThreadRef,
         reply: oneshot::Sender<Result<ThreadStatus, String>>,
     },
 }
@@ -180,37 +187,35 @@ impl Brain {
     async fn handle(self: Arc<Self>, command: Command) {
         match command {
             Command::Submit {
-                thread_key,
+                thread,
                 request_id,
                 input_line,
                 steer,
                 reply,
             } => {
-                let outcome = self
-                    .submit(&thread_key, &request_id, &input_line, steer)
-                    .await;
+                let outcome = self.submit(&thread, &request_id, &input_line, steer).await;
                 let _ = reply.send(outcome);
             }
-            Command::Interrupt { thread_key, reply } => {
-                let outcome = match self.thread(&thread_key, None).await {
+            Command::Interrupt { thread, reply } => {
+                let outcome = match self.thread(&thread, None).await {
                     Ok(thread) => thread.interrupt().await,
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(outcome);
             }
-            Command::Status { thread_key, reply } => {
-                let outcome = match self.thread(&thread_key, None).await {
+            Command::Status { thread, reply } => {
+                let outcome = match self.thread(&thread, None).await {
                     Ok(thread) => thread.status().await,
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(outcome);
             }
             Command::Page {
-                thread_key,
+                thread,
                 after,
                 reply,
             } => {
-                let outcome = match self.thread(&thread_key, None).await {
+                let outcome = match self.thread(&thread, None).await {
                     Ok(thread) => thread.page(after).await,
                     Err(error) => Err(error.to_string()),
                 };
@@ -221,7 +226,7 @@ impl Brain {
 
     async fn submit(
         self: &Arc<Self>,
-        thread_key: &str,
+        thread_ref: &ThreadRef,
         request_id: &str,
         input_line: &Value,
         steer: bool,
@@ -238,11 +243,11 @@ impl Brain {
         };
         let model = turn.model.as_deref().and_then(|model| model.parse().ok());
         let thread = self
-            .thread(thread_key, model)
+            .thread(thread_ref, model)
             .await
             .map_err(|error| SubmitError::Internal(error.to_string()))?;
         let outcome = thread
-            .submit(request_id, &turn.text, thread_key, steer)
+            .submit(request_id, &turn.text, &thread_ref.key, steer)
             .await?;
         thread.drive();
         Ok(outcome)
@@ -251,10 +256,10 @@ impl Brain {
     /// The open thread, opening it (and resuming its pending turns) if needed.
     async fn thread(
         self: &Arc<Self>,
-        thread_key: &str,
+        thread: &ThreadRef,
         model: Option<ModelSelection>,
     ) -> Result<Arc<Thread>, Error> {
-        let session_id = blocks::session_id(thread_key);
+        let session_id = thread.session_id.clone();
         if let Some(thread) = self.open_thread(&session_id) {
             return Ok(thread);
         }

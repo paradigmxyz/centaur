@@ -1,7 +1,6 @@
 //! The input half of the blocks protocol that api-rs writes to a harness.
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, PartialEq)]
 pub enum Input {
@@ -50,23 +49,6 @@ pub fn parse(line: &str) -> Result<Input, String> {
             kind: other.to_owned(),
         }),
     }
-}
-
-/// Every derived session id carries this timestamp (2026-01-01T00:00:00Z).
-const SESSION_EPOCH_MS: u64 = 1_767_225_600_000;
-
-/// The nanocode session that holds a Centaur thread's conversation.
-///
-/// nanocode requires UUIDv7 session ids. Deriving one from the thread key,
-/// with a fixed timestamp and hashed random bits, lets any brain replica find
-/// a thread's session without a lookup table.
-pub fn session_id(thread_key: &str) -> String {
-    let digest = Sha256::digest(format!("centaur:thread:{thread_key}").as_bytes());
-    let mut random = [0_u8; 10];
-    random.copy_from_slice(&digest[..10]);
-    uuid::Builder::from_unix_timestamp_millis(SESSION_EPOCH_MS, &random)
-        .into_uuid()
-        .to_string()
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {
@@ -159,13 +141,5 @@ mod tests {
         );
         assert!(parse("nope").is_err());
         assert!(parse("{}").is_err());
-    }
-
-    #[test]
-    fn session_ids_are_stable_and_opaque() {
-        let id = session_id("slack:T1:C1:1.2");
-        assert_eq!(id, session_id("slack:T1:C1:1.2"));
-        assert_ne!(id, session_id("slack:T1:C1:1.3"));
-        assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 7);
     }
 }

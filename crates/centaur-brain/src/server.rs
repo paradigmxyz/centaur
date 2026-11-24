@@ -20,7 +20,8 @@ use tracing::warn;
 
 use crate::{
     projector::{Entry, Projector, StreamEvent},
-    worker::{Command, Page, SubmitError},
+    sessions::SessionIds,
+    worker::{Command, Page, SubmitError, ThreadRef},
 };
 
 /// Re-read the log at least this often, in case a wake-up was missed.
@@ -29,6 +30,26 @@ const TAIL_POLL: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct AppState {
     pub commands: mpsc::UnboundedSender<Command>,
+    pub sessions: SessionIds,
+}
+
+impl AppState {
+    /// The thread with its nanocode session, assigning one if it is new.
+    async fn thread(&self, thread_key: String) -> Result<ThreadRef, Box<Response>> {
+        match self.sessions.resolve(&thread_key).await {
+            Ok(session_id) => Ok(ThreadRef {
+                key: thread_key,
+                session_id,
+            }),
+            Err(failure) => {
+                warn!(%failure, "cannot resolve the thread's session");
+                Err(Box::new(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cannot resolve the thread's session",
+                )))
+            }
+        }
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -57,8 +78,12 @@ async fn submit(
     if request.request_id.trim().is_empty() {
         return error(StatusCode::BAD_REQUEST, "request_id is required");
     }
+    let thread = match state.thread(thread_key).await {
+        Ok(thread) => thread,
+        Err(response) => return *response,
+    };
     let outcome = ask(&state, |reply| Command::Submit {
-        thread_key,
+        thread,
         request_id: request.request_id.clone(),
         input_line: request.input_line,
         steer: request.steer,
@@ -83,7 +108,11 @@ async fn submit(
 }
 
 async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
-    match ask(&state, |reply| Command::Status { thread_key, reply }).await {
+    let thread = match state.thread(thread_key).await {
+        Ok(thread) => thread,
+        Err(response) => return *response,
+    };
+    match ask(&state, |reply| Command::Status { thread, reply }).await {
         Some(Ok(status)) => Json(json!({
             "running": status.running,
             "queued": status.queued,
@@ -95,7 +124,11 @@ async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -
 }
 
 async fn interrupt(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
-    match ask(&state, |reply| Command::Interrupt { thread_key, reply }).await {
+    let thread = match state.thread(thread_key).await {
+        Ok(thread) => thread,
+        Err(response) => return *response,
+    };
+    match ask(&state, |reply| Command::Interrupt { thread, reply }).await {
         Some(Ok(request_id)) => Json(json!({
             "interrupted": request_id.is_some(),
             "request_id": request_id,
@@ -140,10 +173,24 @@ async fn follow(
     execution_id: Option<String>,
     sender: mpsc::Sender<Event>,
 ) {
+    let thread = match state.sessions.resolve(&thread_key).await {
+        Ok(session_id) => ThreadRef {
+            key: thread_key.clone(),
+            session_id,
+        },
+        Err(failure) => {
+            let _ = sender
+                .send(stream_error(&format!(
+                    "cannot resolve the thread's session: {failure}"
+                )))
+                .await;
+            return;
+        }
+    };
     let mut projector: Option<Projector> = None;
     let mut cursor = 0;
     loop {
-        let Some(page) = page(&state, &thread_key, cursor).await else {
+        let Some(page) = page(&state, &thread, cursor).await else {
             let _ = sender.send(stream_error("the brain is unavailable")).await;
             return;
         };
@@ -202,9 +249,9 @@ async fn follow(
     }
 }
 
-async fn page(state: &AppState, thread_key: &str, after: u64) -> Option<Result<Page, String>> {
+async fn page(state: &AppState, thread: &ThreadRef, after: u64) -> Option<Result<Page, String>> {
     ask(state, |reply| Command::Page {
-        thread_key: thread_key.to_owned(),
+        thread: thread.clone(),
         after,
         reply,
     })

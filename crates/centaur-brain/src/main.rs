@@ -4,6 +4,7 @@ mod blocks;
 mod migrate;
 mod projector;
 mod server;
+mod sessions;
 mod translate;
 mod worker;
 
@@ -70,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Ok(());
         }
     };
+    let sessions = sessions::SessionIds::new(args.database_url.as_deref())?;
     let (commands, receiver) = mpsc::unbounded_channel();
     let _worker = worker::spawn(
         worker::Config {
@@ -83,10 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )?;
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %args.listen, "centaur-brain listening");
-    axum::serve(listener, server::router(server::AppState { commands }))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        server::router(server::AppState { commands, sessions }),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     Ok(())
 }
