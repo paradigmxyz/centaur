@@ -47,6 +47,26 @@ export interface Company {
   [field: string]: unknown;
 }
 
+export interface WorkspaceConnection<T> {
+  totalCount: number;
+  pageInfo: { hasNextPage: boolean; endCursor: string | null; [field: string]: unknown };
+  edges: { node: T; [field: string]: unknown }[];
+  [field: string]: unknown;
+}
+
+export interface WorkspaceList {
+  urn: string;
+  name: string;
+  recordType: { urn: string; name: string; [field: string]: unknown };
+  [field: string]: unknown;
+}
+
+export interface WorkspaceListEntry {
+  urn: string;
+  record: { urn: string; name: string; harmonicUrn: string | null; [field: string]: unknown };
+  [field: string]: unknown;
+}
+
 export interface Experience {
   title?: string;
   role?: string;
@@ -198,6 +218,21 @@ async function request(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return readJson(res, "Harmonic");
+}
+
+async function workspaceQuery<T>(
+  ctx: Ctx,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<T> {
+  const response: { data?: T | null; errors?: { message: string }[] } =
+    await request(ctx, "POST", "/graphql/v2", {}, { query, variables });
+
+  if (response.errors?.length) {
+    throw new Error(`Harmonic GraphQL: ${response.errors.map(({ message }) => message).join("; ").slice(0, 1000)}`);
+  }
+  if (response.data == null) throw new Error("Harmonic GraphQL returned no data");
+  return response.data;
 }
 
 const cleanText = (value: string | null | undefined): string =>
@@ -503,6 +538,93 @@ export async function company_connections(
   ctx: Ctx,
 ): Promise<Record<string, unknown>> {
   return request(ctx, "GET", `/companies/${encodeURIComponent(String(args.company_id))}/userConnections`);
+}
+
+/**
+ * Read one page of Harmonic Workspace lists. Set `first` to the page size and pass
+ * `pageInfo.endCursor` as `after` when `pageInfo.hasNextPage` is true. `record_type`
+ * filters this page's edges by company, person or investor; `totalCount` and
+ * `pageInfo` still describe the unfiltered connection. A filtered page can be empty.
+ */
+export async function lists(
+  args: { record_type?: "company" | "person" | "investor"; first?: number; after?: string },
+  ctx: Ctx,
+): Promise<WorkspaceConnection<WorkspaceList & { createdBy: { email: string | null } | null }>> {
+  const { first, after, record_type } = args;
+  const { workspace } = await workspaceQuery<{
+    workspace: {
+      lists: WorkspaceConnection<WorkspaceList & { createdBy: { email: string | null } | null }>;
+    };
+  }>(
+    ctx,
+    `query WorkspaceLists($first: Int, $after: String) {
+      workspace {
+        lists(first: $first, after: $after) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          edges { node { urn name recordType { urn name } createdBy { email } } }
+        }
+      }
+    }`,
+    { first, after },
+  );
+
+  const page = workspace.lists;
+  if (!record_type) return page;
+
+  const recordTypeUrn = `urn:harmonic:record_type:${record_type}`;
+  return { ...page, edges: page.edges.filter(({ node }) => node.recordType.urn === recordTypeUrn) };
+}
+
+/**
+ * Read one page of entries for a Workspace `list_urn` (`urn:harmonic:list:<uuid>`).
+ * Set `first` to the page size and pass `entries.pageInfo.endCursor` as `after`
+ * when `entries.pageInfo.hasNextPage` is true. For company lists, pass non-null
+ * `record.harmonicUrn` values to `get_companies` for full company profiles.
+ */
+export async function list_entries(
+  args: { list_urn: string; first?: number; after?: string },
+  ctx: Ctx,
+): Promise<WorkspaceList & { entries: WorkspaceConnection<WorkspaceListEntry> }> {
+  const { list_urn, first, after } = args;
+  const { list } = await workspaceQuery<{
+    list: (WorkspaceList & { entries: WorkspaceConnection<WorkspaceListEntry> }) | null;
+  }>(
+    ctx,
+    `query WorkspaceListEntries($urn: ListURN!, $first: Int, $after: String) {
+      list(urn: $urn) {
+        urn
+        name
+        recordType { urn name }
+        entries(first: $first, after: $after) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          edges { node { urn record { urn name harmonicUrn } } }
+        }
+      }
+    }`,
+    { urn: list_urn, first, after },
+  );
+
+  if (list === null) throw new Error(`Harmonic list ${list_urn} was not found or is not shared with the team`);
+  return list;
+}
+
+/**
+ * Fetch company profiles by numeric `ids` and/or company `urns`, up to 500 identifiers
+ * per request. Use `include_fields` to limit which fields Harmonic returns.
+ */
+export async function get_companies(
+  args: { ids?: number[]; urns?: string[]; include_fields?: string[] },
+  ctx: Ctx,
+): Promise<{ companies: Company[] }> {
+  const { ids, urns, include_fields } = args;
+  const count = (ids?.length ?? 0) + (urns?.length ?? 0);
+
+  if (count === 0) throw new Error("Pass at least one company ID or URN");
+  if (count > 500) throw new Error("Pass no more than 500 company IDs and URNs per request");
+
+  return { companies: await request(ctx, "POST", "/companies/batchGet", {}, { ids, urns, include_fields }) };
 }
 
 /** Create a saved search from `name` and `keywords`. Returns Harmonic's saved-search object. */
