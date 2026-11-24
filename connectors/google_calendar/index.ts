@@ -132,10 +132,7 @@ const MEET_SOLUTION_KEY = "hangoutsMeet";
 // only supports Meet); an existing conference is written directly as conferenceData instead.
 const ADD_ON_SOLUTION_KEY = "addOn";
 const ZOOM_SOLUTION_NAME = "Zoom Meeting";
-// Calendar rejects the whole event ("Invalid conference data") unless the icon is one it can
-// serve, such as Zoom's own Google-hosted icon below; zoom.us URLs fail.
-const ZOOM_ICON_URI =
-  "https://lh3.googleusercontent.com/pw/AM-JKLUkiyTEgH-6DiQP85RGtd_BORvAuFnS9katNMgwYQBJUTiDh12qtQxMJFWYH2Dj30hNsNUrr-kzKMl7jX-Qd0FR7JmVSx-Fhruf8xTPPI-wdsMYez6WJE7tz7KmqsORKBEnBTiILtMJXuMvphqKdB9X=s128-no";
+// No iconUri: Calendar rejects the event ("Invalid conference data") for icons it can't serve, such as zoom.us URLs.
 // An https join link on a Zoom host: zoom.us, an account subdomain, or ZoomGov.
 const ZOOM_URL = /^https:\/\/(?:[a-z0-9-]+\.)*(?:zoom\.us|zoomgov\.com)(?:[/?#]|$)/i;
 const DEFAULT_TIME_ZONE = "UTC";
@@ -199,7 +196,6 @@ function zoomConference(zoom: ZoomMeetingRef): ConferenceData {
     conferenceSolution: {
       key: { type: ADD_ON_SOLUTION_KEY },
       name: ZOOM_SOLUTION_NAME,
-      iconUri: ZOOM_ICON_URI,
     },
     entryPoints: [video],
   };
