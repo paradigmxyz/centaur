@@ -560,9 +560,23 @@ pub enum WorkflowWebhookTriggerKey {
 struct WorkflowTaskInput {
     workflow_name: String,
     input: Value,
+    #[serde(deserialize_with = "deserialize_task_harness_type")]
     harness_type: HarnessType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     slack_button_feedback: Option<slack_button_feedback::ButtonFeedback>,
+}
+
+/// Decodes a durable task's harness. Tasks queued before the nanocodex harness
+/// was removed resume on Codex, as its sessions do (migration 0061).
+fn deserialize_task_harness_type<'de, D>(deserializer: D) -> Result<HarnessType, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value == "nanocodex" {
+        return Ok(HarnessType::Codex);
+    }
+    HarnessType::from_str(&value).map_err(serde::de::Error::custom)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4493,6 +4507,20 @@ pub enum WorkflowRuntimeError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn queued_nanocodex_tasks_resume_on_codex() {
+        let task = |harness: &str| {
+            serde_json::from_value::<WorkflowTaskInput>(json!({
+                "workflow_name": "example",
+                "input": {},
+                "harness_type": harness,
+            }))
+        };
+        assert_eq!(task("nanocodex").unwrap().harness_type, HarnessType::Codex);
+        assert_eq!(task("pi").unwrap().harness_type, HarnessType::Pi);
+        assert!(task("unknown").is_err());
+    }
 
     async fn assert_structured_host_error_is_bounded(message_type: &str) {
         let stderr_task = tokio::spawn(async {

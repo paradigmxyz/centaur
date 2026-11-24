@@ -2081,9 +2081,6 @@ pub enum SessionStoreError {
     Bm25IndexesPresent { indexes: Vec<String> },
 }
 
-/// Harness type of sessions created before the nanocodex harness was removed.
-const LEGACY_NANOCODEX_HARNESS: &str = "nanocodex";
-
 #[derive(Debug, FromRow)]
 struct SessionRow {
     thread_key: String,
@@ -2107,14 +2104,6 @@ impl TryFrom<SessionRow> for Session {
     type Error = SessionStoreError;
 
     fn try_from(row: SessionRow) -> Result<Self, Self::Error> {
-        // Compatibility shim: the nanocodex harness was removed. Its sessions
-        // load as Codex without a thread id, since Codex cannot resume a
-        // Nanocodex run.
-        let (harness_type, harness_thread_id) = if row.harness_type == LEGACY_NANOCODEX_HARNESS {
-            (HarnessType::Codex, None)
-        } else {
-            (parse_persisted(row.harness_type)?, row.harness_thread_id)
-        };
         Ok(Self {
             thread_key: parse_persisted(row.thread_key)?,
             title: row.title,
@@ -2137,8 +2126,8 @@ impl TryFrom<SessionRow> for Session {
                 }
                 _ => None,
             },
-            harness_type,
-            harness_thread_id,
+            harness_type: parse_persisted(row.harness_type)?,
+            harness_thread_id: row.harness_thread_id,
             persona_id: row.persona_id,
             status: parse_persisted(row.status)?,
             iron_control_principal: row.iron_control_principal,
@@ -2418,37 +2407,6 @@ mod tests {
     use super::{
         IdleSandboxCandidate, IdleSandboxCandidateRow, PgSessionStore, SessionEventNotification,
     };
-
-    fn session_row(harness_type: &str) -> super::SessionRow {
-        super::SessionRow {
-            thread_key: "slack:T1:C1:1.0".to_owned(),
-            title: None,
-            sandbox_id: None,
-            sandbox_repo_cache_enabled: None,
-            sandbox_repo_cache_access: None,
-            sandbox_observability_enabled: None,
-            harness_type: harness_type.to_owned(),
-            harness_thread_id: Some("thread-1".to_owned()),
-            persona_id: None,
-            status: "idle".to_owned(),
-            iron_control_principal: None,
-            proxy_labels: sqlx::types::Json(BTreeMap::new()),
-            sandbox_last_active_at: None,
-            created_at: OffsetDateTime::UNIX_EPOCH,
-            updated_at: OffsetDateTime::UNIX_EPOCH,
-        }
-    }
-
-    #[test]
-    fn legacy_nanocodex_sessions_load_as_codex_without_a_thread_id() {
-        let session = centaur_session_core::Session::try_from(session_row("nanocodex")).unwrap();
-        assert_eq!(session.harness_type, HarnessType::Codex);
-        assert_eq!(session.harness_thread_id, None);
-
-        let session = centaur_session_core::Session::try_from(session_row("codex")).unwrap();
-        assert_eq!(session.harness_thread_id.as_deref(), Some("thread-1"));
-        assert!(centaur_session_core::Session::try_from(session_row("unknown")).is_err());
-    }
 
     async fn test_store() -> Option<PgSessionStore> {
         let Ok(url) = std::env::var("SESSION_RUNTIME_TEST_DATABASE_URL") else {
