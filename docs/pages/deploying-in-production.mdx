@@ -165,6 +165,21 @@ self-hosted or modified models whose endpoint rejects hosted Responses tools. Ag
 hosted tool for every provider, set `CODEX_CONFIG_OVERLAY` to
 `web_search = "disabled"` through `sandbox.extraEnv`.
 
+`secretHeaders` covers endpoints that require more than a bearer token, such as
+a gateway or tenant key in a custom header. Map each header name to a secret
+name, and store those secrets in the same secret source as `apiKeyEnv`:
+
+```yaml
+      secretHeaders:
+        X-Gateway-Key: PRIVATE_RESPONSES_GATEWAY_KEY
+```
+
+api-rs registers one injection per header, restricted to the `baseUrl` DNS
+host like the bearer replacement. Unlike `apiKeyEnv`, sandboxes receive no
+placeholder for these values; iron-proxy sets the header on every proxied
+request to that host. `Authorization`, `Proxy-Authorization`, `Host`, and
+hop-by-hop or framing headers cannot be configured here.
+
 The optional `models` catalog supplies readable names, natural-language aliases,
 and supported reasoning settings without adding a harness or model-query tool.
 For example, “use Example Model with max reasoning” can resolve to the registered

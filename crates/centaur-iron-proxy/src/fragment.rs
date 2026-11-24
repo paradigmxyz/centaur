@@ -28,7 +28,26 @@ struct CustomProviderConfig {
     /// Validated here; applied by the sandbox Codex harness per thread.
     #[allow(dead_code)]
     web_search: Option<bool>,
+    /// Extra request headers iron-proxy injects for the `baseUrl` host: header
+    /// name → secret name in the configured secret source. Sandboxes never see
+    /// these values, not even as placeholders.
+    #[serde(default)]
+    secret_headers: BTreeMap<String, String>,
 }
+
+/// Headers a custom provider may not claim through `secretHeaders`:
+/// `Authorization` belongs to `apiKeyEnv`, and the rest are connection or
+/// framing headers that must stay under client/proxy control.
+const RESERVED_SECRET_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "host",
+    "connection",
+    "content-length",
+    "transfer-encoding",
+    "te",
+    "upgrade",
+];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -167,6 +186,40 @@ fn custom_provider_auth_fragment(
             "baseUrl must be an HTTPS URL with a DNS hostname and no explicit port",
         )
     })?;
+    let mut seen_headers = Vec::with_capacity(config.secret_headers.len());
+    let mut header_secrets = String::new();
+    for (header, secret_env) in &config.secret_headers {
+        let normalized = header.to_ascii_lowercase();
+        if !valid_header_name(header) || RESERVED_SECRET_HEADERS.contains(&normalized.as_str()) {
+            return Err(invalid_custom_provider(
+                provider,
+                "secretHeaders names must be HTTP header tokens other than Authorization, Host, or hop-by-hop headers",
+            ));
+        }
+        if seen_headers.contains(&normalized) {
+            return Err(invalid_custom_provider(
+                provider,
+                "secretHeaders names must be unique case-insensitively",
+            ));
+        }
+        if !valid_env_name(secret_env) {
+            return Err(invalid_custom_provider(
+                provider,
+                "secretHeaders values must match [A-Z][A-Z0-9_]*",
+            ));
+        }
+        header_secrets.push_str(&format!(
+            r#"
+        - id: CODEX_CUSTOM_PROVIDER_{provider}_HEADER_{header_id}
+          source:
+            placeholder: "{secret_env}"
+          inject:
+            header: "{header}"
+          rules: [{{ host: {host} }}]"#,
+            header_id = normalized.replace('-', "_").to_ascii_uppercase(),
+        ));
+        seen_headers.push(normalized);
+    }
     load_fragment_str(&format!(
         r#"
 transforms:
@@ -177,10 +230,22 @@ transforms:
           replace:
             proxy_value: {api_key_env}
             match_headers: ["Authorization"]
-          rules: [{{ host: {host} }}]
+          rules: [{{ host: {host} }}]{header_secrets}
 "#,
         api_key_env = config.api_key_env,
     ))
+}
+
+/// An HTTP header field name restricted to letters, digits, and inner hyphens,
+/// so it is also safe to splice into the fragment YAML.
+fn valid_header_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
 }
 
 fn invalid_custom_provider(provider: &str, reason: &'static str) -> IronProxyConfigError {
