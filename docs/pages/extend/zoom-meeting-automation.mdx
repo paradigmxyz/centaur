@@ -12,6 +12,11 @@ scheduler. Scheduling policy is deployment-specific: organizer selection,
 calendar ownership, attendee approval, recording defaults, retention, and
 where transcripts may be published all belong in your overlay.
 
+For interactive scheduling, the built-in `zoom` Code Mode connector already
+creates and manages meetings with the Console-managed token, and
+`google_calendar.create_event` accepts its result as the event's Zoom video
+conference (see [OAuth Apps](/secrets/oauth-apps#zoom)).
+
 This recipe shows how to combine a Console-managed Zoom token with a small tool
 and a durable workflow. Extend it with Google Calendar or another calendar
 provider if your deployment also needs availability and invitations.
