@@ -94,7 +94,7 @@ pub type Result<T> = std::result::Result<T, PrincipalError>;
 
 pub const PRINCIPAL_COLUMNS: &str = "id, foreign_id, name, kind, labels, slack_user_id, \
      slack_channel_id, slack_team_id, slack_email, console_user_id, sandbox_repo_cache, \
-     sandbox_api_server_enabled, sandbox_observability_enabled, sandbox_sessions_read_enabled, \
+     sandbox_observability_enabled, sandbox_sessions_read_enabled, \
      sandbox_workflows_read_enabled, sandbox_workflows_write_enabled, sync_config_cache_version, \
      created_by_id, created_at, updated_at";
 
@@ -147,7 +147,6 @@ pub struct PrincipalRow {
     pub slack_email: Option<String>,
     pub console_user_id: Option<i64>,
     pub sandbox_repo_cache: String,
-    pub sandbox_api_server_enabled: bool,
     pub sandbox_observability_enabled: bool,
     pub sandbox_sessions_read_enabled: bool,
     pub sandbox_workflows_read_enabled: bool,

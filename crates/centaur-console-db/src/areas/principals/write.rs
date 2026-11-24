@@ -35,7 +35,6 @@ struct PrincipalDraft {
     slack_email: Option<String>,
     console_user_id: Option<i64>,
     sandbox_repo_cache: Option<String>,
-    sandbox_api_server_enabled: bool,
     sandbox_observability_enabled: Option<bool>,
     sandbox_sessions_read_enabled: Option<bool>,
     sandbox_workflows_read_enabled: Option<bool>,
@@ -59,7 +58,6 @@ impl PrincipalDraft {
             slack_email: None,
             console_user_id: None,
             sandbox_repo_cache: Some("all".to_owned()),
-            sandbox_api_server_enabled: true,
             sandbox_observability_enabled: Some(true),
             sandbox_sessions_read_enabled: Some(false),
             sandbox_workflows_read_enabled: Some(false),
@@ -83,7 +81,6 @@ impl PrincipalDraft {
             slack_email: row.slack_email.clone(),
             console_user_id: row.console_user_id,
             sandbox_repo_cache: Some(row.sandbox_repo_cache.clone()),
-            sandbox_api_server_enabled: row.sandbox_api_server_enabled,
             sandbox_observability_enabled: Some(row.sandbox_observability_enabled),
             sandbox_sessions_read_enabled: Some(row.sandbox_sessions_read_enabled),
             sandbox_workflows_read_enabled: Some(row.sandbox_workflows_read_enabled),
@@ -316,7 +313,7 @@ async fn validate_principal(conn: &mut PgConnection, draft: &PrincipalDraft) -> 
 }
 
 /// The principal columns a write binds, in bind order.
-const PRINCIPAL_WRITE_COLUMNS: [&str; 14] = [
+const PRINCIPAL_WRITE_COLUMNS: [&str; 13] = [
     "name",
     "kind",
     "labels",
@@ -326,7 +323,6 @@ const PRINCIPAL_WRITE_COLUMNS: [&str; 14] = [
     "slack_email",
     "console_user_id",
     "sandbox_repo_cache",
-    "sandbox_api_server_enabled",
     "sandbox_observability_enabled",
     "sandbox_sessions_read_enabled",
     "sandbox_workflows_read_enabled",
@@ -365,7 +361,6 @@ async fn persist_principal_row(
         .bind(&draft.slack_email)
         .bind(draft.console_user_id)
         .bind(&draft.sandbox_repo_cache)
-        .bind(draft.sandbox_api_server_enabled)
         .bind(draft.sandbox_observability_enabled)
         .bind(draft.sandbox_sessions_read_enabled)
         .bind(draft.sandbox_workflows_read_enabled)
@@ -1240,7 +1235,6 @@ mod tests {
             slack_email: None,
             console_user_id: None,
             sandbox_repo_cache: "all".to_owned(),
-            sandbox_api_server_enabled: true,
             sandbox_observability_enabled: true,
             sandbox_sessions_read_enabled: false,
             sandbox_workflows_read_enabled: false,

@@ -1544,9 +1544,6 @@ impl PgSessionStore {
                 sandbox_repo_cache_enabled = $3,
                 sandbox_repo_cache_access = $4,
                 sandbox_observability_enabled = $5,
-                -- Keep the deprecated column populated during rolling upgrades
-                -- so older api-rs pods can read assignments made by this version.
-                sandbox_api_server_enabled = true,
                 sandbox_last_active_at = now(),
                 -- A legacy nanocodex session becomes Codex with its new sandbox
                 -- (see LEGACY_NANOCODEX_HARNESS). Both cases read the old row.
