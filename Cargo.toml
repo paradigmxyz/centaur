@@ -29,6 +29,7 @@ centaur-iron-control = { path = "crates/centaur-iron-control" }
 centaur-iron-proxy = { path = "crates/centaur-iron-proxy" }
 centaur-sandbox-core = { path = "crates/centaur-sandbox-core" }
 centaur-sandbox-agent-k8s = { path = "crates/centaur-sandbox-agent-k8s" }
+centaur-sandbox-brain = { path = "crates/centaur-sandbox-brain" }
 centaur-sandbox-manager = { path = "crates/centaur-sandbox-manager" }
 centaur-session-core = { path = "crates/centaur-session-core" }
 centaur-session-runtime = { path = "crates/centaur-session-runtime" }

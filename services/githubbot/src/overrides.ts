@@ -32,6 +32,7 @@ const HARNESS_FLAGS: Record<string, string> = {
   "claude-code": "claudecode",
   claudecode: "claudecode",
   codex: "codex",
+  nanocode: "nanocode",
 };
 
 // Claude model aliases, usable both as bare flags (--opus) and as --model

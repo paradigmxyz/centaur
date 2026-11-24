@@ -45,6 +45,7 @@ describe('extractMessageOverrides', () => {
     expect(extractMessageOverrides('--claude-code review this').harnessType).toBe('claudecode')
     expect(extractMessageOverrides('--amp review this').harnessType).toBe('amp')
     expect(extractMessageOverrides('--codex review this').harnessType).toBe('codex')
+    expect(extractMessageOverrides('--nanocode review this').harnessType).toBe('nanocode')
     expect(extractMessageOverrides('--hermes review this').harnessType).toBe('hermes')
     expect(extractMessageOverrides('--pi review this').harnessType).toBe('pi')
     expect(extractMessageOverrides('--omp review this').harnessType).toBe('omp')
@@ -533,6 +534,12 @@ describe('validateStrategyOverrides', () => {
       provider: undefined,
       reasoning: 'high'
     })
+    expect(validateStrategyOverrides({ harness: 'nanocode', reasoning: 'high' })).toEqual({
+      harnessType: 'nanocode',
+      model: undefined,
+      provider: undefined,
+      reasoning: 'high'
+    })
     for (const harness of ['pi', 'omp']) {
       expect(validateStrategyOverrides({ harness, reasoning: 'none' })).toEqual({
         harnessType: harness,
@@ -700,6 +707,29 @@ describe('messageOverridesForText strategy invocation', () => {
         trace
       )
     ).resolves.toEqual({ overrides: {} })
+  })
+
+  test('handles --nanocode deterministically before the OpenAI strategy', async () => {
+    let requestCount = 0
+    const strategy = createOpenAiMessageOverridesStrategy({
+      apiKey: 'test-key',
+      fetch: (async () => {
+        requestCount += 1
+        throw new Error('the explicit flag must not call the strategy model')
+      }) as unknown as typeof fetch,
+      model: 'gpt-6-luna'
+    })
+
+    await expect(strategy({ text: '--nanocode review this' })).resolves.toEqual({
+      cleanedText: 'review this',
+      overrides: {
+        harnessType: 'nanocode',
+        model: undefined,
+        provider: undefined,
+        reasoning: undefined
+      }
+    })
+    expect(requestCount).toBe(0)
   })
 
   test('handles --pi deterministically before the OpenAI strategy', async () => {

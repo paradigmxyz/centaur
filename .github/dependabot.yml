@@ -23,6 +23,7 @@ updates:
       default-days: 7
     directories:
       - /services/api-rs
+      - /services/brain
       - /services/company-context
       - /services/discordbot
       - /services/githubbot

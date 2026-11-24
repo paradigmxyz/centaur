@@ -63,7 +63,7 @@ case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox)
+IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker brain:brain iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
@@ -364,7 +364,7 @@ dump_logs() {
 
   mkdir -p "$LOG_DIR"
   local component
-  for component in slackbotv2 api-rs; do
+  for component in slackbotv2 api-rs brain; do
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-${component}" --tail=-1 \
       > "$LOG_DIR/${component}.log" 2>&1 || true
   done

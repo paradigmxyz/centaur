@@ -55,6 +55,15 @@ proxySync:
       path: /events/events
       username: dev
 
+# centaur-brain runs nanocode turns. The stack enables it so the deployment is
+# exercised; nanocode state stays in memory because the e2e stack does not
+# provision the centaur_brain role's login. It trusts the release CA so provider
+# hostnames CoreDNS rewrites to the fake model server verify (the model server's
+# certificate is signed by that CA).
+brain:
+  enabled: true
+  trustReleaseCa: true
+
 # The test runner reaches the Console (served by api-rs) through its NodePort
 # (test-access.yaml). console.publicUrl is the browser origin the session cookie
 # and unsafe-request Origin checks use, and the host that selects the Console

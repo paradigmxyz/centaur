@@ -165,6 +165,9 @@ pub struct SessionRuntime {
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
     session_principal_admission: SessionPrincipalAdmission,
+    /// Whether the out-of-sandbox `nanocode` brain is configured. Without it,
+    /// `HarnessType::Nanocode` sessions are rejected at admission.
+    brain_enabled: bool,
     warm_pools: Option<WarmPools>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -699,6 +702,7 @@ impl SessionRuntime {
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
             session_principal_admission: SessionPrincipalAdmission::default(),
+            brain_enabled: false,
             warm_pools: None,
             personas: None,
             session_title_generator: None,
@@ -718,6 +722,18 @@ impl SessionRuntime {
     ) -> Self {
         self.session_principal_admission = admission;
         self
+    }
+
+    /// Enable sessions whose harness runs in the out-of-sandbox `nanocode`
+    /// brain. When disabled (the default), creating a `nanocode` session is a
+    /// bad request instead of a sandbox create failure.
+    pub fn with_brain_enabled(mut self, enabled: bool) -> Self {
+        self.brain_enabled = enabled;
+        self
+    }
+
+    fn admit_harness(&self, harness: &HarnessType) -> Result<(), SessionRuntimeError> {
+        harness_admission(harness, self.brain_enabled)
     }
 
     pub fn with_session_title_generator<F, Fut>(mut self, generator: F) -> Self
@@ -1107,6 +1123,7 @@ impl SessionRuntime {
             Some(foreign_id) => Some(foreign_id.trim()),
             None => None,
         };
+        self.admit_harness(harness_type)?;
         let span = info_span!(
             "centaur.api_rs.session.create_or_get",
             component = COMPONENT_SESSION_RUNTIME,
@@ -1181,6 +1198,8 @@ impl SessionRuntime {
                 Some(pinned) => pinned,
                 None => requested_harness,
             };
+            // A persona-pinned harness can also select nanocode.
+            self.admit_harness(harness_type)?;
             if harness_type != requested_harness {
                 info!(
                     component = COMPONENT_SESSION_RUNTIME,
@@ -1754,6 +1773,12 @@ impl SessionRuntime {
                 "starting session execution"
             );
             let session = self.store.get_session(thread_key).await?;
+            // A fresh execution must be admitted before its execution row is
+            // created. Replayed (already-persisted) executions are checked by
+            // `ensure_session_sandbox` so they fail durably instead of looping.
+            if persisted_execution_id.is_none() {
+                self.admit_harness(&session.harness_type)?;
+            }
             let harness_label = session.harness_type.to_string();
             validate_input_lines(&input_lines)?;
             let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
@@ -2048,6 +2073,9 @@ impl SessionRuntime {
             return Err(SessionRuntimeError::ShuttingDown);
         }
         let session = self.store.get_session(thread_key).await?;
+        // Fail the HTTP request before persisting an execution row: without a
+        // configured brain this harness cannot run anywhere.
+        self.admit_harness(&session.harness_type)?;
         validate_input_lines(&input.input_lines)?;
         let _ = duration_options(input.idle_timeout_ms, input.max_duration_ms)?;
         // The persisted request keeps the caller's lines; the driver pins
@@ -2568,6 +2596,10 @@ impl SessionRuntime {
         );
         let ensure_started = Instant::now();
         let result = async {
+            // Last line of defense: never build a sandbox spec for a harness
+            // whose runtime is not configured (e.g. a replayed execution whose
+            // brain disappeared).
+            self.admit_harness(harness_type)?;
             let persona_context = self.resolve_stored_persona(persona_id, desired_capabilities)?;
             if let Some(sandbox_id) = existing_sandbox_id {
                 let id = SandboxId::new(sandbox_id);
@@ -4039,6 +4071,9 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Amp => "amp",
+        // The brain never reaches this backend: nanocode specs are routed to
+        // the brain before a Kubernetes workload is built.
+        HarnessType::Nanocode => "nanocode",
         HarnessType::Hermes => "hermes",
         HarnessType::Pi => "pi",
         HarnessType::Omp => "omp",
@@ -7007,6 +7042,21 @@ fn terminal_output_from_lines(lines: &[String]) -> Option<TerminalOutput> {
     None
 }
 
+/// Reject harnesses whose runtime is not configured. `nanocode` sessions only
+/// work when the out-of-sandbox brain is wired in; without it the request is a
+/// bad request rather than a sandbox-create failure.
+fn harness_admission(
+    harness: &HarnessType,
+    brain_enabled: bool,
+) -> Result<(), SessionRuntimeError> {
+    if matches!(harness, HarnessType::Nanocode) && !brain_enabled {
+        return Err(SessionRuntimeError::BadRequest(
+            "harness nanocode is not enabled".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum SessionRuntimeError {
     #[error("{0}")]
@@ -7036,6 +7086,29 @@ mod tests {
     use centaur_session_core::SessionStatus;
     use serde_json::json;
     use time::OffsetDateTime;
+
+    #[test]
+    fn nanocode_admission_requires_a_configured_brain() {
+        let error =
+            harness_admission(&HarnessType::Nanocode, false).expect_err("nanocode needs a brain");
+        assert!(matches!(
+            error,
+            SessionRuntimeError::BadRequest(ref message)
+                if message == "harness nanocode is not enabled"
+        ));
+        harness_admission(&HarnessType::Nanocode, true).unwrap();
+        // Every other harness is unaffected by brain configuration.
+        for harness in [
+            HarnessType::Codex,
+            HarnessType::ClaudeCode,
+            HarnessType::Amp,
+            HarnessType::Hermes,
+            HarnessType::Pi,
+            HarnessType::Omp,
+        ] {
+            harness_admission(&harness, false).unwrap();
+        }
+    }
 
     #[test]
     fn sandbox_repo_cache_label_controls_access() {

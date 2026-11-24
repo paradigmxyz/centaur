@@ -35,6 +35,10 @@ proxySync:
   image:
     pullPolicy: IfNotPresent
 
+brain:
+  image:
+    pullPolicy: IfNotPresent
+
 tokenBroker:
   image:
     pullPolicy: IfNotPresent

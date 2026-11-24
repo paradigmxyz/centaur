@@ -1,0 +1,26 @@
+[package]
+name = "centaur-brain"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+clap.workspace = true
+futures-util.workspace = true
+harness-server = { path = "../harness-server" }
+nanocode = { git = "https://github.com/nanocodexyz/nanocode", rev = "8ef3ec25325f4f64d9d69c6c73bc354d49b08a7a", default-features = false }
+nanocode-executor = { git = "https://github.com/nanocodexyz/nanocode", rev = "8ef3ec25325f4f64d9d69c6c73bc354d49b08a7a" }
+nanocode-store-sql = { git = "https://github.com/nanocodexyz/nanocode", rev = "8ef3ec25325f4f64d9d69c6c73bc354d49b08a7a" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[lints]
+workspace = true

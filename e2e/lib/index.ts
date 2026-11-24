@@ -127,6 +127,24 @@ export async function executionOutput(executionId: string): Promise<any[]> {
   return events.map(({ payload }: { payload: string }) => JSON.parse(payload))
 }
 
+/**
+ * When an execution started and when the control plane recorded its first
+ * answer token, from the durable rows. `latencyMs` is the value api-rs stamped
+ * in the `session.first_token` event.
+ */
+export async function firstTokenTiming(
+  executionId: string
+): Promise<{ startedAt: Date; firstTokenAt: Date; latencyMs: number } | undefined> {
+  const [row] = await db`
+    select e.started_at as "startedAt", ev.created_at as "firstTokenAt",
+      (ev.payload->>'latency_ms')::int as "latencyMs"
+    from session_executions e
+    join session_events ev on ev.execution_id = e.execution_id
+    where e.execution_id = ${executionId} and ev.event_type = 'session.first_token'`
+  if (!row) return undefined
+  return { startedAt: row.startedAt, firstTokenAt: row.firstTokenAt, latencyMs: row.latencyMs }
+}
+
 export const model = {
   /**
    * Scripts the model's answer to the message this is attached to. `delayMs`

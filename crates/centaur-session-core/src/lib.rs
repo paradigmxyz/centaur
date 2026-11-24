@@ -370,6 +370,8 @@ pub enum HarnessType {
     Codex,
     Amp,
     ClaudeCode,
+    /// Runs in the long-lived `centaur-brain` service instead of a sandbox.
+    Nanocode,
     Hermes,
     Pi,
     Omp,
@@ -878,6 +880,10 @@ mod tests {
         assert_eq!(HarnessType::from_str("codex").unwrap(), HarnessType::Codex);
         assert_eq!(HarnessType::from_str("amp").unwrap(), HarnessType::Amp);
         assert_eq!(
+            HarnessType::from_str("nanocode").unwrap(),
+            HarnessType::Nanocode
+        );
+        assert_eq!(
             HarnessType::from_str("claudecode").unwrap(),
             HarnessType::ClaudeCode
         );
@@ -893,6 +899,16 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<HarnessType>(serde_json::json!("codex")).unwrap(),
             HarnessType::Codex
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessType::Nanocode).unwrap(),
+            serde_json::json!("nanocode")
+        );
+        assert_eq!(HarnessType::Nanocode.to_string(), "nanocode");
+        assert_eq!(HarnessType::Nanocode.as_ref(), "nanocode");
+        assert_eq!(
+            serde_json::from_value::<HarnessType>(serde_json::json!("nanocode")).unwrap(),
+            HarnessType::Nanocode
         );
     }
 

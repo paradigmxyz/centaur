@@ -16,6 +16,7 @@ const HARNESS_DISPLAY_NAMES: Record<string, string> = {
   amp: 'Amp',
   claudecode: 'Claude Code',
   codex: 'Codex',
+  nanocode: 'Nanocode',
   pi: 'Pi',
   omp: 'OMP'
 }
@@ -113,11 +114,18 @@ const CODEX_CONFIG = codexConfig as {
 // intentionally absent.
 const BAKED_DEFAULT_MODELS: Record<string, string | undefined> = {
   claudecode: typeof claudeSettings.model === 'string' ? claudeSettings.model : undefined,
-  codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
+  codex: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined,
+  nanocode: typeof CODEX_CONFIG.model === 'string' ? CODEX_CONFIG.model : undefined
 }
 
+// Nanocode shares Codex's default reasoning policy and the same
+// CODEX_MODEL_REASONING_EFFORT deployment override.
 const BAKED_DEFAULT_REASONING: Record<string, string | undefined> = {
   codex:
+    typeof CODEX_CONFIG.model_reasoning_effort === 'string'
+      ? CODEX_CONFIG.model_reasoning_effort
+      : undefined,
+  nanocode:
     typeof CODEX_CONFIG.model_reasoning_effort === 'string'
       ? CODEX_CONFIG.model_reasoning_effort
       : undefined
@@ -199,7 +207,7 @@ export function effectiveReasoningForHarness(
   if (key === 'claudecode' || key === 'pi' || key === 'omp') {
     return requested?.trim().toLowerCase() || undefined
   }
-  if (key !== 'codex') return undefined
+  if (key !== 'codex' && key !== 'nanocode') return undefined
   return requested?.trim().toLowerCase() || defaultReasoningForHarness(key, configured)
 }
 
@@ -226,7 +234,7 @@ export function reasoningForModel(
     return effort && PI_REASONING_EFFORTS.has(effort) ? effort : undefined
   }
   if (!selectedModel || !effort) return undefined
-  if (harness !== 'codex') return undefined
+  if (harness !== 'codex' && harness !== 'nanocode') return undefined
   if (selectedModel === 'gpt-5.6') {
     return GPT_5_6_REASONING_EFFORTS.has(effort) ? effort : undefined
   }

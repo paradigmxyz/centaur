@@ -31,11 +31,11 @@ const INSTRUCTIONS = [
 // lookarounds keep version suffixes ("gpt5", "opus-4.7") and plurals matching
 // while ignoring longer words such as "solve" or "terraform".
 const SELECTOR_TERM_PATTERN =
-  /(?<![a-z])(?:claude|claudecode|codex|amp|omp|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
+  /(?<![a-z])(?:claude|claudecode|codex|amp|nanocode|omp|opus|sonnet|haiku|fable|gpt|astra|sol|luna|terra|model|harness|provider|reasoning|effort|mode|bedrock|openrouter|think|thinking)(?:s|es)?(?![a-z])/i
 
 type Choice = { description?: string; value: string }
 
-const HARNESS_CHOICES: Choice[] = ['codex', 'claudecode', 'amp', 'pi', 'omp'].map(
+const HARNESS_CHOICES: Choice[] = ['codex', 'claudecode', 'amp', 'nanocode', 'pi', 'omp'].map(
   value => ({ value })
 )
 

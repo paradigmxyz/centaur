@@ -3,14 +3,14 @@ import { escapeRegExp } from './utils'
 
 /**
  * Inline message directives, restored from the v1 slackbot:
- *   --claude | --claude-code | --amp | --codex | --pi | --omp
+ *   --claude | --claude-code | --amp | --codex | --nanocode | --pi | --omp
  *                                                  pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
  *   --persona <id> (or --persona=<id>)           pick the persona independently
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/claude-code/pi/omp)
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocode/claude-code/pi/omp)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
@@ -59,6 +59,7 @@ const HARNESS_FLAGS: Record<string, string> = {
   claudecode: 'claudecode',
   codex: 'codex',
   hermes: 'hermes',
+  nanocode: 'nanocode',
   pi: 'pi',
   omp: 'omp'
 }
@@ -90,7 +91,7 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ])
   )
 
-const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'pi', 'omp'])
+const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocode', 'pi', 'omp'])
 const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
 const STRATEGY_REASONING_EFFORTS = new Set([
   'none',
@@ -289,6 +290,7 @@ export function validateStrategyOverrides(
     reasoning =
       harnessType === undefined ||
       harnessType === 'codex' ||
+      harnessType === 'nanocode' ||
       harnessType === 'pi' ||
       harnessType === 'omp'
         ? normalized

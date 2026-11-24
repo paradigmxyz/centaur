@@ -424,6 +424,36 @@
         }
       }
     },
+    "brain": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "defaultModel": { "type": "string" },
+        "defaultThinking": { "type": "string" },
+        "openaiBaseUrl": { "type": "string" },
+        "trustReleaseCa": { "type": "boolean" },
+        "databaseUrl": {
+          "type": "object",
+          "properties": {
+            "existingSecretName": { "type": "string" },
+            "secretKey": { "type": "string" }
+          }
+        },
+        "extraEnv": { "type": "object" },
+        "resources": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
+      }
+    },
     "apiRs": {
       "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
