@@ -567,7 +567,8 @@ struct WorkflowTaskInput {
 }
 
 /// Decodes a durable task's harness. Tasks queued before the nanocodex harness
-/// was removed resume on Codex, as its sessions do (migration 0061).
+/// was removed resume on Codex, as their sessions do (see
+/// `LEGACY_NANOCODEX_HARNESS` in centaur-session-sqlx).
 fn deserialize_task_harness_type<'de, D>(deserializer: D) -> Result<HarnessType, D::Error>
 where
     D: serde::Deserializer<'de>,
