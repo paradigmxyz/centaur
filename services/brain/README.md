@@ -46,13 +46,24 @@ The brain commits the log before it publishes events, so a client never sees an
 event that a crash could take back. After a crash, nanocode resumes an
 interrupted turn from its last commit point, up to three times.
 
+## Migrations
+
+The brain owns its schema, separately from api-rs. `centaur-brain migrate`
+applies `crates/centaur-brain/migrations` (the `nanocode` schema and the
+`centaur_brain` role, created NOLOGIN) using `DATABASE_URL`, a role that may
+create schemas and roles. It records them in its own
+`centaur_brain_migrations._sqlx_migrations` table, apart from api-rs's tracking
+table and out of the brain role's reach. The chart runs it as an init container
+of the brain Deployment when `brain.databaseUrl` is set; only that init
+container receives the owner DSN. nanocode creates its own tables inside
+`nanocode` at runtime.
+
 ## Environment
 
-- `BRAIN_DATABASE_URL` — optional Postgres DSN for nanocode durability. The
-  role's default search_path is the `nanocode` schema (see the
-  `centaur_brain` role migration in `crates/centaur-session-sqlx/migrations`).
-  When unset the service keeps state in memory, which is for local development
-  only. Provision a login for the role out of band
+- `BRAIN_DATABASE_URL` — optional Postgres DSN for nanocode durability,
+  connecting as the `centaur_brain` role, whose default search_path is the
+  `nanocode` schema. When unset the service keeps state in memory, which is for
+  local development only. Provision a login for the role out of band
   (`ALTER ROLE centaur_brain LOGIN PASSWORD ...`) and store the DSN in a Secret;
   the Helm value is `brain.databaseUrl.existingSecretName`.
 - `BRAIN_DEFAULT_MODEL` — default model for turns that name none; defaults to

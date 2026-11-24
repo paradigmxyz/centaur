@@ -17,6 +17,7 @@ nanocode-store-sql = { git = "https://github.com/nanocodexyz/nanocode", rev = "5
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true

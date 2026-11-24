@@ -1,5 +1,6 @@
 -- nanocode sessions run in centaur-brain, which keeps their durable state in
--- its own schema so its role never needs the public schema. The role cannot
+-- its own schema so its role never needs the public schema. `centaur-brain
+-- migrate` applies this with the database owner's credentials. The role cannot
 -- log in by default, like the other service roles: provision a login
 -- (ALTER ROLE centaur_brain LOGIN PASSWORD ...) and point BRAIN_DATABASE_URL at
 -- it when the brain needs durable rather than in-memory state.

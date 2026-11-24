@@ -530,11 +530,12 @@ brain:
   # SSL_CERT_DIR, so provider hostnames that resolve to a service signed by that
   # CA verify. Off by default; e2e turns it on for its fake model server.
   trustReleaseCa: false
-  # Optional Postgres DSN for nanocode durability, from an existing Secret. The
-  # `centaur_brain` role migration creates the role NOLOGIN; provision a login
-  # for it out of band and store a DSN that connects as that role, so its
-  # search_path selects the nanocode schema. Empty keeps state in memory, which
-  # is local/development only.
+  # Optional Postgres DSN for nanocode durability, from an existing Secret. When
+  # set, an init container runs the brain's own migrations with the shared
+  # DATABASE_URL, creating the nanocode schema and the centaur_brain role
+  # NOLOGIN. Provision a login for the role out of band and store a DSN that
+  # connects as it, so its search_path selects the nanocode schema. Empty keeps
+  # state in memory, which is local/development only.
   databaseUrl:
     existingSecretName: ""
     secretKey: DATABASE_URL

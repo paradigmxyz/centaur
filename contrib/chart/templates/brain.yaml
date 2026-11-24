@@ -46,25 +46,21 @@ spec:
 {{- include "centaur.podScheduling" (dict "values" $brain "indent" 6) }}
 {{- if $databaseUrl.existingSecretName }}
       initContainers:
-        # api-rs applies the core schema (including the nanocode schema this
-        # service's role owns), so wait for it before opening the store.
-        - name: wait-for-nanocode-schema
-          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              until [ "$(psql "$BRAIN_DATABASE_URL" -tAc "select to_regnamespace('nanocode') is not null")" = "t" ]; do
-                echo "waiting for the nanocode schema (api-rs)…"
-                sleep 2
-              done
+        # The brain owns its schema: apply its migrations (the nanocode schema
+        # and the centaur_brain role) with the database owner's credentials,
+        # which only this init container receives. The service itself runs as
+        # centaur_brain through brain.databaseUrl.
+        - name: migrate
+          image: {{ printf "%s:%s" $brain.image.repository $brain.image.tag | quote }}
+          imagePullPolicy: {{ $brain.image.pullPolicy }}
+          args:
+            - migrate
           env:
-            - name: BRAIN_DATABASE_URL
+            - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "brain.databaseUrl.existingSecretName is required when set" $databaseUrl.existingSecretName }}
-                  key: {{ required "brain.databaseUrl.secretKey is required when existingSecretName is set" $databaseUrl.secretKey }}
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
 {{- end }}
@@ -86,7 +82,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ $databaseUrl.existingSecretName }}
-                  key: {{ $databaseUrl.secretKey }}
+                  key: {{ required "brain.databaseUrl.secretKey is required when existingSecretName is set" $databaseUrl.secretKey }}
 {{- end }}
 {{- if and $brain.openaiBaseUrl (not (hasKey $brain.extraEnv "OPENAI_BASE_URL")) }}
             - name: OPENAI_BASE_URL

@@ -1,6 +1,7 @@
 //! centaur-brain: runs agent loops for harness `nanocode` outside sandboxes.
 
 mod blocks;
+mod migrate;
 mod projector;
 mod server;
 mod translate;
@@ -21,6 +22,16 @@ struct Cli {
 enum CliCommand {
     /// Serve the brain API for api-rs.
     Serve(ServeArgs),
+    /// Apply the brain's schema migrations with the database owner's
+    /// credentials, then exit.
+    Migrate(MigrateArgs),
+}
+
+#[derive(clap::Args)]
+struct MigrateArgs {
+    /// Postgres DSN of a role that may create schemas and roles.
+    #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
+    database_url: String,
 }
 
 #[derive(clap::Args)]
@@ -47,7 +58,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let CliCommand::Serve(args) = Cli::parse().command;
+    let args = match Cli::parse().command {
+        CliCommand::Serve(args) => args,
+        CliCommand::Migrate(args) => {
+            migrate::run(&args.database_url).await?;
+            tracing::info!("brain migrations applied");
+            return Ok(());
+        }
+    };
     let (commands, receiver) = mpsc::unbounded_channel();
     let _worker = worker::spawn(
         worker::Config {
