@@ -1,5 +1,8 @@
+pub mod brain;
 mod cleanup;
 mod codemode;
+#[cfg(test)]
+mod fake_brain;
 mod retention;
 mod title_generator;
 
@@ -52,6 +55,10 @@ use tokio::{
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 
+pub use brain::{
+    BrainByteStream, BrainClient, BrainError, BrainEventStream, ThreadStatus, TurnInterrupt,
+    TurnSubmitted,
+};
 pub use cleanup::SessionSandboxCleanupConfig;
 pub use codemode::CodemodeEndpoint;
 pub use retention::SessionEventRetentionConfig;
@@ -165,9 +172,10 @@ pub struct SessionRuntime {
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
     session_principal_admission: SessionPrincipalAdmission,
-    /// Whether the out-of-sandbox `nanocode` brain is configured. Without it,
-    /// `HarnessType::Nanocode` sessions are rejected at admission.
-    brain_enabled: bool,
+    /// The out-of-sandbox `nanocode` brain, when configured. `nanocode` turns
+    /// run there instead of in a sandbox; without it they are rejected at
+    /// admission.
+    brain: Option<Arc<BrainClient>>,
     warm_pools: Option<WarmPools>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -702,7 +710,7 @@ impl SessionRuntime {
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
             session_principal_admission: SessionPrincipalAdmission::default(),
-            brain_enabled: false,
+            brain: None,
             warm_pools: None,
             personas: None,
             session_title_generator: None,
@@ -724,16 +732,23 @@ impl SessionRuntime {
         self
     }
 
-    /// Enable sessions whose harness runs in the out-of-sandbox `nanocode`
-    /// brain. When disabled (the default), creating a `nanocode` session is a
-    /// bad request instead of a sandbox create failure.
-    pub fn with_brain_enabled(mut self, enabled: bool) -> Self {
-        self.brain_enabled = enabled;
+    /// Wire in the out-of-sandbox `nanocode` brain. Without it (the default),
+    /// creating or executing a `nanocode` session is a bad request instead of
+    /// a sandbox create failure.
+    pub fn with_brain(mut self, brain: Option<Arc<BrainClient>>) -> Self {
+        self.brain = brain;
         self
     }
 
     fn admit_harness(&self, harness: &HarnessType) -> Result<(), SessionRuntimeError> {
-        harness_admission(harness, self.brain_enabled)
+        harness_admission(harness, self.brain.as_deref())
+    }
+
+    /// The brain that runs this session's turns, when its harness is
+    /// `nanocode` and a brain is configured.
+    fn nanocode_brain(&self, session: &Session) -> Option<Arc<BrainClient>> {
+        let brain = self.brain.as_ref()?;
+        matches!(session.harness_type, HarnessType::Nanocode).then(|| brain.clone())
     }
 
     pub fn with_session_title_generator<F, Fut>(mut self, generator: F) -> Self
@@ -1782,6 +1797,26 @@ impl SessionRuntime {
             let harness_label = session.harness_type.to_string();
             validate_input_lines(&input_lines)?;
             let (idle_timeout, max_duration) = duration_options(idle_timeout_ms, max_duration_ms)?;
+            // `nanocode` turns run in the brain: no execution row, no sandbox,
+            // and no spawned driver. The brain owns the turn from here.
+            if persisted_execution_id.is_none()
+                && let Some(brain) = self.nanocode_brain(&session)
+            {
+                return self
+                    .submit_brain_turn(
+                        &brain,
+                        thread_key,
+                        &session,
+                        ExecuteSessionInput {
+                            idempotency_key,
+                            metadata,
+                            input_lines,
+                            idle_timeout_ms,
+                            max_duration_ms,
+                        },
+                    )
+                    .await;
+            }
             let requester_metadata = metadata.clone();
             let persona_model = self.persona_model(&session);
             let input_lines = match persona_model {
@@ -2068,7 +2103,6 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
-        let _admission = self.execution_admission.read().await;
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(SessionRuntimeError::ShuttingDown);
         }
@@ -2078,6 +2112,18 @@ impl SessionRuntime {
         self.admit_harness(&session.harness_type)?;
         validate_input_lines(&input.input_lines)?;
         let _ = duration_options(input.idle_timeout_ms, input.max_duration_ms)?;
+        // `nanocode` turns are submitted to the brain, which owns the turn and
+        // its transcript. api-rs persists no execution row, provisions no
+        // sandbox, and spawns no driver for them.
+        if let Some(brain) = self.nanocode_brain(&session) {
+            return self
+                .submit_brain_turn(&brain, thread_key, &session, input)
+                .await;
+        }
+        let _admission = self.execution_admission.read().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(SessionRuntimeError::ShuttingDown);
+        }
         // The persisted request keeps the caller's lines; the driver pins
         // them to the persona model when it writes them to the sandbox.
         let persona_model = self.persona_model(&session);
@@ -2122,6 +2168,185 @@ impl SessionRuntime {
             "persisted session execution request"
         );
         Ok(execution.execution)
+    }
+
+    /// Submit one `nanocode` turn to the brain and return the execution-shaped
+    /// response the `/execute` contract expects. The execution id is the brain
+    /// request id, so a retried execute with the same idempotency key maps to
+    /// the same turn.
+    async fn submit_brain_turn(
+        &self,
+        brain: &BrainClient,
+        thread_key: &ThreadKey,
+        session: &Session,
+        input: ExecuteSessionInput,
+    ) -> Result<SessionExecution, SessionRuntimeError> {
+        if input.input_lines.len() != 1 {
+            return Err(SessionRuntimeError::BadRequest(format!(
+                "nanocode turns take exactly one input line, got {}",
+                input.input_lines.len()
+            )));
+        }
+        let request_id = brain::request_id(thread_key, input.idempotency_key.as_deref());
+        let line = input
+            .input_lines
+            .into_iter()
+            .next()
+            .expect("exactly one input line");
+        let lines = match self.persona_model(session) {
+            Some(model) => input_lines_with_persona_model(vec![line], model),
+            None => vec![line],
+        };
+        let line = input_line_with_session_context(
+            thread_key,
+            &SessionTraceContext::for_execution(None, None, Some(&request_id)),
+            &lines[0],
+        );
+        let input_line = brain_input_line(&line)?;
+        let submitted = brain
+            .submit_turn(thread_key, &request_id, input_line, false)
+            .await?;
+        info!(
+            component = COMPONENT_SESSION_RUNTIME,
+            event = "session_brain_turn_submitted",
+            thread_key = %thread_key,
+            execution_id = %submitted.request_id,
+            status = %submitted.status,
+            created = submitted.created,
+            "submitted nanocode turn to the brain"
+        );
+        Ok(brain_session_execution(
+            thread_key,
+            &submitted,
+            input.idempotency_key,
+        ))
+    }
+
+    /// Cancel the thread's running brain turn, if any.
+    async fn interrupt_brain_turn(
+        &self,
+        brain: &BrainClient,
+        thread_key: &ThreadKey,
+        reason: &str,
+    ) -> Result<InterruptExecutionOutcome, SessionRuntimeError> {
+        let interrupted = brain.interrupt(thread_key, reason).await?;
+        Ok(InterruptExecutionOutcome {
+            interrupted: interrupted.interrupted,
+            execution_id: interrupted.request_id,
+        })
+    }
+
+    /// Fold appended user messages into the thread's running brain turn.
+    ///
+    /// The brain turns a steer with no running turn into a queued turn of its
+    /// own, so this asks the brain for the thread's unfinished turns first and
+    /// only submits when one is running. Without a running turn it reports
+    /// `NoActiveExecution` and the caller starts a turn instead.
+    async fn submit_brain_steer(
+        &self,
+        brain: &BrainClient,
+        thread_key: &ThreadKey,
+        session: &Session,
+        input_lines: Vec<String>,
+    ) -> SteeringOutcome {
+        let status = match brain.thread_status(thread_key).await {
+            Ok(status) => status,
+            Err(error) => {
+                // Nothing was submitted, so no turn saw the messages.
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_brain_thread_status_failed",
+                    thread_key = %thread_key,
+                    %error,
+                    "brain thread status lookup failed during steering"
+                );
+                return SteeringOutcome {
+                    status: SteeringStatus::NotDelivered,
+                    execution_id: None,
+                };
+            }
+        };
+        let Some(active_request_id) = status.running else {
+            info!(
+                component = COMPONENT_SESSION_RUNTIME,
+                event = "session_brain_steer_no_active_turn",
+                thread_key = %thread_key,
+                input_line_count = input_lines.len(),
+                queued_turn_count = status.queued.len(),
+                "no running brain turn to steer; appended messages were stored only"
+            );
+            return SteeringOutcome {
+                status: SteeringStatus::NoActiveExecution,
+                execution_id: None,
+            };
+        };
+        let input_lines = match self.persona_model(session) {
+            Some(model) => input_lines_with_persona_model(input_lines, model),
+            None => input_lines,
+        };
+        let trace = SessionTraceContext::for_execution(None, None, Some(&active_request_id));
+        let mut execution_id = active_request_id;
+        for line in input_lines {
+            let line = input_line_with_session_context(thread_key, &trace, &line);
+            let input_line = match brain_input_line(&line) {
+                Ok(input_line) => input_line,
+                Err(error) => {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_brain_steer_line_invalid",
+                        thread_key = %thread_key,
+                        %error,
+                        "steer line was not a blocks-protocol JSON object"
+                    );
+                    return SteeringOutcome {
+                        status: SteeringStatus::NotDelivered,
+                        execution_id: Some(execution_id),
+                    };
+                }
+            };
+            let steer_request_id = brain::new_request_id();
+            match brain
+                .submit_turn(thread_key, &steer_request_id, input_line, true)
+                .await
+            {
+                Ok(submitted) if submitted.steered => {}
+                Ok(submitted) => {
+                    // The turn ended before the steer landed, so the brain
+                    // queued this line as a turn of its own.
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_brain_steer_became_turn",
+                        thread_key = %thread_key,
+                        execution_id = %submitted.request_id,
+                        "brain queued a steer as a new turn"
+                    );
+                    execution_id = submitted.request_id;
+                }
+                Err(error) => {
+                    let status = if error.is_rejected() {
+                        SteeringStatus::NotDelivered
+                    } else {
+                        SteeringStatus::DeliveryUnknown
+                    };
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_brain_steer_failed",
+                        thread_key = %thread_key,
+                        execution_id = %execution_id,
+                        %error,
+                        "brain steer submission failed"
+                    );
+                    return SteeringOutcome {
+                        status,
+                        execution_id: Some(execution_id),
+                    };
+                }
+            }
+        }
+        SteeringOutcome {
+            status: SteeringStatus::Delivered,
+            execution_id: Some(execution_id),
+        }
     }
 
     fn spawn_session_execution(
@@ -2274,6 +2499,26 @@ impl SessionRuntime {
             return None;
         }
 
+        // A steer that lands after the turn ends starts a new turn, which must
+        // run the pinned model too.
+        let session = match self.store.get_session(thread_key).await {
+            Ok(session) => Some(session),
+            Err(error) => {
+                warn!(%thread_key, %error, "session lookup failed during steering");
+                None
+            }
+        };
+        // `nanocode` turns are owned by the brain: there is no execution row
+        // and no sandbox pipe to write the steer to.
+        if let Some(session) = session.as_ref()
+            && let Some(brain) = self.nanocode_brain(session)
+        {
+            return Some(
+                self.submit_brain_steer(&brain, thread_key, session, input_lines)
+                    .await,
+            );
+        }
+
         let Some(execution) = (match self.store.active_execution_for_thread(thread_key).await {
             Ok(execution) => execution,
             Err(error) => {
@@ -2303,15 +2548,6 @@ impl SessionRuntime {
             })
         };
 
-        // A steer that lands after the turn ends starts a new turn, which must
-        // run the pinned model too.
-        let session = match self.store.get_session(thread_key).await {
-            Ok(session) => Some(session),
-            Err(error) => {
-                warn!(%thread_key, %error, "session lookup failed during steering");
-                None
-            }
-        };
         let input_lines = match session
             .as_ref()
             .and_then(|session| self.persona_model(session))
@@ -2391,6 +2627,10 @@ impl SessionRuntime {
         thread_key: &ThreadKey,
         reason: &str,
     ) -> Result<InterruptExecutionOutcome, SessionRuntimeError> {
+        let session = self.store.get_session(thread_key).await?;
+        if let Some(brain) = self.nanocode_brain(&session) {
+            return self.interrupt_brain_turn(&brain, thread_key, reason).await;
+        }
         let Some(execution) = self.store.active_execution_for_thread(thread_key).await? else {
             return Ok(InterruptExecutionOutcome {
                 interrupted: false,
@@ -2529,6 +2769,16 @@ impl SessionRuntime {
                 "opening session event stream"
             );
             let session = self.store.get_session(thread_key).await?;
+            // `nanocode` turns are recorded by the brain, so this reads the
+            // brain's stream instead of `session_events`.
+            if let Some(brain) = self.nanocode_brain(&session) {
+                let events = brain
+                    .events(thread_key, after_event_id, execution_id)
+                    .await?
+                    .map(|event| event.map_err(SessionRuntimeError::from))
+                    .boxed();
+                return Ok(events);
+            }
             if let Some(sandbox_id) = session.sandbox_id.as_deref() {
                 self.ensure_session_pipe_if_live(thread_key, sandbox_id)
                     .await?;
@@ -2543,7 +2793,8 @@ impl SessionRuntime {
                 execution_id.map(ToOwned::to_owned),
                 listener,
                 span.clone(),
-            ))
+            )
+            .boxed())
         }
         .instrument(span.clone())
         .await;
@@ -2559,6 +2810,25 @@ impl SessionRuntime {
             );
         }
         result
+    }
+
+    /// Open the brain's raw event body for a `nanocode` session so the HTTP
+    /// events route can proxy it byte for byte. `None` means the session is not
+    /// a brain session and its events come from `session_events`.
+    pub async fn stream_brain_events_bytes(
+        &self,
+        thread_key: &ThreadKey,
+        after_event_id: i64,
+        execution_id: Option<&str>,
+    ) -> Result<Option<BrainByteStream>, SessionRuntimeError> {
+        let session = self.store.get_session(thread_key).await?;
+        let Some(brain) = self.nanocode_brain(&session) else {
+            return Ok(None);
+        };
+        let bytes = brain
+            .events_bytes(thread_key, after_event_id, execution_id)
+            .await?;
+        Ok(Some(bytes))
     }
 
     async fn ensure_session_sandbox(
@@ -4071,8 +4341,9 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Amp => "amp",
-        // The brain never reaches this backend: nanocode specs are routed to
-        // the brain before a Kubernetes workload is built.
+        // Unreachable: `nanocode` turns run in the brain, so no sandbox
+        // workload is ever built for this harness. Kept because the match over
+        // every harness must stay exhaustive.
         HarnessType::Nanocode => "nanocode",
         HarnessType::Hermes => "hermes",
         HarnessType::Pi => "pi",
@@ -4210,7 +4481,7 @@ fn session_event_stream(
 
 /// Terminal event types for a single execution: once one of these is emitted
 /// on an execution-scoped stream, the stream has nothing left to deliver.
-fn is_terminal_execution_event(event_type: &str) -> bool {
+pub(crate) fn is_terminal_execution_event(event_type: &str) -> bool {
     matches!(
         event_type,
         "session.execution_completed" | "session.execution_failed" | "session.execution_cancelled"
@@ -5886,6 +6157,7 @@ fn runtime_error_failure_class(error: &SessionRuntimeError) -> &'static str {
         SessionRuntimeError::Sandbox(SandboxError::Backend { .. }) => "sandbox_backend",
         SessionRuntimeError::Sandbox(SandboxError::InvalidSpec(_)) => "sandbox_invalid_spec",
         SessionRuntimeError::IronControl(_) => "iron_control",
+        SessionRuntimeError::Brain(_) => "brain",
         SessionRuntimeError::CapacityExceeded { .. } => "capacity",
     }
 }
@@ -7047,14 +7319,60 @@ fn terminal_output_from_lines(lines: &[String]) -> Option<TerminalOutput> {
 /// bad request rather than a sandbox-create failure.
 fn harness_admission(
     harness: &HarnessType,
-    brain_enabled: bool,
+    brain: Option<&BrainClient>,
 ) -> Result<(), SessionRuntimeError> {
-    if matches!(harness, HarnessType::Nanocode) && !brain_enabled {
+    if matches!(harness, HarnessType::Nanocode) && brain.is_none() {
         return Err(SessionRuntimeError::BadRequest(
             "harness nanocode is not enabled".to_owned(),
         ));
     }
     Ok(())
+}
+
+/// A `nanocode` input line is one blocks-protocol JSON object, exactly what
+/// api-rs would have written to a sandbox's stdin.
+fn brain_input_line(line: &str) -> Result<Value, SessionRuntimeError> {
+    let value: Value = serde_json::from_str(line).map_err(|error| {
+        SessionRuntimeError::BadRequest(format!(
+            "nanocode input lines must be blocks-protocol JSON objects: {error}"
+        ))
+    })?;
+    if !value.is_object() {
+        return Err(SessionRuntimeError::BadRequest(
+            "nanocode input lines must be blocks-protocol JSON objects".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+/// The execution-shaped view of a brain turn. The execution id is the brain
+/// request id and the status is the brain's status string, so callers of the
+/// existing `/execute` contract see no difference.
+fn brain_session_execution(
+    thread_key: &ThreadKey,
+    submitted: &TurnSubmitted,
+    idempotency_key: Option<String>,
+) -> SessionExecution {
+    let now = time::OffsetDateTime::now_utc();
+    SessionExecution {
+        execution_id: submitted.request_id.clone(),
+        idempotency_key,
+        thread_key: thread_key.clone(),
+        status: brain_execution_status(&submitted.status),
+        metadata: json!({}),
+        error: None,
+        created_at: now,
+        updated_at: now,
+        started_at: None,
+        completed_at: None,
+    }
+}
+
+fn brain_execution_status(status: &str) -> ExecutionStatus {
+    status
+        .trim()
+        .parse::<ExecutionStatus>()
+        .unwrap_or(ExecutionStatus::Queued)
 }
 
 #[derive(Debug, Error)]
@@ -7067,6 +7385,8 @@ pub enum SessionRuntimeError {
     Store(#[from] SessionStoreError),
     #[error(transparent)]
     Sandbox(#[from] SandboxError),
+    #[error(transparent)]
+    Brain(#[from] BrainError),
     #[error(transparent)]
     IronControl(#[from] centaur_iron_control::IronControlError),
     #[error(
@@ -7087,16 +7407,357 @@ mod tests {
     use serde_json::json;
     use time::OffsetDateTime;
 
+    /// A runtime whose store is a lazy pool: it never connects, so tests that
+    /// exercise only brain paths work without Postgres.
+    fn nanocode_test_runtime(brain: &BrainClient) -> SessionRuntime {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://postgres:postgres@localhost/centaur_test")
+                .expect("create lazy pool");
+        SessionRuntime::new(
+            PgSessionStore::new(pool),
+            SandboxRuntime::backend(
+                Arc::new(crate::adoption_tests::MockBackend::new(
+                    SandboxStatus::Running,
+                    Vec::new(),
+                )),
+                SandboxSpec::new("test"),
+            ),
+            crate::adoption_tests::AdmissionProbeRegistrar,
+        )
+        .with_brain(Some(Arc::new(brain.clone())))
+    }
+
+    fn nanocode_test_thread_key() -> ThreadKey {
+        ThreadKey::try_from("slack:T1:C1:1773364194.179929".to_owned()).unwrap()
+    }
+
+    fn nanocode_test_session(thread_key: &ThreadKey) -> Session {
+        Session {
+            thread_key: thread_key.clone(),
+            title: None,
+            sandbox_id: None,
+            sandbox_capabilities: None,
+            harness_type: HarnessType::Nanocode,
+            harness_thread_id: None,
+            persona_id: None,
+            status: SessionStatus::Active,
+            iron_control_principal: Some("prn_test".to_owned()),
+            proxy_labels: BTreeMap::new(),
+            sandbox_last_active_at: None,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    fn nanocode_turn_input(idempotency_key: Option<&str>) -> ExecuteSessionInput {
+        ExecuteSessionInput {
+            idempotency_key: idempotency_key.map(ToOwned::to_owned),
+            metadata: Some(json!({"source": "brain-test"})),
+            input_lines: vec![
+                json!({
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hello brain"}],
+                    },
+                })
+                .to_string(),
+            ],
+            idle_timeout_ms: None,
+            max_duration_ms: None,
+        }
+    }
+
+    fn nanocode_steer_line(thread_key: &ThreadKey) -> String {
+        json!({
+            "type": "user",
+            "thread_key": thread_key.as_str(),
+            "client_user_message_id": "msg_2",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "one more thing"}],
+            },
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn nanocode_execute_submits_one_turn_with_a_stable_request_id() {
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let runtime = nanocode_test_runtime(&brain);
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+        let expected_request_id = brain::request_id(&thread_key, Some("1773364194.179929"));
+
+        let execution = runtime
+            .submit_brain_turn(
+                &brain,
+                &thread_key,
+                &session,
+                nanocode_turn_input(Some("1773364194.179929")),
+            )
+            .await
+            .expect("submit brain turn");
+        assert_eq!(execution.execution_id, expected_request_id);
+        assert_eq!(execution.thread_key, thread_key);
+        assert_eq!(execution.status, ExecutionStatus::Queued);
+        assert_eq!(
+            execution.idempotency_key.as_deref(),
+            Some("1773364194.179929")
+        );
+
+        // A retried execute with the same idempotency key is the same turn.
+        let retried = runtime
+            .submit_brain_turn(
+                &brain,
+                &thread_key,
+                &session,
+                nanocode_turn_input(Some("1773364194.179929")),
+            )
+            .await
+            .expect("resubmit brain turn");
+        assert_eq!(retried.execution_id, expected_request_id);
+
+        let turns = fake_brain.recorded_turns();
+        assert_eq!(turns.len(), 2);
+        for turn in &turns {
+            assert_eq!(turn.thread_key, thread_key.as_str());
+            assert_eq!(turn.body["request_id"], expected_request_id.as_str());
+            assert_eq!(turn.body["steer"], false);
+            // The submitted line is what api-rs would have written to a
+            // sandbox's stdin: thread key plus the caller's message.
+            assert_eq!(turn.body["input_line"]["type"], "user");
+            assert_eq!(turn.body["input_line"]["thread_key"], thread_key.as_str());
+            assert_eq!(
+                turn.body["input_line"]["trace_metadata"]["execution_id"],
+                expected_request_id.as_str()
+            );
+            let content = turn.body["input_line"]["message"]["content"]
+                .as_array()
+                .expect("turn content parts");
+            assert!(
+                content.iter().any(|part| part["text"] == "hello brain"),
+                "the caller's message rides in the turn line: {content:?}"
+            );
+        }
+
+        // No idempotency key: a fresh turn each time.
+        let first = runtime
+            .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
+            .await
+            .expect("submit keyless turn");
+        let second = runtime
+            .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
+            .await
+            .expect("submit second keyless turn");
+        assert_ne!(first.execution_id, second.execution_id);
+        assert!(first.execution_id.starts_with("exe_"));
+    }
+
+    #[tokio::test]
+    async fn nanocode_execute_rejects_input_that_is_not_one_line() {
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let runtime = nanocode_test_runtime(&brain);
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+
+        for input_lines in [
+            Vec::new(),
+            vec!["{}".to_owned(), "{}".to_owned()],
+            vec!["not json".to_owned()],
+        ] {
+            let error = runtime
+                .submit_brain_turn(
+                    &brain,
+                    &thread_key,
+                    &session,
+                    ExecuteSessionInput {
+                        idempotency_key: None,
+                        metadata: None,
+                        input_lines,
+                        idle_timeout_ms: None,
+                        max_duration_ms: None,
+                    },
+                )
+                .await
+                .expect_err("nanocode turns take one JSON line");
+            assert!(matches!(error, SessionRuntimeError::BadRequest(_)));
+        }
+        assert!(fake_brain.recorded_turns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nanocode_interrupt_maps_the_brain_response() {
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let runtime = nanocode_test_runtime(&brain);
+        let thread_key = nanocode_test_thread_key();
+
+        // Nothing running: the existing response shape, with no execution.
+        let idle = runtime
+            .interrupt_brain_turn(&brain, &thread_key, "stop")
+            .await
+            .expect("interrupt idle thread");
+        assert!(!idle.interrupted);
+        assert_eq!(idle.execution_id, None);
+
+        fake_brain.set_interrupt_response(json!({
+            "interrupted": true,
+            "request_id": "exe_running",
+        }));
+        let outcome = runtime
+            .interrupt_brain_turn(&brain, &thread_key, "stop")
+            .await
+            .expect("interrupt running thread");
+        assert!(outcome.interrupted);
+        assert_eq!(outcome.execution_id.as_deref(), Some("exe_running"));
+
+        let interrupts = fake_brain.recorded_interrupts();
+        assert_eq!(interrupts.len(), 2);
+        assert_eq!(interrupts[1].thread_key, thread_key.as_str());
+        assert_eq!(interrupts[1].body["reason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn nanocode_steer_joins_the_running_brain_turn() {
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        fake_brain.set_thread_status(json!({
+            "running": "exe_running",
+            "queued": ["exe_queued"],
+        }));
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let runtime = nanocode_test_runtime(&brain);
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+
+        let steered = runtime
+            .submit_brain_steer(
+                &brain,
+                &thread_key,
+                &session,
+                vec![nanocode_steer_line(&thread_key)],
+            )
+            .await;
+        assert_eq!(steered.status, SteeringStatus::Delivered);
+        assert_eq!(steered.execution_id.as_deref(), Some("exe_running"));
+
+        let status_requests = fake_brain.recorded_status_requests();
+        assert_eq!(status_requests.len(), 1);
+        assert_eq!(status_requests[0].thread_key, thread_key.as_str());
+
+        let turns = fake_brain.recorded_turns();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].body["steer"], true);
+        assert!(
+            turns[0].body["request_id"]
+                .as_str()
+                .expect("steer request id")
+                .starts_with("exe_")
+        );
+        assert_eq!(turns[0].body["input_line"]["type"], "user");
+        assert_eq!(
+            turns[0].body["input_line"]["client_user_message_id"],
+            "msg_2"
+        );
+        assert_eq!(
+            turns[0].body["input_line"]["trace_metadata"]["execution_id"],
+            "exe_running"
+        );
+    }
+
+    #[tokio::test]
+    async fn nanocode_steer_without_a_running_turn_is_not_submitted() {
+        for thread_status in [
+            json!({"running": null, "queued": []}),
+            // A queued-but-not-running turn does not accept a steer either: the
+            // brain would make the line a turn of its own.
+            json!({"running": null, "queued": ["exe_queued"]}),
+        ] {
+            let fake_brain = crate::fake_brain::FakeBrain::start().await;
+            fake_brain.set_thread_status(thread_status);
+            let brain = BrainClient::new(fake_brain.url()).unwrap();
+            let runtime = nanocode_test_runtime(&brain);
+            let thread_key = nanocode_test_thread_key();
+            let session = nanocode_test_session(&thread_key);
+
+            let idle = runtime
+                .submit_brain_steer(
+                    &brain,
+                    &thread_key,
+                    &session,
+                    vec![nanocode_steer_line(&thread_key)],
+                )
+                .await;
+            assert_eq!(idle.status, SteeringStatus::NoActiveExecution);
+            assert_eq!(idle.execution_id, None);
+            assert!(
+                fake_brain.recorded_turns().is_empty(),
+                "a steer with no running turn must not queue one in the brain"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nanocode_steer_that_misses_the_turn_becomes_its_own_turn() {
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        fake_brain.set_thread_status(json!({"running": "exe_running", "queued": []}));
+        // The running turn ended before the steer landed, so the brain queued
+        // the line as a turn of its own.
+        fake_brain.set_turn_response(json!({
+            "request_id": "exe_new_turn",
+            "status": "queued",
+            "created": true,
+            "steered": false,
+        }));
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let runtime = nanocode_test_runtime(&brain);
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+
+        let outcome = runtime
+            .submit_brain_steer(
+                &brain,
+                &thread_key,
+                &session,
+                vec![nanocode_steer_line(&thread_key)],
+            )
+            .await;
+        assert_eq!(outcome.status, SteeringStatus::Delivered);
+        assert_eq!(outcome.execution_id.as_deref(), Some("exe_new_turn"));
+    }
+
+    #[tokio::test]
+    async fn nanocode_steer_reports_not_delivered_when_thread_status_fails() {
+        let brain = BrainClient::new("http://127.0.0.1:1").unwrap();
+        let runtime = nanocode_test_runtime(&brain);
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+
+        let outcome = runtime
+            .submit_brain_steer(
+                &brain,
+                &thread_key,
+                &session,
+                vec![nanocode_steer_line(&thread_key)],
+            )
+            .await;
+        assert_eq!(outcome.status, SteeringStatus::NotDelivered);
+        assert_eq!(outcome.execution_id, None);
+    }
+
     #[test]
     fn nanocode_admission_requires_a_configured_brain() {
         let error =
-            harness_admission(&HarnessType::Nanocode, false).expect_err("nanocode needs a brain");
+            harness_admission(&HarnessType::Nanocode, None).expect_err("nanocode needs a brain");
         assert!(matches!(
             error,
             SessionRuntimeError::BadRequest(ref message)
                 if message == "harness nanocode is not enabled"
         ));
-        harness_admission(&HarnessType::Nanocode, true).unwrap();
+        let brain = BrainClient::new("http://127.0.0.1:1").unwrap();
+        harness_admission(&HarnessType::Nanocode, Some(&brain)).unwrap();
         // Every other harness is unaffected by brain configuration.
         for harness in [
             HarnessType::Codex,
@@ -7106,7 +7767,7 @@ mod tests {
             HarnessType::Pi,
             HarnessType::Omp,
         ] {
-            harness_admission(&harness, false).unwrap();
+            harness_admission(&harness, None).unwrap();
         }
     }
 
@@ -8768,7 +9429,7 @@ mod adoption_tests {
     struct TestSessionPrincipalRegistrar;
 
     #[derive(Clone, Copy)]
-    struct AdmissionProbeRegistrar;
+    pub(crate) struct AdmissionProbeRegistrar;
 
     /// Fails every principal lookup, as when iron-control is unreachable.
     #[derive(Clone, Copy)]
@@ -8878,10 +9539,13 @@ mod adoption_tests {
         let runtime = SessionRuntime::new(
             PgSessionStore::new(pool),
             SandboxRuntime::backend(
-                Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new())),
+                Arc::new(crate::adoption_tests::MockBackend::new(
+                    SandboxStatus::Running,
+                    Vec::new(),
+                )),
                 SandboxSpec::new("test"),
             ),
-            AdmissionProbeRegistrar,
+            crate::adoption_tests::AdmissionProbeRegistrar,
         )
         .with_session_principal_admission(SessionPrincipalAdmission::Preapproved);
 
@@ -8912,10 +9576,13 @@ mod adoption_tests {
         let runtime = SessionRuntime::new(
             PgSessionStore::new(pool),
             SandboxRuntime::backend(
-                Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new())),
+                Arc::new(crate::adoption_tests::MockBackend::new(
+                    SandboxStatus::Running,
+                    Vec::new(),
+                )),
                 SandboxSpec::new("test"),
             ),
-            AdmissionProbeRegistrar,
+            crate::adoption_tests::AdmissionProbeRegistrar,
         )
         .with_session_principal_admission(SessionPrincipalAdmission::Preapproved);
 
@@ -8938,7 +9605,7 @@ mod adoption_tests {
 
     type ProxyEnsure = (String, String, Option<String>, BTreeMap<String, String>);
 
-    struct MockBackend {
+    pub(crate) struct MockBackend {
         ios: Mutex<VecDeque<SandboxIo>>,
         recorded_output: std::sync::Mutex<Vec<String>>,
         open_count: AtomicUsize,
@@ -8961,7 +9628,7 @@ mod adoption_tests {
     }
 
     impl MockBackend {
-        fn new(status: SandboxStatus, recorded_output: Vec<String>) -> Self {
+        pub(crate) fn new(status: SandboxStatus, recorded_output: Vec<String>) -> Self {
             Self {
                 ios: Mutex::new(VecDeque::new()),
                 recorded_output: std::sync::Mutex::new(recorded_output),

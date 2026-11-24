@@ -29,13 +29,13 @@ use centaur_sandbox_agent_k8s::{
     IronProxyConfig, OtlpEgressTarget, SecurityContext, SshProxyConfig, StateVolumeConfig,
     Toleration, ToolSource, ToolsConfig,
 };
-use centaur_sandbox_brain::RoutingSandboxBackend;
-use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxBackend, SandboxSpec};
+use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
 use centaur_session_core::{HarnessType, SandboxRepoCacheAccess};
 use centaur_session_runtime::{
-    PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
-    SessionPrincipalAdmission, SessionSandboxCleanupConfig, WarmPoolTarget,
+    BrainClient, PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode,
+    SessionEventRetentionConfig, SessionPrincipalAdmission, SessionSandboxCleanupConfig,
+    WarmPoolTarget,
 };
 use centaur_session_sqlx::TextSearchBackend;
 use centaur_workflows::{
@@ -104,6 +104,19 @@ impl Args {
     /// Base URL of the out-of-sandbox `nanocode` brain, when configured.
     pub(crate) fn brain_url(&self) -> Option<String> {
         self.sandbox.brain_url()
+    }
+
+    /// The `nanocode` brain client, when `CENTAUR_BRAIN_URL` is configured.
+    /// `nanocode` sessions are rejected at admission without one.
+    pub(crate) fn brain_client(&self) -> Result<Option<Arc<BrainClient>>, ServerError> {
+        let Some(url) = self.brain_url() else {
+            return Ok(None);
+        };
+        let client = BrainClient::new(&url).map_err(|error| {
+            ServerError::UnsupportedConfig(format!("invalid CENTAUR_BRAIN_URL: {error}"))
+        })?;
+        info!(url = %client.base_url(), "nanocode sessions run in centaur-brain");
+        Ok(Some(Arc::new(client)))
     }
 
     /// The image Code Mode sandboxes run. Missing or blank falls back to
@@ -1278,22 +1291,6 @@ impl SandboxArgs {
                 "drained sandboxes with stale pod identity or agent security contexts before enabling reuse"
             );
         }
-        // `nanocode` turns run in the long-lived brain, not in a Kubernetes
-        // sandbox, so route those specs (and their `brain-` ids) away from the
-        // sandbox backend when a brain is configured.
-        let backend: Arc<dyn SandboxBackend> = match self.brain_url() {
-            Some(url) => {
-                info!("routing nanocode sessions to centaur-brain");
-                Arc::new(
-                    RoutingSandboxBackend::with_brain_url(backend, &url).map_err(|error| {
-                        ServerError::UnsupportedConfig(format!(
-                            "invalid CENTAUR_BRAIN_URL: {error}"
-                        ))
-                    })?,
-                )
-            }
-            None => backend,
-        };
         Ok(SandboxRuntime::backend_with_workload(
             backend,
             self.container_workload_mode()?,

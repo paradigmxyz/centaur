@@ -1,38 +1,47 @@
-//! The nanocode side of the brain. nanocode brings its own executor, so every
-//! agent lives on one dedicated thread; the HTTP server talks to it through
+//! The nanocode side of the brain. Each Centaur thread is a nanocode session
+//! driven by a durable `TurnInbox` over its own session log; the log holds
+//! every turn's lifecycle and events. nanocode brings its own executor, so all
+//! of this runs on one dedicated thread and the HTTP server talks to it through
 //! executor-agnostic channels.
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use nanocode::{
-    AgentEvents, ClaudeClient, ModelSelection, Nanocode, OpenAi, PromptRequest, Thinking, Tools,
-    agent::{PromptRoute, events::AgentEvent},
-    durability::{MemoryStore, SessionStore, SqlStore},
+    ClaudeClient, HostFuture, ModelSelection, Nanocode, OpenAi, Thinking, Tools,
+    backend::Prompt,
+    durability::SessionRecord,
+    session_host::{
+        Driven, InboxHost, LoggedEvent, MovedQueued, Submission, Submitted, TurnInbox, TurnState,
+    },
+    turnlog::{LogHost, MemoryLog, OneLog, Policy, SqlLog},
 };
 use nanocode_store_sql::{PgOptions, PgPool, PgSql};
-use serde_json::Value;
-use tokio::sync::mpsc;
+use serde_json::{Map, Value, json, value::to_raw_value};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-use crate::{
-    blocks::{self, Input, UserTurn},
-    registry::Registry,
-    translate::{self, Turn},
-};
+use crate::blocks::{self, Input};
 
 const PG_CONNECTIONS: usize = 8;
-/// How long a failed turn waits for nanocode's own terminal event before the
-/// brain writes one, so every turn ends exactly once.
-const TERMINAL_GRACE: Duration = Duration::from_millis(250);
+/// How long the inbox batches events before writing them to the log.
+const LOG_WINDOW: Duration = Duration::from_millis(20);
+/// How long an idle driver waits before checking for more work.
+const DRIVE_POLL: Duration = Duration::from_millis(50);
+pub const PAGE_LIMIT: usize = 500;
+/// How many times a turn interrupted by a crash is resumed before it fails,
+/// so a turn that crashes the brain cannot crash-loop it.
+const TURN_RESTARTS: u64 = 3;
+/// The host record that commits the log up to a published event.
+const DURABLE_KEY: &str = "centaur.durable";
 
-pub enum Command {
-    Input { sandbox: String, line: String },
-    Stop { sandbox: String },
-}
+type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -43,11 +52,61 @@ pub struct Config {
     pub anthropic_base_url: Option<String>,
 }
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
+pub enum Command {
+    Submit {
+        thread_key: String,
+        request_id: String,
+        input_line: Value,
+        steer: bool,
+        reply: oneshot::Sender<Result<SubmitOutcome, SubmitError>>,
+    },
+    Interrupt {
+        thread_key: String,
+        reply: oneshot::Sender<Result<Option<String>, String>>,
+    },
+    Page {
+        thread_key: String,
+        after: u64,
+        reply: oneshot::Sender<Result<Page, String>>,
+    },
+    Status {
+        thread_key: String,
+        reply: oneshot::Sender<Result<ThreadStatus, String>>,
+    },
+}
+
+/// The turns a thread has not finished, from its durable log.
+#[derive(Debug)]
+pub struct ThreadStatus {
+    pub running: Option<String>,
+    pub queued: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct SubmitOutcome {
+    pub status: &'static str,
+    pub created: bool,
+    pub steered: bool,
+}
+
+#[derive(Debug)]
+pub enum SubmitError {
+    BadRequest(String),
+    Conflict(String),
+    Internal(String),
+}
+
+pub struct Page {
+    pub session_id: String,
+    pub events: Vec<LoggedEvent>,
+    pub next_cursor: u64,
+    pub has_more: bool,
+    /// Changes whenever the session log gains events.
+    pub wake: watch::Receiver<u64>,
+}
 
 pub fn spawn(
     config: Config,
-    registry: Registry,
     commands: mpsc::UnboundedReceiver<Command>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
@@ -57,7 +116,7 @@ pub fn spawn(
                 .enable_all()
                 .build()
                 .map_err(Error::from)
-                .and_then(|runtime| runtime.block_on(run(config, registry, commands)));
+                .and_then(|runtime| runtime.block_on(run(config, commands)));
             if let Err(error) = outcome {
                 tracing::error!(%error, "nanocode worker stopped");
                 std::process::exit(1);
@@ -65,57 +124,446 @@ pub fn spawn(
         })
 }
 
-async fn run(
-    config: Config,
-    registry: Registry,
-    mut commands: mpsc::UnboundedReceiver<Command>,
-) -> Result<(), Error> {
-    let default_model: ModelSelection = config.default_model.parse()?;
-    let thinking: Thinking = config.thinking.parse()?;
-    let store = session_store(config.database_url.as_deref())?;
-    let runtime = Nanocode::builder()
-        .openai(openai(config.openai_base_url.as_deref())?)
-        .claude(claude(config.anthropic_base_url.as_deref()))
-        .tools(Tools::builder().without_defaults().build()?)
-        .without_cua()
-        .runner_management(false)
-        .durability(store)
-        .thinking(thinking)
-        .build_async()
-        .await?;
-    info!(model = %default_model, ?thinking, "nanocode runtime ready");
-    let mut brain = Brain {
-        runtime,
-        registry,
-        default_model,
-        thinking,
-        sessions: HashMap::new(),
-    };
+async fn run(config: Config, mut commands: mpsc::UnboundedReceiver<Command>) -> Result<(), Error> {
+    let brain = Arc::new(Brain {
+        log_host: log_host(config.database_url.as_deref())?,
+        default_model: config.default_model.parse()?,
+        thinking: config.thinking.parse()?,
+        openai_base_url: config.openai_base_url,
+        anthropic_base_url: config.anthropic_base_url,
+        threads: Default::default(),
+        opening: Default::default(),
+    });
+    info!(model = %brain.default_model, thinking = ?brain.thinking, "brain ready");
     while let Some(command) = commands.recv().await {
-        match command {
-            Command::Input { sandbox, line } => brain.input(&sandbox, &line).await,
-            Command::Stop { sandbox } => brain.stop(&sandbox).await,
-        }
+        let brain = Arc::clone(&brain);
+        nanocode_executor::spawn(async move { brain.handle(command).await });
     }
-    brain.runtime.shutdown().await?;
     Ok(())
 }
 
-fn session_store(database_url: Option<&str>) -> Result<SessionStore, Error> {
+fn log_host(database_url: Option<&str>) -> Result<Arc<dyn LogHost>, Error> {
     Ok(match database_url {
         Some(url) => {
             let pool = PgPool::new(PgOptions::parse(url)?, PG_CONNECTIONS);
-            nanocode::session_store(SqlStore::new(PgSql::reading(pool.clone(), pool)))?
+            Arc::new(SqlLog::new(Arc::new(PgSql::reading(pool.clone(), pool))))
         }
         None => {
             warn!("BRAIN_DATABASE_URL is unset; sessions do not survive a restart");
-            nanocode::session_store(MemoryStore::new()?)?
+            Arc::new(MemoryLog::new())
         }
     })
 }
 
-/// HTTPS SSE: brain overhead to first token measures ~3 ms over it, and the
-/// WebSocket transport does not follow a regional `OPENAI_BASE_URL`.
+struct Brain {
+    log_host: Arc<dyn LogHost>,
+    default_model: ModelSelection,
+    thinking: Thinking,
+    openai_base_url: Option<String>,
+    anthropic_base_url: Option<String>,
+    threads: Mutex<HashMap<String, Arc<Thread>>>,
+    /// Serializes opening, so a thread is opened once.
+    opening: tokio::sync::Mutex<()>,
+}
+
+/// One Centaur thread: a nanocode session and its durable inbox.
+struct Thread {
+    session_id: String,
+    inbox: TurnInbox<OneLog>,
+    wake: watch::Sender<u64>,
+    driving: AtomicBool,
+    /// Kept alive for the inbox's lifetime.
+    _runtime: Nanocode,
+}
+
+impl Brain {
+    async fn handle(self: Arc<Self>, command: Command) {
+        match command {
+            Command::Submit {
+                thread_key,
+                request_id,
+                input_line,
+                steer,
+                reply,
+            } => {
+                let outcome = self
+                    .submit(&thread_key, &request_id, &input_line, steer)
+                    .await;
+                let _ = reply.send(outcome);
+            }
+            Command::Interrupt { thread_key, reply } => {
+                let outcome = match self.thread(&thread_key, None).await {
+                    Ok(thread) => thread.interrupt().await,
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::Status { thread_key, reply } => {
+                let outcome = match self.thread(&thread_key, None).await {
+                    Ok(thread) => thread.status().await,
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::Page {
+                thread_key,
+                after,
+                reply,
+            } => {
+                let outcome = match self.thread(&thread_key, None).await {
+                    Ok(thread) => thread.page(after).await,
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = reply.send(outcome);
+            }
+        }
+    }
+
+    async fn submit(
+        self: &Arc<Self>,
+        thread_key: &str,
+        request_id: &str,
+        input_line: &Value,
+        steer: bool,
+    ) -> Result<SubmitOutcome, SubmitError> {
+        let line = serde_json::to_string(input_line)
+            .map_err(|error| SubmitError::BadRequest(error.to_string()))?;
+        let turn = match blocks::parse(&line).map_err(SubmitError::BadRequest)? {
+            Input::User(turn) => turn,
+            _ => {
+                return Err(SubmitError::BadRequest(
+                    "input_line must be a user line".into(),
+                ));
+            }
+        };
+        let model = turn.model.as_deref().and_then(|model| model.parse().ok());
+        let thread = self
+            .thread(thread_key, model)
+            .await
+            .map_err(|error| SubmitError::Internal(error.to_string()))?;
+        let outcome = thread
+            .submit(request_id, &turn.text, thread_key, steer)
+            .await?;
+        thread.drive();
+        Ok(outcome)
+    }
+
+    /// The open thread, opening it (and resuming its pending turns) if needed.
+    async fn thread(
+        self: &Arc<Self>,
+        thread_key: &str,
+        model: Option<ModelSelection>,
+    ) -> Result<Arc<Thread>, Error> {
+        let session_id = blocks::session_id(thread_key);
+        if let Some(thread) = self.open_thread(&session_id) {
+            return Ok(thread);
+        }
+        let _opening = self.opening.lock().await;
+        if let Some(thread) = self.open_thread(&session_id) {
+            return Ok(thread);
+        }
+        let thread = Arc::new(self.open(&session_id, model).await?);
+        self.threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id, Arc::clone(&thread));
+        thread.drive();
+        Ok(thread)
+    }
+
+    fn open_thread(&self, session_id: &str) -> Option<Arc<Thread>> {
+        self.threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+    }
+
+    async fn open(&self, session_id: &str, model: Option<ModelSelection>) -> Result<Thread, Error> {
+        let policy = Policy {
+            restarts: TURN_RESTARTS,
+            ..Policy::default()
+        };
+        let parts = nanocode::turnlog(Arc::clone(&self.log_host), session_id, policy).await?;
+        let tools = Tools::builder()
+            .without_defaults()
+            .effect_gate(Arc::clone(&parts.gate))
+            .cell_journals(parts.journals.clone())
+            .build()?;
+        let runtime = Nanocode::builder()
+            .openai(openai(self.openai_base_url.as_deref())?)
+            .claude(claude(self.anthropic_base_url.as_deref()))
+            .tools(tools)
+            .without_cua()
+            .runner_management(false)
+            .thinking(self.thinking)
+            .durability(parts.store.clone())
+            .build_async()
+            .await?;
+        // Everything already in the log is durable; later events become
+        // visible only once the host has committed them.
+        let durable = last_seq(&parts.log).await?;
+        let (wake, _) = watch::channel(durable);
+        let host = Arc::new(Host {
+            log: Arc::clone(&parts.log),
+            wake: wake.clone(),
+        });
+        let record = SessionRecord::root(
+            session_id,
+            model.unwrap_or_else(|| self.default_model.clone()),
+            None,
+        );
+        let (inbox, pump) = TurnInbox::open(
+            (*runtime).clone(),
+            &parts.store,
+            record,
+            parts.log,
+            host,
+            LOG_WINDOW,
+        )
+        .await?;
+        nanocode_executor::spawn(pump);
+        info!(session_id, "opened session");
+        Ok(Thread {
+            session_id: session_id.to_owned(),
+            inbox,
+            wake,
+            driving: AtomicBool::new(false),
+            _runtime: runtime,
+        })
+    }
+}
+
+impl Thread {
+    async fn submit(
+        &self,
+        request_id: &str,
+        text: &str,
+        thread_key: &str,
+        steer: bool,
+    ) -> Result<SubmitOutcome, SubmitError> {
+        let internal = |error: &dyn std::fmt::Display| SubmitError::Internal(error.to_string());
+        let running = self.running().await.map_err(|error| internal(&error))?;
+        let submission = Submission {
+            request_id: request_id.to_owned(),
+            prompt: Prompt::new(text),
+            hand: None,
+            metadata: to_raw_value(&json!({"thread_key": thread_key}))
+                .map_err(|error| internal(&error))?,
+        };
+        let submitted = self
+            .inbox
+            .log()
+            .submit(&submission)
+            .await
+            .map_err(|error| internal(&error))?;
+        let record = match submitted {
+            Submitted::Accepted { record, event } => {
+                self.wake(event.seq);
+                record
+            }
+            Submitted::Existing(record) => {
+                return Ok(SubmitOutcome {
+                    status: record.state.as_str(),
+                    created: false,
+                    steered: false,
+                });
+            }
+            Submitted::Conflict(_) => {
+                return Err(SubmitError::Conflict(format!(
+                    "request {request_id} was already submitted with different input"
+                )));
+            }
+            Submitted::TooLarge { bytes, limit } => {
+                return Err(SubmitError::BadRequest(format!(
+                    "the turn is {bytes} bytes; the limit is {limit}"
+                )));
+            }
+        };
+        let mut steered = false;
+        if steer && let Some(running) = running {
+            steered = matches!(
+                self.inbox
+                    .move_queued(request_id, Some(&running))
+                    .await
+                    .map_err(|error| internal(&error))?,
+                MovedQueued::Moved
+            );
+        }
+        Ok(SubmitOutcome {
+            status: record.state.as_str(),
+            created: true,
+            steered,
+        })
+    }
+
+    async fn running(&self) -> Result<Option<String>, String> {
+        let pending = self
+            .inbox
+            .log()
+            .pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(pending
+            .into_iter()
+            .find(|record| record.state == TurnState::Running)
+            .map(|record| record.request_id))
+    }
+
+    async fn status(&self) -> Result<ThreadStatus, String> {
+        let pending = self
+            .inbox
+            .log()
+            .pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut status = ThreadStatus {
+            running: None,
+            queued: Vec::new(),
+        };
+        for record in pending {
+            match record.state {
+                TurnState::Running => status.running = Some(record.request_id),
+                TurnState::Queued => status.queued.push(record.request_id),
+                _ => {}
+            }
+        }
+        Ok(status)
+    }
+
+    async fn interrupt(&self) -> Result<Option<String>, String> {
+        let Some(running) = self.running().await? else {
+            return Ok(None);
+        };
+        self.inbox
+            .cancel(&running, &Map::new())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some(running))
+    }
+
+    async fn page(&self, after: u64) -> Result<Page, String> {
+        let page = self
+            .inbox
+            .log()
+            .page(after, PAGE_LIMIT)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Serve only committed events: a client must never see an event that
+        // a crash could take back.
+        let durable = *self.wake.borrow();
+        let complete = page.events.iter().all(|event| event.seq <= durable);
+        let events = page
+            .events
+            .into_iter()
+            .filter(|event| event.seq <= durable)
+            .map(|event| event.expanded(&self.session_id))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(Page {
+            session_id: self.session_id.clone(),
+            next_cursor: events.last().map_or(after, |event| event.seq),
+            has_more: complete && page.has_more,
+            events,
+            wake: self.wake.subscribe(),
+        })
+    }
+
+    fn wake(&self, seq: u64) {
+        self.wake.send_if_modified(|latest| {
+            let newer = seq > *latest;
+            *latest = (*latest).max(seq);
+            newer
+        });
+    }
+
+    /// Run queued turns until the inbox is idle. One driver per thread.
+    fn drive(self: &Arc<Self>) {
+        if self.driving.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let thread = Arc::clone(self);
+        nanocode_executor::spawn(async move {
+            loop {
+                match thread.inbox.drive(None).await {
+                    Ok(Driven::Idle) => {
+                        let pending = thread.inbox.log().pending().await;
+                        if pending.is_ok_and(|pending| pending.is_empty()) {
+                            break;
+                        }
+                        nanocode_executor::sleep(DRIVE_POLL).await;
+                    }
+                    Ok(Driven::Busy) => nanocode_executor::sleep(DRIVE_POLL).await,
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(session_id = %thread.session_id, %error, "drive failed");
+                        nanocode_executor::sleep(DRIVE_POLL).await;
+                    }
+                }
+            }
+            thread.driving.store(false, Ordering::Release);
+            // A turn submitted between the last check and the flag reset.
+            if thread
+                .inbox
+                .log()
+                .pending()
+                .await
+                .is_ok_and(|pending| !pending.is_empty())
+            {
+                thread.drive();
+            }
+        });
+    }
+}
+
+/// Commits what the inbox logs, then wakes event streams up to it. The log
+/// buffers events between its own commit points and replays a turn from the
+/// last one after a crash; committing on publish keeps every event a client
+/// sees durable, so a client never sees one that a crash takes back.
+struct Host {
+    log: Arc<OneLog>,
+    /// The highest committed seq.
+    wake: watch::Sender<u64>,
+}
+
+impl InboxHost for Host {
+    fn publish(&self, events: Vec<LoggedEvent>) -> HostFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let Some(seq) = events.iter().map(|event| event.seq).max() else {
+                return Ok(());
+            };
+            if seq <= *self.wake.borrow() {
+                return Ok(());
+            }
+            let marker = to_raw_value(&seq).map_err(|error| error.to_string())?;
+            self.log
+                .effect(DURABLE_KEY, marker)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.wake.send_if_modified(|latest| {
+                let newer = seq > *latest;
+                *latest = (*latest).max(seq);
+                newer
+            });
+            Ok(())
+        })
+    }
+}
+
+/// The last seq in a session log.
+async fn last_seq(log: &OneLog) -> Result<u64, Error> {
+    let mut cursor = 0;
+    loop {
+        let page = log.page(cursor, PAGE_LIMIT).await?;
+        cursor = page.next_cursor;
+        if !page.has_more {
+            return Ok(cursor);
+        }
+    }
+}
+
+/// HTTPS SSE: the WebSocket transport does not follow a regional
+/// `OPENAI_BASE_URL`.
 fn openai(base_url: Option<&str>) -> Result<OpenAi, Error> {
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "OPENAI_API_KEY".to_owned());
     let mut builder = OpenAi::builder(key)
@@ -133,250 +581,4 @@ fn claude(base_url: Option<&str>) -> ClaudeClient {
         url.trim_end_matches('/')
     });
     ClaudeClient::with_api_key(format!("{base}/messages"), key)
-}
-
-struct Brain {
-    runtime: Nanocode,
-    registry: Registry,
-    default_model: ModelSelection,
-    thinking: Thinking,
-    sessions: HashMap<String, Session>,
-}
-
-struct Session {
-    agent: nanocode::Agent,
-    output: Arc<Output>,
-}
-
-/// Where a session's output goes, and the translation state of its turn.
-struct Output {
-    thread_id: String,
-    state: Mutex<OutputState>,
-}
-
-struct OutputState {
-    /// The sandbox whose socket receives this session's output.
-    sandbox: String,
-    turn: Option<Turn>,
-    thread_announced: bool,
-    /// Turns ended so far. Turns run one at a time per session, so a turn
-    /// that fails without this moving never reported its own end.
-    ended: u64,
-}
-
-impl Output {
-    fn new(thread_id: &str, sandbox: &str) -> Self {
-        Self {
-            thread_id: thread_id.to_owned(),
-            state: Mutex::new(OutputState {
-                sandbox: sandbox.to_owned(),
-                turn: None,
-                thread_announced: false,
-                ended: 0,
-            }),
-        }
-    }
-
-    fn route_to(&self, sandbox: &str) {
-        sandbox.clone_into(&mut lock(&self.state).sandbox);
-    }
-
-    fn sandbox(&self) -> String {
-        lock(&self.state).sandbox.clone()
-    }
-
-    fn ended(&self) -> u64 {
-        lock(&self.state).ended
-    }
-
-    /// Translate one nanocode event and send the resulting lines.
-    fn event(&self, registry: &Registry, event: &AgentEvent) {
-        let payload: Value = serde_json::from_str(event.payload.get()).unwrap_or_default();
-        let mut state = lock(&self.state);
-        let mut out = Vec::new();
-        if let Some(turn_id) = payload["turn_id"].as_str()
-            && state.turn.as_ref().is_none_or(|turn| turn.id() != turn_id)
-        {
-            let announce = !state.thread_announced;
-            let (turn, opening) = Turn::start(&self.thread_id, turn_id, announce);
-            state.thread_announced = true;
-            state.turn = Some(turn);
-            out.extend(opening);
-        }
-        let Some(turn) = state.turn.as_mut() else {
-            return;
-        };
-        out.extend(turn.event(event));
-        if turn.finished() {
-            state.turn = None;
-            state.ended += 1;
-        }
-        for line in out {
-            registry.emit(&state.sandbox, line);
-        }
-    }
-
-    /// End a turn that failed without reporting its own end.
-    fn fail(&self, registry: &Registry, ended_before: u64, error: &str) {
-        let mut state = lock(&self.state);
-        if state.ended != ended_before {
-            return;
-        }
-        let out = match state.turn.take() {
-            Some(mut turn) => turn.fail(error),
-            None => translate::failed_turn(
-                &self.thread_id,
-                &nanocode::platform::uuid_v7().to_string(),
-                error,
-            ),
-        };
-        state.ended += 1;
-        for line in out {
-            registry.emit(&state.sandbox, line);
-        }
-    }
-}
-
-impl Brain {
-    async fn input(&mut self, sandbox: &str, line: &str) {
-        match blocks::parse(line) {
-            Ok(Input::User(turn)) => self.user(sandbox, turn).await,
-            Ok(Input::Interrupt { thread_key }) => {
-                let Some(thread_key) = thread_key.or_else(|| self.registry.thread_key(sandbox))
-                else {
-                    return;
-                };
-                if let Some(session) = self.sessions.get(&blocks::session_id(&thread_key))
-                    && let Err(error) = session.agent.cancel_active_turn().await
-                {
-                    warn!(%error, "interrupt failed");
-                }
-            }
-            Ok(Input::Ignored { kind }) => info!(kind, "ignoring unsupported input"),
-            Err(error) => warn!(%error, "dropping malformed input"),
-        }
-    }
-
-    async fn user(&mut self, sandbox: &str, turn: UserTurn) {
-        let request_id = turn
-            .request_id
-            .clone()
-            .unwrap_or_else(|| nanocode::platform::uuid_v7().to_string());
-        let Some(thread_key) = turn
-            .thread_key
-            .clone()
-            .or_else(|| self.registry.thread_key(sandbox))
-        else {
-            self.fail(sandbox, "brain", "input has no thread_key");
-            return;
-        };
-        self.registry.set_thread_key(sandbox, &thread_key);
-        let model = turn.model.as_deref().and_then(|model| model.parse().ok());
-        let (agent, output) = match self.session(sandbox, &thread_key, model).await {
-            Ok(session) => (session.agent.clone(), Arc::clone(&session.output)),
-            Err(error) => {
-                let thread_id = blocks::session_id(&thread_key);
-                self.fail(
-                    sandbox,
-                    &thread_id,
-                    &format!("cannot open session: {error}"),
-                );
-                return;
-            }
-        };
-        let ended_before = output.ended();
-        let route = agent
-            .route_prompt_request(PromptRequest::new(turn.text).request_id(&request_id))
-            .await;
-        match route {
-            Ok(PromptRoute::Started(started)) => {
-                let registry = self.registry.clone();
-                nanocode_executor::spawn(async move {
-                    if let Err(error) = started.result().await {
-                        nanocode_executor::sleep(TERMINAL_GRACE).await;
-                        output.fail(&registry, ended_before, &error.to_string());
-                    }
-                });
-            }
-            Ok(PromptRoute::Steered) => info!(%thread_key, "steered the active turn"),
-            Err(error) => output.fail(&self.registry, ended_before, &error.to_string()),
-        }
-    }
-
-    async fn session(
-        &mut self,
-        sandbox: &str,
-        thread_key: &str,
-        model: Option<ModelSelection>,
-    ) -> Result<&Session, Error> {
-        let id = blocks::session_id(thread_key);
-        if !self.sessions.contains_key(&id) {
-            let (agent, events) = match self.runtime.open_session(&id).await {
-                Ok(opened) => opened,
-                Err(_) => {
-                    self.runtime
-                        .spawn()
-                        .harness_model(model.clone().unwrap_or_else(|| self.default_model.clone()))
-                        .thinking(self.thinking)
-                        .session_id(id.clone())
-                        .build()
-                        .await?
-                }
-            };
-            let output = Arc::new(Output::new(&id, sandbox));
-            pump(events, self.registry.clone(), Arc::clone(&output));
-            self.sessions.insert(id.clone(), Session { agent, output });
-        }
-        let session = &self.sessions[&id];
-        session.output.route_to(sandbox);
-        if let Some(model) = model
-            && session
-                .agent
-                .settings()
-                .await
-                .is_ok_and(|(current, _, _)| current != model)
-            && let Err(error) = session.agent.set_harness_model(model).await
-        {
-            warn!(%error, "keeping the session's model");
-        }
-        Ok(session)
-    }
-
-    async fn stop(&mut self, sandbox: &str) {
-        let stopped: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.output.sandbox() == sandbox)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in stopped {
-            if let Some(session) = self.sessions.remove(&id) {
-                let _ = session.agent.cancel_active_turn().await;
-                let _ = session.agent.shutdown().await;
-            }
-        }
-    }
-
-    /// End a turn that failed before it had a session to run in.
-    fn fail(&self, sandbox: &str, thread_id: &str, error: &str) {
-        warn!(sandbox, error, "turn failed before it started");
-        let turn_id = nanocode::platform::uuid_v7().to_string();
-        for line in translate::failed_turn(thread_id, &turn_id, error) {
-            self.registry.emit(sandbox, line);
-        }
-    }
-}
-
-fn pump(mut events: AgentEvents, registry: Registry, output: Arc<Output>) {
-    nanocode_executor::spawn(async move {
-        while let Some(event) = events.recv().await {
-            output.event(&registry, &event);
-        }
-    });
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

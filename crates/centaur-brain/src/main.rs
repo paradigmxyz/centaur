@@ -1,7 +1,7 @@
 //! centaur-brain: runs agent loops for harness `nanocode` outside sandboxes.
 
 mod blocks;
-mod registry;
+mod projector;
 mod server;
 mod translate;
 mod worker;
@@ -48,7 +48,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
     let CliCommand::Serve(args) = Cli::parse().command;
-    let registry = registry::Registry::default();
     let (commands, receiver) = mpsc::unbounded_channel();
     let _worker = worker::spawn(
         worker::Config {
@@ -58,18 +57,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             openai_base_url: args.openai_base_url,
             anthropic_base_url: args.anthropic_base_url,
         },
-        registry.clone(),
         receiver,
     )?;
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %args.listen, "centaur-brain listening");
-    axum::serve(
-        listener,
-        server::router(server::AppState { registry, commands }),
-    )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await?;
+    axum::serve(listener, server::router(server::AppState { commands }))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }

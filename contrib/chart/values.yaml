@@ -498,13 +498,13 @@ tokenBroker:
     annotations: {}
   resources: {}
 
-# Rust nanocode harness service (`centaur-brain`). Runs nanocode turns outside a
-# sandbox: api-rs treats it as a sandbox backend over HTTP and a WebSocket, so
-# sessions using the `nanocode` harness need it. Off by default, which makes
-# creating a nanocode session fail. See services/brain/README.md.
+# Rust nanocode harness service (`centaur-brain`). Runs `nanocode` turns outside
+# any sandbox and owns their durable turn log; api-rs submits turns and proxies
+# the event stream to it. Off by default, which makes creating a nanocode
+# session fail. See services/brain/README.md.
 #
-# Model traffic is direct HTTPS in this spike. Production model egress should go
-# through a dedicated iron-proxy with a model-only principal (follow-up).
+# Model traffic is direct HTTPS. Production model egress should go through a
+# dedicated iron-proxy with a model-only principal (follow-up).
 brain:
   enabled: false
   replicaCount: 1

@@ -75,6 +75,15 @@ export type Turn = {
   request?: ModelRequest
 }
 
+/** A `nanocode` turn: it has no execution row or sandbox, only the brain's event stream. */
+export type BrainTurn = {
+  /** Text of the turn's one Slack reply. */
+  reply: string
+  execution: Execution
+  /** The api-rs `session.first_token` latency the brain reported, in milliseconds. */
+  firstTokenMs: number
+}
+
 export type SlackMessage = {
   ts: string
   text?: string
@@ -88,7 +97,8 @@ export type SlackMessage = {
 
 const slackUrl = required('E2E_SLACK_URL')
 const modelUrl = required('E2E_MODEL_URL')
-const db = new SQL(required('E2E_DATABASE_URL'))
+/** The session database, for the durable rows a turn leaves behind. */
+export const db = new SQL(required('E2E_DATABASE_URL'))
 const ironControlDb = new SQL(required('E2E_IRON_CONTROL_DATABASE_URL'))
 const apiUrl = required('E2E_API_URL')
 const apiKey = required('E2E_API_KEY')
@@ -125,24 +135,6 @@ export async function executionOutput(executionId: string): Promise<any[]> {
     where execution_id = ${executionId} and event_type = 'session.output.line'
     order by event_id`
   return events.map(({ payload }: { payload: string }) => JSON.parse(payload))
-}
-
-/**
- * When an execution started and when the control plane recorded its first
- * answer token, from the durable rows. `latencyMs` is the value api-rs stamped
- * in the `session.first_token` event.
- */
-export async function firstTokenTiming(
-  executionId: string
-): Promise<{ startedAt: Date; firstTokenAt: Date; latencyMs: number } | undefined> {
-  const [row] = await db`
-    select e.started_at as "startedAt", ev.created_at as "firstTokenAt",
-      (ev.payload->>'latency_ms')::int as "latencyMs"
-    from session_executions e
-    join session_events ev on ev.execution_id = e.execution_id
-    where e.execution_id = ${executionId} and ev.event_type = 'session.first_token'`
-  if (!row) return undefined
-  return { startedAt: row.startedAt, firstTokenAt: row.firstTokenAt, latencyMs: row.latencyMs }
 }
 
 export const model = {
@@ -619,6 +611,61 @@ export type ApiClient = { clientId: string; secret: string; principalId: string;
 /** A session API event, as its SSE frame named and carried it. */
 export type SessionEvent = { event: string; data: string }
 
+/** Whether an event ends its execution. */
+function isTerminalEvent(event: SessionEvent | undefined): boolean {
+  return event !== undefined && ['session.execution_completed', 'session.execution_failed', 'session.execution_cancelled'].includes(event.event)
+}
+
+/** The execution a control event names. Output lines are raw harness lines and name none. */
+function eventExecutionId(event: SessionEvent): string | undefined {
+  if (event.event === 'session.output.line') return undefined
+  try {
+    const payload = JSON.parse(event.data)
+    return typeof payload?.execution_id === 'string' ? payload.execution_id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Reads a session's SSE event stream, returning the frames collected once
+ * `stop` sees enough of them or the stream ends.
+ */
+async function readSessionEvents(
+  threadKey: string,
+  query: Record<string, string>,
+  authorization: string,
+  stop: (events: SessionEvent[]) => boolean
+): Promise<SessionEvent[]> {
+  const params = new URLSearchParams(query)
+  const response = await fetch(`${apiUrl}/api/session/${encodeURIComponent(threadKey)}/events?${params}`, {
+    headers: { authorization: `Bearer ${authorization}` },
+    signal: AbortSignal.timeout(turnTimeoutMs)
+  })
+  if (!response.ok || !response.body) throw new Error(`event stream failed: ${response.status}`)
+  const events: SessionEvent[] = []
+  let buffer = ''
+  const decoder = new TextDecoder()
+  const reader = response.body.getReader()
+  for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+    buffer += decoder.decode(chunk.value, { stream: true })
+    let end: number
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, end).split('\n')
+      buffer = buffer.slice(end + 2)
+      const event = frame.find(line => line.startsWith('event:'))?.slice(6).trim()
+      if (!event) continue
+      const data = frame.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
+      events.push({ event, data })
+      if (stop(events)) {
+        await reader.cancel()
+        return events
+      }
+    }
+  }
+  return events
+}
+
 /**
  * Machine callers of the session API: created as an operator would in the
  * console, then calling api-rs with the access token they exchange their
@@ -665,33 +712,16 @@ export const apiClients = {
       ...operatorApi(apiUrl, accessToken),
       /** A session's events for one execution, through its terminal event. */
       async events(threadKey: string, executionId: string): Promise<SessionEvent[]> {
-        const query = new URLSearchParams({ execution_id: executionId, after_event_id: '0' })
-        const response = await fetch(`${apiUrl}/api/session/${encodeURIComponent(threadKey)}/events?${query}`, {
-          headers: { authorization: `Bearer ${accessToken}` },
-          signal: AbortSignal.timeout(turnTimeoutMs)
-        })
-        if (!response.ok || !response.body) throw new Error(`event stream failed: ${response.status}`)
-        const events: SessionEvent[] = []
-        let buffer = ''
-        const decoder = new TextDecoder()
-        const reader = response.body.getReader()
-        for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
-          buffer += decoder.decode(chunk.value, { stream: true })
-          let end: number
-          while ((end = buffer.indexOf('\n\n')) >= 0) {
-            const frame = buffer.slice(0, end).split('\n')
-            buffer = buffer.slice(end + 2)
-            const event = frame.find(line => line.startsWith('event:'))?.slice(6).trim()
-            if (!event) continue
-            const data = frame.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
-            events.push({ event, data })
-            if (['session.execution_completed', 'session.execution_failed', 'session.execution_cancelled'].includes(event)) {
-              await reader.cancel()
-              return events
-            }
-          }
+        const events = await readSessionEvents(
+          threadKey,
+          { execution_id: executionId, after_event_id: '0' },
+          accessToken,
+          events => isTerminalEvent(events.at(-1))
+        )
+        if (!events.some(isTerminalEvent)) {
+          throw new Error(`event stream ended before execution ${executionId} finished: ${JSON.stringify(events)}`)
         }
-        throw new Error(`event stream ended before execution ${executionId} finished: ${JSON.stringify(events)}`)
+        return events
       }
     }
   }
@@ -707,6 +737,8 @@ export class Thread {
   private readonly scripts: Array<string | undefined>
   private readonly dm: boolean
   private turnsSeen = 0
+  /** Brain executions an earlier nextBrainTurn already reported, so replay skips them. */
+  private readonly brainTurns = new Set<string>()
 
   constructor(
     readonly channel: Channel,
@@ -807,6 +839,74 @@ export class Thread {
       sandbox,
       request: token ? (await modelRequests(token))[0] : undefined
     }
+  }
+
+  /**
+   * Waits for the next turn of a `nanocode` thread. Those turns run in
+   * centaur-brain and leave no `session_executions` or `session_events` rows,
+   * so the turn's completion and first-token latency come from the session
+   * event stream api-rs proxies from the brain, and its reply from Slack as
+   * nextTurn reads it. A turn must produce exactly one reply.
+   */
+  async nextBrainTurn(): Promise<BrainTurn> {
+    const index = this.turnsSeen++
+    const trigger = this.triggers[index]
+    if (!trigger) throw new Error(`turn ${index + 1} was never triggered in ${this.key}`)
+
+    // The ingress creates the session after it receives the mention; the
+    // event stream of a thread with no session is a 404.
+    await eventually(`session of ${this.key}`, turnTimeoutMs, async () => {
+      const [session] = await db`select 1 as ok from sessions where thread_key = ${this.key}`
+      return session
+    })
+    // The stream is session-scoped because the turn's request id is chosen by
+    // the brain: replay the log and stop at the first terminal event of an
+    // execution no earlier call reported.
+    let events: SessionEvent[]
+    try {
+      events = await readSessionEvents(this.key, { after_event_id: '0' }, apiKey, events => {
+        const executionId = eventExecutionId(events.at(-1)!)
+        return isTerminalEvent(events.at(-1)) && executionId !== undefined && !this.brainTurns.has(executionId)
+      })
+    } catch (error) {
+      throw new Error(`the event stream of ${this.key} failed while waiting for turn ${index + 1}: ${error}`)
+    }
+    const terminal = events.at(-1)!
+    const executionId = eventExecutionId(terminal)
+    if (!isTerminalEvent(terminal) || executionId === undefined) {
+      throw new Error(`turn ${index + 1} of ${this.key} streamed no terminal event: ${JSON.stringify(terminal)}`)
+    }
+    this.brainTurns.add(executionId)
+    const turnEvents = events.filter(event => eventExecutionId(event) === executionId)
+
+    const payload = JSON.parse(terminal.data)
+    const status = terminal.event === 'session.execution_completed'
+      ? 'completed'
+      : terminal.event === 'session.execution_cancelled' ? 'cancelled' : 'failed'
+    const execution: Execution = {
+      execution_id: executionId,
+      status,
+      error: typeof payload?.error === 'string' ? payload.error : null
+    }
+    const firstToken = turnEvents.find(event => event.event === 'session.first_token')
+    const latencyMs = firstToken ? JSON.parse(firstToken.data)?.latency_ms : undefined
+    if (typeof latencyMs !== 'number') {
+      throw new Error(`turn ${index + 1} of ${this.key} recorded no first token: ${JSON.stringify(turnEvents)}`)
+    }
+
+    // A failure names the execution and the replies so far, so it can be read without the stack.
+    const seen = `execution ${JSON.stringify(execution)}`
+    let lastReplies: SlackMessage[] = []
+    const replies = await eventually(`reply to turn ${index + 1} of ${this.key}`, renderTimeoutMs, async () => {
+      lastReplies = await this.repliesTo(index)
+      return lastReplies.length > 0 && lastReplies.every(reply => !reply.streaming) ? lastReplies : undefined
+    }).catch(error => {
+      throw new Error(`${error.message}; ${seen}; replies ${JSON.stringify(lastReplies.map(({ ts, text, streaming }) => ({ ts, text, streaming })))}`)
+    })
+    if (replies.length !== 1) {
+      throw new Error(`turn ${index + 1} of ${this.key} produced ${replies.length} replies: ${JSON.stringify(replies)}`)
+    }
+    return { reply: replies[0]!.text ?? '', execution, firstTokenMs: latencyMs }
   }
 
   async nextCancelledExecution(): Promise<Execution> {

@@ -1,10 +1,12 @@
 # Brain
 
-`centaur-brain` runs nanocode agent turns outside a sandbox. It is the harness
-service behind the `nanocode` harness type: api-rs creates a cheap logical
-"brain sandbox" per nanocode session and talks to the service over HTTP and a
-WebSocket, so the existing stdout pump, event persistence, terminal detection,
-and rendering work unchanged. It is off by default (`brain.enabled`).
+`centaur-brain` runs agent turns for the `nanocode` harness outside any
+sandbox. Each Centaur thread is a nanocode session with a durable turn inbox
+over its own session log, so the brain owns turn queueing, steering,
+cancellation, crash recovery, and the transcript. api-rs stays the front door:
+it authorizes the caller, then submits turns, interrupts, and proxies the
+event stream. It writes no execution rows or session events for these turns.
+The service is off by default (`brain.enabled`).
 
 ## HTTP
 
@@ -14,18 +16,35 @@ The service listens on `0.0.0.0:8790`:
 centaur-brain serve --listen 0.0.0.0:8790
 ```
 
+Thread keys are percent-encoded path segments.
+
 | Route | Purpose |
 |-------|---------|
 | `GET /healthz` | Readiness and liveness. |
-| `POST /v1/sandboxes` | Create (idempotently) a logical sandbox. |
-| `GET /v1/sandboxes/{id}` | Status; `running` while the sandbox exists. |
-| `DELETE /v1/sandboxes/{id}` | Cancel the active turn and drop its buffers. |
-| `GET /v1/sandboxes/{id}/io` | WebSocket carrying the blocks protocol in and Codex app-server notifications out, translated from nanocode events by harness-server's turn normalizer. |
-| `GET /v1/sandboxes/{id}/output?since_ms=N` | Buffered output lines for replay. |
+| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. |
+| `GET /v1/threads/{thread_key}` | The thread's unfinished turns: `{"running", "queued"}`. |
+| `POST /v1/threads/{thread_key}/interrupt` | Cancel the running turn. |
+| `GET /v1/threads/{thread_key}/events?after_event_id=N[&execution_id=R]` | The thread's session event stream, in the same SSE format as api-rs `/api/session/{key}/events`. |
 
-At most one socket attaches to a sandbox; a new attach replaces the old one.
-Detaching does not cancel a running turn, and output produced while detached is
-buffered (in memory, the last 10k lines).
+`input_line` is one blocks-protocol user line, as api-rs would write it to a
+harness. The request id is the execution id clients see.
+
+## Event stream
+
+Events are projected from the session log on every read, so any cursor can be
+replayed and the stream survives restarts. Each turn yields
+`session.execution_started`, `session.output.line` events carrying Codex
+app-server notifications (translated from nanocode events by harness-server's
+turn normalizer), `session.first_token`, and exactly one of
+`session.execution_completed` (with `result_text`), `session.execution_failed`,
+or `session.execution_cancelled`. Event ids are `seq * 64 + k` for log seq
+`seq`: they increase monotonically per thread and are stable across replay.
+With `execution_id`, the stream carries only that turn and ends after its
+terminal event.
+
+The brain commits the log before it publishes events, so a client never sees an
+event that a crash could take back. After a crash, nanocode resumes an
+interrupted turn from its last commit point, up to three times.
 
 ## Environment
 
@@ -59,16 +78,15 @@ buffered (in memory, the last 10k lines).
   built by an init container would also work, but this needs no writable volume,
   no extra container, and no file assembly.
 
-This spike sends model traffic directly over HTTPS. Production model egress
-should go through a dedicated iron-proxy with a model-only principal; that is a
+Model traffic goes directly over HTTPS. Production model egress should go
+through a dedicated iron-proxy with a model-only principal; that is a
 follow-up, not part of this deployment wiring.
 
 ## Chart
 
 The chart renders a Deployment, Service, and NetworkPolicies when
 `brain.enabled=true` and points api-rs at the Service with
-`CENTAUR_BRAIN_URL`. The brain is never reaped by the sandbox reaper, so it
-stays a long-lived service rather than part of a warm pool.
+`CENTAUR_BRAIN_URL`.
 
 `brain.trustReleaseCa=true` mounts `firewall.existingCaSecretName` (the public
 `ca-cert.pem` entry; the private key lives in a separate Secret and is never

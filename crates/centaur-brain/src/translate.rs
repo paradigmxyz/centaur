@@ -5,13 +5,11 @@ use harness_server::{
     BridgeConfig, CodexTurnNormalizer, NormalizedContent, NormalizedEvent,
     notification_to_wire_value, protocol::ServerNotification,
 };
-use nanocode::agent::events::{AgentEvent, AgentEventKind};
 use serde_json::Value;
 use tracing::warn;
 
 /// One turn's translation state.
 pub struct Turn {
-    id: String,
     normalizer: CodexTurnNormalizer,
     agent_messages: std::collections::HashSet<String>,
     finished: bool,
@@ -27,7 +25,6 @@ impl Turn {
         let mut normalizer = CodexTurnNormalizer::new(config);
         let opening = normalizer.start_notifications(announce_thread);
         let turn = Self {
-            id: turn_id.to_owned(),
             normalizer,
             agent_messages: std::collections::HashSet::new(),
             finished: false,
@@ -35,26 +32,18 @@ impl Turn {
         (turn, lines(opening.map_err(|error| error.to_string())))
     }
 
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn finished(&self) -> bool {
-        self.finished
-    }
-
-    /// Translate one nanocode event of this turn.
-    pub fn event(&mut self, event: &AgentEvent) -> Vec<String> {
-        let payload: Value = serde_json::from_str(event.payload.get()).unwrap_or_default();
+    /// Translate one nanocode agent event of this turn, given its wire type
+    /// (`assistant.delta`, `run.completed`, ...) and payload.
+    pub fn event(&mut self, kind: &str, payload: &Value) -> Vec<String> {
         let text = |key: &str| payload[key].as_str().unwrap_or_default().to_owned();
         let mut out = Vec::new();
-        match event.kind {
-            AgentEventKind::AssistantDelta => {
+        match kind {
+            "assistant.delta" => {
                 let item_id = text("item_id");
                 if self.agent_messages.insert(item_id.clone()) {
                     out.extend(self.process(&NormalizedEvent::AgentMessageStarted {
                         item_id: item_id.clone(),
-                        stop_reason: stop_reason(&payload),
+                        stop_reason: stop_reason(payload),
                     }));
                 }
                 out.extend(self.process(&NormalizedEvent::AgentTextDelta {
@@ -62,19 +51,19 @@ impl Turn {
                     delta: text("text"),
                 }));
             }
-            AgentEventKind::AssistantMessage => {
+            "assistant.message" => {
                 let item_id = text("item_id");
                 self.agent_messages.insert(item_id.clone());
                 out.extend(self.process(&NormalizedEvent::AssistantMessage {
                     partial: false,
-                    stop_reason: stop_reason(&payload),
+                    stop_reason: stop_reason(payload),
                     content: vec![NormalizedContent::AgentText {
                         item_id,
                         text: text("text"),
                     }],
                 }));
             }
-            AgentEventKind::ReasoningSummaryDelta => {
+            "reasoning.summary.delta" => {
                 let item_id = payload["item_id"].as_str().map_or_else(
                     || format!("reasoning-{}", payload["model_call_index"]),
                     str::to_owned,
@@ -84,7 +73,7 @@ impl Turn {
                     delta: text("text"),
                 }));
             }
-            AgentEventKind::RunError if payload["observational"] != true => {
+            "run.error" if payload["observational"] != true => {
                 // Recorded for the turn's end; a nanocode run error is not
                 // terminal on its own, so it is not an app-server `error`.
                 let message = payload["message"]
@@ -96,8 +85,8 @@ impl Turn {
                     error: Some(message),
                 }));
             }
-            AgentEventKind::RunCompleted => out.extend(self.finish(Ok(None))),
-            AgentEventKind::RunFailed => {
+            "run.completed" => out.extend(self.finish(Ok(None))),
+            "run.failed" => {
                 let status = payload["status"].as_str().unwrap_or_default();
                 if matches!(status, "cancelled" | "canceled") {
                     out.extend(self.finish(Err(())));
@@ -114,9 +103,19 @@ impl Turn {
         out
     }
 
+    /// End the turn as completed, unless it already ended.
+    pub fn complete(&mut self) -> Vec<String> {
+        self.finish(Ok(None))
+    }
+
     /// End the turn as failed, unless it already ended.
     pub fn fail(&mut self, error: &str) -> Vec<String> {
         self.finish(Ok(Some(error.to_owned())))
+    }
+
+    /// End the turn as interrupted, unless it already ended.
+    pub fn interrupt(&mut self) -> Vec<String> {
+        self.finish(Err(()))
     }
 
     /// `Ok(error)` completes (or fails, with an error); `Err(())` interrupts.
@@ -143,13 +142,6 @@ impl Turn {
                 .map_err(|error| error.to_string()),
         )
     }
-}
-
-/// The lines of a turn that failed before nanocode ran it.
-pub fn failed_turn(thread_id: &str, turn_id: &str, error: &str) -> Vec<String> {
-    let (mut turn, mut out) = Turn::start(thread_id, turn_id, false);
-    out.extend(turn.fail(error));
-    out
 }
 
 /// nanocode marks agent messages by phase; the normalizer reads the phase from
@@ -186,27 +178,12 @@ fn lines(notifications: Result<Vec<ServerNotification>, String>) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn event(kind: &str, payload: Value) -> AgentEvent {
-        serde_json::from_value(serde_json::json!({
-            "protocol_version": 1,
-            "request_id": "session",
-            "seq": 1,
-            "type": kind,
-            "payload": payload,
-        }))
-        .unwrap()
-    }
+    use serde_json::json;
 
     fn methods(lines: &[String]) -> Vec<String> {
         lines
             .iter()
-            .map(|line| {
-                serde_json::from_str::<Value>(line).unwrap()["method"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
-            })
+            .map(|line| parse(line)["method"].as_str().unwrap().to_owned())
             .collect()
     }
 
@@ -220,24 +197,19 @@ mod tests {
         assert_eq!(methods(&opening), ["thread/started", "turn/started"]);
         assert_eq!(parse(&opening[0])["params"]["thread"]["id"], "thread-1");
 
-        let delta = |text: &str| {
-            event(
-                "assistant.delta",
-                serde_json::json!({"item_id": "msg-1", "phase": "final_answer", "text": text}),
-            )
-        };
-        let first = turn.event(&delta("Hi"));
+        let delta = |text: &str| json!({"item_id": "msg-1", "phase": "final_answer", "text": text});
+        let first = turn.event("assistant.delta", &delta("Hi"));
         assert_eq!(methods(&first), ["item/started", "item/agentMessage/delta"]);
         assert_eq!(parse(&first[1])["params"]["delta"], "Hi");
         assert_eq!(
-            methods(&turn.event(&delta(" there"))),
+            methods(&turn.event("assistant.delta", &delta(" there"))),
             ["item/agentMessage/delta"]
         );
 
-        let message = turn.event(&event(
+        let message = turn.event(
             "assistant.message",
-            serde_json::json!({"item_id": "msg-1", "phase": "final_answer", "text": "Hi there"}),
-        ));
+            &json!({"item_id": "msg-1", "phase": "final_answer", "text": "Hi there"}),
+        );
         let completed = message
             .iter()
             .map(|line| parse(line))
@@ -246,63 +218,43 @@ mod tests {
         assert_eq!(completed["params"]["item"]["text"], "Hi there");
         assert_eq!(completed["params"]["item"]["phase"], "final_answer");
 
-        let end = turn.event(&event(
-            "run.completed",
-            serde_json::json!({"status": "completed"}),
-        ));
+        let end = turn.event("run.completed", &json!({"status": "completed"}));
         assert_eq!(methods(&end), ["turn/completed"]);
         assert_eq!(parse(&end[0])["params"]["turn"]["status"], "completed");
-        assert!(turn.finished());
         assert!(turn.fail("late").is_empty());
+        assert!(turn.complete().is_empty());
     }
 
     #[test]
     fn failures_and_cancellations_end_the_turn_once() {
         let (mut failed, _) = Turn::start("t", "turn-1", false);
-        failed.event(&event(
-            "run.error",
-            serde_json::json!({"message": "rate limited"}),
-        ));
-        let end = failed.event(&event(
-            "run.failed",
-            serde_json::json!({"status": "failed", "error": "boom"}),
-        ));
+        assert!(
+            failed
+                .event("run.error", &json!({"message": "rate limited"}))
+                .is_empty()
+        );
+        let end = failed.event("run.failed", &json!({"status": "failed", "error": "boom"}));
         let turn = &parse(&end[0])["params"]["turn"];
         assert_eq!(turn["status"], "failed");
         assert_eq!(turn["error"]["message"], "boom");
 
         let (mut cancelled, _) = Turn::start("t", "turn-2", false);
-        let end = cancelled.event(&event(
-            "run.failed",
-            serde_json::json!({"status": "cancelled"}),
-        ));
+        let end = cancelled.event("run.failed", &json!({"status": "cancelled"}));
         assert_eq!(parse(&end[0])["params"]["turn"]["status"], "interrupted");
-        assert!(cancelled.fail("again").is_empty());
-    }
+        assert!(cancelled.interrupt().is_empty());
 
-    #[test]
-    fn a_turn_that_never_ran_still_ends() {
-        let out = failed_turn("t", "turn-1", "no thread_key");
-        assert_eq!(methods(&out), ["turn/started", "turn/completed"]);
-        assert_eq!(
-            parse(&out[1])["params"]["turn"]["error"]["message"],
-            "no thread_key"
-        );
+        let (mut interrupted, _) = Turn::start("t", "turn-3", false);
+        let end = interrupted.interrupt();
+        assert_eq!(parse(&end[0])["params"]["turn"]["status"], "interrupted");
     }
 
     #[test]
     fn other_events_are_dropped() {
         let (mut turn, _) = Turn::start("t", "turn-1", false);
+        assert!(turn.event("model.call.started", &json!({})).is_empty());
         assert!(
-            turn.event(&event("model.call.started", serde_json::json!({})))
+            turn.event("run.error", &json!({"observational": true, "error": "x"}))
                 .is_empty()
-        );
-        assert!(
-            turn.event(&event(
-                "run.error",
-                serde_json::json!({"observational": true, "error": "x"})
-            ))
-            .is_empty()
         );
     }
 }
