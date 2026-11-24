@@ -48,8 +48,8 @@ spec:
       initContainers:
         # The brain owns its schema: apply its migrations (the nanocode schema
         # and the centaur_brain role) with the database owner's credentials,
-        # which only this init container receives. The service itself runs as
-        # centaur_brain through brain.databaseUrl.
+        # which only this init container receives, and set the role's login
+        # password from brain.databaseUrl. The service runs as centaur_brain.
         - name: migrate
           image: {{ printf "%s:%s" $brain.image.repository $brain.image.tag | quote }}
           imagePullPolicy: {{ $brain.image.pullPolicy }}
@@ -61,6 +61,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: BRAIN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $databaseUrl.existingSecretName }}
+                  key: {{ required "brain.databaseUrl.secretKey is required when existingSecretName is set" $databaseUrl.secretKey }}
           securityContext:
 {{ toYaml .Values.containerSecurityContext | nindent 12 }}
 {{- end }}

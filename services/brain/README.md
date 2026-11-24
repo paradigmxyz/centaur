@@ -53,19 +53,21 @@ applies `crates/centaur-brain/migrations` (the `nanocode` schema and the
 `centaur_brain` role, created NOLOGIN) using `DATABASE_URL`, a role that may
 create schemas and roles. It records them in its own
 `centaur_brain_migrations._sqlx_migrations` table, apart from api-rs's tracking
-table and out of the brain role's reach. The chart runs it as an init container
-of the brain Deployment when `brain.databaseUrl` is set; only that init
-container receives the owner DSN. nanocode creates its own tables inside
-`nanocode` at runtime.
+table and out of the brain role's reach. Given `BRAIN_DATABASE_URL` too, it then
+sets the role's login password from that DSN, which must connect as
+`centaur_brain`. The chart runs it as an init container of the brain Deployment
+when `brain.databaseUrl` is set; only that init container receives the owner
+DSN. nanocode creates its own tables inside `nanocode` at runtime.
 
 ## Environment
 
 - `BRAIN_DATABASE_URL` — optional Postgres DSN for nanocode durability,
   connecting as the `centaur_brain` role, whose default search_path is the
   `nanocode` schema. When unset the service keeps state in memory, which is for
-  local development only. Provision a login for the role out of band
-  (`ALTER ROLE centaur_brain LOGIN PASSWORD ...`) and store the DSN in a Secret;
-  the Helm value is `brain.databaseUrl.existingSecretName`.
+  local development only. Store the DSN, with a password you choose, in a
+  Secret named by `brain.databaseUrl.existingSecretName`; the migration init
+  container enables the login with that password on every start, so rotating
+  it means changing the Secret and restarting the pod.
 - `BRAIN_DEFAULT_MODEL` — default model for turns that name none; defaults to
   `luna`.
 - `BRAIN_DEFAULT_THINKING` — default reasoning effort; defaults to `low`.

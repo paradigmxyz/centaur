@@ -32,6 +32,10 @@ struct MigrateArgs {
     /// Postgres DSN of a role that may create schemas and roles.
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     database_url: String,
+    /// The brain's own DSN; when set, its password becomes the brain role's
+    /// login password.
+    #[arg(long, env = "BRAIN_DATABASE_URL", hide_env_values = true)]
+    brain_database_url: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -61,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = match Cli::parse().command {
         CliCommand::Serve(args) => args,
         CliCommand::Migrate(args) => {
-            migrate::run(&args.database_url).await?;
+            migrate::run(&args.database_url, args.brain_database_url.as_deref()).await?;
             tracing::info!("brain migrations applied");
             return Ok(());
         }
