@@ -1,0 +1,8 @@
+description = "Zoom: create, list, read, update and delete Zoom meetings; get join links, meeting IDs and passcodes for calendar invites"
+
+# No secret is declared here. Zoom access is a user-managed OAuth credential
+# connected through a Console OAuth app with provider `zoom`; the wrapper secret
+# created at consent injects the current access token into requests to
+# api.zoom.us. Declaring a secret here would create a second, unrelated
+# credential. See docs/pages/secrets/oauth-apps.mdx.
+secrets = []

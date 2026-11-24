@@ -30,7 +30,10 @@ export interface EventAttendee {
   [field: string]: unknown;
 }
 
-/** Google Meet conference data; `entryPoints` carry the video URL once the conference exists. */
+/**
+ * Conference data: a Google Meet (`hangoutsMeet`) or a third-party call such as Zoom (`addOn`).
+ * `entryPoints` carry the video URL once the conference exists.
+ */
 export interface ConferenceData {
   conferenceId?: string;
   entryPoints?: { entryPointType?: string; uri?: string; label?: string; [field: string]: unknown }[];
@@ -109,10 +112,29 @@ export interface FreeBusyGroup {
   [field: string]: unknown;
 }
 
+/**
+ * An existing Zoom meeting to attach as an event's video call: the `meeting` that
+ * `zoom.create_meeting` or `zoom.get_meeting` returns, or the same fields by hand. `join_url` is
+ * required; `id` (the numeric meeting ID) and `password` (the passcode) are shown in the invite.
+ */
+export interface ZoomMeetingRef {
+  join_url: string;
+  id?: number | string;
+  password?: string;
+  [field: string]: unknown;
+}
+
 /** RSVP answer, as Calendar spells it. */
 export type ResponseStatus = "accepted" | "declined" | "tentative";
 
 const MEET_SOLUTION_KEY = "hangoutsMeet";
+// Calendar's conference type for third-party providers. Calendar cannot mint these (createRequest
+// only supports Meet); an existing conference is written directly as conferenceData instead.
+const ADD_ON_SOLUTION_KEY = "addOn";
+const ZOOM_SOLUTION_NAME = "Zoom Meeting";
+const ZOOM_ICON_URI = "https://st1.zoom.us/zoom.ico";
+// An https join link on a Zoom host: zoom.us, an account subdomain, or ZoomGov.
+const ZOOM_URL = /^https:\/\/(?:[a-z0-9-]+\.)*(?:zoom\.us|zoomgov\.com)(?:[/?#]|$)/i;
 const DEFAULT_TIME_ZONE = "UTC";
 
 function headers(ctx: Ctx): Record<string, string> {
@@ -155,18 +177,67 @@ function conferenceCreateRequest(): ConferenceData {
   return { createRequest: { requestId: randomId(), conferenceSolutionKey: { type: MEET_SOLUTION_KEY } } };
 }
 
+/**
+ * Conference data attaching an existing Zoom meeting as the event's video call, rendered by
+ * Calendar as "Join Zoom Meeting" with the meeting ID and passcode.
+ */
+function zoomConference(zoom: ZoomMeetingRef): ConferenceData {
+  const uri = String(zoom.join_url ?? "").trim();
+  if (!ZOOM_URL.test(uri) || /\s/.test(uri)) {
+    throw new Error(`zoom.join_url must be an https Zoom join link, not ${JSON.stringify(zoom.join_url)}`);
+  }
+  const meetingId = String(zoom.id ?? /\/(?:j|w|s)\/(\d+)/.exec(uri)?.[1] ?? "").replace(/\s+/g, "");
+  const label = uri.replace(/^https:\/\//i, "").replace(/[?#].*$/, "");
+  const video: NonNullable<ConferenceData["entryPoints"]>[number] = { entryPointType: "video", uri, label };
+  if (meetingId) video.meetingCode = meetingId;
+  if (zoom.password) video.passcode = String(zoom.password);
+  return {
+    conferenceId: meetingId || label,
+    conferenceSolution: {
+      key: { type: ADD_ON_SOLUTION_KEY },
+      name: ZOOM_SOLUTION_NAME,
+      iconUri: ZOOM_ICON_URI,
+    },
+    entryPoints: [video],
+  };
+}
+
 /** `dateTime` needs a time zone; a bare `YYYY-MM-DD` is an all-day event. */
 function eventTime(value: string, timeZone: string): EventDateTime {
   return value.includes("T") ? { dateTime: value, timeZone } : { date: value };
 }
 
-/** The event's Google Meet URL, "" when it has none. */
-function meetLink(event: CalendarEvent): string {
-  if (event.hangoutLink) return event.hangoutLink;
+/** The event's video entry point of the given kind, "" when it has none. */
+function videoLink(event: CalendarEvent, matches: (uri: string) => boolean): string {
   for (const entry of event.conferenceData?.entryPoints ?? []) {
-    if (entry.entryPointType === "video" && entry.uri) return entry.uri;
+    if (entry.entryPointType === "video" && entry.uri && matches(entry.uri)) return entry.uri;
   }
   return "";
+}
+
+/** The event's Google Meet URL, "" when it has none (a Zoom call is not a Meet). */
+function meetLink(event: CalendarEvent): string {
+  if (event.hangoutLink) return event.hangoutLink;
+  return videoLink(event, (uri) => !ZOOM_URL.test(uri));
+}
+
+/** The event's Zoom join URL, "" when it has none. */
+function zoomLink(event: CalendarEvent): string {
+  return videoLink(event, (uri) => ZOOM_URL.test(uri));
+}
+
+/**
+ * Fail loudly when Calendar accepted the write but did not keep the Zoom conference, rather than
+ * reporting a scheduled call that guests cannot see.
+ */
+function requireZoomLink(event: CalendarEvent): string {
+  const link = zoomLink(event);
+  if (!link) {
+    throw new Error(
+      `Calendar saved event ${event.id} without the Zoom conference; the calendar may not allow third-party conferencing`,
+    );
+  }
+  return link;
 }
 
 /**
@@ -359,6 +430,9 @@ export async function get_event(
  * explicit offset in the time, or a matching zone, for local meetings), or `YYYY-MM-DD` for an
  * all-day event, where `end` is exclusive. `attendees` are emails and are emailed an invitation.
  * `conference: true` attaches a Google Meet; the returned `meet_link` is "" when there is none.
+ * `zoom` makes an existing Zoom meeting the video call instead (pass the `meeting` from
+ * `zoom.create_meeting`); guests see "Join Zoom Meeting" with its ID and passcode, and the returned
+ * `zoom_link` is its join URL ("" without `zoom`). `conference` and `zoom` are exclusive.
  */
 export async function create_event(
   args: {
@@ -370,10 +444,12 @@ export async function create_event(
     location?: string;
     attendees?: string[];
     conference?: boolean;
+    zoom?: ZoomMeetingRef;
     time_zone?: string;
   },
   ctx: Ctx,
-): Promise<{ event: CalendarEvent; meet_link: string }> {
+): Promise<{ event: CalendarEvent; meet_link: string; zoom_link: string }> {
+  if (args.conference && args.zoom) throw new Error("pass either conference (Google Meet) or zoom, not both");
   const calendarId = args.calendar_id ?? "primary";
   const zone = args.time_zone ?? DEFAULT_TIME_ZONE;
   const event: EventInput = {
@@ -388,9 +464,11 @@ export async function create_event(
   const params: Params = { sendUpdates: args.attendees?.length ? "all" : "none" };
   if (args.conference) {
     event.conferenceData = conferenceCreateRequest();
-    // Without conferenceDataVersion=1 Calendar drops conferenceData silently.
-    params.conferenceDataVersion = 1;
+  } else if (args.zoom) {
+    event.conferenceData = zoomConference(args.zoom);
   }
+  // Without conferenceDataVersion=1 Calendar drops conferenceData silently.
+  if (event.conferenceData) params.conferenceDataVersion = 1;
 
   const created: CalendarEvent = await calendar(ctx, `${calPath(calendarId)}/events`, {
     params,
@@ -399,6 +477,7 @@ export async function create_event(
   return {
     event: created,
     meet_link: args.conference ? await awaitMeetLink(ctx, calendarId, created) : "",
+    zoom_link: args.zoom ? requireZoomLink(created) : "",
   };
 }
 
@@ -406,10 +485,12 @@ export async function create_event(
  * Update an event by reading it and writing back the changed fields; unset arguments leave the
  * existing value alone (empty strings change nothing). `add_attendees` merges into the guest list
  * without duplicating existing guests. `conference: true` adds a Google Meet if the event has
- * none, and keeps an existing one. `notify` emails guests; by default it does so when the event
- * has guests and the change is material (time, title, location, new guests, new conference) —
- * a description-only edit stays quiet. Returns the updated event and its `meet_link` ("" when it
- * has none).
+ * none, and keeps an existing one. `zoom` makes an existing Zoom meeting the video call (pass the
+ * `meeting` from `zoom.create_meeting`), replacing any Meet or other conference the event had;
+ * `conference` and `zoom` are exclusive. `notify` emails guests; by default it does so when the event
+ * has guests and the change is material (time, title, location, new guests, new or changed
+ * conference) — a description-only edit stays quiet. Returns the updated event, its `meet_link`
+ * and its `zoom_link` ("" when it has none).
  */
 export async function update_event(
   args: {
@@ -422,11 +503,13 @@ export async function update_event(
     location?: string;
     add_attendees?: string[];
     conference?: boolean;
+    zoom?: ZoomMeetingRef;
     notify?: boolean;
     time_zone?: string;
   },
   ctx: Ctx,
-): Promise<{ event: CalendarEvent; meet_link: string }> {
+): Promise<{ event: CalendarEvent; meet_link: string; zoom_link: string }> {
+  if (args.conference && args.zoom) throw new Error("pass either conference (Google Meet) or zoom, not both");
   const calendarId = args.calendar_id ?? "primary";
   const zone = args.time_zone ?? DEFAULT_TIME_ZONE;
   const event: EventInput = await calendar(ctx, eventPath(calendarId, args.event_id));
@@ -460,6 +543,15 @@ export async function update_event(
       event.conferenceData = conferenceCreateRequest();
       conferenceAdded = true;
     }
+  } else if (args.zoom) {
+    const zoom = zoomConference(args.zoom);
+    params.conferenceDataVersion = 1;
+    if (zoomLink(event as CalendarEvent) !== zoom.entryPoints?.[0]?.uri) {
+      event.conferenceData = zoom;
+      // A Meet surfaces through hangoutLink too; drop it so the event does not carry both.
+      delete event.hangoutLink;
+      conferenceAdded = true;
+    }
   }
 
   const notify =
@@ -483,6 +575,7 @@ export async function update_event(
   return {
     event: updated,
     meet_link: args.conference ? await awaitMeetLink(ctx, calendarId, updated) : "",
+    zoom_link: args.zoom ? requireZoomLink(updated) : zoomLink(updated),
   };
 }
 
