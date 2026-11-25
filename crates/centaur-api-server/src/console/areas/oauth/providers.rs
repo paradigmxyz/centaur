@@ -457,12 +457,25 @@ impl Provider {
         }
     }
 
+    /// The subject as it appears in a credential `foreign_id`. Bytes that are
+    /// not URL-safe (for example the `|` in `idp|123` style subjects) become
+    /// `~xx` hex escapes, so subjects that were already URL-safe keep the same
+    /// id they always had.
     pub(crate) fn foreign_id_subject(&self, subject: &str) -> String {
-        if self.kind == "zoom" {
+        let subject = if self.kind == "zoom" {
             subject.to_owned()
         } else {
             subject.to_lowercase()
+        };
+        let mut encoded = String::with_capacity(subject.len());
+        for byte in subject.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push_str(&format!("~{byte:02x}"));
+            }
         }
+        encoded
     }
 
     pub(crate) fn wrapping_secret_kind(&self) -> &'static str {
@@ -1444,6 +1457,20 @@ pub(crate) fn tool_label(app: &OauthApp) -> Map<String, Value> {
 mod tests {
     use super::*;
     use garde::Validate;
+
+    #[test]
+    fn foreign_id_subject_escapes_unsafe_bytes_only() {
+        let provider = custom(Map::new());
+        assert_eq!(
+            provider.foreign_id_subject("User_01Ab-c.d~e"),
+            "user_01ab-c.d~e"
+        );
+        assert_eq!(provider.foreign_id_subject("idp|AbC123"), "idp~7cabc123");
+        assert_eq!(provider.foreign_id_subject("a b@c:d"), "a~20b~40c~3ad");
+        assert!(centaur_console_db::areas::oauth::url_safe(
+            &provider.foreign_id_subject("é|/+= ")
+        ));
+    }
 
     fn custom(config: Map<String, Value>) -> Provider {
         Provider {

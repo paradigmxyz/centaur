@@ -484,8 +484,10 @@ async fn exchange_code(
 enum UpsertFailure {
     AccountMismatch,
     Concurrent,
-    SaveFailed,
-    Internal,
+    /// The credential could not be built; the reason is a fixed label.
+    SaveFailed(&'static str),
+    /// A database step failed; carries the stage and the error text.
+    Internal(&'static str, String),
 }
 
 impl From<centaur_console_db::areas::oauth::FlowUpsertError> for UpsertFailure {
@@ -494,7 +496,7 @@ impl From<centaur_console_db::areas::oauth::FlowUpsertError> for UpsertFailure {
         match error {
             FlowUpsertError::AccountMismatch => Self::AccountMismatch,
             FlowUpsertError::UniqueViolation => Self::Concurrent,
-            FlowUpsertError::Console(_) => Self::Internal,
+            FlowUpsertError::Console(error) => Self::Internal("upsert", error.to_string()),
         }
     }
 }
@@ -517,7 +519,8 @@ async fn upsert_credential(
     result: &CodeExchangeResult,
     identity: &Identity,
 ) -> Result<i64, UpsertFailure> {
-    let encryption = OauthEncryption::from_env().ok_or(UpsertFailure::SaveFailed)?;
+    let encryption =
+        OauthEncryption::from_env().ok_or(UpsertFailure::SaveFailed("encryption_unavailable"))?;
     let now = centaur_console_db::timestamp::now();
     let refreshable = provider.refreshable_result(result);
     let scopes = match result.scope.as_ref() {
@@ -543,18 +546,21 @@ async fn upsert_credential(
         provider.foreign_id_subject(&subject)
     );
     if !url_safe(&foreign_id) {
-        return Err(UpsertFailure::SaveFailed);
+        return Err(UpsertFailure::SaveFailed("foreign_id_not_url_safe"));
     }
     let display = display_name(identity);
     let token_endpoint = provider.token_endpoint().unwrap_or_default();
     let name = format!("{} – {}", provider.display_name(), display);
     let external_user_key = random_token(16);
 
-    let mut tx = pool.begin().await.map_err(|_| UpsertFailure::Internal)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| UpsertFailure::Internal("begin", error.to_string()))?;
     if app.shared {
         lock_oauth_app_row(&mut tx, &app.slug)
             .await
-            .map_err(|_| UpsertFailure::Internal)?;
+            .map_err(|error| UpsertFailure::Internal("lock_app", error.to_string()))?;
         if let Some(first) = first_credential_for_app(&mut tx, app.id).await?
             && first.provider_subject.as_deref() != Some(subject.as_str())
         {
@@ -630,8 +636,10 @@ async fn upsert_credential(
     upsert_wrapping_secret(&mut tx, credential.id, &spec).await?;
     centaur_console_db::areas::reconciliation::apply_for_credential(&mut tx, credential.id)
         .await
-        .map_err(|_| UpsertFailure::Internal)?;
-    tx.commit().await.map_err(|_| UpsertFailure::Internal)?;
+        .map_err(|error| UpsertFailure::Internal("reconcile", error.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|error| UpsertFailure::Internal("commit", error.to_string()))?;
     Ok(credential.id)
 }
 
@@ -916,13 +924,11 @@ async fn callback_inner(
                 "Another consent for this account is in progress. Try again.",
             ));
         }
-        Err(UpsertFailure::SaveFailed | UpsertFailure::Internal) => {
-            return Err(result_page(
-                Some(&app),
-                "error",
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Connecting the integration failed while saving the credential.",
-            ));
+        Err(UpsertFailure::SaveFailed(reason)) => {
+            return Err(save_failed(&app, "build", reason));
+        }
+        Err(UpsertFailure::Internal(stage, error)) => {
+            return Err(save_failed(&app, stage, &error));
         }
     }
 
@@ -933,6 +939,24 @@ async fn callback_inner(
         "/console/integrations".to_owned()
     };
     Ok(redirect(&location, &context.config, &next, None))
+}
+
+/// Logs why the credential save failed (the page stays generic) and renders
+/// the error page.
+fn save_failed(app: &DbOauthApp, stage: &str, error: &str) -> Response {
+    tracing::error!(
+        app = %app.slug,
+        provider = %app.provider,
+        stage,
+        error,
+        "OAuth credential save failed"
+    );
+    result_page(
+        Some(app),
+        "error",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "Connecting the integration failed while saving the credential.",
+    )
 }
 
 async fn find_app(pool: &sqlx::PgPool, slug: &str) -> Result<Option<DbOauthApp>, Response> {
