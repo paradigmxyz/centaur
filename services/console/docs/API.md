@@ -1585,7 +1585,7 @@ Console stores and validates `name`, `description`, and Markdown `instructions` 
 
 ### Sandbox Operations
 
-These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Principals linked to an active Console user can see that user's private skills, private skills they have been added to as an editor, and every public skill. Other principals can see public skills only. Mutations require an active Console user linked to the sandbox principal. Owners can perform every mutation on their skills, while editors can update skill content but cannot share, unshare, or archive the skill.
+These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy`. Principals linked to an active Console user can see that user's private skills, private skills they have been added to as a reader or editor, and every public skill. Other principals can see public skills only. Mutations require an active Console user linked to the sandbox principal. Owners can perform every mutation on their skills, while editors can update skill content but cannot share, unshare, archive, or manage access. Readers can list, search, and read the skill only.
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
@@ -1600,8 +1600,11 @@ These endpoints use the existing sandbox entitlement JWT injected by `iron-proxy
 | `GET` | `/api/v1/sandbox/skills/:id/editors` | List editors for any visible skill by exact name or OID. |
 | `POST` | `/api/v1/sandbox/skills/:id/editors` | Add an editor to an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
 | `DELETE` | `/api/v1/sandbox/skills/:id/editors` | Remove an editor from an owned skill OID using an exact email or `usr_...` OID in `data.user`. |
+| `GET` | `/api/v1/sandbox/skills/:id/readers` | List the read grants on an owned skill OID. Owner only. |
+| `POST` | `/api/v1/sandbox/skills/:id/readers` | Grant an active user read access to an owned skill OID using an exact email or `usr_...` OID in `data.user`. Idempotent; naming the owner returns `422`. |
+| `DELETE` | `/api/v1/sandbox/skills/:id/readers` | Revoke a read grant on an owned skill OID using `data.user`. Idempotent, and works for disabled users. |
 
-Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. The editor list follows skill visibility: every principal that can read a shared skill can also read its editor list, while a private skill's list remains visible only to its owner and editors. Adding an editor is idempotent. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
+Editor responses include each editor's OID, email, name, and account status, plus the skill's current `lock_version`. The editor list follows skill visibility: every principal that can read a shared skill can also read its editor list, while a private skill's list remains visible only to its owner, readers, and editors. Adding an editor is idempotent. Reader responses (`id`, `visibility`, `readers`, `lock_version`) use the same user shape and are visible only to the owner. Read grants take effect on the next catalog request. Catalog responses include the skill ID and a checksum over the generated document. Read responses set `Cache-Control: no-store`.
 
 ## Proxies
 
@@ -2381,17 +2384,17 @@ admin-only.
 ### Console skills
 
 Any active user. Visibility matches the agent catalog:
-every public skill plus the caller's own and edited skills; any other skill is
-a `404`. Owners and editors can update content. Only the owner can manage
-editors, share, or archive; an admin can also make any public skill private
+every public skill plus the skills the caller owns, edits, or holds a read grant
+on; any other skill is a `404`. Owners and editors can update content. Only the
+owner can manage visibility, readers, editors, share, or archive; an admin can also make any public skill private
 (moderation).
 
 | Method | Path | Notes |
 | ------ | ---- | ----- |
-| `GET` | `/api/v1/console/skills` | List. `tab=directory` (default, active public skills) or `tab=mine` (skills the caller owns or edits). Optional `q` does a full-text search within the tab. Ordered by `updated_at` desc. No pagination. |
+| `GET` | `/api/v1/console/skills` | List. `tab=directory` (default, active public skills) or `tab=mine` (skills the caller owns or edits, plus private skills it may read). Optional `q` does a full-text search within the tab. Ordered by `updated_at` desc. No pagination. |
 | `GET` | `/api/v1/console/skills/:id` | Read a visible skill by `skl_...` OID. |
-| `POST` | `/api/v1/console/skills` | Create from `data.name`, `data.description`, `data.instructions`, and optional `data.editor_ids` (user OIDs). New skills are public. Returns `201`. |
-| `PUT`/`PATCH` | `/api/v1/console/skills/:id` | Update an owned or editable skill. Send `data.lock_version` from the last read; a stale version returns `409` with `details.reason = "stale"`. `data.editor_ids` replaces the editor list for owners (ignored for editors; omitted keeps it). |
+| `POST` | `/api/v1/console/skills` | Create from `data.name`, `data.description`, `data.instructions`, and optional `data.visibility` (`private` or `shared`, default `shared`), `data.reader_ids`, and `data.editor_ids` (user OIDs). Returns `201`. |
+| `PUT`/`PATCH` | `/api/v1/console/skills/:id` | Update an owned or editable skill. Send `data.lock_version` from the last read; a stale version returns `409` with `details.reason = "stale"`. For owners, `data.visibility` changes visibility and `data.reader_ids` and `data.editor_ids` replace the reader and editor lists (all ignored for editors; omitted keeps them). |
 | `DELETE` | `/api/v1/console/skills/:id` | Archive an owned skill. Returns `204`. The name becomes reusable. |
 | `POST` | `/api/v1/console/skills/:id/share` | Make an owned skill public. |
 | `POST` | `/api/v1/console/skills/:id/unshare` | Make an owned skill private. An admin can do this to any public skill. |
@@ -2403,9 +2406,10 @@ List rows contain `id`, `name`, `description`, `visibility` (`private` or `share
 - `content_html`: the instructions rendered as a sanitized GitHub-flavoured subset. Every source character is HTML-escaped, only `http(s)` links are kept, and only the tags `a blockquote br code del div em h1-h4 li ol p pre strong table tbody td th thead tr ul` and the attributes `class href rel target` survive.
 - `lock_version`, `checksum`, and `created_at`.
 - `editors`: active editors, ordered by email.
+- `readers`: active readers, ordered by email; only in the owner's response.
 - `viewer`: `{owner, can_edit, can_manage, can_unshare}`.
 
-Validation failures return `422` with per-field `details` (`name`, `description`, `instructions`, `editors`), e.g. `editors: ["include an unavailable user"]` for an unknown, inactive, or owner OID.
+Validation failures return `422` with per-field `details` (`name`, `description`, `instructions`, `editors`, `readers`), e.g. `readers: ["include an unavailable user"]` for an unknown, inactive, or owner OID.
 
 ### Personal SSH key
 

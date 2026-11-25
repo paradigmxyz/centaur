@@ -1988,3 +1988,450 @@ async fn console_session_db_responses_have_exactly_one_data_envelope() {
     );
     assert!(permissions["data"].get("data").is_none(), "{permissions}");
 }
+
+// ---------------------------------------------------------------------------
+// Skill read grants
+// ---------------------------------------------------------------------------
+
+/// A full router whose sandbox tokens verify with [`JWT_SECRET`].
+fn skills_app(fixture: &Fixture) -> Router {
+    let state = AppState::unready(ApiAuthConfig::testing("test-secret"))
+        .with_console_db(fixture.pool.clone())
+        .with_console_write_db(fixture.pool.clone())
+        .with_console_session(
+            ConsoleSessionConfig::from_settings(
+                Some(SESSION_SECRET),
+                Some("https://console.example.test"),
+            )
+            .unwrap()
+            .unwrap()
+            .with_sandbox_jwt(
+                SandboxJwtConfig::new(
+                    JWT_SECRET,
+                    crate::auth::SANDBOX_TOKEN_AUDIENCE,
+                    crate::auth::SANDBOX_TOKEN_ISSUER,
+                )
+                .unwrap(),
+            ),
+        );
+    build_router_with_app_state(state)
+}
+
+/// A non-admin Console user who can sign in with [`PASSWORD`], and the bearer
+/// header of a sandbox linked to them.
+struct SkillUser {
+    id: i64,
+    email: String,
+    sandbox: String,
+}
+
+impl Fixture {
+    async fn skill_user(&self, label: &str) -> SkillUser {
+        let email = format!("{label}-{}@example.com", self.unique);
+        let id = insert_user(
+            &self.pool,
+            &email,
+            "active",
+            false,
+            Some(hash(PASSWORD, 4).unwrap().as_str()),
+        )
+        .await;
+        let principal = sqlx::query_scalar(
+            "INSERT INTO principals \
+                (foreign_id, name, kind, labels, slack_user_id, console_user_id, \
+                 created_by_id, created_at, updated_at) \
+             VALUES ($1, 'Example', 'slack_dm', '{}', 'U12345678', $2, $3, now(), now()) \
+             RETURNING id",
+        )
+        .bind(format!("{label}-{}", self.name("principal")))
+        .bind(id)
+        .bind(self.admin)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        let name = format!("{label}-{}", self.name("sandbox"));
+        let proxy: i64 = sqlx::query_scalar(
+            "INSERT INTO proxies \
+                (name, bearer_token_hash, principal_id, principal_assigned_at, created_at, updated_at) \
+             VALUES ($1, $2, $3, now(), now(), now()) RETURNING id",
+        )
+        .bind(&name)
+        .bind(hex::encode(Sha256::digest(name.as_bytes())))
+        .bind(principal)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let token = sandbox_token(
+            JWT_SECRET,
+            &sandbox_claims(&oid("prx", proxy), &name, &oid("prn", principal), now),
+        );
+        SkillUser {
+            id,
+            email,
+            sandbox: format!("Bearer {token}"),
+        }
+    }
+}
+
+impl SkillUser {
+    fn oid(&self) -> String {
+        oid("usr", self.id)
+    }
+}
+
+/// A JSON request with `auth` as either a sandbox bearer or a session cookie.
+async fn call(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    auth: &str,
+    body: Option<Value>,
+) -> Response {
+    let (name, extra) = if auth.starts_with("Bearer ") {
+        ("authorization", None)
+    } else {
+        ("cookie", Some(origin()))
+    };
+    let mut headers = vec![(name, auth), ("content-type", "application/json")];
+    headers.extend(extra);
+    let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
+    send(app, request(method, uri, &headers, body)).await
+}
+
+async fn session_cookie(app: &Router, email: &str) -> String {
+    let response = login(app, email, PASSWORD).await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    cookie(&response).expect("sign-in sets a session cookie")
+}
+
+fn ids(body: &Value, key: &str) -> Vec<String> {
+    body["data"][key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn listed(body: &Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn console_session_db_sandbox_skill_readers_are_owner_managed_and_read_only() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let app = skills_app(&fixture);
+    let owner = fixture.skill_user("owner").await;
+    let reader = fixture.skill_user("reader").await;
+    let editor = fixture.skill_user("editor").await;
+    let name = fixture.name("readers");
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/v1/sandbox/skills",
+        &owner.sandbox,
+        Some(json!({ "data": {
+            "name": name,
+            "description": format!("Private {} guidance", fixture.unique),
+            "instructions": "Keep private.",
+            "visibility": "private",
+        }})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = json_body(response).await;
+    assert_eq!(created["data"]["visibility"], "private");
+    let skill = created["data"]["id"].as_str().unwrap().to_owned();
+    let version = created["data"]["lock_version"].as_i64().unwrap();
+    let path = format!("/api/v1/sandbox/skills/{skill}");
+    let readers = format!("{path}/readers");
+
+    let response = call(&app, Method::GET, &path, &reader.sandbox, None).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Granting is idempotent and accepts an email in any case.
+    for _ in 0..2 {
+        let response = call(
+            &app,
+            Method::POST,
+            &readers,
+            &owner.sandbox,
+            Some(json!({ "data": { "user": reader.email.to_uppercase() } })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(ids(&body, "readers"), vec![reader.oid()]);
+        assert_eq!(body["data"]["lock_version"].as_i64(), Some(version + 1));
+    }
+    let response = call(&app, Method::GET, &readers, &owner.sandbox, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        ids(&json_body(response).await, "readers"),
+        vec![reader.oid()]
+    );
+
+    // The owner cannot be a reader.
+    let response = call(
+        &app,
+        Method::POST,
+        &readers,
+        &owner.sandbox,
+        Some(json!({ "data": { "user": owner.oid() } })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // The reader lists, searches, and reads it by name and OID.
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/v1/sandbox/skills?scope=private&limit=20",
+        &reader.sandbox,
+        None,
+    )
+    .await;
+    assert!(listed(&json_body(response).await).contains(&skill));
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("/api/v1/sandbox/skills/search?q={}", fixture.unique),
+        &reader.sandbox,
+        None,
+    )
+    .await;
+    assert_eq!(listed(&json_body(response).await), vec![skill.clone()]);
+    for identifier in [&skill, &name] {
+        let response = call(
+            &app,
+            Method::GET,
+            &format!("/api/v1/sandbox/skills/{identifier}"),
+            &reader.sandbox,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(json_body(response).await["data"]["document"].is_string());
+    }
+
+    // ...but cannot edit, archive, share, or manage access.
+    let user = json!({ "data": { "user": editor.oid() } });
+    for (method, uri, body) in [
+        (
+            Method::PATCH,
+            path.clone(),
+            Some(json!({ "data": { "instructions": "Changed" } })),
+        ),
+        (Method::DELETE, path.clone(), None),
+        (Method::POST, format!("{path}/share"), None),
+        (Method::GET, readers.clone(), None),
+        (Method::POST, readers.clone(), Some(user.clone())),
+        (
+            Method::DELETE,
+            readers.clone(),
+            Some(json!({ "data": { "user": reader.oid() } })),
+        ),
+        (Method::POST, format!("{path}/editors"), Some(user.clone())),
+    ] {
+        let response = call(&app, method.clone(), &uri, &reader.sandbox, body).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    // An editor can update content but not grant reads or change visibility.
+    let response = call(
+        &app,
+        Method::POST,
+        &format!("{path}/editors"),
+        &owner.sandbox,
+        Some(json!({ "data": { "user": editor.email } })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = call(
+        &app,
+        Method::POST,
+        &readers,
+        &editor.sandbox,
+        Some(json!({ "data": { "user": owner.oid() } })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = call(
+        &app,
+        Method::PATCH,
+        &path,
+        &editor.sandbox,
+        Some(json!({ "data": { "instructions": "Edited.", "visibility": "shared" } })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["data"]["visibility"], "private");
+
+    // A disabled reader's grant can still be revoked, by OID.
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(reader.id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let response = call(
+        &app,
+        Method::POST,
+        &readers,
+        &owner.sandbox,
+        Some(json!({ "data": { "user": reader.oid() } })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for _ in 0..2 {
+        let response = call(
+            &app,
+            Method::DELETE,
+            &readers,
+            &owner.sandbox,
+            Some(json!({ "data": { "user": reader.oid() } })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(ids(&json_body(response).await, "readers").is_empty());
+    }
+    sqlx::query("UPDATE users SET status = 'active' WHERE id = $1")
+        .bind(reader.id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let response = call(&app, Method::GET, &path, &reader.sandbox, None).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = call(
+        &app,
+        Method::GET,
+        &format!("/api/v1/sandbox/skills/search?q={}", fixture.unique),
+        &reader.sandbox,
+        None,
+    )
+    .await;
+    assert!(listed(&json_body(response).await).is_empty());
+}
+
+#[tokio::test]
+async fn console_session_db_console_skill_readers_round_trip_through_the_form() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let app = skills_app(&fixture);
+    let owner = fixture.skill_user("owner").await;
+    let reader = fixture.skill_user("reader").await;
+    let editor = fixture.skill_user("editor").await;
+    let (disabled, _) = fixture.user("disabled", "disabled", false).await;
+    let owner_cookie = session_cookie(&app, &owner.email).await;
+    let reader_cookie = session_cookie(&app, &reader.email).await;
+    let editor_cookie = session_cookie(&app, &editor.email).await;
+
+    let response = call(
+        &app,
+        Method::POST,
+        "/api/v1/console/skills",
+        &owner_cookie,
+        Some(json!({ "data": {
+            "name": fixture.name("selective"),
+            "description": "Selective guidance",
+            "instructions": "Instructions",
+            "visibility": "private",
+            "reader_ids": [reader.oid()],
+            "editor_ids": [editor.oid()],
+        }})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = json_body(response).await;
+    assert_eq!(created["data"]["visibility"], "private");
+    assert_eq!(ids(&created, "readers"), vec![reader.oid()]);
+    assert_eq!(ids(&created, "editors"), vec![editor.oid()]);
+    let skill = created["data"]["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/v1/console/skills/{skill}");
+
+    // The reader finds it under My Skills and views it read-only, without the
+    // reader list.
+    let response = call(
+        &app,
+        Method::GET,
+        "/api/v1/console/skills?tab=mine",
+        &reader_cookie,
+        None,
+    )
+    .await;
+    assert!(listed(&json_body(response).await).contains(&skill));
+    let response = call(&app, Method::GET, &path, &reader_cookie, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let viewed = json_body(response).await;
+    assert_eq!(viewed["data"]["viewer"]["can_edit"], false);
+    assert!(viewed["data"].get("readers").is_none());
+    for (method, body) in [
+        (
+            Method::PATCH,
+            Some(json!({ "data": { "instructions": "Changed" } })),
+        ),
+        (Method::DELETE, None),
+    ] {
+        let response = call(&app, method, &path, &reader_cookie, body).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // An editor's save ignores visibility and reader changes.
+    let response = call(
+        &app,
+        Method::PATCH,
+        &path,
+        &editor_cookie,
+        Some(json!({ "data": {
+            "instructions": "Updated by editor",
+            "visibility": "shared",
+            "reader_ids": [],
+        }})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = call(&app, Method::GET, &path, &owner_cookie, None).await;
+    let current = json_body(response).await;
+    assert_eq!(current["data"]["visibility"], "private");
+    assert_eq!(ids(&current, "readers"), vec![reader.oid()]);
+
+    // An unavailable reader is rejected without saving anything.
+    let response = call(
+        &app,
+        Method::PATCH,
+        &path,
+        &owner_cookie,
+        Some(json!({ "data": {
+            "instructions": "Unsaved change",
+            "reader_ids": [oid("usr", disabled)],
+        }})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(json_body(response).await["error"]["details"]["readers"].is_array());
+
+    // Clearing the readers revokes access immediately.
+    let response = call(
+        &app,
+        Method::PATCH,
+        &path,
+        &owner_cookie,
+        Some(json!({ "data": { "reader_ids": [] } })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = json_body(response).await;
+    assert!(ids(&saved, "readers").is_empty());
+    assert_eq!(saved["data"]["instructions"], "Updated by editor");
+    let response = call(&app, Method::GET, &path, &reader_cookie, None).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

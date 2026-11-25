@@ -628,3 +628,84 @@ def test_cli_lists_adds_and_removes_editors(monkeypatch, capsys):
 
     remove_editor("skl_123", "usr_456")
     assert json.loads(capsys.readouterr().out)["data"]["editors"] == []
+
+
+def test_list_add_and_remove_readers_use_reader_endpoint():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return json_response(
+            {
+                "data": {
+                    "id": "skl_123",
+                    "visibility": "private",
+                    "readers": [{"id": "usr_456", "email": "reader@example.com"}],
+                    "lock_version": 4,
+                }
+            }
+        )
+
+    client = make_client(handler)
+    listed = client.list_readers("skl_123")
+    added = client.add_reader("skl_123", " READER@example.com ")
+    removed = client.remove_reader("skl_123", "usr_456")
+
+    assert listed["readers"][0]["id"] == "usr_456"
+    assert added["lock_version"] == 4
+    assert removed["visibility"] == "private"
+    assert [request.method for request in requests] == ["GET", "POST", "DELETE"]
+    assert all(request.url.path == f"{SANDBOX_SKILLS_PATH}/skl_123/readers" for request in requests)
+    assert json.loads(requests[1].content) == {"data": {"user": "READER@example.com"}}
+    assert json.loads(requests[2].content) == {"data": {"user": "usr_456"}}
+
+
+@pytest.mark.parametrize("method", ["add_reader", "remove_reader"])
+def test_reader_mutations_require_a_user(method):
+    client = make_client(lambda _request: json_response({}))
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        getattr(client, method)("skl_123", " ")
+
+
+def test_cli_manages_readers_and_creates_private_skills(monkeypatch):
+    class StubClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def create(self, name, description, instructions, *, visibility):
+            assert visibility == "private"
+            return {"id": "skl_123", "visibility": visibility}
+
+        def list_readers(self, identifier):
+            assert identifier == "skl_123"
+            return {"id": identifier, "readers": []}
+
+        def add_reader(self, identifier, user):
+            assert (identifier, user) == ("skl_123", "reader@example.com")
+            return {"id": identifier, "readers": [{"id": "usr_456"}]}
+
+        def remove_reader(self, identifier, user):
+            assert (identifier, user) == ("skl_123", "reader@example.com")
+            return {"id": identifier, "readers": []}
+
+    monkeypatch.setattr("cli.get_client", StubClient)
+    runner = CliRunner()
+    for args, readers in [
+        (["readers", "skl_123"], []),
+        (["add-reader", "skl_123", "reader@example.com"], [{"id": "usr_456"}]),
+        (["remove-reader", "skl_123", "reader@example.com"], []),
+    ]:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"]["readers"] == readers
+
+    result = runner.invoke(
+        app,
+        ["create", "private-runbook", "-d", "Private guidance", "-i", "Steps", "--private"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["data"]["visibility"] == "private"

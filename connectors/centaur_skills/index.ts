@@ -19,7 +19,7 @@ export interface Skill {
   name: string;
   /** When to use the skill, as shown in the catalog. */
   description: string;
-  /** `private`: only the author and editors see it. `shared`: every Console user sees it. */
+  /** `private`: only the author, readers, and editors see it. `shared`: every Console user sees it. */
   visibility: "private" | "shared";
   /** Display name or email of the author. */
   author: string;
@@ -46,6 +46,14 @@ export interface EditorList {
   id: string;
   editors: SkillEditor[];
   /** Pass this to `edit` as `lock_version` to reject a concurrent change. */
+  lock_version: number;
+}
+
+/** The read grants on one skill the caller owns. */
+export interface ReaderList {
+  id: string;
+  visibility: "private" | "shared";
+  readers: SkillEditor[];
   lock_version: number;
 }
 
@@ -205,7 +213,7 @@ export async function share(args: { identifier: string }, ctx: Ctx): Promise<{ s
   };
 }
 
-/** Make a skill the caller owns private again, by OID: only its author and editors keep access. */
+/** Make a skill the caller owns private again, by OID: only its author, readers, and editors keep access. */
 export async function unshare(args: { identifier: string }, ctx: Ctx): Promise<{ skill: Skill }> {
   return {
     skill: dataObject(
@@ -252,6 +260,47 @@ export async function remove_editor(
   if (!user) throw new Error("user email or OID must not be empty");
   return dataObject(
     await request(ctx, `${skillPath(args.identifier)}/editors`, {
+      method: "DELETE",
+      data: { data: { user } },
+    }),
+  );
+}
+
+/** List the users granted read access to a skill the caller owns, by OID. Owner only. */
+export async function list_readers(args: { identifier: string }, ctx: Ctx): Promise<ReaderList> {
+  return dataObject(await request(ctx, `${skillPath(args.identifier)}/readers`));
+}
+
+/**
+ * Grant read access to a skill the caller owns: an exact Console user email or a `usr_...` OID.
+ * Readers can discover and read a private skill but cannot edit it. Returns the reader list.
+ */
+export async function add_reader(
+  args: { identifier: string; user: string },
+  ctx: Ctx,
+): Promise<ReaderList> {
+  const user = args.user.trim();
+  if (!user) throw new Error("user email or OID must not be empty");
+  return dataObject(
+    await request(ctx, `${skillPath(args.identifier)}/readers`, {
+      method: "POST",
+      data: { data: { user } },
+    }),
+  );
+}
+
+/**
+ * Revoke read access to a skill the caller owns: an exact Console user email or a `usr_...` OID.
+ * Idempotent. Editors keep their separate access. Returns the reader list.
+ */
+export async function remove_reader(
+  args: { identifier: string; user: string },
+  ctx: Ctx,
+): Promise<ReaderList> {
+  const user = args.user.trim();
+  if (!user) throw new Error("user email or OID must not be empty");
+  return dataObject(
+    await request(ctx, `${skillPath(args.identifier)}/readers`, {
       method: "DELETE",
       data: { data: { user } },
     }),

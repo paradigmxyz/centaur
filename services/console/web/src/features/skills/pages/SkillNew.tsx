@@ -22,7 +22,7 @@ function SkillNew() {
 
   return (
     <>
-      <PageHeader title="New Skill" subtitle="Create a private skill. You can share it after it validates." />
+      <PageHeader title="New Skill" subtitle="Choose who can read or edit this skill." />
       <SkillForm
         canManageEditors
         cancelTo="/console/skills"

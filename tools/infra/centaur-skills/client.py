@@ -168,13 +168,30 @@ class SkillsClient:
         """Remove an editor from an owned skill by exact email or Console user OID."""
         return self._manage_editor(identifier, user, method="DELETE")
 
-    def _manage_editor(self, identifier: str, user: str, *, method: str) -> dict[str, Any]:
+    def list_readers(self, identifier: str) -> dict[str, Any]:
+        """List read grants on an owned Console skill by OID."""
+        result = self._request(f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/readers")
+        if not isinstance(result, dict):
+            raise RuntimeError("centaur-skills response did not include a data object")
+        return result
+
+    def add_reader(self, identifier: str, user: str) -> dict[str, Any]:
+        """Grant read access to an owned skill by exact email or Console user OID."""
+        return self._manage_editor(identifier, user, method="POST", access="readers")
+
+    def remove_reader(self, identifier: str, user: str) -> dict[str, Any]:
+        """Revoke read access to an owned skill by exact email or Console user OID."""
+        return self._manage_editor(identifier, user, method="DELETE", access="readers")
+
+    def _manage_editor(
+        self, identifier: str, user: str, *, method: str, access: str = "editors"
+    ) -> dict[str, Any]:
         normalized_user = user.strip()
         if not normalized_user:
             raise ValueError("user email or OID must not be empty")
 
         result = self._request(
-            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/editors",
+            f"{SANDBOX_SKILLS_PATH}/{quote(identifier, safe='')}/{access}",
             method=method,
             json={"data": {"user": normalized_user}},
         )
