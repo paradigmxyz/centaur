@@ -33,15 +33,15 @@ RUN --mount=type=cache,id=company-context-cargo-registry-${TARGETARCH},target=/u
 # Debian's pandoc predates the pptx and xlsx readers. The release binary is
 # static, so it is fetched on the build platform for the target architecture.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS pandoc
-ARG PANDOC_VERSION=3.13
+ARG PANDOC_VERSION=3.14
 ARG TARGETARCH
 RUN --mount=type=cache,id=company-context-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=company-context-apt-lib,target=/var/lib/apt,sharing=locked \
     printf '%s\n' "Acquire::Retries \"5\";" "Acquire::http::Timeout \"30\";" "Acquire::https::Timeout \"30\";" > /etc/apt/apt.conf.d/80-network-retries \
     && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
 RUN case "$TARGETARCH" in \
-      amd64) checksum=38aa33b325a2bc96a4c39409631212db55702f564250bcdbead180b3bf646389 ;; \
-      arm64) checksum=21e1d4ba09bd0b334590d204580fd4f6629b21be4ab6a32b26cc98982e9e0c68 ;; \
+      amd64) checksum=c5f4720cdefb3f7bdc5d07202ef579feef0d1370773c873804dd8fdaa8c4f1b8 ;; \
+      arm64) checksum=c692f3d78a415741bbbac4cdbbbe26fa7edca1f43d2301b982fbf4009cc8cf7f ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 2 ;; \
     esac && \
     archive="pandoc-${PANDOC_VERSION}-linux-${TARGETARCH}.tar.gz" && \

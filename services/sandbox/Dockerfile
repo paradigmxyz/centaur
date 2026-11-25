@@ -46,7 +46,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip3 install --break-system-packages --no-compile --ignore-installed "packaging>=24.2.0" \
     && pip3 install --break-system-packages --no-compile \
     python-docx==1.2.0 lxml==6.1.3 docx-revisions==0.1.5 \
-    matplotlib==3.11.2 numpy==2.5.4 pandas==3.1.1 \
+    matplotlib==3.11.2 numpy==2.5.5 pandas==3.1.1 \
     python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.28.2 mammoth==1.13.0 \
     faster-whisper \
     asyncpg==0.32.0 \
@@ -63,7 +63,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     "githubkit>=0.16.1" \
     pysocks>=1.7.1 \
     rich>=13.0.0 \
-    slack-sdk==3.46.0 \
+    slack-sdk==3.47.0 \
     tomli-w==1.2.0 \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
@@ -94,7 +94,7 @@ RUN --mount=type=cache,id=sandbox-apt-cache,target=/var/cache/apt,sharing=locked
 RUN useradd -m -s /bin/bash -u 1001 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/agent
 
-ARG CLAUDE_CODE_VERSION=2.1.325
+ARG CLAUDE_CODE_VERSION=2.1.327
 # Bumping CODEX_VERSION: refresh services/sandbox/codex-base-instructions.md
 # from openai/codex rust-v<version>/codex-rs/models-manager/prompt.md.
 ARG CODEX_VERSION=0.171.0
@@ -109,7 +109,7 @@ ARG KACHE_VERSION=v0.28.1
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
 # default; `manage-package-manager-versions` in v10) over the same registry
 # egress a dependency install already needs.
-ARG PNPM_VERSION=11.28.11
+ARG PNPM_VERSION=11.28.13
 
 # ── kubectl ──────────────────────────────────────────────────────────────────
 RUN set -eux; \
@@ -160,7 +160,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
       "@openai/codex@${CODEX_VERSION}" \
       "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-      agent-browser@0.42.0 \
+      agent-browser@0.43.0 \
     && find /usr/lib/node_modules -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete \
     && claude --version | grep -F "${CLAUDE_CODE_VERSION}" \
     && codex --version | grep -F "${CODEX_VERSION}" \
@@ -211,7 +211,7 @@ WORKDIR /home/agent
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/home/agent/.foundry/bin:/home/agent/.bun/bin:${PATH}"
 
 ARG FOUNDRY_VERSION=v1.9.0
-ARG AMP_CLI_VERSION=0.0.1794326444-g2deeb3
+ARG AMP_CLI_VERSION=0.0.1794945632-gf6a800
 ARG MANIM_VERSION=0.22.1
 ARG BUN_VERSION=bun-v1.4.4
 ARG OMP_VERSION=19.1.1
@@ -296,7 +296,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
 # Keep Playwright in uv's image-backed cache so isolated tool environments do
 # not download its large Python driver package on first use. Browser binaries
 # are intentionally omitted because DocSend connects to Browserbase over CDP.
-ARG PLAYWRIGHT_VERSION=1.65.0
+ARG PLAYWRIGHT_VERSION=1.65.2
 RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
     && playwright --version | grep -F "${PLAYWRIGHT_VERSION}"
 
