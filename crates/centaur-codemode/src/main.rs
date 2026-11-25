@@ -8,6 +8,7 @@
 //! centaur-codemode load CONNECTOR        print one connector's declarations
 //! centaur-codemode brief                 print the typed catalog an agent reads
 //! centaur-codemode serve                 HTTP API for api-rs
+//! centaur-codemode serve-executor        multi-tenant HTTP API for the brain
 //! ```
 //!
 //! Every command but `serve` honors the deployment's tool filter from
@@ -16,6 +17,9 @@
 
 mod catalog;
 mod engine;
+mod executor;
+#[cfg(test)]
+mod executor_tests;
 mod files;
 mod reload;
 mod search;
@@ -154,6 +158,20 @@ enum Command {
     },
     /// Print the typed catalog an agent reads before writing a cell.
     Brief,
+    /// Serve Code Mode for agent turns outside a sandbox: every request
+    /// carries a turn token, and every connector request goes through the
+    /// tenancy iron-proxy with it.
+    ServeExecutor {
+        #[arg(
+            long,
+            env = "CENTAUR_CODEMODE_LISTEN",
+            default_value = "127.0.0.1:8790"
+        )]
+        listen: SocketAddr,
+        /// The tenancy iron-proxy's tunnel URL (`http://host:port`).
+        #[arg(long, env = "CENTAUR_CODEMODE_EGRESS_PROXY")]
+        egress_proxy: String,
+    },
     /// Serve the HTTP API.
     Serve {
         /// Address to listen on; sandboxes set `0.0.0.0:8790`.
@@ -171,7 +189,7 @@ fn main() -> Result<()> {
     // `serve` logs requests for operators. The other commands run as agent
     // tool calls, whose stderr lands in the agent's context: only problems.
     let default_filter = match cli.command {
-        Command::Serve { .. } => "centaur_codemode=info,warn",
+        Command::Serve { .. } | Command::ServeExecutor { .. } => "centaur_codemode=info,warn",
         // A failed span export is not the agent's problem.
         _ => "warn,opentelemetry=off,opentelemetry_sdk=off,opentelemetry_otlp=off",
     };
@@ -195,7 +213,10 @@ async fn run(cli: Cli) -> Result<()> {
     // Only `serve` hides `@requires files` functions when it has no files
     // capability: it backs MCP clients that cannot use them. The CLI shows
     // the whole catalog, and such a call fails with a clear error instead.
-    let files = !matches!(command, Command::Serve { .. }) || common.files_dir.is_some();
+    let files = !matches!(
+        command,
+        Command::Serve { .. } | Command::ServeExecutor { .. }
+    ) || common.files_dir.is_some();
     let catalog = Arc::new(Catalog::load(&common.roots, files)?);
     match command {
         Command::List => {
@@ -240,6 +261,8 @@ async fn run(cli: Cli) -> Result<()> {
                     tools: None,
                     policy: common.policy(),
                     trace: telemetry::TraceParent::for_cli(),
+                    egress: None,
+                    context: None,
                 })
                 .await;
             // Before any exit: the process ends right after this.
@@ -259,6 +282,10 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::ServeExecutor {
+            listen,
+            egress_proxy,
+        } => serve_executor(&common, catalog, listen, egress_proxy).await,
         Command::Serve { listen } => {
             if common.tools.is_some() {
                 tracing::warn!("--tools applies to exec and brief; serve uses the request policy");
@@ -280,6 +307,56 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn serve_executor(
+    common: &Common,
+    catalog: Arc<Catalog>,
+    listen: SocketAddr,
+    egress_proxy: String,
+) -> Result<()> {
+    // From the environment only: never a flag, never logged.
+    let public_key = std::env::var(centaur_codemode_protocol::TOKEN_PUBLIC_KEY_ENV)
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "{} is required",
+                centaur_codemode_protocol::TOKEN_PUBLIC_KEY_ENV
+            )
+        })?;
+    let verifier =
+        centaur_codemode_protocol::token::TurnTokenVerifier::from_pem(public_key.as_bytes())?;
+    // No context file: each turn's context comes from its token.
+    let engine = Engine::new(catalog.clone(), common.ca_file.as_deref(), None, None)?;
+    if catalog.connectors.is_empty() {
+        bail!("no connectors found under the connector roots");
+    }
+    let console_url = std::env::var("CENTAUR_CONSOLE_URL")
+        .ok()
+        .map(|url| url.trim().trim_end_matches('/').to_owned())
+        .filter(|url| !url.is_empty());
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .wrap_err_with(|| format!("binding {listen}"))?;
+    let reloader = tokio::spawn(
+        Reloader::new(common.roots.clone(), server::RELOAD_INTERVAL).run(engine.clone()),
+    );
+    tracing::info!(%listen, %egress_proxy, "centaur-codemode executor serving");
+    let served = executor::serve(
+        listener,
+        engine,
+        executor::Config {
+            verifier,
+            proxy_url: egress_proxy,
+            console_url,
+            max_cells: executor::MAX_CELLS,
+        },
+    )
+    .await;
+    reloader.abort();
+    telemetry::flush();
+    Ok(served?)
 }
 
 fn engine(common: &Common, catalog: Arc<Catalog>) -> Result<Engine> {

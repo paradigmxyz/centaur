@@ -271,6 +271,24 @@
             "repository": { "type": "string" },
             "tag": { "type": "string" }
           }
+        },
+        "executor": {
+          "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecretName": { "type": "string" },
+            "replicaCount": { "type": "integer", "minimum": 0 },
+            "resources": { "type": "object" },
+            "ironProxy": {
+              "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+              "type": "object",
+              "properties": {
+                "replicaCount": { "type": "integer", "minimum": 0 },
+                "resources": { "type": "object" }
+              }
+            }
+          }
         }
       }
     },

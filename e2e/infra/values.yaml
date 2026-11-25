@@ -64,6 +64,15 @@ brain:
   enabled: true
   trustReleaseCa: true
 
+# The Code Mode executor and its tenancy iron-proxy give nanocode turns the
+# Code Mode tools. e2e/stack.sh creates centaur-e2e-codemode (turn-token
+# keypair and sync token). Like per-sandbox proxies, the tenancy iron-proxy
+# loads centaur-e2e-iron-proxy-env, so it trusts the fakes' certificates.
+codemode:
+  executor:
+    enabled: true
+    existingSecretName: centaur-e2e-codemode
+
 # The test runner reaches the Console (served by api-rs) through its NodePort
 # (test-access.yaml). console.publicUrl is the browser origin the session cookie
 # and unsafe-request Origin checks use, and the host that selects the Console

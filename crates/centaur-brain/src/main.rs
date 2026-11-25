@@ -1,6 +1,7 @@
 //! centaur-brain: runs agent loops for harness `nanocode` outside sandboxes.
 
 mod blocks;
+mod codemode;
 mod migrate;
 mod projector;
 mod server;
@@ -72,6 +73,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
     let sessions = sessions::SessionIds::new(args.database_url.as_deref())?;
+    let setup = codemode::Setup::from_env()?;
+    let code_mode = match setup.endpoints {
+        Some(endpoints) => {
+            tracing::info!(
+                executor = %endpoints.executor_url,
+                "Code Mode tools are on"
+            );
+            Some(std::sync::Arc::new(codemode::CodeMode::new(
+                endpoints,
+                tokio::runtime::Handle::current(),
+            )?))
+        }
+        None => {
+            tracing::info!("Code Mode tools are off");
+            None
+        }
+    };
     let (commands, receiver) = mpsc::unbounded_channel();
     let _worker = worker::spawn(
         worker::Config {
@@ -80,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             thinking: args.thinking,
             openai_base_url: args.openai_base_url,
             anthropic_base_url: args.anthropic_base_url,
+            code_mode,
         },
         receiver,
     )?;
@@ -87,7 +106,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!(listen = %args.listen, "centaur-brain listening");
     axum::serve(
         listener,
-        server::router(server::AppState { commands, sessions }),
+        server::router(server::AppState {
+            commands,
+            sessions,
+            verifier: setup.verifier,
+        }),
     )
     .with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;

@@ -124,12 +124,16 @@ impl BrainClient {
     }
 
     /// Submit one turn (or a steer) for a thread. Idempotent by `request_id`.
+    ///
+    /// `tool_token` is the turn's Code Mode token: the brain forwards it with
+    /// every Code Mode call, and without one the turn has no Code Mode tools.
     pub async fn submit_turn(
         &self,
         thread_key: &ThreadKey,
         request_id: &str,
         input_line: Value,
         steer: bool,
+        tool_token: Option<&str>,
     ) -> Result<TurnSubmitted, BrainError> {
         let response = self
             .control
@@ -138,6 +142,7 @@ impl BrainClient {
                 request_id,
                 input_line,
                 steer,
+                tool_token,
             })
             .send()
             .await?;
@@ -249,6 +254,10 @@ struct SubmitTurn<'a> {
     request_id: &'a str,
     input_line: Value,
     steer: bool,
+    /// The turn's Code Mode token, minted by api-rs for the session's
+    /// principal; absent when the turn gets no Code Mode tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_token: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -492,7 +501,7 @@ mod tests {
         });
 
         let submitted = client
-            .submit_turn(&thread_key(), "exe_abc", line.clone(), false)
+            .submit_turn(&thread_key(), "exe_abc", line.clone(), false, None)
             .await
             .unwrap();
         assert_eq!(
@@ -507,7 +516,7 @@ mod tests {
 
         // Resubmitting the same request id is an idempotent replay.
         let replay = client
-            .submit_turn(&thread_key(), "exe_abc", line, false)
+            .submit_turn(&thread_key(), "exe_abc", line, false, Some("token"))
             .await
             .unwrap();
         assert!(!replay.created);
@@ -517,6 +526,9 @@ mod tests {
         assert_eq!(turns[0].thread_key, thread_key().as_str());
         assert_eq!(turns[0].body["request_id"], "exe_abc");
         assert_eq!(turns[0].body["steer"], false);
+        // No token is sent as no field, not as null.
+        assert!(turns[0].body.get("tool_token").is_none());
+        assert_eq!(turns[1].body["tool_token"], "token");
         assert_eq!(turns[0].body["input_line"]["type"], "user");
         assert_eq!(
             turns[0].body["input_line"]["message"]["content"][0]["text"],
@@ -531,7 +543,13 @@ mod tests {
         let client = BrainClient::new(brain.url()).unwrap();
 
         let error = client
-            .submit_turn(&thread_key(), "exe_abc", json!({"type": "user"}), false)
+            .submit_turn(
+                &thread_key(),
+                "exe_abc",
+                json!({"type": "user"}),
+                false,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(error.is_rejected(), "{error}");

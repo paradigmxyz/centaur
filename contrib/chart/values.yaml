@@ -281,6 +281,32 @@ codemode:
   image:
     repository: centaur-codemode
     tag: latest
+  # Code Mode tools for nanocode turns (crates/centaur-codemode/README.md): a
+  # shared executor (`centaur-codemode serve-executor`) runs cells and
+  # connector functions for the brain, and a shared tenancy iron-proxy
+  # (ironProxy.image with IRON_TENANCY_ENABLED) injects each turn principal's
+  # credentials into its connector requests. The turn token api-rs mints is the
+  # only credential on the path. Requires brain.enabled. The per-principal
+  # Code Mode sandboxes above keep serving /mcp.
+  executor:
+    enabled: false
+    # Existing Secret with three keys: token-signing-key (Ed25519, PKCS#8 PEM;
+    # api-rs only), token-public-key (its SPKI PEM; brain, executor, tenancy
+    # iron-proxy, proxy-sync), and sync-token (the tenancy iron-proxy's
+    # credential to proxy-sync). `just bootstrap-codemode-secret` creates one.
+    # Restart the four Deployments after rotating it.
+    existingSecretName: ""
+    replicaCount: 1
+    nodeSelector: {}
+    affinity: {}
+    tolerations: []
+    resources: {}
+    ironProxy:
+      replicaCount: 1
+      nodeSelector: {}
+      affinity: {}
+      tolerations: []
+      resources: {}
 
 sandbox:
   image:

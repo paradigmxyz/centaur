@@ -111,6 +111,13 @@ spec:
               value: info
             - name: CENTAUR_SSH_TARGETS
               value: {{ .Values.proxySync.sshTargets | toJson | quote }}
+{{- if .Values.codemode.executor.enabled }}
+            # Code Mode principal config for the tenancy iron-proxy: the sync
+            # token authenticates the proxy, the public key verifies the turn
+            # token it forwards.
+{{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_SYNC_TOKEN" "key" "sync-token") | indent 12 }}
+{{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY" "key" "token-public-key") | indent 12 }}
+{{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.proxySync.port }}
@@ -144,6 +151,12 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- if .Values.codemode.executor.enabled }}
+        # The Code Mode tenancy iron-proxy fetches turn principal configuration.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 14 }}
+{{- end }}
 {{- range .Values.networkPolicy.apiIngressSourceNamespaces }}
         - namespaceSelector:
             matchLabels:

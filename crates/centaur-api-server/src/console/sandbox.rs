@@ -12,6 +12,12 @@
 //! additionally re-checks that the principal is still a Slack DM in the bot's
 //! home workspace linked to an active Console admin.
 //!
+//! The tenancy iron-proxy, which serves Code Mode turns for every principal,
+//! has no per-principal proxy row. proxy-sync gives it the same token with
+//! `binding: "codemode"`, an empty `proxy_id`, and at most a 15-minute
+//! lifetime. Such a token skips the proxy lookup but still requires a live
+//! Console principal and the same delegate re-check.
+//!
 //! Routes are added through the unified `console::guard::GuardedRoutes`
 //! builder; this module only authenticates the credential and exposes the
 //! claims handlers need.
@@ -21,8 +27,8 @@ use std::fmt;
 use axum::Router;
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use centaur_console_db::{
-    ConsoleProxy, ConsoleUser, ConsoleUserStatus, Principal, find_console_proxy, find_console_user,
-    find_principal, oid, slack_bot_home_team,
+    ConsoleProxy, ConsoleUser, ConsoleUserStatus, Principal, decode_oid, find_console_proxy,
+    find_console_user, find_principal, oid, slack_bot_home_team,
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -89,6 +95,11 @@ impl SandboxJwtConfig {
     }
 }
 
+/// The `binding` claim of a Code Mode tool-host token, which has no proxy.
+const CODEMODE_BINDING: &str = "codemode";
+/// The longest lifetime a `codemode` binding is accepted for.
+const CODEMODE_TOKEN_MAX_LIFETIME: i64 = 900;
+
 /// The claims proxy-sync signs into the single sandbox token.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct SandboxClaims {
@@ -102,6 +113,9 @@ pub(crate) struct SandboxClaims {
     pub(crate) sandbox_id: String,
     #[serde(default, deserialize_with = "string_claim")]
     pub(crate) proxy_id: String,
+    /// `codemode` for a tool-host token; empty for a proxy token.
+    #[serde(default, deserialize_with = "string_claim")]
+    pub(crate) binding: String,
     #[serde(default)]
     pub(crate) capabilities: Vec<String>,
     #[serde(default)]
@@ -111,6 +125,10 @@ pub(crate) struct SandboxClaims {
     /// A numeric `iat` in the future is rejected by the JWT layer. Not required.
     #[serde(default)]
     pub(crate) iat: Option<serde_json::Value>,
+    /// The JWT layer validates `exp`; a `codemode` binding also bounds its
+    /// lifetime, so the claim is kept here.
+    #[serde(default)]
+    pub(crate) exp: Option<i64>,
 }
 
 /// The Slack channel lists embedded in the sandbox token.
@@ -132,8 +150,20 @@ fn string_claim<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D:
 /// What a successfully authenticated sandbox request carries to its handler.
 #[derive(Clone, Debug)]
 pub(crate) struct SandboxBinding {
-    pub(crate) proxy: ConsoleProxy,
+    /// The proxy this token is bound to, or `None` for a Code Mode tool-host
+    /// token.
+    pub(crate) proxy: Option<ConsoleProxy>,
     pub(crate) claims: SandboxClaims,
+}
+
+impl SandboxBinding {
+    /// The Console principal this credential acts for.
+    pub(crate) fn principal_id(&self) -> Option<i64> {
+        match &self.proxy {
+            Some(proxy) => proxy.principal_id,
+            None => decode_oid("prn", &self.claims.sub),
+        }
+    }
 }
 
 /// The historical name of [`SandboxBinding`] used by the area handlers.
@@ -188,15 +218,36 @@ pub(crate) async fn authenticate_sandbox(
         return Ok(SandboxAuthentication::InvalidOrMissing);
     };
     let pool = state.console_session_db()?;
-    let Some(proxy) = find_console_proxy(&pool, &claims.proxy_id)
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?
-    else {
-        return Ok(SandboxAuthentication::Invalid);
+    let (proxy, principal_id) = if claims.binding == CODEMODE_BINDING {
+        if !valid_codemode_claims(&claims) {
+            return Ok(SandboxAuthentication::Invalid);
+        }
+        let Some(principal_id) = decode_oid("prn", &claims.sub) else {
+            return Ok(SandboxAuthentication::Invalid);
+        };
+        // A tool-host token has no proxy row, so the live check is that its
+        // principal still exists.
+        if find_principal(&pool, principal_id)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+            .is_none()
+        {
+            return Ok(SandboxAuthentication::Invalid);
+        }
+        (None, Some(principal_id))
+    } else {
+        let Some(proxy) = find_console_proxy(&pool, &claims.proxy_id)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+        else {
+            return Ok(SandboxAuthentication::Invalid);
+        };
+        if !valid_proxy_binding(&proxy, &claims) {
+            return Ok(SandboxAuthentication::Invalid);
+        }
+        let principal_id = proxy.principal_id;
+        (Some(proxy), principal_id)
     };
-    if !valid_proxy_binding(&proxy, &claims) {
-        return Ok(SandboxAuthentication::Invalid);
-    }
 
     let capabilities: Vec<Capability> = claims
         .capabilities
@@ -204,22 +255,27 @@ pub(crate) async fn authenticate_sandbox(
         .filter_map(|name| Capability::from_str(name))
         .filter(|capability| *capability != Capability::ConsoleDelegate)
         .collect();
+    let identity = if claims.proxy_id.is_empty() {
+        claims.sandbox_id.clone()
+    } else {
+        claims.proxy_id.clone()
+    };
     let mut caller = AuthenticatedCaller::new(
         CallerClass::Principal,
-        claims.proxy_id.clone(),
+        identity,
         capabilities,
         None,
         Some(claims.sub.clone()),
     );
     caller.attach_sandbox(SandboxBinding {
-        proxy: proxy.clone(),
+        proxy,
         claims: claims.clone(),
     });
 
     if claims.console_delegate {
         // api-rs never trusts the token's delegate claim alone: re-check the
         // linked user and the DM/home-team rule on every request.
-        if let Some(user) = delegated_admin(&pool, &proxy).await? {
+        if let Some(user) = delegated_admin(&pool, principal_id).await? {
             caller.grant([
                 Capability::ConsoleDelegate,
                 Capability::ConsoleAdmin,
@@ -237,9 +293,9 @@ pub(crate) async fn authenticate_sandbox(
 /// principal still passes the sandbox-admin rule.
 async fn delegated_admin(
     pool: &sqlx::PgPool,
-    proxy: &ConsoleProxy,
+    principal_id: Option<i64>,
 ) -> Result<Option<ConsoleUser>, ApiError> {
-    let Some(principal_id) = proxy.principal_id else {
+    let Some(principal_id) = principal_id else {
         return Ok(None);
     };
     let Some(principal) = find_principal(pool, principal_id)
@@ -319,6 +375,21 @@ fn valid_proxy_binding(proxy: &ConsoleProxy, claims: &SandboxClaims) -> bool {
     proxy.assigned()
         && claims.sub == expected_principal.unwrap_or_default()
         && proxy.name == claims.sandbox_id
+}
+
+/// A tool-host token has no proxy to bind. Its replacement checks are an empty
+/// `proxy_id` and a lifetime no longer than the one proxy-sync mints.
+fn valid_codemode_claims(claims: &SandboxClaims) -> bool {
+    let Some(iat) = claims.iat.as_ref().and_then(serde_json::Value::as_i64) else {
+        return false;
+    };
+    let Some(exp) = claims.exp else {
+        return false;
+    };
+    let Some(lifetime) = exp.checked_sub(iat) else {
+        return false;
+    };
+    claims.proxy_id.is_empty() && (0..=CODEMODE_TOKEN_MAX_LIFETIME).contains(&lifetime)
 }
 
 /// The delegated-credential facts, kept pure so the complete rule is testable
@@ -455,10 +526,12 @@ mod tests {
             sub: principal_id.unwrap_or_default().to_owned(),
             sandbox_id: "sandbox-name".to_owned(),
             proxy_id: oid("prx", 9),
+            binding: String::new(),
             capabilities: Vec::new(),
             slack: Default::default(),
             console_delegate: false,
             iat: None,
+            exp: None,
         }
     }
 
@@ -507,6 +580,43 @@ mod tests {
         let mut wrong_name = claims(Some(&oid("prn", 3)));
         wrong_name.sandbox_id = "other".to_owned();
         assert!(!valid_proxy_binding(&proxy(Some(3)), &wrong_name));
+    }
+
+    #[test]
+    fn codemode_binding_requires_an_empty_proxy_and_a_short_lifetime() {
+        let mut claims = claims(Some(&oid("prn", 3)));
+        claims.binding = CODEMODE_BINDING.to_owned();
+        claims.proxy_id.clear();
+        claims.sandbox_id = "codemode".to_owned();
+        claims.iat = Some(json!(1_700_000_000));
+        claims.exp = Some(1_700_000_900);
+        assert!(valid_codemode_claims(&claims));
+        assert_eq!(
+            SandboxBinding {
+                proxy: None,
+                claims: claims.clone(),
+            }
+            .principal_id(),
+            Some(3)
+        );
+
+        // At most 15 minutes.
+        claims.exp = Some(1_700_000_901);
+        assert!(!valid_codemode_claims(&claims));
+        claims.exp = None;
+        assert!(!valid_codemode_claims(&claims));
+        claims.exp = Some(1_699_999_999);
+        assert!(!valid_codemode_claims(&claims));
+
+        // A `codemode` token carries no proxy binding.
+        claims.exp = Some(1_700_000_900);
+        claims.proxy_id = oid("prx", 9);
+        assert!(!valid_codemode_claims(&claims));
+
+        // The lifetime difference needs a numeric `iat`.
+        claims.proxy_id.clear();
+        claims.iat = Some(json!("yesterday"));
+        assert!(!valid_codemode_claims(&claims));
     }
 
     #[test]

@@ -104,6 +104,22 @@ pub struct ExecRequest {
     /// file and `serve` from the `traceparent` header, never from the body.
     #[serde(skip)]
     pub trace: Option<TraceParent>,
+    /// Clients for this cell's connector requests, in place of the engine's
+    /// (the executor's per-turn clients through the tenancy iron-proxy).
+    #[serde(skip)]
+    pub egress: Option<Egress>,
+    /// The calling context for this cell (JSON text), in place of the
+    /// engine's context file or Console snapshot.
+    #[serde(skip)]
+    pub context: Option<String>,
+}
+
+/// The HTTP clients a cell's connectors use: one for requests, one
+/// HTTP/1-only for websocket upgrades.
+#[derive(Clone, Debug)]
+pub struct Egress {
+    pub http: reqwest::Client,
+    pub ws_http: reqwest::Client,
 }
 
 impl ExecRequest {
@@ -205,6 +221,8 @@ pub struct Engine {
     files: Option<Files>,
     /// Where traced cells export; `None` uses the process's OTLP tracer.
     tracer: Option<opentelemetry_sdk::trace::SdkTracer>,
+    /// Extra trust roots from `--ca-file`, for clients built later.
+    roots: Vec<reqwest::Certificate>,
 }
 
 impl Engine {
@@ -225,15 +243,18 @@ impl Engine {
         let mut ws_builder = reqwest::Client::builder()
             .http1_only()
             .connect_timeout(Duration::from_secs(10));
+        let mut roots = Vec::new();
         if let Some(path) = ca_file {
             let pem = std::fs::read(path)
                 .wrap_err_with(|| format!("reading CA bundle {}", path.display()))?;
             for certificate in reqwest::Certificate::from_pem_bundle(&pem)? {
                 builder = builder.add_root_certificate(certificate.clone());
-                ws_builder = ws_builder.add_root_certificate(certificate);
+                ws_builder = ws_builder.add_root_certificate(certificate.clone());
+                roots.push(certificate);
             }
         }
         Ok(Self {
+            roots,
             catalog: Arc::new(RwLock::new(catalog)),
             http: builder.build()?,
             ws_http: ws_builder.build()?,
@@ -241,6 +262,34 @@ impl Engine {
             console: None,
             files: files_dir.map(Files::new).transpose()?,
             tracer: None,
+        })
+    }
+
+    /// Clients that send every request through `proxy`, authenticating each
+    /// tunnel with `proxy_authorization`, with the engine's timeouts and
+    /// trust roots. Connections are never shared with other clients, so a
+    /// tunnel opened for one credential is never reused for another.
+    pub fn egress_via(
+        &self,
+        proxy: &str,
+        proxy_authorization: reqwest::header::HeaderValue,
+    ) -> Result<Egress> {
+        let proxy = reqwest::Proxy::all(proxy)?.custom_http_auth(proxy_authorization);
+        let mut builder = reqwest::Client::builder()
+            .timeout(TOOL_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10))
+            .proxy(proxy.clone());
+        let mut ws_builder = reqwest::Client::builder()
+            .http1_only()
+            .connect_timeout(Duration::from_secs(10))
+            .proxy(proxy);
+        for certificate in &self.roots {
+            builder = builder.add_root_certificate(certificate.clone());
+            ws_builder = ws_builder.add_root_certificate(certificate.clone());
+        }
+        Ok(Egress {
+            http: builder.build()?,
+            ws_http: ws_builder.build()?,
         })
     }
 
@@ -289,18 +338,26 @@ impl Engine {
 
     /// Per-cell state: the catalog snapshot, the connectors the policy makes
     /// visible, and the bookkeeping the host records.
-    async fn cell(&self, policy: Option<&Policy>, started: Instant) -> Cell {
+    async fn cell(&self, request: &ExecRequest, policy: Option<&Policy>, started: Instant) -> Cell {
         let catalog = self.catalog();
         let allowed = catalog
             .visible(policy)
             .map(|connector| connector.name.clone())
             .collect();
+        let context = match &request.context {
+            Some(context) => context.clone(),
+            None => self.calling_context().await,
+        };
+        let egress = request.egress.clone().unwrap_or_else(|| Egress {
+            http: self.http.clone(),
+            ws_http: self.ws_http.clone(),
+        });
         Cell {
             catalog,
             allowed,
-            context: self.calling_context().await,
-            http: self.http.clone(),
-            ws_http: self.ws_http.clone(),
+            context,
+            http: egress.http,
+            ws_http: egress.ws_http,
             files: self.files.clone(),
             logs: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
@@ -342,7 +399,7 @@ impl Engine {
     pub async fn exec(&self, request: ExecRequest) -> ExecResponse {
         let started = Instant::now();
         let filter = request.filter();
-        let cell = Arc::new(self.cell(filter.as_ref(), started).await);
+        let cell = Arc::new(self.cell(&request, filter.as_ref(), started).await);
         let connectors: BTreeMap<&str, Vec<&str>> = cell
             .catalog
             .visible(filter.as_ref())
@@ -513,6 +570,24 @@ impl ConsoleContext {
                 "{PERMISSIONS_PATH} response did not include a data object"
             )),
         }
+    }
+}
+
+/// The calling context for a turn the executor runs: the turn's thread, and
+/// the principal's Console permissions (or why they are missing).
+pub(crate) fn turn_context(console: Result<Json, String>, thread_key: &str) -> Json {
+    let mut context = build_console_context(console, unix_now());
+    context["thread_key"] = Json::from(thread_key);
+    context
+}
+
+/// Unwrap Console's `/api/v1/sandbox/permissions` response.
+pub(crate) fn permissions_data(body: &Json) -> Result<Json, String> {
+    match body.get("data") {
+        Some(data) if data.is_object() => Ok(data.clone()),
+        _ => Err(format!(
+            "{PERMISSIONS_PATH} response did not include a data object"
+        )),
     }
 }
 
@@ -1954,6 +2029,8 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
                 tools,
                 policy: None,
                 trace: None,
+                egress: None,
+                context: None,
             })
             .await
     }
@@ -2321,6 +2398,8 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
                 tools: None,
                 policy: None,
                 trace: TraceParent::parse(traceparent),
+                egress: None,
+                context: None,
             })
             .await;
         assert!(response.ok, "{:?}", response.error);
@@ -2779,6 +2858,8 @@ export async function realm(args: {}, ctx: Ctx): Promise<{ marker: string; json:
             tools,
             policy,
             trace: None,
+            egress: None,
+            context: None,
         };
         let response = engine
             .exec(request(

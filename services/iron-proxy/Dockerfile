@@ -7,6 +7,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --update-cache --cache-dir /var/cache/apk curl jq
 
 COPY services/iron-proxy/iron-proxy.yaml /usr/local/share/iron-proxy/proxy.yaml.default
+COPY services/iron-proxy/iron-proxy-tenancy.yaml /usr/local/share/iron-proxy/tenancy.yaml
 COPY --chmod=755 services/iron-proxy/entrypoint.sh /entrypoint.sh
 
 EXPOSE 8080

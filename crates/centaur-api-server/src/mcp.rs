@@ -269,22 +269,7 @@ fn mcp_initialize_result(params: &Value) -> Value {
             "name": "centaur",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "instructions": concat!(
-                "Centaur Code Mode exposes a large, dynamic connector catalog through a few tools. ",
-                "Whenever a task involves an external service, private or current data, an external ",
-                "action, or a service URL, first call `centaur_catalog_search` with the relevant ",
-                "service names, URLs, domains and action; results include each function's ",
-                "signature. Load a connector's full TypeScript declarations with ",
-                "`centaur_catalog_load` when the one-line signature is not enough. Then call ",
-                "connectors by writing JavaScript for `centaur_execute`: `code` is the body of an ",
-                "async function, call connectors as ",
-                "`await tools.<connector>.<function>(args)`, run independent calls together with ",
-                "`Promise.all` or `Promise.allSettled` in one cell instead of several tool calls, ",
-                "and `return` the JSON-serializable value you want back. `console.log` output is ",
-                "returned with the result. A cell has no `fetch`, no module imports, no file access ",
-                "and no state between calls, and is limited to 120 s, 1000 calls and 8 concurrent ",
-                "calls."
-        ),
+        "instructions": centaur_codemode_protocol::tools::INSTRUCTIONS,
     })
 }
 
@@ -302,72 +287,10 @@ fn mcp_tool_name(name: &str) -> bool {
 }
 
 fn mcp_codemode_tools() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "centaur_catalog_search",
-            "description": concat!(
-                "Search Centaur's live connector catalog. The catalog is large and dynamic, so ",
-                "search whenever a task involves an external service, private or current data, an ",
-                "external action, or a service URL; include service names, URLs, domains and the ",
-                "requested action as terms. Results include each function's signature. Load a ",
-                "connector's full TypeScript declarations with `centaur_catalog_load` when needed."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "required": ["query"],
-                "additionalProperties": false,
-                "properties": {
-                    "query": {"type": "string", "minLength": 1},
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 50,
-                        "description": "Maximum number of results (default 8).",
-                    },
-                },
-            },
-        }),
-        json!({
-            "name": "centaur_catalog_load",
-            "description": concat!(
-                "Load a connector's full TypeScript declarations and JSDoc, for a connector found ",
-                "with `centaur_catalog_search`. Use it when the one-line signature from search is ",
-                "not enough to call the connector correctly."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "required": ["tool"],
-                "additionalProperties": false,
-                "properties": {
-                    "tool": {"type": "string", "minLength": 1},
-                },
-            },
-        }),
-        json!({
-            "name": "centaur_execute",
-            "description": concat!(
-                "Run one JavaScript cell in the principal's Code Mode sandbox. `code` is the body of ",
-                "an async function: call connectors as `await tools.<connector>.<function>(args)`, ",
-                "run independent calls together with `Promise.all` or `Promise.allSettled` in the ",
-                "same cell instead of several tool calls, and `return` a JSON-serializable value, ",
-                "which becomes the result. `console.log` output is returned too. There is no ",
-                "`fetch`, no module imports, no file access and no state between cells. A cell is ",
-                "limited to 120 s, 1000 calls and 8 concurrent calls."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "required": ["code"],
-                "additionalProperties": false,
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Async function body; `return` value is the cell result.",
-                    },
-                },
-            },
-        }),
-    ]
+    centaur_codemode_protocol::tools::specs()
+        .iter()
+        .map(centaur_codemode_protocol::tools::ToolSpec::mcp)
+        .collect()
 }
 
 fn invalid_mcp_arguments(error: impl std::fmt::Display) -> McpToolCallOutcome {

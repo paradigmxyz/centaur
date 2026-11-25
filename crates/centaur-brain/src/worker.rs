@@ -14,12 +14,15 @@ use std::{
 };
 
 use nanocode::{
-    ClaudeClient, HostFuture, ModelSelection, Nanocode, OpenAi, Thinking, Tools,
+    ClaudeClient, ClaudeHarness, CodexHarness, HostFuture, ModelSelection, Nanocode, OpenAi,
+    Thinking, Tools,
     backend::Prompt,
+    claude::ClaudeEnvironment,
     durability::SessionRecord,
     session_host::{
         Driven, InboxHost, LoggedEvent, MovedQueued, Submission, Submitted, TurnInbox, TurnState,
     },
+    tools::ToolExposure,
     turnlog::{LogHost, MemoryLog, OneLog, Policy, SqlLog},
 };
 use nanocode_store_sql::{PgOptions, PgPool, PgSql};
@@ -27,7 +30,10 @@ use serde_json::{Map, Value, json, value::to_raw_value};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-use crate::blocks::{self, Input};
+use crate::{
+    blocks::{self, Input},
+    codemode::{self, CodeMode},
+};
 
 const PG_CONNECTIONS: usize = 8;
 /// How long the inbox batches events before writing them to the log.
@@ -43,13 +49,15 @@ const DURABLE_KEY: &str = "centaur.durable";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub database_url: Option<String>,
     pub default_model: String,
     pub thinking: String,
     pub openai_base_url: Option<String>,
     pub anthropic_base_url: Option<String>,
+    /// Registers the Code Mode tools on every thread when set.
+    pub code_mode: Option<Arc<CodeMode>>,
 }
 
 /// A Centaur thread and the nanocode session that holds it.
@@ -65,6 +73,8 @@ pub enum Command {
         request_id: String,
         input_line: Value,
         steer: bool,
+        /// The turn's verified Code Mode token, kept in its own metadata.
+        tool_token: Option<codemode::TurnToken>,
         reply: oneshot::Sender<Result<SubmitOutcome, SubmitError>>,
     },
     Interrupt {
@@ -138,6 +148,7 @@ async fn run(config: Config, mut commands: mpsc::UnboundedReceiver<Command>) -> 
         thinking: config.thinking.parse()?,
         openai_base_url: config.openai_base_url,
         anthropic_base_url: config.anthropic_base_url,
+        code_mode: config.code_mode,
         threads: Default::default(),
         opening: Default::default(),
     });
@@ -168,6 +179,7 @@ struct Brain {
     thinking: Thinking,
     openai_base_url: Option<String>,
     anthropic_base_url: Option<String>,
+    code_mode: Option<Arc<CodeMode>>,
     threads: Mutex<HashMap<String, Arc<Thread>>>,
     /// Serializes opening, so a thread is opened once.
     opening: tokio::sync::Mutex<()>,
@@ -191,9 +203,12 @@ impl Brain {
                 request_id,
                 input_line,
                 steer,
+                tool_token,
                 reply,
             } => {
-                let outcome = self.submit(&thread, &request_id, &input_line, steer).await;
+                let outcome = self
+                    .submit(&thread, &request_id, &input_line, steer, tool_token)
+                    .await;
                 let _ = reply.send(outcome);
             }
             Command::Interrupt { thread, reply } => {
@@ -230,6 +245,7 @@ impl Brain {
         request_id: &str,
         input_line: &Value,
         steer: bool,
+        tool_token: Option<codemode::TurnToken>,
     ) -> Result<SubmitOutcome, SubmitError> {
         let line = serde_json::to_string(input_line)
             .map_err(|error| SubmitError::BadRequest(error.to_string()))?;
@@ -247,7 +263,7 @@ impl Brain {
             .await
             .map_err(|error| SubmitError::Internal(error.to_string()))?;
         let outcome = thread
-            .submit(request_id, &turn.text, &thread_ref.key, steer)
+            .submit(request_id, &turn.text, &thread_ref.key, steer, tool_token)
             .await?;
         thread.drive();
         Ok(outcome)
@@ -267,7 +283,7 @@ impl Brain {
         if let Some(thread) = self.open_thread(&session_id) {
             return Ok(thread);
         }
-        let thread = Arc::new(self.open(&session_id, model).await?);
+        let thread = Arc::new(self.open(&session_id, &thread.key, model).await?);
         self.threads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -284,27 +300,49 @@ impl Brain {
             .cloned()
     }
 
-    async fn open(&self, session_id: &str, model: Option<ModelSelection>) -> Result<Thread, Error> {
+    async fn open(
+        &self,
+        session_id: &str,
+        thread_key: &str,
+        model: Option<ModelSelection>,
+    ) -> Result<Thread, Error> {
         let policy = Policy {
             restarts: TURN_RESTARTS,
+            effects: codemode::effects(),
             ..Policy::default()
         };
         let parts = nanocode::turnlog(Arc::clone(&self.log_host), session_id, policy).await?;
-        let tools = Tools::builder()
+        let mut tools = Tools::builder()
             .without_defaults()
             .effect_gate(Arc::clone(&parts.gate))
-            .cell_journals(parts.journals.clone())
-            .build()?;
-        let runtime = Nanocode::builder()
-            .openai(openai(self.openai_base_url.as_deref())?)
-            .claude(claude(self.anthropic_base_url.as_deref()))
+            .cell_journals(parts.journals.clone());
+        if let Some(code_mode) = &self.code_mode {
+            // Direct function tools. By default nanocode offers only its own
+            // code mode (`exec`, calling the tools from JavaScript) and
+            // refuses direct calls; with direct tools, the subagent tools are
+            // direct functions too.
+            tools = tools.exposure(ToolExposure::DirectOnly);
+            let log: Arc<dyn codemode::Turns> = parts.log.clone();
+            for tool in code_mode.tools(thread_key, &log) {
+                tools = tools.tool(tool);
+            }
+        }
+        let tools = tools.build()?;
+        let code_mode = self.code_mode.is_some();
+        let mut runtime = Nanocode::builder()
+            .openai(openai(self.openai_base_url.as_deref(), code_mode)?)
+            .claude(claude(self.anthropic_base_url.as_deref(), code_mode))
             .tools(tools)
             .without_cua()
             .runner_management(false)
             .thinking(self.thinking)
-            .durability(parts.store.clone())
-            .build_async()
-            .await?;
+            .durability(parts.store.clone());
+        if code_mode {
+            // With direct tools the model would also see nanocode's subagent
+            // tools; a brain turn gets exactly the Code Mode tools.
+            runtime = runtime.without_subagents();
+        }
+        let runtime = runtime.build_async().await?;
         // Everything already in the log is durable; later events become
         // visible only once the host has committed them.
         let durable = last_seq(&parts.log).await?;
@@ -346,15 +384,22 @@ impl Thread {
         text: &str,
         thread_key: &str,
         steer: bool,
+        tool_token: Option<codemode::TurnToken>,
     ) -> Result<SubmitOutcome, SubmitError> {
         let internal = |error: &dyn std::fmt::Display| SubmitError::Internal(error.to_string());
         let running = self.running().await.map_err(|error| internal(&error))?;
+        // The turn's Code Mode token lives in its own record, and only there:
+        // nanocode stores, resumes, and retires it with this turn. A retry of
+        // the same request keeps the first submission's metadata.
+        let mut metadata = json!({"thread_key": thread_key});
+        if let Some(token) = tool_token {
+            metadata["tool_token"] = json!(token);
+        }
         let submission = Submission {
             request_id: request_id.to_owned(),
             prompt: Prompt::new(text),
             hand: None,
-            metadata: to_raw_value(&json!({"thread_key": thread_key}))
-                .map_err(|error| internal(&error))?,
+            metadata: to_raw_value(&metadata).map_err(|error| internal(&error))?,
         };
         let submitted = self
             .inbox
@@ -568,8 +613,9 @@ async fn last_seq(log: &OneLog) -> Result<u64, Error> {
 }
 
 /// HTTPS SSE: the WebSocket transport does not follow a regional
-/// `OPENAI_BASE_URL`.
-fn openai(base_url: Option<&str>) -> Result<OpenAi, Error> {
+/// `OPENAI_BASE_URL`. With Code Mode, its instructions join the session's
+/// developer instructions.
+fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error> {
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "OPENAI_API_KEY".to_owned());
     let mut builder = OpenAi::builder(key)
         .transport(nanocode::oai::transport::ResponsesTransport::Https)
@@ -577,13 +623,34 @@ fn openai(base_url: Option<&str>) -> Result<OpenAi, Error> {
     if let Some(base_url) = base_url {
         builder = builder.api_base_url(base_url.trim_end_matches('/'));
     }
-    Ok(builder.build()?)
+    let harness = CodexHarness::new(builder.build()?);
+    Ok(if code_mode {
+        harness.configure(|builder| {
+            Ok(builder.additional_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS))
+        })
+    } else {
+        harness
+    })
 }
 
-fn claude(base_url: Option<&str>) -> ClaudeClient {
+/// With Code Mode, its instructions are the session's project instructions,
+/// which follow the base system prompt. That replaces the environment nanocode
+/// would derive from the process's working directory, which the brain's
+/// agents cannot reach anyway.
+fn claude(base_url: Option<&str>, code_mode: bool) -> ClaudeHarness {
     let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "ANTHROPIC_API_KEY".to_owned());
     let base = base_url.map_or("https://api.anthropic.com/v1", |url| {
         url.trim_end_matches('/')
     });
-    ClaudeClient::with_api_key(format!("{base}/messages"), key)
+    let harness = ClaudeHarness::new(ClaudeClient::with_api_key(format!("{base}/messages"), key));
+    if code_mode {
+        harness.configure(|builder| {
+            Ok(builder.environment(
+                ClaudeEnvironment::new()
+                    .project_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS),
+            ))
+        })
+    } else {
+        harness
+    }
 }

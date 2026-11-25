@@ -6,15 +6,37 @@ use sha2::{Digest, Sha256};
 use crate::{
     ApiError,
     models::{AppState, ProxyRecord},
-    tokens::append_sandbox_token,
+    tokens::{append_codemode_sandbox_token, append_sandbox_token},
 };
 
 pub(crate) async fn build_config(
     state: &AppState,
     proxy: &ProxyRecord,
-    principal_id: i64,
     now: i64,
 ) -> Result<Config, ApiError> {
+    let mut config = assemble_config(state, proxy).await?;
+    append_sandbox_token(state, proxy, &mut config, now).await?;
+    Ok(config)
+}
+
+/// The configuration the Code Mode tenant route receives: the same credentials
+/// and requester wrappers, with the windowed Code Mode token appended.
+pub(crate) async fn build_codemode_config(
+    state: &AppState,
+    proxy: &ProxyRecord,
+    now: i64,
+) -> Result<Config, ApiError> {
+    let mut config = assemble_config(state, proxy).await?;
+    append_codemode_sandbox_token(state, proxy, &mut config, now).await?;
+    Ok(config)
+}
+
+/// The stored credentials for the record's principal and requester, without any
+/// token the caller mints.
+async fn assemble_config(state: &AppState, proxy: &ProxyRecord) -> Result<Config, ApiError> {
+    let Some(principal_id) = proxy.principal_id else {
+        return Ok(Config::default());
+    };
     let subject = Subject {
         principal_id,
         principal: proxy.principal.as_ref(),
@@ -23,15 +45,13 @@ pub(crate) async fn build_config(
         slack_history_channel_ids: &proxy.slack_history_channel_ids,
         proxy_labels: &proxy.labels,
     };
-    let mut config = centaur_console_db::build_config(
+    Ok(centaur_console_db::build_config(
         &state.pool,
         SecretValues::Live(&state.encryption),
         &subject,
         proxy.requester_principal_id,
     )
-    .await?;
-    append_sandbox_token(state, proxy, &mut config, now).await?;
-    Ok(config)
+    .await?)
 }
 
 pub(crate) fn config_hash(proxy: &ProxyRecord, config: &Value) -> Result<String, ApiError> {

@@ -14,7 +14,6 @@
 {{- $skillDirs := list -}}
 {{- $publicSkillDirs := list -}}
 {{- $overlayRepoDirs := list -}}
-{{- $codemodeSandboxConnectorDirs := list -}}
 {{- range $source := $overlaySources -}}
 {{- $repo := get $source "repo" | default "" -}}
 {{- $visibility := get $source "visibility" | default "private" -}}
@@ -37,11 +36,6 @@
 {{- if eq $visibility "public" -}}
 {{- $publicSkillDirs = append $publicSkillDirs $skillDir -}}
 {{- end -}}
-{{- end -}}
-{{- /* Code Mode connector roots: overlay copies shadow the image's baked
-connectors, so later sources come later in the list. */ -}}
-{{- with (get $source "connectorsSubdir") -}}
-{{- $codemodeSandboxConnectorDirs = append $codemodeSandboxConnectorDirs (printf "/home/agent/github/%s/%s" $repo .) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -360,6 +354,11 @@ spec:
             - name: CENTAUR_BRAIN_URL
               value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "brain")) .Values.brain.port | quote }}
 {{- end }}
+{{- if .Values.codemode.executor.enabled }}
+            # Signs the turn token api-rs hands the brain with every nanocode
+            # turn; only api-rs holds this key.
+{{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_SIGNING_KEY" "key" "token-signing-key") | indent 12 }}
+{{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "KUBERNETES_WORKFLOW_DIRS") }}
             - name: KUBERNETES_WORKFLOW_DIRS
               value: {{ $sandboxWorkflowDirs | quote }}
@@ -633,13 +632,7 @@ spec:
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_OVERLAY_REPO_DIRS" "value" (join ":" $overlayRepoDirs)) }}
 {{- end }}
 {{- if not (hasKey .Values.sandbox.extraEnv "CENTAUR_CODEMODE_CONNECTORS") }}
-{{- /* Code Mode connector roots: the image's baked connectors, then overlay
-copies in source order (later roots shadow earlier ones). */}}
-{{- $codemodeSandboxConnectorRoots := list "/opt/centaur/connectors" -}}
-{{- if and .Values.repoCache.enabled (gt (len $codemodeSandboxConnectorDirs) 0) -}}
-{{- $codemodeSandboxConnectorRoots = concat $codemodeSandboxConnectorRoots $codemodeSandboxConnectorDirs -}}
-{{- end }}
-{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_CODEMODE_CONNECTORS" "value" (join ":" $codemodeSandboxConnectorRoots)) }}
+{{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_CODEMODE_CONNECTORS" "value" (include "centaur.codemodeConnectorRoots" .)) }}
 {{- end }}
 {{- if and $companyContext.enabled (not (hasKey .Values.sandbox.extraEnv "COMPANY_CONTEXT_API_URL")) }}
 {{- /* The company_context Code Mode connector and `slack search` call this query API through the proxy. */}}

@@ -29,9 +29,10 @@ export type ProviderError = { status: number; type: string; code?: string; messa
 
 /**
  * A scripted model answer, matched by a token placed in the user's message.
- * `run` first has the harness run a shell command through its shell tool.
+ * `run` first has the harness run a shell command through its shell tool;
+ * `cell` first has it run a Code Mode cell through `centaur_execute`.
  */
-export type Script = { token: string; text: string; delayMs?: number; error?: ProviderError; run?: string }
+export type Script = { token: string; text: string; delayMs?: number; error?: ProviderError; run?: string; cell?: string }
 
 export type Execution = { execution_id: string; status: string; error: string | null }
 
@@ -151,6 +152,23 @@ export const model = {
    */
   runs(command: string, text = 'Ran it.', options: { delayMs?: number } = {}): Script {
     return { token: `e2e-${randomUUID().slice(0, 8)}`, text, run: command, ...options }
+  },
+  /**
+   * Scripts the model to run a Code Mode cell through `centaur_execute`
+   * (nanocode turns in the brain), then answer with `text`.
+   */
+  runsCell(code: string, text = 'Ran the cell.'): Script {
+    return { token: `e2e-${randomUUID().slice(0, 8)}`, text, cell: code }
+  },
+  /** What the model received as the output of a script's tool call, verbatim. */
+  async toolOutput(script: Script): Promise<string> {
+    for (const { body } of await modelRequests(script.token)) {
+      const outputs = (Array.isArray(body.input) ? body.input : [])
+        .filter((item: any) => String(item?.type ?? '').endsWith('_call_output'))
+        .map((item: any) => (typeof item.output === 'string' ? item.output : contentText(item.output)))
+      if (outputs.length > 0) return outputs.join('\n')
+    }
+    throw new Error(`the model received no tool output for script ${script.token}`)
   },
   /** What the harness's shell tool returned for a `runs` script's command, as the model received it. */
   async commandOutput(script: Script): Promise<string> {
@@ -434,6 +452,14 @@ export const ironControl = {
     )
     if (!principal) throw new Error(`proxy for sandbox ${sandboxId} has no principal`)
     return { principal, requester: requester ?? null }
+  },
+  /** The Console id (`prn_…`) of a Slack channel's principal. */
+  async slackChannelPrincipalId(channelId: string): Promise<string> {
+    const [row] = await ironControlDb`
+      select foreign_id as "foreignId" from principals where slack_channel_id = ${channelId}`
+    if (!row) throw new Error(`iron-control has no principal for channel ${channelId}`)
+    const { data } = await this.api.ok('GET', `/api/v1/principals/lookup/${encodeURIComponent(row.foreignId)}`)
+    return data.id
   },
   /** The principal for a Slack user, if iron-control has one. */
   async slackUser(user: SlackUser): Promise<Principal | undefined> {
@@ -980,7 +1006,8 @@ async function registerScript(script: Script): Promise<void> {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      match: script.token, text: script.text, delayMs: script.delayMs, error: script.error, run: script.run
+      match: script.token, text: script.text, delayMs: script.delayMs, error: script.error, run: script.run,
+      cell: script.cell
     })
   })
   if (!response.ok) throw new Error(`registering the model script failed: ${response.status}`)

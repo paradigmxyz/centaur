@@ -1,0 +1,42 @@
+# Tenancy mode: one shared proxy for every Code Mode turn. Each
+# CONNECT carries the turn token api-rs minted; iron-proxy verifies it with
+# IRON_TENANT_PUBLIC_KEYS, fetches that turn's principal config from
+# proxy-sync (IRON_TENANCY_CONFIG_URL, authenticated with
+# IRON_TENANCY_CONTROL_PLANE_TOKEN), and applies it to the tunnel's requests.
+dns:
+  enabled: false
+
+proxy:
+  # The chart's Service and NetworkPolicies use this fixed port.
+  tunnel_listen: ":8080"
+  # Tenancy refuses the plain listeners; keep them off the network.
+  http_listen: "127.0.0.1:18080"
+  https_listen: "127.0.0.1:18443"
+  upstream_response_header_timeout: "120s"
+
+tls:
+  mode: "mitm"
+  ca_cert: "/etc/iron-proxy/ca.crt"
+  ca_key: "/etc/iron-proxy/ca.key"
+
+tenancy:
+  enabled: true
+  token:
+    issuer: "centaur-api"
+    audience: "centaur-codemode"
+  # config.url comes from IRON_TENANCY_CONFIG_URL.
+
+# Runs before every tenant's own config. Tenant configs carry credentials,
+# not egress rules, so this is the egress policy.
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "*"
+
+# Serves /healthz; the chart's probes and Service use these fixed ports.
+metrics:
+  listen: ":9090"
+
+log:
+  level: "info"

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use active_record_encryption::ActiveRecordEncryption;
+use centaur_codemode_protocol::token::TurnTokenVerifier;
 use chrono::{DateTime, Utc};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::Value;
@@ -14,6 +15,12 @@ pub(crate) struct AppState {
     pub(crate) pool: PgPool,
     pub(crate) encryption: Arc<ActiveRecordEncryption>,
     pub(crate) jwt_secret: Option<String>,
+    /// Bearer token the tenancy iron-proxy presents to the principal config
+    /// route. `None` leaves that route disabled.
+    pub(crate) codemode_sync_token: Option<String>,
+    /// Verifies the turn token iron-proxy forwards on the principal config
+    /// route. `None` makes that route refuse every tenant token.
+    pub(crate) codemode_token_verifier: Option<TurnTokenVerifier>,
     pub(crate) api_hosts: Vec<String>,
     pub(crate) sync_cache: Arc<SyncCache>,
     pub(crate) metrics: PrometheusHandle,

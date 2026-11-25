@@ -152,6 +152,26 @@ _import-k3s:
 bootstrap-secrets *args:
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace {{namespace}} {{args}}
 
+# Create the Code Mode Secret (turn-token keypair and the iron-proxy/proxy-sync
+# sync token) if missing; see the Code Mode executor values in contrib/chart/values.yaml.
+bootstrap-codemode-secret name="centaur-codemode":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if kubectl -n {{namespace}} get secret {{name}} >/dev/null 2>&1; then
+      echo "secret {{name}} already exists"; exit 0
+    fi
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    openssl genpkey -algorithm ed25519 -out "$work/signing.pem" 2>/dev/null
+    openssl pkey -in "$work/signing.pem" -pubout -out "$work/public.pem"
+    (umask 077; openssl rand -hex 32 | tr -d '\n' > "$work/sync-token")
+    kubectl create namespace {{namespace}} --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl -n {{namespace}} create secret generic {{name}} \
+      --from-file=token-signing-key="$work/signing.pem" \
+      --from-file=token-public-key="$work/public.pem" \
+      --from-file=sync-token="$work/sync-token" >/dev/null
+    echo "created secret {{name}}"
+
 deploy:
     #!/usr/bin/env bash
     set -euo pipefail

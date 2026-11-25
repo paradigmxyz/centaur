@@ -31,6 +31,14 @@ log_json "info" "ca_loaded" "loaded CA from mounted volume at $CA_MOUNT_DIR"
 cp "$CA_CERT" "$CERT_SHARE/ca-cert.pem"
 log_json "info" "ca_shared" "CA cert shared at /certs/ca-cert.pem"
 
+# ── Tenancy mode: one shared proxy serving every Code Mode turn, each tunnel
+# authenticated by its turn token. The baked config is read-only; its
+# environment (IRON_TENANCY_*, IRON_TENANT_PUBLIC_KEYS) fills in the rest. ──
+if [ "${IRON_TENANCY_ENABLED:-}" = "true" ]; then
+    log_json "info" "tenancy_mode" "IRON_TENANCY_ENABLED set; serving tenants"
+    exec iron-proxy -config /usr/local/share/iron-proxy/tenancy.yaml
+fi
+
 # ── Managed mode: the control plane is the source of truth for the proxy
 # config, and everything local comes from IRON_* env vars, so run with no
 # -config. A local config file would conflict (e.g. management.listen). ────

@@ -1,4 +1,5 @@
 mod cache;
+mod codemode;
 mod config;
 mod database;
 #[cfg(test)]
@@ -21,7 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use cache::SyncCache;
-use centaur_console_db::{models::Config, oid};
+use centaur_console_db::oid;
 use chrono::Utc;
 use config::{build_config, config_hash};
 use database::load_proxy;
@@ -69,6 +70,27 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: "invalid or missing proxy token".to_owned(),
+        }
+    }
+
+    fn codemode_unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "invalid or missing sync token".to_owned(),
+        }
+    }
+
+    fn codemode_forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
         }
     }
 }
@@ -138,6 +160,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_secret: env::var("CENTAUR_JWT_SIGNING_SECRET")
             .ok()
             .filter(|value| !value.trim().is_empty()),
+        codemode_sync_token: env::var("CENTAUR_CODEMODE_SYNC_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        codemode_token_verifier: codemode::token_verifier(
+            env::var(centaur_codemode_protocol::TOKEN_PUBLIC_KEY_ENV)
+                .ok()
+                .as_deref(),
+        )
+        .map_err(|error| format!("invalid turn token public key: {error}"))?,
         api_hosts,
         sync_cache: Arc::new(SyncCache::default()),
         metrics: metrics_handle,
@@ -159,6 +190,7 @@ fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { StatusCode::OK }))
         .route("/metrics", get(metrics))
         .route("/api/v1/proxy/sync", post(sync))
+        .route("/api/v1/proxy/tenant_config", post(codemode::tenant_config))
         .route("/api/v1/proxy/ssh/authorize", post(ssh::authorize))
         .layer(middleware::from_fn(log_request))
         .with_state(state)
@@ -237,11 +269,7 @@ async fn sync(
         record_cache_lookup("miss");
     }
 
-    let config = if let Some(principal_id) = proxy.principal_id {
-        build_config(&state, &proxy, principal_id, now).await?
-    } else {
-        Config::default()
-    };
+    let config = build_config(&state, &proxy, now).await?;
     let config_value = json!({
         "secrets": config.secrets,
         "transforms": config.transforms,
