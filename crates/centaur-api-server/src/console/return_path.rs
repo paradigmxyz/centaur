@@ -31,6 +31,11 @@ pub(crate) fn safe(raw: &str) -> Option<String> {
         return None;
     }
     let mut value = resolved.path().to_owned();
+    // Dot segments can collapse to a leading `//`, which a browser reads as a
+    // protocol-relative URL to another host.
+    if value.starts_with("//") {
+        return None;
+    }
     if let Some(query) = resolved.query().filter(|query| !query.is_empty()) {
         value.push('?');
         value.push_str(query);
@@ -97,6 +102,12 @@ mod tests {
             "/mcp/oauth/authorize?state=a\nLocation:%20x",
             "/mcp/oauth/authorize?state=a b",
             "/\\evil.example?x=\\",
+            "/..//evil.example",
+            "/.//evil.example",
+            "/%2e%2e//evil.example",
+            "/%2E%2E//evil.example",
+            "/console/../..//evil.example",
+            "/console/..//evil.example/login",
         ] {
             assert_eq!(safe(raw), None, "{raw:?}");
         }
