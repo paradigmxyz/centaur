@@ -8,12 +8,14 @@ publish = false
 
 [dependencies]
 axum.workspace = true
+centaur-codemode-protocol.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 harness-server = { path = "../harness-server" }
 nanocode = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202", default-features = false }
 nanocode-executor = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202" }
 nanocode-store-sql = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -23,6 +25,10 @@ url.workspace = true
 urlencoding.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+aws-lc-rs = "1"
+base64.workspace = true
 
 [lints]
 workspace = true

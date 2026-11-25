@@ -11,6 +11,9 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use centaur_codemode_protocol::token::{
+    TTL_SECS, ToolPolicy, TurnGrant, TurnTokenSigner, TurnTokenVerifier, testing,
+};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -25,6 +28,7 @@ const SALT: &str = "dev_ar_encryption_key_derivation_salt_000000000";
 const ENCRYPTED: &str =
     r#"{"p":"xOiyro9XYBkfABUF","h":{"iv":"pCjJC5SxH78ZN0Nm","at":"s9DIUyHAkF8ZAthKO6ROtw=="}}"#;
 const JWT_SECRET: &str = "integration-test-signing-key";
+const CODEMODE_SYNC_TOKEN: &str = "integration-test-codemode-sync-token";
 
 // Console's grant priorities: direct grants default to 100, role grants to 0.
 const DIRECT: i32 = 100;
@@ -53,6 +57,7 @@ struct Fixture {
     state: AppState,
     admin: i64,
     unique: String,
+    turn_signer: TurnTokenSigner,
 }
 
 #[derive(Clone, Copy)]
@@ -69,11 +74,16 @@ impl Fixture {
     async fn with_jwt(enabled: bool) -> Option<Self> {
         let pool = database().await?;
         let unique = format!("{:032x}", rand_suffix());
+        let (private, public) = testing::pair();
+        let turn_signer = TurnTokenSigner::from_pem(private.as_bytes()).unwrap();
         let state = AppState {
             ssh_targets: vec![],
             pool: pool.clone(),
             encryption: Arc::new(ActiveRecordEncryption::new(PRIMARY_KEY, SALT)),
             jwt_secret: enabled.then(|| JWT_SECRET.to_owned()),
+            codemode_sync_token: Some(CODEMODE_SYNC_TOKEN.to_owned()),
+            codemode_token_verifier: enabled
+                .then(|| TurnTokenVerifier::from_pem(public.as_bytes()).unwrap()),
             api_hosts: if enabled {
                 vec!["api.internal".to_owned()]
             } else {
@@ -95,6 +105,7 @@ impl Fixture {
             state,
             admin,
             unique,
+            turn_signer,
         })
     }
 
@@ -445,6 +456,35 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         body
+    }
+
+    /// Posts to the tenancy config route with the proxy credential and the
+    /// tenant token in their respective headers.
+    async fn codemode(
+        &self,
+        proxy_token: Option<&str>,
+        tenant_token: Option<&str>,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut request =
+            Request::post(CODEMODE_ENDPOINT).header("content-type", "application/json");
+        if let Some(token) = proxy_token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        if let Some(token) = tenant_token {
+            request = request.header("x-iron-tenant-token", token);
+        }
+        let response = router(self.state.clone())
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn turn_token(&self, principal: i64, requester: Option<i64>, now: i64) -> String {
+        turn_token(&self.turn_signer, principal, requester, now)
     }
 }
 
@@ -965,6 +1005,303 @@ async fn console_delegate_is_computed_for_a_linked_admin_slack_dm() {
             .unwrap()
             .contains(&json!("console.delegate"))
     );
+
+    // The tenant variant carries the same capability set and the same
+    // delegate rule, only bound to `codemode` instead of a proxy.
+    let (status, codemode) = f
+        .codemode(
+            Some(CODEMODE_SYNC_TOKEN),
+            Some(&f.turn_token(principal, None, now())),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{codemode}");
+    let claims = decode_sandbox_token(codemode_sandbox_secret(&codemode));
+    assert_eq!(claims["console_delegate"], true);
+    assert!(
+        claims["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("console.delegate"))
+    );
+}
+
+const CODEMODE_ENDPOINT: &str = "/api/v1/proxy/tenant_config";
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+fn turn_token(
+    signer: &TurnTokenSigner,
+    principal: i64,
+    requester: Option<i64>,
+    now: i64,
+) -> String {
+    let (token, _) = signer
+        .sign(
+            &TurnGrant {
+                principal: centaur_console_db::oid("prn", principal),
+                requester: requester.map(|id| centaur_console_db::oid("prn", id)),
+                thread_key: "slack:T1:C1:1.2".to_owned(),
+                execution_id: "exe_integration".to_owned(),
+                tools: ToolPolicy::default(),
+            },
+            now,
+        )
+        .unwrap();
+    token
+}
+
+/// The api-rs token secret in a principal config: the one injected on api-rs
+/// hosts, always last because it is appended after the stored credentials.
+fn codemode_sandbox_secret(body: &Value) -> &Value {
+    body["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|secret| secret["rules"][0]["host"] == "api.internal")
+        .expect("a codemode sandbox token")
+}
+
+#[tokio::test]
+async fn tenant_config_serves_a_principal_without_a_proxy() {
+    let Some(f) = Fixture::with_jwt(true).await else {
+        return;
+    };
+    let principal = f.principal("codemode").await;
+    let own = f
+        .static_secret("codemode-own", "X-Own", "own.example.com")
+        .await;
+    f.grant(
+        Grantee::Principal(principal),
+        "static_secret_id",
+        own,
+        DIRECT,
+    )
+    .await;
+
+    let requester = f.principal("codemode-requester").await;
+    let app = f.oauth_app("codemode-always", true).await;
+    let credential = f
+        .broker_credential("codemode-hoisted", Some(app), true)
+        .await;
+    let hoisted = f
+        .wrapper_secret(
+            "codemode-hoisted",
+            credential,
+            credential,
+            "hoisted.example.com",
+        )
+        .await;
+    f.grant(
+        Grantee::Principal(requester),
+        "static_secret_id",
+        hoisted,
+        DIRECT,
+    )
+    .await;
+
+    let token = f.turn_token(principal, None, now());
+    let (status, body) = f
+        .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&token), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut hosts = secret_hosts(&body);
+    hosts.sort();
+    assert_eq!(hosts, vec!["api.internal", "own.example.com"]);
+    assert!(body["config_hash"].as_str().unwrap().starts_with("sha256:"));
+    // The tenancy contract carries no postgres block, and this config has no
+    // top-level rules.
+    assert!(body.get("postgres").is_none());
+    assert!(body.get("rules").is_none());
+
+    let claims = decode_sandbox_token(codemode_sandbox_secret(&body));
+    assert_eq!(claims["binding"], "codemode");
+    assert_eq!(claims["proxy_id"], "");
+    assert_eq!(claims["sandbox_id"], "codemode");
+    assert_eq!(claims["sub"], centaur_console_db::oid("prn", principal));
+    assert_eq!(
+        claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(),
+        900
+    );
+
+    // The requester comes from the token and contributes only
+    // always-available OAuth wrappers, exactly as on a proxy sync.
+    let requester_token = f.turn_token(principal, Some(requester), now());
+    let (status, with_requester) = f
+        .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&requester_token), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{with_requester}");
+    let mut hosts = secret_hosts(&with_requester);
+    hosts.sort();
+    assert_eq!(
+        hosts,
+        vec!["api.internal", "hoisted.example.com", "own.example.com"]
+    );
+    assert_ne!(with_requester["config_hash"], body["config_hash"]);
+}
+
+#[tokio::test]
+async fn tenant_config_requires_the_proxy_and_tenant_credentials() {
+    let Some(mut f) = Fixture::with_jwt(true).await else {
+        return;
+    };
+    let principal = f.principal("codemode-auth").await;
+    let tenant = f.turn_token(principal, None, now());
+
+    // The proxy credential is required and checked in constant time.
+    for token in [None, Some("wrong-sync-token")] {
+        let (status, body) = f.codemode(token, Some(&tenant), json!({})).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error"]["message"], "invalid or missing sync token");
+    }
+
+    // A missing, expired, foreign-key, or malformed tenant token is refused.
+    let (private, _) = testing::pair();
+    let other_signer = TurnTokenSigner::from_pem(private.as_bytes()).unwrap();
+    let other_key = turn_token(&other_signer, principal, None, now());
+    let expired = f.turn_token(principal, None, now() - TTL_SECS - 120);
+    for tenant_token in [
+        None,
+        Some(other_key.as_str()),
+        Some(expired.as_str()),
+        Some("not-a-token"),
+    ] {
+        let (status, body) = f
+            .codemode(Some(CODEMODE_SYNC_TOKEN), tenant_token, json!({}))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["message"], "invalid or missing tenant token");
+    }
+
+    // A valid token may name a principal that does not exist.
+    for sub in [
+        centaur_console_db::oid("prn", principal + 1_000_000),
+        "not-an-oid".to_owned(),
+    ] {
+        let (unknown, _) = f
+            .turn_signer
+            .sign(
+                &TurnGrant {
+                    principal: sub,
+                    requester: None,
+                    thread_key: "slack:T1:C1:1.2".to_owned(),
+                    execution_id: "exe_integration".to_owned(),
+                    tools: ToolPolicy::default(),
+                },
+                now(),
+            )
+            .unwrap();
+        let (status, body) = f
+            .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&unknown), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"]["message"], "unknown principal");
+    }
+
+    // Without the environment value the route does not exist.
+    f.state.codemode_sync_token = None;
+    let (status, response) = f
+        .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&tenant), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{response}");
+    assert_eq!(response["error"]["message"], "route is not configured");
+}
+
+#[tokio::test]
+async fn tenant_config_answers_hash_only_until_grants_change() {
+    let Some(f) = Fixture::with_jwt(true).await else {
+        return;
+    };
+    let principal = f.principal("codemode-hash").await;
+    let first = f
+        .static_secret("codemode-first", "X-First", "first.example.com")
+        .await;
+    f.grant(
+        Grantee::Principal(principal),
+        "static_secret_id",
+        first,
+        DIRECT,
+    )
+    .await;
+    let token = f.turn_token(principal, None, now());
+
+    let (status, full) = f
+        .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&token), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    let hash = full["config_hash"].clone();
+    let (status, unchanged) = f
+        .codemode(
+            Some(CODEMODE_SYNC_TOKEN),
+            Some(&token),
+            json!({ "config_hash": hash }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unchanged}");
+    assert_eq!(unchanged, json!({ "config_hash": hash }));
+
+    // Console bumps the principal's cache version on every grant change.
+    let second = f
+        .static_secret("codemode-second", "X-Second", "second.example.com")
+        .await;
+    f.grant(
+        Grantee::Principal(principal),
+        "static_secret_id",
+        second,
+        DIRECT,
+    )
+    .await;
+    f.bump(principal).await;
+    let (status, changed) = f
+        .codemode(
+            Some(CODEMODE_SYNC_TOKEN),
+            Some(&token),
+            json!({ "config_hash": hash }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_ne!(changed["config_hash"], hash);
+    assert_eq!(
+        secret_hosts(&changed),
+        vec!["first.example.com", "second.example.com", "api.internal"]
+    );
+}
+
+#[tokio::test]
+async fn codemode_api_token_is_stable_within_one_window() {
+    let Some(f) = Fixture::with_jwt(true).await else {
+        return;
+    };
+    let principal = f.principal("codemode-window").await;
+    let token = f.turn_token(principal, None, now());
+    // Two calls can straddle a window boundary; the next pair in the new window
+    // proves the property.
+    for _ in 0..5 {
+        let (status, first) = f
+            .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&token), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let (status, second) = f
+            .codemode(Some(CODEMODE_SYNC_TOKEN), Some(&token), json!({}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        if first["config_hash"] != second["config_hash"] {
+            continue;
+        }
+        assert_eq!(first["secrets"], second["secrets"]);
+        let claims = decode_sandbox_token(codemode_sandbox_secret(&second));
+        assert_eq!(
+            claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(),
+            900
+        );
+        return;
+    }
+    panic!("the config hash changed across every pair of calls in one window");
 }
 
 #[tokio::test]

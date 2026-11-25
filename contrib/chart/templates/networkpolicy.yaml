@@ -182,6 +182,13 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- if .Values.codemode.executor.enabled }}
+        # The Code Mode tenancy iron-proxy forwards the executor's Console and
+        # connector calls, with the turn principal's credentials.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 14 }}
+{{- end }}
 {{- if $console.ingress.enabled }}
         # The Console Ingress controller forwards the Console public host to
         # api-rs, on the same port as the rest of its API.
@@ -414,6 +421,16 @@ spec:
           port: {{ .Values.brain.port }}
   egress:
     {{- include "centaur.postgresEgress" . | nindent 4 }}
+{{- if .Values.codemode.executor.enabled }}
+    # Code Mode: exec, search, and load go to the executor.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-executor") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8790
+{{- end }}
     # Direct HTTPS to model providers until model egress moves behind a dedicated
     # iron-proxy with a model-only principal (follow-up).
     - ports:
@@ -649,6 +666,12 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
+{{- if .Values.codemode.executor.enabled }}
+        # The Code Mode tenancy iron-proxy resolves 1password_connect sources too.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 14 }}
+{{- end }}
       ports:
         - protocol: TCP
           port: {{ include "centaur.onepasswordConnectPort" . }}

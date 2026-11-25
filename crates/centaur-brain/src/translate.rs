@@ -1,18 +1,37 @@
 //! Translates nanocode agent events into the Codex app-server notifications
 //! every Centaur harness speaks, through harness-server's turn normalizer.
+//! Tool calls become Codex `mcpToolCall` items, which the normalizer does not
+//! model, so this writes them in the app-server wire shape itself.
+
+use std::collections::{HashMap, HashSet};
 
 use harness_server::{
     BridgeConfig, CodexTurnNormalizer, NormalizedContent, NormalizedEvent,
     notification_to_wire_value, protocol::ServerNotification,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracing::warn;
+
+/// The MCP server name renderers show for the Code Mode tools.
+const CODE_MODE_SERVER: &str = "centaur";
+/// The server name of any other nanocode tool.
+const NANOCODE_SERVER: &str = "nanocode";
 
 /// One turn's translation state.
 pub struct Turn {
     normalizer: CodexTurnNormalizer,
-    agent_messages: std::collections::HashSet<String>,
+    agent_messages: HashSet<String>,
+    /// Tool calls started and not yet completed, by call id.
+    tool_calls: HashMap<String, ToolCall>,
+    /// Tool calls already completed, so a replayed result is not repeated.
+    tools_done: HashSet<String>,
     finished: bool,
+}
+
+struct ToolCall {
+    tool: String,
+    arguments: Value,
+    started_at_ms: u64,
 }
 
 impl Turn {
@@ -26,15 +45,17 @@ impl Turn {
         let opening = normalizer.start_notifications(announce_thread);
         let turn = Self {
             normalizer,
-            agent_messages: std::collections::HashSet::new(),
+            agent_messages: HashSet::new(),
+            tool_calls: HashMap::new(),
+            tools_done: HashSet::new(),
             finished: false,
         };
         (turn, lines(opening.map_err(|error| error.to_string())))
     }
 
     /// Translate one nanocode agent event of this turn, given its wire type
-    /// (`assistant.delta`, `run.completed`, ...) and payload.
-    pub fn event(&mut self, kind: &str, payload: &Value) -> Vec<String> {
+    /// (`assistant.delta`, `run.completed`, ...), payload, and log time.
+    pub fn event(&mut self, kind: &str, payload: &Value, at_ms: u64) -> Vec<String> {
         let text = |key: &str| payload[key].as_str().unwrap_or_default().to_owned();
         let mut out = Vec::new();
         match kind {
@@ -85,6 +106,8 @@ impl Turn {
                     error: Some(message),
                 }));
             }
+            "tool.call" => out.extend(self.tool_started(payload, at_ms)),
+            "tool.result" => out.extend(self.tool_completed(payload, at_ms)),
             "run.completed" => out.extend(self.finish(Ok(None))),
             "run.failed" => {
                 let status = payload["status"].as_str().unwrap_or_default();
@@ -124,15 +147,156 @@ impl Turn {
             return Vec::new();
         }
         self.finished = true;
+        // A call the turn ended during never completes on its own.
+        let mut out = Vec::new();
+        let mut open = self.tool_calls.drain().collect::<Vec<_>>();
+        open.sort_by_key(|(_, call)| call.started_at_ms);
+        for (id, call) in open {
+            let at_ms = call.started_at_ms;
+            let item = self.tool_item(
+                &id,
+                &call,
+                "failed",
+                Value::Null,
+                json!({"message": "the turn ended before the tool call finished"}),
+                None,
+            );
+            out.push(self.item_notification("item/completed", item, at_ms));
+        }
         let finished = match outcome {
             Ok(error) => self.normalizer.finish_turn(error),
             Err(()) => self.normalizer.finish_turn_interrupted(),
         };
-        lines(
+        out.extend(lines(
             finished
                 .map(|notification| notification.into_iter().collect())
                 .map_err(|error| error.to_string()),
-        )
+        ));
+        out
+    }
+
+    /// `item/started` for a `tool.call` (`{call_id, tool, arguments}`).
+    fn tool_started(&mut self, payload: &Value, at_ms: u64) -> Vec<String> {
+        let Some(id) = payload["call_id"].as_str() else {
+            return Vec::new();
+        };
+        if self.finished || self.tools_done.contains(id) || self.tool_calls.contains_key(id) {
+            return Vec::new();
+        }
+        let call = ToolCall {
+            tool: payload["tool"].as_str().unwrap_or("tool").to_owned(),
+            arguments: arguments(&payload["arguments"]),
+            started_at_ms: at_ms,
+        };
+        let item = self.tool_item(id, &call, "inProgress", Value::Null, Value::Null, None);
+        self.tool_calls.insert(id.to_owned(), call);
+        vec![self.item_notification("item/started", item, at_ms)]
+    }
+
+    /// `item/completed` for a `tool.result` (`{call_id, tool, status,
+    /// duration_ns, result}`).
+    fn tool_completed(&mut self, payload: &Value, at_ms: u64) -> Vec<String> {
+        let Some(id) = payload["call_id"].as_str() else {
+            return Vec::new();
+        };
+        if self.finished || !self.tools_done.insert(id.to_owned()) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let call = match self.tool_calls.remove(id) {
+            Some(call) => call,
+            None => {
+                // A result whose call this projection never saw.
+                let call = ToolCall {
+                    tool: payload["tool"].as_str().unwrap_or("tool").to_owned(),
+                    arguments: Value::Null,
+                    started_at_ms: at_ms,
+                };
+                let item = self.tool_item(id, &call, "inProgress", Value::Null, Value::Null, None);
+                out.push(self.item_notification("item/started", item, at_ms));
+                call
+            }
+        };
+        let text = result_text(&payload["result"]);
+        let duration_ms = payload["duration_ns"]
+            .as_u64()
+            .map(|nanos| nanos / 1_000_000)
+            .unwrap_or_else(|| at_ms.saturating_sub(call.started_at_ms));
+        let item = if payload["status"] == "completed" {
+            self.tool_item(
+                id,
+                &call,
+                "completed",
+                json!({"content": [{"type": "text", "text": text}], "structuredContent": null}),
+                Value::Null,
+                Some(duration_ms),
+            )
+        } else {
+            let message = if text.is_empty() {
+                format!(
+                    "the tool call was {}",
+                    payload["status"].as_str().unwrap_or("failed")
+                )
+            } else {
+                text
+            };
+            self.tool_item(
+                id,
+                &call,
+                "failed",
+                Value::Null,
+                json!({"message": message}),
+                Some(duration_ms),
+            )
+        };
+        out.push(self.item_notification("item/completed", item, at_ms));
+        out
+    }
+
+    fn tool_item(
+        &self,
+        id: &str,
+        call: &ToolCall,
+        status: &str,
+        result: Value,
+        error: Value,
+        duration_ms: Option<u64>,
+    ) -> Value {
+        let server = if call.tool.starts_with("centaur_") {
+            CODE_MODE_SERVER
+        } else {
+            NANOCODE_SERVER
+        };
+        json!({
+            "type": "mcpToolCall",
+            "id": id,
+            "server": server,
+            "tool": call.tool,
+            "status": status,
+            "arguments": call.arguments,
+            "result": result,
+            "error": error,
+            "durationMs": duration_ms,
+        })
+    }
+
+    /// An `item/started` or `item/completed` notification line.
+    fn item_notification(&self, method: &str, item: Value, at_ms: u64) -> String {
+        let at = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        json!({
+            "method": method,
+            "params": {
+                "item": item,
+                "threadId": self.normalizer.thread_id(),
+                "turnId": self.normalizer.turn_id(),
+                (at): at_ms,
+            },
+        })
+        .to_string()
     }
 
     fn process(&mut self, event: &NormalizedEvent) -> Vec<String> {
@@ -141,6 +305,29 @@ impl Turn {
                 .process_event(event)
                 .map_err(|error| error.to_string()),
         )
+    }
+}
+
+/// A tool call's arguments: the model's JSON object, also when nanocode
+/// carries it as JSON text.
+fn arguments(raw: &Value) -> Value {
+    match raw {
+        Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| raw.clone()),
+        other => other.clone(),
+    }
+}
+
+/// The text of a nanocode tool result: plain text, or content items.
+fn result_text(result: &Value) -> String {
+    match result {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -198,17 +385,18 @@ mod tests {
         assert_eq!(parse(&opening[0])["params"]["thread"]["id"], "thread-1");
 
         let delta = |text: &str| json!({"item_id": "msg-1", "phase": "final_answer", "text": text});
-        let first = turn.event("assistant.delta", &delta("Hi"));
+        let first = turn.event("assistant.delta", &delta("Hi"), 0);
         assert_eq!(methods(&first), ["item/started", "item/agentMessage/delta"]);
         assert_eq!(parse(&first[1])["params"]["delta"], "Hi");
         assert_eq!(
-            methods(&turn.event("assistant.delta", &delta(" there"))),
+            methods(&turn.event("assistant.delta", &delta(" there"), 0)),
             ["item/agentMessage/delta"]
         );
 
         let message = turn.event(
             "assistant.message",
             &json!({"item_id": "msg-1", "phase": "final_answer", "text": "Hi there"}),
+            0,
         );
         let completed = message
             .iter()
@@ -218,7 +406,7 @@ mod tests {
         assert_eq!(completed["params"]["item"]["text"], "Hi there");
         assert_eq!(completed["params"]["item"]["phase"], "final_answer");
 
-        let end = turn.event("run.completed", &json!({"status": "completed"}));
+        let end = turn.event("run.completed", &json!({"status": "completed"}), 0);
         assert_eq!(methods(&end), ["turn/completed"]);
         assert_eq!(parse(&end[0])["params"]["turn"]["status"], "completed");
         assert!(turn.fail("late").is_empty());
@@ -230,16 +418,20 @@ mod tests {
         let (mut failed, _) = Turn::start("t", "turn-1", false);
         assert!(
             failed
-                .event("run.error", &json!({"message": "rate limited"}))
+                .event("run.error", &json!({"message": "rate limited"}), 0)
                 .is_empty()
         );
-        let end = failed.event("run.failed", &json!({"status": "failed", "error": "boom"}));
+        let end = failed.event(
+            "run.failed",
+            &json!({"status": "failed", "error": "boom"}),
+            0,
+        );
         let turn = &parse(&end[0])["params"]["turn"];
         assert_eq!(turn["status"], "failed");
         assert_eq!(turn["error"]["message"], "boom");
 
         let (mut cancelled, _) = Turn::start("t", "turn-2", false);
-        let end = cancelled.event("run.failed", &json!({"status": "cancelled"}));
+        let end = cancelled.event("run.failed", &json!({"status": "cancelled"}), 0);
         assert_eq!(parse(&end[0])["params"]["turn"]["status"], "interrupted");
         assert!(cancelled.interrupt().is_empty());
 
@@ -249,12 +441,130 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_become_mcp_tool_call_items() {
+        let (mut turn, _) = Turn::start("thread-1", "turn-1", false);
+        let started = turn.event(
+            "tool.call",
+            &json!({
+                "call_id": "call-1",
+                "tool": "centaur_execute",
+                "arguments": {"code": "return 1"},
+                "model_call_index": 0,
+            }),
+            1_000,
+        );
+        assert_eq!(methods(&started), ["item/started"]);
+        let params = &parse(&started[0])["params"];
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["turnId"], "turn-1");
+        assert_eq!(params["startedAtMs"], 1_000);
+        assert_eq!(
+            params["item"],
+            json!({
+                "type": "mcpToolCall",
+                "id": "call-1",
+                "server": "centaur",
+                "tool": "centaur_execute",
+                "status": "inProgress",
+                "arguments": {"code": "return 1"},
+                "result": null,
+                "error": null,
+                "durationMs": null,
+            })
+        );
+        // A replayed call is not announced twice.
+        assert!(
+            turn.event(
+                "tool.call",
+                &json!({"call_id": "call-1", "tool": "centaur_execute", "arguments": {}}),
+                1_001
+            )
+            .is_empty()
+        );
+
+        let result = json!({
+            "call_id": "call-1",
+            "tool": "centaur_execute",
+            "status": "completed",
+            "duration_ns": 2_500_000_000_u64,
+            "result": "1",
+            "structured_result": "1",
+        });
+        let completed = turn.event("tool.result", &result, 3_500);
+        assert_eq!(methods(&completed), ["item/completed"]);
+        let params = &parse(&completed[0])["params"];
+        assert_eq!(params["completedAtMs"], 3_500);
+        let item = &params["item"];
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["durationMs"], 2_500);
+        assert_eq!(item["arguments"], json!({"code": "return 1"}));
+        assert_eq!(
+            item["result"],
+            json!({"content": [{"type": "text", "text": "1"}], "structuredContent": null})
+        );
+        assert_eq!(item["error"], Value::Null);
+        assert!(turn.event("tool.result", &result, 3_600).is_empty());
+
+        let failed = turn.event(
+            "tool.call",
+            &json!({"call_id": "call-2", "tool": "centaur_catalog_load", "arguments": "{\"tool\":\"x\"}"}),
+            4_000,
+        );
+        assert_eq!(
+            parse(&failed[0])["params"]["item"]["arguments"],
+            json!({"tool": "x"})
+        );
+        let failed = turn.event(
+            "tool.result",
+            &json!({
+                "call_id": "call-2",
+                "tool": "centaur_catalog_load",
+                "status": "failed",
+                "duration_ns": 1_000_000,
+                "result": [{"type": "input_text", "text": "Unknown or unavailable tool x."}],
+            }),
+            4_001,
+        );
+        let item = &parse(&failed[0])["params"]["item"];
+        assert_eq!(item["status"], "failed");
+        assert_eq!(item["result"], Value::Null);
+        assert_eq!(item["error"]["message"], "Unknown or unavailable tool x.");
+    }
+
+    #[test]
+    fn a_turn_ending_mid_call_fails_the_call_first() {
+        let (mut turn, _) = Turn::start("t", "turn-1", false);
+        turn.event(
+            "tool.call",
+            &json!({"call_id": "c", "tool": "centaur_catalog_search", "arguments": {"query": "x"}}),
+            10,
+        );
+        let end = turn.interrupt();
+        assert_eq!(methods(&end), ["item/completed", "turn/completed"]);
+        let item = &parse(&end[0])["params"]["item"];
+        assert_eq!(item["status"], "failed");
+        assert_eq!(item["server"], "centaur");
+        assert!(
+            turn.event(
+                "tool.result",
+                &json!({"call_id": "c", "status": "completed"}),
+                20
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn other_events_are_dropped() {
         let (mut turn, _) = Turn::start("t", "turn-1", false);
-        assert!(turn.event("model.call.started", &json!({})).is_empty());
+        assert!(turn.event("model.call.started", &json!({}), 0).is_empty());
         assert!(
-            turn.event("run.error", &json!({"observational": true, "error": "x"}))
-                .is_empty()
+            turn.event(
+                "run.error",
+                &json!({"observational": true, "error": "x"}),
+                0
+            )
+            .is_empty()
         );
     }
 }

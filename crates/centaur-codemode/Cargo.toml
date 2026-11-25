@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 axum.workspace = true
 base64.workspace = true
+centaur-codemode-protocol.workspace = true
 clap.workspace = true
 flate2 = "1"
 futures-util.workspace = true
@@ -34,6 +35,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+centaur-codemode-protocol = { workspace = true, features = ["testing"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tower.workspace = true

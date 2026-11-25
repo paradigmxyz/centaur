@@ -24,6 +24,7 @@ absurd-sdk = { path = "crates/absurd-sdk" }
 axum = "0.8.9"
 bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
+centaur-codemode-protocol = { path = "crates/centaur-codemode-protocol" }
 centaur-console-db = { path = "crates/centaur-console-db" }
 centaur-iron-control = { path = "crates/centaur-iron-control" }
 centaur-iron-proxy = { path = "crates/centaur-iron-proxy" }

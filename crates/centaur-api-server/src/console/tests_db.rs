@@ -1160,6 +1160,125 @@ async fn console_session_db_sandbox_token_checks_proxy_binding_and_admin() {
 }
 
 #[tokio::test]
+async fn console_session_db_codemode_token_skips_proxy_lookup_and_rechecks_principal() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let principal = fixture
+        .principal("slack_dm", Some("T-codemode-home"), fixture.admin)
+        .await;
+    sqlx::query(
+        "INSERT INTO slack_bot_channels \
+            (team_id, channel_id, name, bot_user_id, created_at, updated_at) \
+         VALUES ('T-codemode-home', $1, 'general', 'U-bot', now(), now())",
+    )
+    .bind(fixture.name("channel"))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let state = AppState::unready(ApiAuthConfig::testing("test-secret"))
+        .with_console_db(fixture.pool.clone())
+        .with_console_write_db(fixture.pool.clone())
+        .with_console_session(
+            ConsoleSessionConfig::from_settings(
+                Some(SESSION_SECRET),
+                Some("https://console.example.test"),
+            )
+            .unwrap()
+            .unwrap()
+            .with_sandbox_jwt(
+                SandboxJwtConfig::new(
+                    JWT_SECRET,
+                    crate::auth::SANDBOX_TOKEN_AUDIENCE,
+                    crate::auth::SANDBOX_TOKEN_ISSUER,
+                )
+                .unwrap(),
+            ),
+        );
+    let probe_app = Router::new()
+        .nest(
+            "/api/v1/sandbox",
+            test_sandbox_routes(GuardedRoutes::new(state.clone())).into_router(),
+        )
+        .with_state(state.clone());
+    let app = build_router_with_app_state(state);
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let principal_oid = oid("prn", principal);
+    let codemode_claims = |claims: &mut Value| {
+        claims["binding"] = json!("codemode");
+        claims["exp"] = json!(now + 900);
+        sandbox_token(JWT_SECRET, claims)
+    };
+
+    // No proxy exists for this token: the guard skips the proxy lookup and
+    // accepts the live principal. The delegated Console route still works.
+    let mut claims = sandbox_claims("", "codemode", &principal_oid, now);
+    let auth = format!("Bearer {}", codemode_claims(&mut claims));
+    let response = send(
+        &app,
+        request(
+            Method::GET,
+            "/api/v1/console/me",
+            &[("authorization", &auth)],
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let me = json_body(response).await;
+    assert_eq!(me["data"]["auth_method"], "sandbox");
+    assert_eq!(me["data"]["user"]["id"], oid("usr", fixture.admin));
+
+    // Longer lifetimes, a non-empty proxy id, and an unknown principal are all
+    // rejected.
+    let mut too_long = sandbox_claims("", "codemode", &principal_oid, now);
+    too_long["binding"] = json!("codemode");
+    too_long["exp"] = json!(now + 901);
+    let mut with_proxy = sandbox_claims("prx_missing", "codemode", &principal_oid, now);
+    let mut unknown = sandbox_claims("", "codemode", &oid("prn", principal + 1_000_000), now);
+    for (case, claims) in [
+        ("long lifetime", sandbox_token(JWT_SECRET, &too_long)),
+        ("proxy id", codemode_claims(&mut with_proxy)),
+        ("unknown principal", codemode_claims(&mut unknown)),
+    ] {
+        let response = send(
+            &probe_app,
+            request(
+                Method::GET,
+                "/api/v1/sandbox/probe/sandbox",
+                &[("authorization", &format!("Bearer {claims}"))],
+                Body::empty(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+        assert_eq!(
+            json_body(response).await["error"]["message"],
+            "invalid sandbox token",
+            "{case}"
+        );
+    }
+
+    // The principal check is live: removing the principal revokes the token.
+    sqlx::query("DELETE FROM principals WHERE id = $1")
+        .bind(principal)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let response = send(
+        &probe_app,
+        request(
+            Method::GET,
+            "/api/v1/sandbox/probe/sandbox",
+            &[("authorization", &auth)],
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn console_session_db_sandbox_admin_jwt_acts_as_console_user() {
     let Some(fixture) = Fixture::new().await else {
         return;

@@ -104,7 +104,7 @@ impl Projector {
         let event = &entry.body["event"];
         let kind = event["type"].as_str().unwrap_or_default();
         let payload = &event["payload"];
-        out.lines(running.turn.event(kind, payload));
+        out.lines(running.turn.event(kind, payload, entry.created_at_ms));
         if !running.first_token
             && kind == "assistant.delta"
             // Providers that do not mark phases stream only answer text.

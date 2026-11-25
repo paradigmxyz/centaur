@@ -65,6 +65,28 @@ read a real key from the environment (`CRUNCHBASE_API_KEY`, `SLACK_BOT_TOKEN`).
 `--files-dir` (`$CENTAUR_CODEMODE_FILES_DIR`) turns on the files capability
 (below); without it connectors have no file access.
 
+## Executor
+
+`serve-executor` runs Code Mode for agent turns outside a sandbox (the
+brain's `nanocode` turns). It is one shared pool for every
+principal:
+
+```bash
+centaur-codemode serve-executor --listen 0.0.0.0:8790 --egress-proxy http://iron-proxy-tenancy:8080
+```
+
+- Every request (`POST /v1/exec {code, cell_id}`, `/v1/search`, `/v1/load`)
+  needs `Authorization: Bearer <turn token>`, an Ed25519 JWT api-rs mints per
+  turn, verified with `CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY`. Nothing runs
+  without one. The token's tool filter decides what a cell, search and load
+  see; its thread and the principal's Console permissions are the calling
+  context.
+- The executor holds no credentials. Every connector request goes through the
+  tenancy iron-proxy (`--egress-proxy`, `CENTAUR_CODEMODE_EGRESS_PROXY`) with
+  the turn token as the tunnel's `Proxy-Authorization`, over clients built
+  per token; iron-proxy applies that principal's credentials. `--ca-file`
+  trusts iron-proxy's MITM CA.
+
 ## Packaging
 
 A dedicated slim image, built from `services/codemode/Dockerfile`, runs Code

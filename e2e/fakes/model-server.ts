@@ -7,7 +7,8 @@
 //
 // A reply can instead run a shell command first: the model answers with a
 // call to the harness's shell tool, then with its text once the tool's output
-// comes back. Commands can reach /_e2e/echo/<match> on the provider hosts,
+// comes back. A reply with a `cell` calls the Code Mode tool `centaur_execute`
+// with that JavaScript instead. Commands can reach /_e2e/echo/<match> on the provider hosts,
 // which records the X-E2E-Credential header iron-proxy injected.
 //
 // Provider traffic: HTTPS on 8443 (cert for the provider hostnames).
@@ -16,7 +17,7 @@ import { randomUUID } from 'node:crypto'
 
 /** A provider error to answer with instead of text: an HTTP error from Anthropic, a failed response from OpenAI. */
 type ProviderError = { status: number; type: string; code?: string; message: string }
-type Reply = { match: string; text: string; delayMs?: number; error?: ProviderError; run?: string }
+type Reply = { match: string; text: string; delayMs?: number; error?: ProviderError; run?: string; cell?: string }
 /** A request a tool command made to the echo path, and the test credential it carried. */
 type Echo = { at: string; match: string; credential?: string }
 type Recorded = {
@@ -150,7 +151,12 @@ function openaiEvents(
   const text = reply?.text ?? 'ok'
   const responseId = `resp_${randomUUID()}`
   const itemId = `msg_${randomUUID()}`
-  const toolCall = reply?.run && !hasToolOutput(body.input) ? shellCall([...(body.tools ?? []), ...declaredTools(conversation)], reply.run) : undefined
+  const answered = hasToolOutput(body.input)
+  const toolCall = reply?.run && !answered
+    ? shellCall([...(body.tools ?? []), ...declaredTools(conversation)], reply.run)
+    : reply?.cell && !answered
+      ? cellCall([...(body.tools ?? []), ...declaredTools(conversation)], reply.cell)
+      : undefined
   if (toolCall) {
     const output = (status: string) => ({
       id: responseId, object: 'response', model: body.model, status, output: [toolCall],
@@ -299,6 +305,17 @@ function shellCall(tools: any[], command: string): Record<string, unknown> {
   return {
     type: 'function_call', id: `fc_${randomUUID()}`, call_id: callId, status: 'completed',
     name, arguments: JSON.stringify(args)
+  }
+}
+
+/** A call to the Code Mode tool `centaur_execute`, running `code` as a cell. */
+function cellCall(tools: any[], code: string): Record<string, unknown> {
+  if (!tools.some(tool => tool?.name === 'centaur_execute')) {
+    log('model_server_no_code_mode_tool', { tools: tools.map(tool => tool?.name) })
+  }
+  return {
+    type: 'function_call', id: `fc_${randomUUID()}`, call_id: `call_${randomUUID()}`, status: 'completed',
+    name: 'centaur_execute', arguments: JSON.stringify({ code })
   }
 }
 

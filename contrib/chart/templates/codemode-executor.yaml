@@ -1,0 +1,377 @@
+{{- /*
+Code Mode executor and its tenancy iron-proxy. The executor runs cells and
+connector functions for the brain. Every request carries the turn token api-rs
+minted, which the executor verifies, and every connector request leaves
+through the tenancy iron-proxy with that token as Proxy-Authorization. The
+proxy fetches the turn's principal configuration from proxy-sync and injects
+its credentials, so the executor holds none.
+*/ -}}
+{{- if .Values.codemode.executor.enabled }}
+{{- if not .Values.brain.enabled }}
+{{- fail "codemode.executor.enabled requires brain.enabled: the brain is the executor's only client" }}
+{{- end }}
+{{- $executor := .Values.codemode.executor -}}
+{{- $executorName := include "centaur.codemodeExecutorName" . -}}
+{{- $proxyName := include "centaur.codemodeIronProxyName" . -}}
+{{- $companyContext := include "centaur.companyContextValues" . | fromYaml -}}
+{{- $connectorRoots := include "centaur.codemodeConnectorRoots" . -}}
+{{- $caKey := .Values.firewall.existingCaSecretKey | default "ca-cert.pem" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $executorName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codemode-executor") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-executor") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8790
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $executorName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codemode-executor") | nindent 4 }}
+spec:
+  replicas: {{ $executor.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-executor") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-executor") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $executor "indent" 6) }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+      containers:
+        - name: executor
+          image: {{ printf "%s:%s" .Values.codemode.image.repository .Values.codemode.image.tag | quote }}
+          imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
+          args:
+            - serve-executor
+          env:
+            - name: CENTAUR_CODEMODE_LISTEN
+              value: "0.0.0.0:8790"
+            - name: CENTAUR_CODEMODE_CONNECTORS
+              value: {{ $connectorRoots | quote }}
+            - name: CENTAUR_CODEMODE_EGRESS_PROXY
+              value: {{ printf "http://%s:8080" $proxyName | quote }}
+            - name: CENTAUR_CODEMODE_CA_FILE
+              value: /etc/centaur-ca/ca-cert.pem
+            # Connector configuration, as Code Mode sandboxes receive it. These
+            # in-cluster URLs are reached through the tenancy iron-proxy too.
+            - name: CENTAUR_CONSOLE_URL
+              value: {{ include "centaur.consoleUrl" . | quote }}
+            - name: CENTAUR_API_URL
+              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "api-rs")) .Values.apiRs.port | quote }}
+{{- if $companyContext.enabled }}
+            - name: COMPANY_CONTEXT_API_URL
+              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "company-context")) $companyContext.port | quote }}
+{{- end }}
+            - name: HOME
+              value: /tmp
+            # Verifies the turn token on every request. The executor holds no
+            # credential, signing key, or sync token.
+{{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY" "key" "token-public-key") | indent 12 }}
+          ports:
+            - name: http
+              containerPort: 8790
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml $executor.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # The iron-proxy CA certificate (not its key), so connector TLS
+            # through the tenancy iron-proxy verifies.
+            - name: release-ca
+              mountPath: /etc/centaur-ca
+              readOnly: true
+{{- if contains ":" $connectorRoots }}
+            # Overlay checkouts, where Code Mode sandboxes see them. Every
+            # overlay's connectors load for every principal; the turn token's
+            # tool filter still applies.
+            - name: repo-cache
+              mountPath: /home/agent/github
+              readOnly: true
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: release-ca
+          secret:
+            secretName: {{ include "centaur.trustedCaSecretName" . }}
+            items:
+              - key: {{ $caKey | quote }}
+                path: ca-cert.pem
+{{- if contains ":" $connectorRoots }}
+        - name: repo-cache
+{{- if eq (include "centaur.repoCacheStorageType" .) "persistentVolumeClaim" }}
+          persistentVolumeClaim:
+            claimName: {{ include "centaur.repoCachePvcName" . | quote }}
+            readOnly: true
+{{- else }}
+          hostPath:
+            path: {{ .Values.sandbox.reposPath | default .Values.repoCache.hostPath | quote }}
+            type: DirectoryOrCreate
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $proxyName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 4 }}
+  ports:
+    - name: proxy
+      port: 8080
+      targetPort: proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $proxyName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 4 }}
+spec:
+  replicas: {{ $executor.ironProxy.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $executor.ironProxy "indent" 6) }}
+      containers:
+        - name: iron-proxy
+          image: {{ printf "%s:%s" .Values.ironProxy.image.repository .Values.ironProxy.image.tag | quote }}
+          imagePullPolicy: {{ .Values.ironProxy.image.pullPolicy }}
+          # The image entrypoint loads the CA and, with IRON_TENANCY_ENABLED,
+          # runs its baked tenancy config (services/iron-proxy).
+          env:
+            - name: IRON_TENANCY_ENABLED
+              value: "true"
+            - name: IRON_TENANCY_CONFIG_URL
+              value: {{ printf "%s/api/v1/proxy/tenant_config" (include "centaur.proxySyncUrl" .) | quote }}
+{{- with .Values.ironProxy.upstreamDenyCidrs }}
+            - name: IRON_PROXY_UPSTREAM_DENY_CIDRS
+              value: {{ join "," . | quote }}
+{{- end }}
+{{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
+            - name: OP_CONNECT_HOST
+              value: {{ include "centaur.onepasswordConnectUrl" . | quote }}
+{{- end }}
+{{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "IRON_TENANT_PUBLIC_KEYS" "key" "token-public-key") | indent 12 }}
+{{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "IRON_TENANCY_CONTROL_PLANE_TOKEN" "key" "sync-token") | indent 12 }}
+          # The Secrets per-sandbox iron-proxy pods load, for 1password and
+          # 1password_connect sources. Tenancy drops `env` sources, so nothing
+          # else in them reaches a tenant.
+          envFrom:
+            - secretRef:
+                name: {{ include "centaur.secretEnvName" . }}
+{{- if and (has .Values.ironProxy.secretSource (list "env" "onepassword")) .Values.secrets.bootstrapSecretName }}
+            - secretRef:
+                name: {{ .Values.secrets.bootstrapSecretName | quote }}
+{{- end }}
+          ports:
+            - name: proxy
+              containerPort: 8080
+            - name: health
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          resources:
+{{ toYaml $executor.ironProxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            # Writable dirs for the entrypoint's CA copy.
+            - name: iron-proxy-config
+              mountPath: /etc/iron-proxy
+            - name: iron-proxy-certs
+              mountPath: /certs
+            - name: iron-proxy-ca
+              mountPath: /etc/iron-proxy-ca
+              readOnly: true
+      volumes:
+        - name: iron-proxy-config
+          emptyDir: {}
+        - name: iron-proxy-certs
+          emptyDir: {}
+        # The release CA, cert and key, as per-sandbox iron-proxy pods get it.
+        - name: iron-proxy-ca
+          projected:
+            sources:
+              - secret:
+                  name: {{ include "centaur.trustedCaSecretName" . }}
+                  items:
+                    - key: {{ $caKey | quote }}
+                      path: ca-cert.pem
+              - secret:
+                  name: {{ include "centaur.trustedCaKeySecretName" . }}
+                  items:
+                    - key: {{ .Values.firewall.existingCaKeySecretKey | default "ca-key.pem" | quote }}
+                      path: ca-key.pem
+{{- if .Values.networkPolicy.enabled }}
+---
+# The executor runs untrusted cells: reachable only from the brain, and it may
+# reach only the tenancy iron-proxy (DNS is allowed namespace-wide).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $executorName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codemode-executor") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-executor") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "brain") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8790
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# The tenancy iron-proxy injects principals' credentials: reachable from the
+# executor only. It fetches tenant configuration from proxy-sync, forwards
+# connector calls to api-rs and company context, and reaches public HTTPS
+# upstreams as per-sandbox iron-proxy pods do.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $proxyName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-iron-proxy") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codemode-executor") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.proxySync.port }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+{{- if $companyContext.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "company-context") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $companyContext.port }}
+{{- end }}
+{{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ include "centaur.onepasswordConnectAppName" . | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ include "centaur.onepasswordConnectPort" . }}
+{{- end }}
+    # Public addresses only: private, loopback, link-local, and reserved
+    # ranges are excluded, as in the per-sandbox iron-proxy policies.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.0.2.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
+{{- end }}

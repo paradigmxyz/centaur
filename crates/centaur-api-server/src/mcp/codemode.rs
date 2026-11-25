@@ -9,6 +9,7 @@
 
 use std::{sync::OnceLock, time::Duration};
 
+use centaur_codemode_protocol::tools;
 use centaur_sandbox_core::SandboxError;
 use centaur_session_runtime::{
     CodemodeEndpoint, SessionRuntime, SessionRuntimeError, ToolHostCallPolicy, ToolHostToolFilter,
@@ -227,108 +228,38 @@ fn error_detail(body: &str) -> String {
 }
 
 fn search_result(body: Value) -> Result<McpToolCallOutcome, ApiError> {
-    let text = serde_json::to_string_pretty(&body)?;
-    let mut result = mcp_text_result(text, false);
-    result["structuredContent"] = body;
-    Ok(McpToolCallOutcome {
-        result,
-        timed_out: false,
-    })
+    Ok(rendered(tools::render_search(body)))
 }
 
 fn load_result(body: Value) -> Result<McpToolCallOutcome, ApiError> {
-    let text = ["description", "brief"]
-        .iter()
-        .filter_map(|field| body.get(field).and_then(Value::as_str).map(str::trim))
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    Ok(McpToolCallOutcome {
-        result: mcp_text_result(text, false),
-        timed_out: false,
-    })
+    Ok(rendered(tools::render_load(&body)))
 }
 
 fn exec_result(body: Value) -> Result<McpToolCallOutcome, ApiError> {
-    let response: ExecResponse = serde_json::from_value(body).map_err(|error| {
+    let rendered_cell = tools::render_exec(body).map_err(|error| {
         ApiError::Internal(format!("decoding Code Mode cell response: {error}"))
     })?;
-    if response.ok {
-        let mut text = match response.result.as_ref() {
-            Some(result) => serde_json::to_string_pretty(result)?,
-            None => "null".to_owned(),
-        };
-        append_logs(&mut text, &response.logs);
-        let mut result = mcp_text_result(text, false);
-        result["structuredContent"] = json!({
-            "result": response.result,
-            "logs": response.logs,
-        });
-        return Ok(McpToolCallOutcome {
-            result,
-            timed_out: false,
-        });
+    Ok(rendered(rendered_cell))
+}
+
+/// A rendered Code Mode result as an MCP tool result.
+fn rendered(rendered: tools::Rendered) -> McpToolCallOutcome {
+    let mut result = mcp_text_result(rendered.text, rendered.is_error);
+    if let Some(structured) = rendered.structured {
+        result["structuredContent"] = structured;
     }
-
-    let failure = response.error.unwrap_or_default();
-    let mut text = if failure.message.is_empty() {
-        "Code Mode cell failed".to_owned()
-    } else {
-        failure.message
-    };
-    for extra in [
-        failure.tool.map(|tool| format!("tool: {tool}")),
-        failure.stack,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        text.push_str(&format!("\n\n{extra}"));
-    }
-    append_logs(&mut text, &response.logs);
-    Ok(tool_error(text))
-}
-
-fn append_logs(text: &mut String, logs: &[String]) {
-    if logs.is_empty() {
-        return;
-    }
-    text.push_str("\n\nlogs:\n");
-    text.push_str(&logs.join("\n"));
-}
-
-/// `ExecResponse` from the contract: a failed cell is `200` with `ok: false`.
-#[derive(serde::Deserialize)]
-struct ExecResponse {
-    ok: bool,
-    result: Option<Value>,
-    error: Option<ExecFailure>,
-    #[serde(default)]
-    logs: Vec<String>,
-}
-
-/// A failed cell, as the sandbox reports it: `{message, stack?, tool?}`.
-#[derive(Default, serde::Deserialize)]
-struct ExecFailure {
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    stack: Option<String>,
-    #[serde(default)]
-    tool: Option<String>,
-}
-
-fn tool_error(text: String) -> McpToolCallOutcome {
     McpToolCallOutcome {
-        result: mcp_text_result(text, true),
+        result,
         timed_out: false,
     }
 }
 
+fn tool_error(text: String) -> McpToolCallOutcome {
+    rendered(tools::Rendered::error(text))
+}
+
 fn unknown_tool(tool: &str) -> McpToolCallOutcome {
-    tool_error(format!(
-        "Unknown or unavailable tool {tool}. Use centaur_catalog_search to discover available tools."
-    ))
+    rendered(tools::render_unknown_tool(tool))
 }
 
 #[cfg(test)]

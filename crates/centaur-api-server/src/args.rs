@@ -16,6 +16,7 @@ use centaur_api_server::{
     ConsoleSessionConfig, DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig,
     discover_persona_registry, discover_tool_proxy_fragment,
 };
+use centaur_codemode_protocol::TOKEN_SIGNING_KEY_ENV;
 use centaur_iron_control::{
     IdentityInput, IronControlClient, IronControlError, PrincipalInput, RegisterError, RoleSpec,
     SessionRegistrar, register_role,
@@ -35,7 +36,7 @@ use centaur_session_core::{HarnessType, SandboxRepoCacheAccess};
 use centaur_session_runtime::{
     BrainClient, PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode,
     SessionEventRetentionConfig, SessionPrincipalAdmission, SessionSandboxCleanupConfig,
-    WarmPoolTarget,
+    TurnTokenSigner, WarmPoolTarget,
 };
 use centaur_session_sqlx::TextSearchBackend;
 use centaur_workflows::{
@@ -117,6 +118,26 @@ impl Args {
         })?;
         info!(url = %client.base_url(), "nanocode sessions run in centaur-brain");
         Ok(Some(Arc::new(client)))
+    }
+
+    /// The Code Mode turn-token signer, when
+    /// `CENTAUR_CODEMODE_TOKEN_SIGNING_KEY` holds a PKCS#8 PEM Ed25519 key.
+    /// Read from the environment only, never a flag, since it is a private
+    /// key. Without it `nanocode` turns run without Code Mode tools.
+    pub(crate) fn codemode_token_signer(
+        &self,
+    ) -> Result<Option<Arc<TurnTokenSigner>>, ServerError> {
+        let Some(pem) = std::env::var(TOKEN_SIGNING_KEY_ENV)
+            .ok()
+            .filter(|pem| !pem.trim().is_empty())
+        else {
+            return Ok(None);
+        };
+        let signer = TurnTokenSigner::from_pem(pem.as_bytes()).map_err(|error| {
+            ServerError::UnsupportedConfig(format!("invalid {TOKEN_SIGNING_KEY_ENV}: {error}"))
+        })?;
+        info!("nanocode turns get Code Mode turn tokens");
+        Ok(Some(Arc::new(signer)))
     }
 
     /// The image Code Mode sandboxes run. Missing or blank falls back to

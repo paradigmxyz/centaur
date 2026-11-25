@@ -348,3 +348,49 @@ the logical database.
 {{- define "centaur.proxySyncUrl" -}}
 {{- printf "http://%s:%v" (include "centaur.proxySyncName" .) .Values.proxySync.port -}}
 {{- end -}}
+
+{{- /*
+Code Mode connector roots: the image's baked connectors, then overlay copies in
+source order (later roots shadow earlier ones). Code Mode sandboxes and the
+executor load the same roots.
+*/ -}}
+{{- define "centaur.codemodeConnectorRoots" -}}
+{{- $roots := list "/opt/centaur/connectors" -}}
+{{- if .Values.repoCache.enabled -}}
+{{- range $source := include "centaur.overlaySources" . | fromJsonArray -}}
+{{- $repo := get $source "repo" | default "" -}}
+{{- if $repo -}}
+{{- with (get $source "connectorsSubdir") -}}
+{{- $roots = append $roots (printf "/home/agent/github/%s/%s" $repo .) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- join ":" $roots -}}
+{{- end -}}
+
+{{- /*
+Code Mode executor and its tenancy iron-proxy (codemode.executor). Both listen
+on fixed ports: the executor on 8790, the proxy on 8080 (the image's tenancy
+config, services/iron-proxy/iron-proxy-tenancy.yaml).
+*/ -}}
+{{- define "centaur.codemodeExecutorName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "codemode-executor") -}}
+{{- end -}}
+
+{{- define "centaur.codemodeIronProxyName" -}}
+{{- include "centaur.componentName" (dict "root" . "component" "codemode-iron-proxy") -}}
+{{- end -}}
+
+{{- /*
+One env entry from the Code Mode Secret (codemode.executor.existingSecretName).
+Params: root, name (env var), key (token-signing-key, token-public-key, or
+sync-token).
+*/ -}}
+{{- define "centaur.codemodeSecretEnv" -}}
+- name: {{ .name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "codemode.executor.existingSecretName is required when codemode.executor.enabled=true" .root.Values.codemode.executor.existingSecretName | quote }}
+      key: {{ .key }}
+{{- end -}}

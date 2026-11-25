@@ -17,6 +17,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub use centaur_codemode_protocol::token::TurnTokenSigner;
+use centaur_codemode_protocol::token::{ToolPolicy, TurnGrant};
 use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, ObservedSandbox, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME,
@@ -176,6 +178,9 @@ pub struct SessionRuntime {
     /// run there instead of in a sandbox; without it they are rejected at
     /// admission.
     brain: Option<Arc<BrainClient>>,
+    /// Signs the Code Mode turn token handed to the brain with each
+    /// `nanocode` turn. Without it, `nanocode` turns get no Code Mode tools.
+    codemode_token_signer: Option<Arc<TurnTokenSigner>>,
     warm_pools: Option<WarmPools>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -711,6 +716,7 @@ impl SessionRuntime {
             iron_control: Arc::new(iron_control),
             session_principal_admission: SessionPrincipalAdmission::default(),
             brain: None,
+            codemode_token_signer: None,
             warm_pools: None,
             personas: None,
             session_title_generator: None,
@@ -737,6 +743,14 @@ impl SessionRuntime {
     /// a sandbox create failure.
     pub fn with_brain(mut self, brain: Option<Arc<BrainClient>>) -> Self {
         self.brain = brain;
+        self
+    }
+
+    /// Sign a Code Mode turn token for every `nanocode` turn, so the brain
+    /// can give it Code Mode tools. Without a signer (the default), `nanocode`
+    /// turns run without them.
+    pub fn with_codemode_token_signer(mut self, signer: Option<Arc<TurnTokenSigner>>) -> Self {
+        self.codemode_token_signer = signer;
         self
     }
 
@@ -2203,8 +2217,17 @@ impl SessionRuntime {
             &lines[0],
         );
         let input_line = brain_input_line(&line)?;
+        let tool_token = self
+            .brain_tool_token(thread_key, session, &request_id, input.metadata.as_ref())
+            .await;
         let submitted = brain
-            .submit_turn(thread_key, &request_id, input_line, false)
+            .submit_turn(
+                thread_key,
+                &request_id,
+                input_line,
+                false,
+                tool_token.as_deref(),
+            )
             .await?;
         info!(
             component = COMPONENT_SESSION_RUNTIME,
@@ -2220,6 +2243,66 @@ impl SessionRuntime {
             &submitted,
             input.idempotency_key,
         ))
+    }
+
+    /// The Code Mode turn token for one `nanocode` turn, or `None` when the
+    /// turn gets no Code Mode tools: no signer is configured, the session has
+    /// no principal, or resolving its policy failed (the turn then still runs,
+    /// only without tools).
+    ///
+    /// The token names the session's principal, the requesting user's
+    /// principal (whose always-available OAuth credentials iron-proxy layers
+    /// on top), and the principal's tool filter. Steers do not mint one: a
+    /// steer folds into a turn that already has its own, and re-minting would
+    /// let a second user's credentials into someone else's turn.
+    async fn brain_tool_token(
+        &self,
+        thread_key: &ThreadKey,
+        session: &Session,
+        execution_id: &str,
+        metadata: Option<&Value>,
+    ) -> Option<String> {
+        let signer = self.codemode_token_signer.as_ref()?;
+        let principal = session
+            .iron_control_principal
+            .as_deref()
+            .map(str::trim)
+            .filter(|principal| !principal.is_empty())?;
+        let policy = match self.resolve_tool_host_call_policy(principal).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_brain_tool_policy_failed",
+                    thread_key = %thread_key,
+                    principal_id = principal,
+                    %error,
+                    "resolving the Code Mode tool policy failed; the turn runs without tools"
+                );
+                return None;
+            }
+        };
+        let requester = self.resolve_requester_principal(thread_key, metadata).await;
+        let grant = TurnGrant {
+            principal: principal.to_owned(),
+            requester,
+            thread_key: thread_key.as_str().to_owned(),
+            execution_id: execution_id.to_owned(),
+            tools: codemode_tool_policy(policy.tool_filter()),
+        };
+        match signer.sign(&grant, unix_now_secs()) {
+            Ok((token, _)) => Some(token),
+            Err(error) => {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_brain_tool_token_failed",
+                    thread_key = %thread_key,
+                    %error,
+                    "signing the Code Mode turn token failed; the turn runs without tools"
+                );
+                None
+            }
+        }
     }
 
     /// Cancel the thread's running brain turn, if any.
@@ -2306,7 +2389,7 @@ impl SessionRuntime {
             };
             let steer_request_id = brain::new_request_id();
             match brain
-                .submit_turn(thread_key, &steer_request_id, input_line, true)
+                .submit_turn(thread_key, &steer_request_id, input_line, true, None)
                 .await
             {
                 Ok(submitted) if submitted.steered => {}
@@ -7187,6 +7270,31 @@ fn is_legacy_mcp_tool_host_execution(execution: &SessionExecution) -> bool {
         == Some(true)
 }
 
+/// The deployment tool filter as a Code Mode policy: comma-separated lists,
+/// where unset or empty means no restriction.
+fn codemode_tool_policy(filter: &ToolHostToolFilter) -> ToolPolicy {
+    fn split(raw: Option<&str>) -> Option<Vec<String>> {
+        let entries = raw?
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        (!entries.is_empty()).then(|| entries.into_iter().collect())
+    }
+    ToolPolicy {
+        allowlist: split(filter.allowlist.as_deref()),
+        blocklist: split(filter.blocklist.as_deref()),
+    }
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 pub fn tool_host_thread_key(principal_id: &str) -> Result<ThreadKey, SessionRuntimeError> {
     ThreadKey::parse(format!("mcp:{}", principal_id.trim()))
         .map_err(|error| SessionRuntimeError::BadRequest(error.to_string()))
@@ -7553,6 +7661,79 @@ mod tests {
             .expect("submit second keyless turn");
         assert_ne!(first.execution_id, second.execution_id);
         assert!(first.execution_id.starts_with("exe_"));
+    }
+
+    #[tokio::test]
+    async fn nanocode_turns_carry_a_code_mode_token_for_the_session_principal() {
+        use centaur_codemode_protocol::token::{TurnTokenVerifier, testing};
+
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+
+        // Without a signer the turn carries no token and gets no tools.
+        nanocode_test_runtime(&brain)
+            .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
+            .await
+            .expect("submit turn without a signer");
+        assert!(
+            fake_brain.recorded_turns()[0]
+                .body
+                .get("tool_token")
+                .is_none()
+        );
+
+        let (private, public) = testing::pair();
+        let runtime = nanocode_test_runtime(&brain).with_codemode_token_signer(Some(Arc::new(
+            TurnTokenSigner::from_pem(private.as_bytes()).unwrap(),
+        )));
+        let execution = runtime
+            .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
+            .await
+            .expect("submit turn with a signer");
+        let turns = fake_brain.recorded_turns();
+        let token = turns[1].body["tool_token"]
+            .as_str()
+            .expect("the turn carries a Code Mode token");
+        let claims = TurnTokenVerifier::from_pem(public.as_bytes())
+            .unwrap()
+            .verify(token)
+            .expect("the token verifies with the public key");
+        assert_eq!(claims.sub, "prn_test");
+        assert_eq!(claims.thread_key, thread_key.as_str());
+        assert_eq!(claims.execution_id, execution.execution_id);
+
+        // A session with no principal gets no token.
+        let mut unowned = session.clone();
+        unowned.iron_control_principal = None;
+        runtime
+            .submit_brain_turn(&brain, &thread_key, &unowned, nanocode_turn_input(None))
+            .await
+            .expect("submit turn without a principal");
+        assert!(
+            fake_brain.recorded_turns()[2]
+                .body
+                .get("tool_token")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn code_mode_policies_split_the_deployment_filter() {
+        let policy = codemode_tool_policy(&ToolHostToolFilter {
+            allowlist: Some(" slack, crunchbase,,slack".to_owned()),
+            blocklist: Some(" ".to_owned()),
+        });
+        assert_eq!(
+            policy.allowlist,
+            Some(vec!["crunchbase".to_owned(), "slack".to_owned()])
+        );
+        assert_eq!(policy.blocklist, None);
+        assert_eq!(
+            codemode_tool_policy(&ToolHostToolFilter::default()),
+            ToolPolicy::default()
+        );
     }
 
     #[tokio::test]

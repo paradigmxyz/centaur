@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+centaur-codemode-protocol.workspace = true
 centaur-iron-control.workspace = true
 centaur-sandbox-core.workspace = true
 centaur-sandbox-manager.workspace = true
@@ -32,6 +33,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+centaur-codemode-protocol = { workspace = true, features = ["testing"] }
 centaur-console-db.workspace = true
 sqlx.workspace = true
 time.workspace = true

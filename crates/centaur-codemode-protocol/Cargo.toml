@@ -1,0 +1,25 @@
+[package]
+name = "centaur-codemode-protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Wire contract between api-rs, centaur-brain, and the Code Mode executor"
+
+[features]
+# Test helpers (`token::testing`) for crates that exercise turn tokens.
+testing = ["dep:aws-lc-rs"]
+
+[dependencies]
+aws-lc-rs = { version = "1", optional = true }
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+aws-lc-rs = "1"
+
+[lints]
+workspace = true

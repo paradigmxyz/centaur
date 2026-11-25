@@ -143,6 +143,7 @@ up() {
     --from-literal=SSL_CERT_FILE=/etc/iron-proxy-ca/ca-cert.pem \
     --dry-run=client -o yaml | apply_stdin
 
+  create_codemode_secret
   load_release_ca
   deploy_model_server
   deploy_ssh_gateway
@@ -219,6 +220,24 @@ seed_broker_credentials() {
     bun e2e/infra/broker-credentials-sql.ts | "${psql[@]}"
   # Skip the crash-loop backoff api-rs built up while it waited.
   kubectl -n "$NAMESPACE" delete pod -l app.kubernetes.io/component=api-rs --wait=false > /dev/null
+}
+
+# The Code Mode Secret (codemode.executor in e2e/infra/values.yaml): the
+# Ed25519 turn-token keypair api-rs signs with and the brain, executor, tenancy
+# iron-proxy, and proxy-sync verify with, and the sync token the tenancy
+# iron-proxy presents to proxy-sync. Created once per cluster, so redeploys keep
+# the tokens of in-flight turns valid.
+create_codemode_secret() {
+  if kubectl -n "$NAMESPACE" get secret centaur-e2e-codemode > /dev/null 2>&1; then
+    return 0
+  fi
+  openssl genpkey -algorithm ed25519 -out "$WORK/codemode-signing.pem" 2> /dev/null
+  openssl pkey -in "$WORK/codemode-signing.pem" -pubout -out "$WORK/codemode-public.pem"
+  (umask 077; openssl rand -hex 32 | tr -d '\n' > "$WORK/codemode-sync-token")
+  kubectl -n "$NAMESPACE" create secret generic centaur-e2e-codemode \
+    --from-file=token-signing-key="$WORK/codemode-signing.pem" \
+    --from-file=token-public-key="$WORK/codemode-public.pem" \
+    --from-file=sync-token="$WORK/codemode-sync-token" > /dev/null
 }
 
 # The release's iron-proxy CA, which iron-proxy pods trust (see
@@ -364,7 +383,7 @@ dump_logs() {
 
   mkdir -p "$LOG_DIR"
   local component
-  for component in slackbotv2 api-rs brain; do
+  for component in slackbotv2 api-rs brain codemode-executor codemode-iron-proxy; do
     kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-${component}" --tail=-1 \
       > "$LOG_DIR/${component}.log" 2>&1 || true
   done

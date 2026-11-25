@@ -4,11 +4,16 @@
 // session event stream api-rs proxies from the brain, and nothing is recorded
 // in session_executions or session.sandbox_ready, so no Kubernetes Sandbox
 // exists for the thread. The timing scenarios report time to first token for
-// nanocode next to a sandboxed harness, without asserting a threshold.
+// nanocode next to a sandboxed harness, without asserting a threshold. A
+// nanocode turn's Code Mode cell runs in the shared executor, and its
+// requests go through the shared tenancy iron-proxy with the channel
+// principal's credentials; none of it needs a sandbox.
 import { expect, test } from 'bun:test'
 import {
+  CHANNEL,
   db,
   eventually,
+  ironControl,
   model,
   releaseSandboxesAfterAll,
   slack,
@@ -31,6 +36,44 @@ test.concurrent('nanocode answers a Slack mention from the brain, without a sand
   // Nanocode turns leave no sandbox_ready event, which is where a thread's
   // sandbox handle would come from; sandboxes carry no thread label, so the
   // durable rows are what proves the thread has no sandbox at all.
+  expect(await thread.sandboxes()).toEqual([])
+}, turnTimeoutMs)
+
+test.concurrent('nanocode runs Code Mode cells on the executor as the channel principal', async () => {
+  // `context.sandbox` is the channel principal's Console permissions: the
+  // executor fetched them through the tenancy iron-proxy with the turn token,
+  // and iron-proxy added the api-rs credential proxy-sync serves for that
+  // principal, which api-rs accepted without a proxy row. The turn token
+  // carries the deployment's tool filter (TOOL_ALLOWLIST=ssh,demo in
+  // e2e/infra/values.yaml), which names no connector, so the cell sees none.
+  const cell = model.runsCell(`
+    return {
+      thread: context.thread_key,
+      harness: context.harness,
+      principal: context.sandbox?.principal_id ?? null,
+      error: context.sandbox_error ?? null,
+      connectors: Object.keys(tools),
+    }`, 'Checked with Code Mode.')
+
+  const thread = await slack.mention('--nanocode What can this channel do?', cell)
+  const turn = await thread.nextBrainTurn()
+
+  expect(turn.reply).toBe(cell.text)
+  expect(turn.execution.status).toBe('completed')
+  // Exactly this channel's principal: the session's, and the one api-rs
+  // answered for with the credential iron-proxy injected.
+  const principal = await ironControl.slackChannelPrincipalId(CHANNEL.id)
+  const [session] = await db`
+    select iron_control_principal as principal from sessions where thread_key = ${thread.key}`
+  expect(session?.principal).toBe(principal)
+  const output = JSON.parse(await model.toolOutput(cell))
+  expect(output).toEqual({
+    thread: thread.key,
+    harness: 'codemode',
+    principal,
+    error: null,
+    connectors: []
+  })
   expect(await thread.sandboxes()).toEqual([])
 }, turnTimeoutMs)
 

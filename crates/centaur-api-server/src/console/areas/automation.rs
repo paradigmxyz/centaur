@@ -677,7 +677,7 @@ async fn sandbox_principal(
     pool: &sqlx::PgPool,
     context: &SandboxContext,
 ) -> Result<Option<Principal>, ApiError> {
-    let Some(principal_id) = context.proxy.principal_id else {
+    let Some(principal_id) = context.principal_id() else {
         return Ok(None);
     };
     centaur_console_db::find_principal(pool, principal_id)
@@ -759,7 +759,11 @@ async fn channel_requester(
     pool: &sqlx::PgPool,
     context: &SandboxContext,
 ) -> Result<Option<Principal>, ApiError> {
-    let Some(requester) = db::proxy_requester(pool, context.proxy.id)
+    // A Code Mode tool-host token has no proxy, so it has no requester.
+    let Some(proxy) = &context.proxy else {
+        return Ok(None);
+    };
+    let Some(requester) = db::proxy_requester(pool, proxy.id)
         .await
         .map_err(internal)?
     else {
@@ -2754,7 +2758,7 @@ async fn sandbox_permissions_show(
     context: SandboxContext,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let permissions = match context.proxy.principal_id {
+    let permissions = match context.principal_id() {
         Some(principal_id) => db::sandbox_permissions(&pool, principal_id)
             .await
             .map_err(internal)?,
@@ -2774,7 +2778,7 @@ async fn sandbox_permissions_show(
     let record = &permissions.principal;
     let data = PermissionsData {
         sandbox_id: &context.claims.sandbox_id,
-        proxy_id: model::Proxy::oid(context.proxy.id),
+        proxy_id: context.claims.proxy_id.clone(),
         principal_id: model::Principal::oid(record.id),
         principal: PrincipalPayload {
             id: model::Principal::oid(record.id),
