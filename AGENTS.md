@@ -28,6 +28,8 @@ product-specific defaults solely to make them neutral unless the user asks.
   a parallel one.
 - Keep clients thin and changes focused. If a contract changes, update every
   producer, consumer, test fixture, and chart value affected by it.
+- Do not bump `version` in `contrib/chart/Chart.yaml`; a bot PR bumps it after
+  chart changes merge to `main`.
 - Never expose credentials in output, logs, fixtures, commits, or command-line
   arguments. Use placeholders and configured secret paths.
 - Do not mutate a remote environment unless the user explicitly asks. Local
@@ -62,6 +64,10 @@ Ownership by tree:
 
 - `services/api-rs/`: Rust control plane, durable sessions, sandbox backends,
   workflows, auth integration, and telemetry.
+- `crates/`: every Rust package, in one repository-root Cargo workspace
+  (`Cargo.toml`, `Cargo.lock`). A Rust service's code lives here, while its
+  `services/<name>/` directory holds the Dockerfile and docs. Run `cargo` from
+  the repository root.
 - `services/slackbotv2/`, `discordbot/`, `githubbot/`, `linearbot/`,
   `teamsbot/`: platform transport, policy gates, session forwarding, and
   platform rendering.
@@ -71,8 +77,19 @@ Ownership by tree:
 - `services/iron-proxy/`: credential-injecting proxy image and startup config.
 - `services/workflow-python/`: Python workflow compatibility host; durability
   remains in `api-rs`.
-- `services/console/`: operator UI and credential-control API.
+- `services/console/`: the Console operator UI, a React SPA in
+  `services/console/web/`, its static files, and the Console API reference.
+  api-rs serves the Console (`crates/centaur-api-server/src/console/`).
 - `tools/`: independently packaged agent-facing CLI plugins.
+- `connectors/`: experimental Code Mode connectors, run by
+  `crates/centaur-codemode` and not yet deployed. Each is a
+  `connector.toml` (description and secrets, in the `[tool.centaur]` schema)
+  plus an `index.ts` whose exported async functions are tools; helpers shared
+  by connectors live in `connectors/_lib/`. Return upstream data as the API
+  sends it. Check with `pnpm --filter @centaur/connectors lint`,
+  `pnpm --filter @centaur/connectors typecheck`, and
+  `cargo test -p centaur-codemode`; the runtime's security invariants are in
+  `crates/centaur-codemode/README.md`.
 - `workflows/`: discoverable workflow definitions.
 - `contrib/chart/`: Helm wiring, policies, probes, and service configuration.
 - `packages/`: shared TypeScript event and rendering contracts used by ingress
@@ -124,7 +141,7 @@ Python code targets Python 3.11+ and uses `uv` for environments and commands.
 Follow the local package's import style: service modules generally use
 top-level absolute imports, while independently packaged tool CLIs and optional
 dependencies may deliberately import lazily. Do not mechanically rewrite those
-boundaries. Rust, Ruby, TypeScript, shell, and image-only services have their
+boundaries. Rust, TypeScript, shell, and image-only services have their
 own commands in local guides; there is no single repository-wide lint command
 that accurately validates every service.
 

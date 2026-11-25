@@ -1,6 +1,6 @@
 [project]
 name = "gsuite"
-description = "Gmail, Calendar, Drive, Docs, Sheets, Slides, Analytics"
+description = "Gmail, Calendar, Directory, Drive, Docs, Sheets, Slides, Analytics"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -37,6 +37,7 @@ module = "client.py"
 hosts = [
     "gmail.googleapis.com",
     "calendar.googleapis.com",
+    "people.googleapis.com",
     "www.googleapis.com",
     "docs.google.com",
     "docs.googleapis.com",
@@ -55,6 +56,7 @@ secrets = [
     { type = "oauth_token", grant = "refresh_token", name = "GOOGLE_TOKEN_JSON", token_endpoint = "https://oauth2.googleapis.com/token", hosts = [
         "gmail.googleapis.com",
         "calendar.googleapis.com",
+        "people.googleapis.com",
         "www.googleapis.com",
         "docs.google.com",
         "docs.googleapis.com",

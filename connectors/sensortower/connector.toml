@@ -1,0 +1,3 @@
+description = "SensorTower: mobile app analytics, rankings, sales estimates and publisher data"
+
+secrets = [{ type = "http", name = "SENSOR_TOWER_AUTH_TOKEN", mode = "inject", inject_query_param = "auth_token", hosts = ["api.sensortower.com", "app.sensortower.com"] }]

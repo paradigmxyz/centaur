@@ -11,7 +11,7 @@ permissions:
 jobs:
   close-stale-drafts:
     name: Close stale drafts
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Close inactive draft pull requests

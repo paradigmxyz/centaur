@@ -1,0 +1,3 @@
+description = "Messari: crypto asset prices, metrics, profiles, markets and time series"
+
+secrets = [{type = "http", name = "MESSARI_API_KEY", mode = "inject", inject_header = "x-messari-api-key", hosts = ["api.messari.io"]}]

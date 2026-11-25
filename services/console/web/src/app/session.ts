@@ -1,0 +1,56 @@
+// The shell loads GET /api/v1/console/me once; read it through useSession().
+import { useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
+
+import { api, type DataEnvelope } from "@/lib/api";
+import { sharedKeys } from "@/lib/query-keys";
+
+export type NavSection =
+  | "control"
+  | "principals"
+  | "roles"
+  | "secrets"
+  | "credentials"
+  | "oauth_apps"
+  | "users"
+  | "api_clients"
+  | "api_keys"
+  | "settings"
+  | "workflows"
+  | "integrations"
+  | "skills"
+  | "scheduled_tasks";
+
+export interface Me {
+  user: { id: string; email: string; name: string | null; status: "active" | "pending" | "disabled"; admin: boolean };
+  auth_method: "session" | "sandbox";
+  acting_admin: boolean;
+  features: { api_clients: boolean; password_login: boolean };
+  nav: Record<NavSection, boolean>;
+}
+
+export async function fetchMe(): Promise<Me> {
+  const body = await api.get<DataEnvelope<Me>>("/api/v1/console/me");
+  return body.data;
+}
+
+export const meQueryOptions = {
+  queryKey: sharedKeys.me,
+  queryFn: fetchMe,
+  staleTime: 60_000,
+} as const;
+
+/** The session inside the authenticated shell (suspends until loaded). */
+export function useSession(): Me {
+  return useSuspenseQuery(meQueryOptions).data;
+}
+
+/** DELETE /api/v1/console/session; the caller then leaves the SPA. */
+export async function signOut(queryClient: QueryClient) {
+  await api.delete("/api/v1/console/session");
+  queryClient.clear();
+}
+
+/** Where a signed-in user lands: admins on Principals, everyone else on Integrations. */
+export function defaultLandingPath(me: Pick<Me, "acting_admin">): string {
+  return me.acting_admin ? "/console/principals" : "/console/integrations";
+}

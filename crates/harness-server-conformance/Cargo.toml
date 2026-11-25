@@ -1,0 +1,16 @@
+[package]
+name = "harness-server-conformance"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Its own workspace root, so the Codex dependency tree stays out of every other
+# crate's lockfile. A parent workspace must list this directory in `exclude`.
+[workspace]
+
+[dev-dependencies]
+codex-app-server-protocol = { git = "https://github.com/openai/codex", rev = "e93dc98a48d597df322436ffe8d03bfd7ec63b3b" }
+harness-server = { path = "../harness-server" }
+serde = "1.0"
+serde_json = "1.0"

@@ -47,7 +47,7 @@ Tools: `coinmetrics`, `tardis`, `bloomberg`
 
 ## News / Search Tools
 
-Tools: `websearch`, `googlenews`, `newsapi`, `coindesk`, `theblock`
+Tools: `websearch`, `googlenews`, `newsapi`, `eventregistry`, `coindesk`, `theblock`
 
 | Method pattern | Test input |
 |---------------|------------|

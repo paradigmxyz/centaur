@@ -1,0 +1,14 @@
+{
+  "$schema": "../node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "es2024": true
+  },
+  "rules": {
+    // The runtime calls every tool as `(args, ctx)`, so a tool may ignore
+    // either parameter.
+    "no-unused-vars": ["error", { "args": "none", "varsIgnorePattern": "^_", "caughtErrors": "none" }]
+  }
+}

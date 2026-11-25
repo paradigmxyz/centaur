@@ -1,1 +1,1 @@
-"""Web search and deep research via Parallel Web Systems."""
+"""Web search via Parallel, Exa, or Tako."""

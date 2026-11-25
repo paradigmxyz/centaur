@@ -31,9 +31,9 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--codex review this").harnessType).toBe(
       "codex",
     );
-    expect(extractMessageOverrides("--nanocodex review this").harnessType).toBe(
-      "nanocodex",
-    );
+    expect(
+      extractMessageOverrides("--nanocodex review this").harnessType,
+    ).toBeUndefined();
   });
 
   test("parses harness flag anywhere in the message", () => {
@@ -69,16 +69,16 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--opus fix it")).toEqual({
       cleanedText: "fix it",
       harnessType: "claudecode",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
     });
     expect(extractMessageOverrides("--sonnet fix it").model).toBe(
-      "claude-sonnet-4-6",
+      "claude-sonnet-5-5",
     );
     expect(extractMessageOverrides("--haiku fix it").model).toBe(
-      "claude-haiku-4-5",
+      "claude-haiku-5-5",
     );
     expect(extractMessageOverrides("--fable fix it").model).toBe(
-      "claude-fable-5",
+      "claude-fable-5-2",
     );
   });
 
@@ -126,13 +126,13 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--claude --model opus go")).toEqual({
       cleanedText: "go",
       harnessType: "claudecode",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
     });
     expect(extractMessageOverrides("--model Sonnet go").model).toBe(
-      "claude-sonnet-4-6",
+      "claude-sonnet-5-5",
     );
     expect(extractMessageOverrides("--model fable go").model).toBe(
-      "claude-fable-5",
+      "claude-fable-5-2",
     );
   });
 
@@ -142,14 +142,14 @@ describe("extractMessageOverrides", () => {
     ).toEqual({
       cleanedText: "what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5",
+      model: "claude-fable-5-2",
     });
     expect(
       extractMessageOverrides("@Centaur AI --claude --model=fable\r\nwhat model are you"),
     ).toEqual({
       cleanedText: "@Centaur AI what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5",
+      model: "claude-fable-5-2",
     });
   });
 
@@ -159,7 +159,7 @@ describe("extractMessageOverrides", () => {
     ).toEqual({
       cleanedText: "what model are you",
       harnessType: "claudecode",
-      model: "claude-fable-5",
+      model: "claude-fable-5-2",
     });
   });
 
@@ -174,7 +174,7 @@ describe("extractMessageOverrides", () => {
     expect(extractMessageOverrides("--codex --opus fix it")).toEqual({
       cleanedText: "fix it",
       harnessType: "codex",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
     });
     expect(
       extractMessageOverrides("--sonnet --model claude-opus-4-8 fix it").model,

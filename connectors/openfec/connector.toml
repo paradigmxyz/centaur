@@ -1,0 +1,3 @@
+description = "OpenFEC: federal candidates, committees, itemized contributions, filings and candidate financial totals"
+
+secrets = [{type = "http", name = "DATAGOV_API_KEY", mode = "inject", inject_query_param = "api_key", hosts = ["api.open.fec.gov"]}]

@@ -198,19 +198,21 @@ and repo-cache syncs the configured overlay repos on every node.
 
 ## 7. Verify the running overlay
 
-From the API pod, verify API-side discovery:
+From the API pod, verify API-side tool discovery:
 
 ```bash
 kubectl exec -n centaur deploy/centaur-centaur-api-rs -- \
-  sh -lc 'echo "$TOOL_DIRS"; echo "$WORKFLOW_DIRS"'
+  sh -lc 'echo "$TOOL_DIRS"'
 ```
 
 Expected paths include:
 
 ```text
 /var/lib/centaur/repos/your-org/centaur-acme/tools
-/var/lib/centaur/repos/your-org/centaur-acme/workflows
 ```
+
+Workflows are discovered by the `workflow-discovery` service and run in
+workflow-host sandboxes, under `/home/agent/github/your-org/centaur-acme/workflows`.
 
 From a sandbox, verify sandbox-side guidance:
 
@@ -228,8 +230,8 @@ Expected paths include:
 You can also inspect the api-rs session context for a thread:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+CENTAUR_API_TOKEN=$(kubectl get secret -n centaur-system centaur-infra-env \
+  -o jsonpath='{.data.CENTAUR_APIRS_ADMIN_API_KEY}' | base64 -d)
 THREAD_PATH=$(jq -rn --arg v "$THREAD_KEY" '$v|@uri')
 curl -s "$CENTAUR_API_URL/api/session/${THREAD_PATH}" \
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" | jq

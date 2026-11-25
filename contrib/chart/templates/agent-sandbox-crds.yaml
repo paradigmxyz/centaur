@@ -1,0 +1,154 @@
+{{- if .Values.agentSandbox.enabled }}
+{{- /*
+Installs the agent-sandbox CRDs from a pre-install/pre-upgrade hook (Argo CD
+runs it as PreSync). Helm never upgrades files in crds/, and a cluster still on
+the v1alpha1 API must be migrated before the v1beta1-only CRDs apply, so the
+hook does both; see crates/centaur-sandbox-agent-k8s/src/crd_migration.rs. The
+hook's own RBAC and egress policy are hooks too, because they must exist before
+the release's regular resources do.
+*/ -}}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "agent-sandbox-crds") -}}
+{{- $apiRsName := include "centaur.componentName" (dict "root" . "component" "api-rs") -}}
+{{- /* Resolved as the subchart's agent-sandbox.namespace helper does. */ -}}
+{{- $controllerNamespace := default .Release.Namespace .Values.agentSandbox.namespace.name -}}
+{{- /* Cluster-scoped, so unique per release namespace too. */ -}}
+{{- $clusterName := printf "%s-%s" .Release.Namespace $name | trunc 63 | trimSuffix "-" -}}
+{{- $crds := list "sandboxes.agents.x-k8s.io" "sandboxclaims.extensions.agents.x-k8s.io" "sandboxtemplates.extensions.agents.x-k8s.io" "sandboxwarmpools.extensions.agents.x-k8s.io" -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $clusterName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames: {{ toJson $crds }}
+    verbs: ["get", "update"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions/status"]
+    resourceNames: {{ toJson $crds }}
+    verbs: ["patch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["list", "patch"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["list", "patch"]
+  # Children whose owner references name the v1alpha1 Sandbox.
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["list", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["list", "patch"]
+  # The v1alpha1-only writers stopped before a migration.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ $apiRsName | quote }}, "agent-sandbox-controller"]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $clusterName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $clusterName }}
+---
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # Kubernetes API only; see the api-rs egress policy for the port.
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.apiServerPort }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # Every step is idempotent, so a retry resumes an interrupted migration.
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "agent-sandbox-crds") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $name }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" .Values.apiRs "indent" 6) }}
+      containers:
+        - name: install-crds
+          image: {{ printf "%s:%s" .Values.apiRs.image.repository .Values.apiRs.image.tag | quote }}
+          imagePullPolicy: {{ .Values.apiRs.image.pullPolicy }}
+          args:
+            - install-agent-sandbox-crds
+{{- if .Values.apiRs.enabled }}
+            - --stop-deployment={{ .Release.Namespace }}/{{ $apiRsName }}
+{{- end }}
+            - --stop-deployment={{ $controllerNamespace }}/agent-sandbox-controller
+          env:
+            - name: RUST_LOG
+              value: info
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- end }}

@@ -1,43 +1,44 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
     mpsc::{self, Receiver, RecvTimeoutError},
 };
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use codex_app_server_protocol::{
-    ApprovalsReviewer, AskForApproval, ClientResponse, InitializeResponse, JSONRPCError,
-    JSONRPCErrorError, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxPolicy,
-    ServerNotification, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
-    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnStatus, TurnSteerParams, TurnSteerResponse, UserInput,
-};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::amp::AmpHarness;
 use crate::claude::ClaudeCodeHarness;
 use crate::codex::CodexHarnessServer;
+use crate::omp::OmpHarness;
 use crate::otel::{TraceContext, TurnStatus as TelemetryTurnStatus, TurnTelemetry};
+use crate::pi::PiHarness;
+use crate::protocol::{
+    ApprovalsReviewer, AskForApproval, InitializeResponse, JSONRPCError, JSONRPCErrorError,
+    JSONRPCMessage, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxPolicy, ServerNotification,
+    ThreadResumeParams, ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, Turn,
+    TurnInterruptParams, TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnStatus,
+    TurnSteerParams, TurnSteerResponse, UserInput,
+};
 use crate::traits::{
     AppServerNormalizer, AppServerRuntime, HarnessChild, HarnessKind, HarnessServer,
-    NormalizedEvent, ThreadState,
+    NormalizedEvent, ThreadState, TurnHold,
 };
 use crate::turn::{BridgeConfig, CodexTurnNormalizer};
 use crate::util::{absolute_path, default_codex_home, write_value};
-use crate::wire::{is_known_untyped_server_notification, notification_to_wire_value};
+use crate::wire::notification_to_wire_value;
 use crate::{HarnessServerError, Result};
 
 pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
@@ -45,6 +46,8 @@ pub fn server_for(kind: HarnessKind) -> Box<dyn AppServerRuntime> {
         HarnessKind::Codex => Box::new(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => Box::new(AppServerNormalizer::new(ClaudeCodeHarness)),
         HarnessKind::Amp => Box::new(AppServerNormalizer::new(AmpHarness)),
+        HarnessKind::Pi => Box::new(AppServerNormalizer::new(PiHarness)),
+        HarnessKind::Omp => Box::new(AppServerNormalizer::new(OmpHarness)),
     }
 }
 
@@ -57,28 +60,9 @@ pub fn run_blocks_server(kind: HarnessKind) -> Result<()> {
         HarnessKind::Codex => crate::codex::run_codex_blocks_server(CodexHarnessServer::codex()),
         HarnessKind::ClaudeCode => run_blocks_app_server(&ClaudeCodeHarness),
         HarnessKind::Amp => run_blocks_app_server(&AmpHarness),
+        HarnessKind::Pi => run_blocks_app_server(&PiHarness),
+        HarnessKind::Omp => run_blocks_app_server(&OmpHarness),
     }
-}
-
-pub fn run_validate_jsonrpc() -> Result<()> {
-    let stdin = io::stdin();
-    for raw in stdin.lock().lines() {
-        let line = raw?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let message: JSONRPCMessage = serde_json::from_str(&line)?;
-        if let JSONRPCMessage::Notification(notification) = message {
-            let method = notification.method.clone();
-            if !is_known_untyped_server_notification(&method) {
-                let _typed = codex_app_server_protocol::ServerNotification::try_from(notification)
-                    .map_err(|error| HarnessServerError::InvalidServerNotification {
-                        message: error.to_string(),
-                    })?;
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
@@ -86,7 +70,7 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
     let mut state = initial_blocks_thread_state(harness)?;
     let (command_tx, command_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
-    let turn_active = Arc::new(AtomicBool::new(false));
+    let turn_active = Arc::new(Mutex::new(false));
 
     {
         let turn_active = Arc::clone(&turn_active);
@@ -102,14 +86,30 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     continue;
                 }
 
+                // Route under the same lock the runner uses to end a turn, so
+                // a steer is either delivered to that turn or becomes the next
+                // turn's command, never stranded between them.
+                let mut active = turn_active.lock().unwrap();
                 match parse_blocks_line_with_state(trimmed, &mut blocks_state) {
-                    Ok(BlocksCommand::Interrupt) if turn_active.load(Ordering::SeqCst) => {
+                    Ok(BlocksCommand::Interrupt) if *active => {
                         if request_tx.send(ActiveTurnRequest::BlocksInterrupt).is_err() {
                             break;
                         }
                     }
+                    // A follow-up api-rs forwards to the running execution
+                    // belongs to the active turn, not a turn of its own: a
+                    // separate turn would run after the execution completed,
+                    // where api-rs attributes its output to no execution.
+                    Ok(command @ BlocksCommand::User { .. }) if *active && command.is_steer() => {
+                        if request_tx
+                            .send(ActiveTurnRequest::BlocksSteer(command))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(command @ BlocksCommand::User { .. }) => {
-                        turn_active.store(true, Ordering::SeqCst);
+                        *active = true;
                         if command_tx
                             .send(BlocksReaderInput::Command(command))
                             .is_err()
@@ -138,23 +138,37 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
         });
     }
 
-    while let Ok(input) = command_rx.recv() {
+    // Steers that reached the reader as a turn ended, after its last check
+    // for them; each runs as the next turn, ahead of newer input.
+    let mut leftover: VecDeque<BlocksReaderInput> = VecDeque::new();
+    while let Some(input) = leftover.pop_front().or_else(|| command_rx.recv().ok()) {
         match input {
             BlocksReaderInput::Command(BlocksCommand::User {
                 input,
                 client_user_message_id,
                 model,
-                // Provider selection and reasoning effort only apply to the codex
-                // harness; the emulated (claude/amp) app-server has no equivalent
-                // knob (its provider is fixed at thread start from session params).
+                // Provider selection only applies to the codex harness; the
+                // emulated (claude/amp) app-server fixes its provider at thread
+                // start from session params. Reasoning effort is applied by
+                // per turn by harnesses that support it.
                 provider: _,
-                reasoning: _,
+                reasoning,
                 trace_context,
             }) => {
+                crate::session_prompt::run_session_prompt_hooks(
+                    Some(&trace_context),
+                    crate::otel::harness_name(harness.kind()),
+                );
                 if let Some(model) = model {
                     state.model = model;
                 }
-                let result = run_blocks_turn(
+                if trace_context.thread_key.is_some() {
+                    state.thread_key.clone_from(&trace_context.thread_key);
+                }
+                state.reasoning_effort = reasoning
+                    .as_deref()
+                    .and_then(|reasoning| harness.reasoning_effort(reasoning));
+                let (result, unhandled_steers) = run_blocks_turn(
                     harness,
                     &mut state,
                     input,
@@ -164,7 +178,12 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                     &request_rx,
                     &turn_active,
                 );
-                drain_active_turn_requests(&request_rx);
+                for steer in unhandled_steers {
+                    eprintln!(
+                        "blocks steer arrived as the turn ended; running it as the next turn"
+                    );
+                    leftover.push_back(BlocksReaderInput::Command(steer));
+                }
                 if let Err(error) = result {
                     eprintln!("blocks turn failed: {error:#}");
                     write_blocks_error(&mut stdout, &state.id, "turn", error.to_string())?;
@@ -227,8 +246,8 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
                     eprintln!("request failed: {error:#}");
                 }
             }
-            ActiveTurnRequest::BlocksInterrupt => {
-                eprintln!("blocks interrupt ignored: no active turn runs");
+            ActiveTurnRequest::BlocksInterrupt | ActiveTurnRequest::BlocksSteer(_) => {
+                eprintln!("blocks input ignored: no active turn runs");
             }
         }
     }
@@ -251,11 +270,11 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
     trace_context: &TraceContext,
     stdout: &mut W,
     request_rx: &Receiver<ActiveTurnRequest>,
-    turn_active: &AtomicBool,
-) -> Result<()> {
+    turn_active: &Mutex<bool>,
+) -> (Result<()>, Vec<BlocksCommand>) {
     let turn_id = format!("turn-{}", Uuid::new_v4().simple());
     let mut normalizer = normalizer_for(harness, state, &turn_id);
-    turn_active.store(true, Ordering::SeqCst);
+    *turn_active.lock().unwrap() = true;
     let result = run_normalized_turn(
         harness,
         state,
@@ -266,8 +285,15 @@ fn run_blocks_turn<H: HarnessServer, W: Write>(
         stdout,
         request_rx,
     );
-    turn_active.store(false, Ordering::SeqCst);
-    result
+    // Clear the flag and collect stragglers while holding the lock the reader
+    // routes under, so a steer cannot land after this drain with the turn still
+    // marked active.
+    let unhandled_steers = {
+        let mut active = turn_active.lock().unwrap();
+        *active = false;
+        drain_active_turn_requests(request_rx)
+    };
+    (result, unhandled_steers)
 }
 
 enum BlocksReaderInput {
@@ -278,10 +304,29 @@ enum BlocksReaderInput {
 enum ActiveTurnRequest {
     JsonRpc(JSONRPCRequest),
     BlocksInterrupt,
+    /// A blocks `user` line that steers the active turn.
+    BlocksSteer(BlocksCommand),
 }
 
-fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) {
-    while rx.try_recv().is_ok() {}
+/// Discards requests left after a turn, returning its unhandled steers.
+fn drain_active_turn_requests(rx: &Receiver<ActiveTurnRequest>) -> Vec<BlocksCommand> {
+    let mut steers = Vec::new();
+    while let Ok(request) = rx.try_recv() {
+        if let ActiveTurnRequest::BlocksSteer(command) = request {
+            steers.push(command);
+        }
+    }
+    steers
+}
+
+/// What the active turn does with a request that arrived while it ran.
+enum ActiveTurnAction {
+    Continue,
+    Interrupted,
+    Steer {
+        input: Vec<UserInput>,
+        client_user_message_id: Option<String>,
+    },
 }
 
 #[derive(Debug)]
@@ -297,6 +342,15 @@ pub(crate) enum BlocksCommand {
     },
     Interrupt,
     AttachmentChunk,
+}
+
+impl BlocksCommand {
+    /// Whether api-rs forwarded this message to steer the running execution.
+    pub(crate) fn is_steer(&self) -> bool {
+        matches!(self, Self::User { trace_context, .. }
+            if trace_context.metadata.get("action").and_then(Value::as_str)
+                == Some("steer_active_execution"))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -876,13 +930,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 platform_family: env::consts::FAMILY.to_string(),
                 platform_os: env::consts::OS.to_string(),
             };
-            write_client_response(
-                stdout,
-                ClientResponse::Initialize {
-                    request_id: request.id,
-                    response,
-                },
-            )
+            write_response(stdout, request.id, &response)
         }
         "thread/start" => {
             let params: ThreadStartParams = request_params(request.params)?;
@@ -914,13 +962,7 @@ fn handle_request<H: HarnessServer, W: Write>(
                 reasoning_effort: None,
             };
             threads.insert(thread_id, state);
-            write_client_response(
-                stdout,
-                ClientResponse::ThreadStart {
-                    request_id: request.id,
-                    response,
-                },
-            )
+            write_response(stdout, request.id, &response)
         }
         "thread/resume" => {
             let params: ThreadResumeParams = request_params(request.params)?;
@@ -938,27 +980,23 @@ fn handle_request<H: HarnessServer, W: Write>(
                 thread.turns = state.completed_turns.clone();
             }
             let response = ThreadResumeResponse {
-                thread,
-                model: state.model.clone(),
-                model_provider: state.model_provider.clone(),
-                service_tier: state.service_tier.clone(),
-                cwd: absolute_path(state.cwd.clone())?,
-                runtime_workspace_roots: Vec::new(),
-                instruction_sources: Vec::new(),
-                approval_policy: AskForApproval::Never,
-                approvals_reviewer: ApprovalsReviewer::User,
-                sandbox: SandboxPolicy::DangerFullAccess,
-                active_permission_profile: None,
-                reasoning_effort: None,
+                response: ThreadStartResponse {
+                    thread,
+                    model: state.model.clone(),
+                    model_provider: state.model_provider.clone(),
+                    service_tier: state.service_tier.clone(),
+                    cwd: absolute_path(state.cwd.clone())?,
+                    runtime_workspace_roots: Vec::new(),
+                    instruction_sources: Vec::new(),
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: ApprovalsReviewer::User,
+                    sandbox: SandboxPolicy::DangerFullAccess,
+                    active_permission_profile: None,
+                    reasoning_effort: None,
+                },
                 initial_turns_page: None,
             };
-            write_client_response(
-                stdout,
-                ClientResponse::ThreadResume {
-                    request_id: request.id,
-                    response,
-                },
-            )
+            write_response(stdout, request.id, &response)
         }
         "turn/start" => {
             let params: TurnStartParams = request_params(request.params)?;
@@ -967,18 +1005,15 @@ fn handle_request<H: HarnessServer, W: Write>(
                     thread_id: params.thread_id.clone(),
                 }
             })?;
+            state.reasoning_effort = params
+                .effort
+                .and_then(|effort| harness.reasoning_effort(effort.as_str()));
             let turn_id = format!("turn-{}", Uuid::new_v4().simple());
             let mut normalizer = normalizer_for(harness, state, &turn_id);
             let response = TurnStartResponse {
                 turn: normalizer.turn_snapshot(TurnStatus::InProgress),
             };
-            write_client_response(
-                stdout,
-                ClientResponse::TurnStart {
-                    request_id: request.id,
-                    response,
-                },
-            )?;
+            write_response(stdout, request.id, &response)?;
             run_normalized_turn(
                 harness,
                 state,
@@ -992,13 +1027,7 @@ fn handle_request<H: HarnessServer, W: Write>(
         }
         "turn/interrupt" => {
             let _params: TurnInterruptParams = request_params(request.params)?;
-            write_client_response(
-                stdout,
-                ClientResponse::TurnInterrupt {
-                    request_id: request.id,
-                    response: TurnInterruptResponse {},
-                },
-            )
+            write_response(stdout, request.id, &TurnInterruptResponse {})
         }
         "turn/steer" => write_error(
             stdout,
@@ -1053,7 +1082,9 @@ fn resumed_thread_state<H: HarnessServer>(
             .clone()
             .unwrap_or_else(|| harness.default_model_provider().to_string()),
         service_tier: params.service_tier.clone().flatten(),
+        reasoning_effort: None,
         harness_session_id: Some(params.thread_id.clone()),
+        thread_key: None,
         completed_turns: Vec::new(),
         process: None,
         thread_started_sent: false,
@@ -1081,16 +1112,29 @@ fn apply_resume_overrides(state: &mut ThreadState, params: &ThreadResumeParams) 
     Ok(())
 }
 
-fn handle_active_turn_request<H: HarnessServer, W: Write>(
-    harness: &H,
+fn handle_active_turn_request<W: Write>(
     process: &mut HarnessChild,
     normalizer: &mut CodexTurnNormalizer,
     request: ActiveTurnRequest,
     stdout: &mut W,
-) -> Result<bool> {
-    let ActiveTurnRequest::JsonRpc(request) = request else {
-        process.kill_and_wait()?;
-        return Ok(true);
+) -> Result<ActiveTurnAction> {
+    let request = match request {
+        ActiveTurnRequest::JsonRpc(request) => request,
+        ActiveTurnRequest::BlocksInterrupt => {
+            process.kill_and_wait()?;
+            return Ok(ActiveTurnAction::Interrupted);
+        }
+        ActiveTurnRequest::BlocksSteer(BlocksCommand::User {
+            input,
+            client_user_message_id,
+            ..
+        }) => {
+            return Ok(ActiveTurnAction::Steer {
+                input,
+                client_user_message_id,
+            });
+        }
+        ActiveTurnRequest::BlocksSteer(_) => return Ok(ActiveTurnAction::Continue),
     };
 
     match request.method.as_str() {
@@ -1103,7 +1147,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnAction::Continue);
             }
             if params.expected_turn_id != normalizer.turn_id() {
                 write_error(
@@ -1116,27 +1160,19 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnAction::Continue);
             }
-            process
-                .stdin
-                .write_all(&harness.stdin_for_steer(&params.input)?)?;
-            process.stdin.flush()?;
-            write_client_response(
+            write_response(
                 stdout,
-                ClientResponse::TurnSteer {
-                    request_id: request.id,
-                    response: TurnSteerResponse {
-                        turn_id: normalizer.turn_id().to_string(),
-                    },
+                request.id,
+                &TurnSteerResponse {
+                    turn_id: normalizer.turn_id().to_string(),
                 },
             )?;
-            for notification in normalizer
-                .emit_user_message(params.client_user_message_id.clone(), params.input.clone())?
-            {
-                write_value(stdout, &notification_to_wire_value(&notification)?)?;
-            }
-            Ok(false)
+            Ok(ActiveTurnAction::Steer {
+                input: params.input,
+                client_user_message_id: params.client_user_message_id,
+            })
         }
         "turn/interrupt" => {
             let params: TurnInterruptParams = request_params(request.params)?;
@@ -1147,7 +1183,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                     -32600,
                     format!("unknown threadId {}", params.thread_id),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnAction::Continue);
             }
             if params.turn_id != normalizer.turn_id() {
                 write_error(
@@ -1160,17 +1196,11 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                         normalizer.turn_id()
                     ),
                 )?;
-                return Ok(false);
+                return Ok(ActiveTurnAction::Continue);
             }
             process.kill_and_wait()?;
-            write_client_response(
-                stdout,
-                ClientResponse::TurnInterrupt {
-                    request_id: request.id,
-                    response: TurnInterruptResponse {},
-                },
-            )?;
-            Ok(true)
+            write_response(stdout, request.id, &TurnInterruptResponse {})?;
+            Ok(ActiveTurnAction::Interrupted)
         }
         _ => {
             write_error(
@@ -1179,7 +1209,7 @@ fn handle_active_turn_request<H: HarnessServer, W: Write>(
                 -32600,
                 format!("cannot handle {} while a turn is active", request.method),
             )?;
-            Ok(false)
+            Ok(ActiveTurnAction::Continue)
         }
     }
 }
@@ -1288,7 +1318,7 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     stdout: &mut W,
     request_rx: &Receiver<ActiveTurnRequest>,
     telemetry: &mut TurnTelemetry,
-) -> Result<Option<codex_app_server_protocol::Turn>> {
+) -> Result<Option<Turn>> {
     ensure_harness_process(harness, state)?;
     {
         let process = state
@@ -1300,6 +1330,13 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         // late `result` (and trailing rate-limit noise) behind, which would
         // otherwise read as this turn's instant terminal.
         while process.stdout.try_recv().is_ok() {}
+        if process.reasoning_effort != state.reasoning_effort {
+            let effort = state.reasoning_effort.as_deref();
+            process
+                .stdin
+                .write_all(&harness.stdin_for_reasoning_effort(effort)?)?;
+            process.reasoning_effort = state.reasoning_effort.clone();
+        }
         process.stdin.write_all(&harness.stdin_for_turn(input)?)?;
         process.stdin.flush()?;
     }
@@ -1310,74 +1347,93 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
     // the fallback. Any further output (the native result on its way, trailing
     // noise, or a continuation of the turn) pushes the deadline back.
     let mut settle_deadline: Option<Instant> = None;
-    let mut last_session_id = state.harness_session_id.clone();
+    // Armed while the harness holds the turn for a background follow-up that
+    // has not started; any output pushes it back.
+    let mut hold_deadline: Option<Instant> = None;
     let mut event_normalizer = H::EventNormalizer::default();
     let mut completed_turn = None;
+    // Steers held for the harness's next native turn, which continues this
+    // turn rather than starting another (see `HarnessServer::steers_mid_turn`).
+    let mut held_steers: Vec<Vec<UserInput>> = Vec::new();
+    // Set once the native turn's last answer is in: from then on a steer may
+    // reach an idle agent, so it waits to continue the turn instead.
+    let mut native_turn_may_have_ended = false;
+    // Buffered output is read (without waiting) until the stream is empty, and
+    // only then are steers taken: writing a steer after the native turn ended
+    // reaches an idle agent that never answers.
+    let mut read_timeout = Duration::ZERO;
     loop {
-        while let Ok(request) = request_rx.try_recv() {
-            let process = state
-                .process
-                .as_mut()
-                .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
-            if handle_active_turn_request(harness, process, normalizer, request, stdout)? {
-                state.process = None;
-                return Err(HarnessServerError::TurnInterrupted {
-                    kind: harness.kind(),
-                });
-            }
-            // A steer re-opens the turn: the harness now owes a response whose
-            // first token can take longer than the settle window, so the
-            // pending fallback completion no longer applies. The response's
-            // own terminal stop re-arms it.
-            settle_deadline = None;
-        }
-
         let mut terminal = false;
-        match state
+        let read = state
             .process
             .as_mut()
             .ok_or(HarnessServerError::HarnessStdoutUnavailable)?
             .stdout
-            .recv_timeout(Duration::from_millis(50))
-        {
+            .recv_timeout(read_timeout);
+        match read {
             Ok(line) => {
-                let line = line?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let event = harness.parse_stdout_line(trimmed)?;
-                let normalized_events = harness.normalize_events(&mut event_normalizer, event)?;
-                let mut terminal_stop = false;
-                for normalized in normalized_events {
-                    telemetry.observe_normalized(&normalized);
-                    if let Some(session_id) = normalized.session_id() {
-                        last_session_id = Some(session_id.to_string());
-                        state.harness_session_id = Some(session_id.to_string());
-                    }
-                    for notification in normalizer.process_event(&normalized)? {
-                        let value = notification_to_wire_value(&notification)?;
-                        telemetry.observe_tool_notification(&value);
-                        write_value(stdout, &value)?;
-                    }
-                    terminal |= normalized.is_terminal();
-                    terminal_stop |=
-                        settle_window.is_some() && normalized.is_terminal_assistant_stop();
-                }
-                if !terminal {
+                read_timeout = Duration::ZERO;
+                if let Some(progress) = handle_stdout_line(
+                    harness,
+                    state,
+                    normalizer,
+                    &mut event_normalizer,
+                    stdout,
+                    telemetry,
+                    &line?,
+                )? {
+                    native_turn_may_have_ended |= progress.assistant_stop;
+                    terminal = progress.terminal;
+                    // A held turn still owes output after a terminal stop (for
+                    // example the answer to a steer), so the stop must not arm
+                    // the fallback completion.
+                    let terminal_stop =
+                        progress.assistant_stop && progress.hold == TurnHold::Released;
                     match settle_window {
-                        Some(window) if terminal_stop && window.is_zero() => terminal = true,
-                        Some(window) if terminal_stop || settle_deadline.is_some() => {
+                        Some(window) if !terminal && terminal_stop && window.is_zero() => {
+                            terminal = true;
+                        }
+                        Some(window)
+                            if !terminal && (terminal_stop || settle_deadline.is_some()) =>
+                        {
                             settle_deadline = Some(Instant::now() + window);
                         }
                         _ => {}
                     }
+                    hold_deadline = match progress.hold {
+                        TurnHold::Idle(window) => Some(Instant::now() + window),
+                        TurnHold::Released | TurnHold::Waiting => None,
+                    };
                 }
             }
-            Err(RecvTimeoutError::Timeout) => match settle_deadline {
-                Some(deadline) if Instant::now() >= deadline => terminal = true,
-                _ => continue,
-            },
+            Err(RecvTimeoutError::Timeout) => {
+                read_timeout = Duration::from_millis(50);
+                for input in drain_turn_steers(harness, state, normalizer, stdout, request_rx)? {
+                    if harness.steers_mid_turn() && !native_turn_may_have_ended {
+                        let process = state
+                            .process
+                            .as_mut()
+                            .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+                        process
+                            .stdin
+                            .write_all(&harness.stdin_for_steer(&mut event_normalizer, &input)?)?;
+                        process.stdin.flush()?;
+                    } else {
+                        held_steers.push(input);
+                    }
+                    // A steer re-opens the turn: the harness now owes a response
+                    // whose first token can take longer than the settle window,
+                    // so the pending fallback completion no longer applies. The
+                    // response's own terminal stop re-arms it.
+                    settle_deadline = None;
+                }
+                if hold_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    return Err(HarnessServerError::BackgroundFollowUpStalled {
+                        kind: harness.kind(),
+                    });
+                }
+                terminal = settle_deadline.is_some_and(|deadline| Instant::now() >= deadline);
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 let status = state
                     .process
@@ -1401,6 +1457,41 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
             }
         }
         if terminal {
+            // Steers that arrived as the harness finished, and those held for
+            // this moment, continue the turn as the harness's next native
+            // turn, so their answers stay in this turn (and its execution).
+            held_steers.extend(drain_turn_steers(
+                harness, state, normalizer, stdout, request_rx,
+            )?);
+            if !held_steers.is_empty() {
+                if harness.turn_hold(&event_normalizer) != TurnHold::Released {
+                    state.process = None;
+                }
+                if ensure_harness_process(harness, state)? {
+                    event_normalizer = H::EventNormalizer::default();
+                }
+                let process = state
+                    .process
+                    .as_mut()
+                    .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+                // Drop the finished turn's trailing output before continuing.
+                while process.stdout.try_recv().is_ok() {}
+                // One native turn at a time, so every held steer's answer lands
+                // before the turn's final terminal.
+                let input = held_steers.remove(0);
+                process.stdin.write_all(&harness.stdin_for_turn(&input)?)?;
+                process.stdin.flush()?;
+                settle_deadline = None;
+                hold_deadline = None;
+                native_turn_may_have_ended = false;
+                continue;
+            }
+            // Background work outliving the turn (e.g. an error result while
+            // agents run) would deliver its output into the next turn; stop
+            // it with the process, which the next turn resumes.
+            if harness.turn_hold(&event_normalizer) != TurnHold::Released {
+                state.process = None;
+            }
             if let Some(notification) = normalizer.finish_turn(None)? {
                 if let ServerNotification::TurnCompleted(completed) = &notification {
                     completed_turn = Some(completed.turn.clone());
@@ -1411,9 +1502,6 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         }
     }
 
-    if let Some(session_id) = last_session_id {
-        state.harness_session_id = Some(session_id);
-    }
     if let Some(notification) = normalizer.finish_turn(None)? {
         if let ServerNotification::TurnCompleted(completed) = &notification {
             completed_turn = Some(completed.turn.clone());
@@ -1421,6 +1509,97 @@ fn run_harness_turn<H: HarnessServer, W: Write>(
         write_value(stdout, &notification_to_wire_value(&notification)?)?;
     }
     Ok(completed_turn)
+}
+
+struct StdoutProgress {
+    terminal: bool,
+    assistant_stop: bool,
+    hold: TurnHold,
+}
+
+fn handle_stdout_line<H: HarnessServer, W: Write>(
+    harness: &H,
+    state: &mut ThreadState,
+    normalizer: &mut CodexTurnNormalizer,
+    event_normalizer: &mut H::EventNormalizer,
+    stdout: &mut W,
+    telemetry: &mut TurnTelemetry,
+    line: &str,
+) -> Result<Option<StdoutProgress>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let event = harness.parse_stdout_line(trimmed)?;
+    let normalized_events = harness.normalize_events(event_normalizer, event)?;
+    let mut terminal = false;
+    let mut assistant_stop = false;
+    for normalized in normalized_events {
+        telemetry.observe_normalized(&normalized);
+        if let Some(session_id) = normalized.session_id() {
+            state.harness_session_id = Some(session_id.to_string());
+        }
+        for notification in normalizer.process_event(&normalized)? {
+            let value = notification_to_wire_value(&notification)?;
+            telemetry.observe_tool_notification(&value);
+            write_value(stdout, &value)?;
+        }
+        terminal |= normalized.is_terminal();
+        assistant_stop |= normalized.is_terminal_assistant_stop();
+    }
+    Ok(Some(StdoutProgress {
+        terminal,
+        assistant_stop,
+        hold: harness.turn_hold(event_normalizer),
+    }))
+}
+
+/// Answers every queued request for the active turn and returns the input of
+/// each accepted steer, already recorded as its own user message item.
+fn drain_turn_steers<H: HarnessServer, W: Write>(
+    harness: &H,
+    state: &mut ThreadState,
+    normalizer: &mut CodexTurnNormalizer,
+    stdout: &mut W,
+    request_rx: &Receiver<ActiveTurnRequest>,
+) -> Result<Vec<Vec<UserInput>>> {
+    let mut steers = Vec::new();
+    while let Ok(request) = request_rx.try_recv() {
+        let process = state
+            .process
+            .as_mut()
+            .ok_or(HarnessServerError::HarnessStdinUnavailable)?;
+        match handle_active_turn_request(process, normalizer, request, stdout)? {
+            ActiveTurnAction::Continue => {}
+            ActiveTurnAction::Interrupted => {
+                state.process = None;
+                return Err(HarnessServerError::TurnInterrupted {
+                    kind: harness.kind(),
+                });
+            }
+            ActiveTurnAction::Steer {
+                input,
+                client_user_message_id,
+            } => {
+                accept_steer(normalizer, stdout, client_user_message_id, &input)?;
+                steers.push(input);
+            }
+        }
+    }
+    Ok(steers)
+}
+
+/// Records a steer in the active turn as its own user message item.
+fn accept_steer<W: Write>(
+    normalizer: &mut CodexTurnNormalizer,
+    stdout: &mut W,
+    client_user_message_id: Option<String>,
+    input: &[UserInput],
+) -> Result<()> {
+    for notification in normalizer.emit_user_message(client_user_message_id, input.to_vec())? {
+        write_value(stdout, &notification_to_wire_value(&notification)?)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
@@ -1444,13 +1623,22 @@ pub(crate) fn usage_span_input_value(input: &[UserInput]) -> Option<String> {
     non_empty(Some(&joined)).map(str::to_owned)
 }
 
-fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<()> {
-    if let Some(process) = state.process.as_mut() {
-        if process.child.try_wait()?.is_none() {
-            return Ok(());
-        }
-        state.process = None;
+fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState) -> Result<bool> {
+    if let Some(process) = state.process.as_mut()
+        && (process.model == state.model || !harness.restart_on_model_change())
+        && process.child.try_wait()?.is_none()
+    {
+        return Ok(false);
     }
+    let previous_model = state.process.as_ref().map(|process| process.model.clone());
+    if !state.model.is_empty()
+        && let Err(message) = harness.validate_model(&state.model)
+    {
+        // Fail this turn, and let later turns run the last working model.
+        state.model = previous_model.unwrap_or_else(|| harness.default_model());
+        return Err(HarnessServerError::UnknownModel { message });
+    }
+    state.process = None;
 
     let mut command = harness.command_for_turn(state);
     let mut child = command
@@ -1496,12 +1684,21 @@ fn ensure_harness_process<H: HarnessServer>(harness: &H, state: &mut ThreadState
         }
     });
 
-    state.process = Some(HarnessChild {
+    let mut process = HarnessChild {
         child,
         stdin,
         stdout: stdout_rx,
-    });
-    Ok(())
+        model: state.model.clone(),
+        reasoning_effort: None,
+    };
+    if let Err(error) = harness.on_process_start(state, &mut process) {
+        if matches!(error, HarnessServerError::UnknownModel { .. }) {
+            state.model = previous_model.unwrap_or_else(|| harness.default_model());
+        }
+        return Err(error);
+    }
+    state.process = Some(process);
+    Ok(true)
 }
 
 fn request_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T> {
@@ -1509,8 +1706,12 @@ fn request_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Resu
         .map_err(|source| HarnessServerError::InvalidParams { source })
 }
 
-fn write_client_response<W: Write>(stdout: &mut W, response: ClientResponse) -> Result<()> {
-    let (id, result) = response.into_jsonrpc_parts()?;
+fn write_response<W: Write, T: Serialize>(
+    stdout: &mut W,
+    id: RequestId,
+    response: &T,
+) -> Result<()> {
+    let result = serde_json::to_value(response)?;
     write_value(
         stdout,
         &serde_json::to_value(JSONRPCMessage::Response(JSONRPCResponse { id, result }))?,

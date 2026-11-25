@@ -1,0 +1,161 @@
+{{- if .Values.brain.enabled }}
+{{- $name := include "centaur.componentName" (dict "root" . "component" "brain") }}
+{{- $brain := .Values.brain }}
+{{- $databaseUrl := $brain.databaseUrl }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "brain") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "brain") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $brain.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "brain") | nindent 4 }}
+spec:
+  replicas: {{ $brain.replicaCount }}
+  # nanocode state and the attached output socket are per replica, so replace
+  # the pod instead of running two against the same logical sandboxes.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "brain") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/infra-secrets: {{ include "centaur.infraSecretsChecksum" . }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "brain") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+{{- include "centaur.podScheduling" (dict "values" $brain "indent" 6) }}
+{{- if $databaseUrl.existingSecretName }}
+      initContainers:
+        # The brain owns its schema: apply its migrations (the nanocode schema
+        # and the centaur_brain role) with the database owner's credentials,
+        # which only this init container receives, and set the role's login
+        # password from brain.databaseUrl. The service runs as centaur_brain.
+        - name: migrate
+          image: {{ printf "%s:%s" $brain.image.repository $brain.image.tag | quote }}
+          imagePullPolicy: {{ $brain.image.pullPolicy }}
+          args:
+            - migrate
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sDATABASE_URL" .Values.secretManager.envPrefix }}
+            - name: BRAIN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $databaseUrl.existingSecretName }}
+                  key: {{ required "brain.databaseUrl.secretKey is required when existingSecretName is set" $databaseUrl.secretKey }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- end }}
+      containers:
+        - name: brain
+          image: {{ printf "%s:%s" $brain.image.repository $brain.image.tag | quote }}
+          imagePullPolicy: {{ $brain.image.pullPolicy }}
+          args:
+            - serve
+            - --listen
+            - {{ printf "0.0.0.0:%v" $brain.port | quote }}
+          env:
+            - name: BRAIN_DEFAULT_MODEL
+              value: {{ $brain.defaultModel | quote }}
+            - name: BRAIN_DEFAULT_THINKING
+              value: {{ $brain.defaultThinking | quote }}
+{{- if $databaseUrl.existingSecretName }}
+            - name: BRAIN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $databaseUrl.existingSecretName }}
+                  key: {{ required "brain.databaseUrl.secretKey is required when existingSecretName is set" $databaseUrl.secretKey }}
+{{- end }}
+{{- if and $brain.openaiBaseUrl (not (hasKey $brain.extraEnv "OPENAI_BASE_URL")) }}
+            - name: OPENAI_BASE_URL
+              value: {{ $brain.openaiBaseUrl | quote }}
+{{- end }}
+            # Placeholders: a proxy substitutes real credentials on the wire, and
+            # extraEnv overrides these where a direct key is configured.
+{{- if not (hasKey $brain.extraEnv "OPENAI_API_KEY") }}
+            - name: OPENAI_API_KEY
+              value: OPENAI_API_KEY
+{{- end }}
+{{- if not (hasKey $brain.extraEnv "ANTHROPIC_API_KEY") }}
+            - name: ANTHROPIC_API_KEY
+              value: ANTHROPIC_API_KEY
+{{- end }}
+{{- if $brain.trustReleaseCa }}
+            # nanocode replaces its default roots with the paths in SSL_CERT_FILE
+            # and SSL_CERT_DIR, so keep the image's public bundle and add the
+            # release CA directory. See services/brain/README.md.
+{{- if not (hasKey $brain.extraEnv "SSL_CERT_FILE") }}
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-certificates.crt
+{{- end }}
+{{- if not (hasKey $brain.extraEnv "SSL_CERT_DIR") }}
+            - name: SSL_CERT_DIR
+              value: /etc/centaur-ca
+{{- end }}
+{{- end }}
+            - name: RUST_LOG
+              value: info
+{{- range $name, $value := $brain.extraEnv }}
+            - name: {{ $name }}
+{{- if kindIs "map" $value }}
+{{ toYaml $value | nindent 14 }}
+{{- else }}
+              value: {{ $value | quote }}
+{{- end }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $brain.port }}
+{{- if $brain.trustReleaseCa }}
+          volumeMounts:
+            # Only the certificate is projected; the CA private key never leaves
+            # $firewall.existingCaKeySecretName.
+            - name: release-ca
+              mountPath: /etc/centaur-ca
+              readOnly: true
+{{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+{{ toYaml $brain.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- if $brain.trustReleaseCa }}
+      volumes:
+        - name: release-ca
+          secret:
+            secretName: {{ include "centaur.trustedCaSecretName" . }}
+            items:
+              - key: {{ .Values.firewall.existingCaSecretKey | default "ca-cert.pem" | quote }}
+                path: ca-cert.pem
+{{- end }}
+{{- end }}

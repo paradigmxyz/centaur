@@ -9,8 +9,11 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -652,6 +655,31 @@ class WorkflowHostTests(unittest.TestCase):
         registered.principal = " prn_01k2m3n4p5 "
         self.assertEqual(host.normalize_principal(registered), "prn_01k2m3n4p5")
 
+    def test_load_workflow_file_reads_workflow_starters(self) -> None:
+        host = load_workflow_host()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "starters_workflow.py"
+            path.write_text(
+                "WORKFLOW_NAME = 'starters_workflow'\n"
+                "WORKFLOW_STARTERS = {' console ', 'admin'}\n"
+                "def handler(inp, ctx):\n"
+                "    return None\n"
+            )
+            registered = host.load_workflow_file(path)
+
+        assert registered is not None
+        self.assertEqual(host.normalize_starters(registered), ["admin", "console"])
+
+        registered.starters = None
+        self.assertIsNone(host.normalize_starters(registered))
+
+        registered.starters = "console"
+        self.assertEqual(host.normalize_starters(registered), ["console"])
+
+        # A declared but malformed value fails closed.
+        registered.starters = True
+        self.assertEqual(host.normalize_starters(registered), [])
+
     def test_workflow_name_from_source_reads_string_constant(self) -> None:
         host = load_workflow_host()
         with tempfile.TemporaryDirectory() as tmp:
@@ -744,6 +772,89 @@ class WorkflowHostTests(unittest.TestCase):
 
         self.assertEqual(discovered, {})
         self.assertFalse(marker.exists())
+
+    def test_slack_buttons_post_workflow_target_and_replay_message(self) -> None:
+        source = '''
+from api.workflow_engine import Button
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel=inp["channel"], text="Proceed?", workflow="review_release",
+        input={"release_id": "release-1"},
+        buttons={"approve": Button("Approve", style="primary"),
+                 "reject": Button("Reject", style="danger"),
+                 "later": "Decide later", "details": Button("Details")},
+    )
+'''
+        message = {"ok": True, "channel": "C1", "ts": "1.0"}
+        group_ids = []
+        for channel, replay in [("C1", False), ("C1", True), ("C1", False)]:
+            with self.subTest(channel=channel, replay=replay), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": {"channel": channel},
+                })
+                posts = 0
+                while True:
+                    request = self.read_host_message(proc)
+                    kind = request["type"]
+                    if kind == "workflow.result":
+                        self.assertEqual(request["result"], message)
+                        break
+                    if kind == "ctx.step.get":
+                        self.assertEqual(request["step"], "review.post")
+                        value = {"done": replay, "value": message if replay else None, "checkpoint_name": "review.post"}
+                    elif kind == "ctx.post_to_slack":
+                        posts += 1
+                        self.assertEqual(request["channel"], "C1")
+                        elements = request["args"]["blocks"][1]["elements"]
+                        group_id = request["args"]["client_msg_id"]
+                        group_ids.append(group_id)
+                        self.assertEqual([b["action_id"] for b in elements], [
+                            f"centaur.workflow.action:{group_id}:approve",
+                            f"centaur.workflow.action:{group_id}:reject",
+                            f"centaur.workflow.action:{group_id}:later",
+                            f"centaur.workflow.action:{group_id}:details",
+                        ])
+                        self.assertEqual([b["text"]["text"] for b in elements], ["Approve", "Reject", "Decide later", "Details"])
+                        self.assertEqual([b.get("style") for b in elements], ["primary", "danger", None, None])
+                        for button in elements:
+                            self.assertEqual(json.loads(button["value"]), {
+                                "workflow_name": "review_release", "input": {"release_id": "release-1"},
+                            })
+                        value = message
+                    elif kind == "ctx.step.put":
+                        self.assertEqual(request["value"], message)
+                        value = None
+                    else:
+                        self.fail(f"unexpected host output: {request}")
+                    self.send_host_message(proc, {"type": "ctx.response", "request_id": request["request_id"], "ok": True, "value": value})
+                self.assertEqual(posts, int(not replay))
+                proc.wait(timeout=2)
+                self.assertEqual(proc.returncode, 0)
+        self.assertEqual(group_ids[0], group_ids[1])
+
+    def test_button_configuration_is_validated_before_posting(self) -> None:
+        source = """
+from api.workflow_engine import Button
+WORKFLOW_NAME = "buttons"
+async def handler(inp, ctx):
+    return await ctx.slack_buttons(
+        "review", channel=inp.get("channel", "C1"), workflow="review_release",
+        text=inp.get("text", "Proceed?"), input=inp.get("data", {}),
+        buttons={"approve": Button("Approve", style=inp["style"])} if "style" in inp else inp.get("buttons", {"approve": "Approve"}),
+    )
+"""
+        for inp in [{"buttons": {}}, {"channel": "general"}, {"channel": "#general"}, {"text": "x" * 3001}, {"data": {"large": "x" * 2000}},
+                    {"buttons": {"bad:action": "Bad"}}, {"buttons": {"approve": "x" * 76}},
+                    {"style": "blue"}, {"style": "default"}, {"style": ""}]:
+            with self.subTest(input=inp), self.workflow_host(source) as proc:
+                self.send_host_message(proc, {
+                    "type": "workflow.start", "workflow_name": "buttons",
+                    "task_id": "task-1", "run_id": "run-1", "input": inp,
+                })
+                self.assertEqual(self.read_host_message(proc)["type"], "workflow.error")
+                proc.wait(timeout=2)
 
     def test_failed_workflow_host_exits_with_stdin_open(self) -> None:
         source = (
@@ -1168,6 +1279,201 @@ class WorkflowHostTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
             assert proc.stderr is not None
             self.assertEqual(proc.stderr.read(), "")
+
+
+def http_json(method: str, url: str, body: dict | None = None) -> tuple[int, dict]:
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(url, data=data, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def discover(base: str, workflow_dir: str, **env: str) -> tuple[int, dict]:
+    return http_json("POST", f"{base}/discover", {"workflow_dirs": workflow_dir, "env": env})
+
+
+class DiscoveryServerTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def discovery_server(self, timeout_seconds: float = 30) -> Iterator[str]:
+        host = load_workflow_host()
+        handler = type(
+            "TestDiscoveryHandler",
+            (host.DiscoveryRequestHandler,),
+            {"timeout_seconds": timeout_seconds, "discovery_lock": threading.Lock()},
+        )
+        server = host.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_address[1]}"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+    def test_each_discovery_imports_the_current_workflow_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "first.py").write_text(
+                'WORKFLOW_NAME = "first"\n\nasync def handler(inp, ctx):\n    return inp\n'
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["first"])
+
+                (Path(tmp) / "second.py").write_text(
+                    'WORKFLOW_NAME = "second"\n'
+                    'SCHEDULE = {"schedule_id": "second", "interval_seconds": 60}\n\n'
+                    "async def handler(inp, ctx):\n    return inp\n"
+                )
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                workflows = {w["workflow_name"]: w for w in body["workflows"]}
+                self.assertEqual(sorted(workflows), ["first", "second"])
+                self.assertEqual(workflows["second"]["schedule"]["interval_seconds"], 60)
+
+    def test_a_failed_discovery_is_an_error_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in ("one.py", "two.py"):
+                (Path(tmp) / filename).write_text(
+                    'WORKFLOW_NAME = "same"\n\nasync def handler(inp, ctx):\n    return inp\n'
+                )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 500)
+                self.assertIn("duplicate workflow name", body["error"])
+
+                (Path(tmp) / "two.py").unlink()
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["same"])
+
+    def test_output_from_workflow_code_does_not_affect_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "noisy.py").write_text(
+                'print("loading noisy")\nWORKFLOW_NAME = "noisy"\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["noisy"])
+
+    def test_edits_to_imported_helper_modules_are_picked_up(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workflows = Path(root) / "workflows"
+            (workflows / "helpers").mkdir(parents=True)
+            (workflows / "__init__.py").write_text("")
+            (workflows / "helpers" / "__init__.py").write_text("")
+            helper = workflows / "helpers" / "schedule.py"
+            helper.write_text("INTERVAL = 60\n")
+            (workflows / "report.py").write_text(
+                "from workflows.helpers.schedule import INTERVAL\n\n"
+                'WORKFLOW_NAME = "report"\n'
+                'SCHEDULE = {"schedule_id": "report", "interval_seconds": INTERVAL}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, str(workflows))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 60)
+
+                helper.write_text("INTERVAL = 120\n")
+                status, body = discover(base, str(workflows))
+                self.assertEqual(status, 200)
+                self.assertEqual(body["workflows"][0]["schedule"]["interval_seconds"], 120)
+
+    def test_module_level_config_reads_the_request_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "weekly.py").write_text(
+                "import os\n\n"
+                'WORKFLOW_NAME = "weekly"\n'
+                'SCHEDULE = {"schedule_id": "weekly", "cron": "0 8 * * MON",\n'
+                '            "enabled": os.environ.get("ENABLE_WEEKLY_WORKFLOW", "true") == "true"}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp, ENABLE_WEEKLY_WORKFLOW="false")
+                self.assertEqual(status, 200)
+                self.assertFalse(body["workflows"][0]["schedule"]["enabled"])
+                # The env applies to one pass only.
+                status, body = discover(base, tmp)
+                self.assertTrue(body["workflows"][0]["schedule"]["enabled"])
+                self.assertNotIn("ENABLE_WEEKLY_WORKFLOW", os.environ)
+
+    def test_an_exiting_module_fails_the_pass_without_stopping_the_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "exits.py").write_text(
+                'import sys\nWORKFLOW_NAME = "exits"\nsys.exit(3)\n'
+            )
+            with self.discovery_server() as base:
+                status, body = discover(base, tmp)
+                self.assertEqual(status, 500)
+                self.assertIn("SystemExit", body["traceback"])
+                self.assertEqual(http_json("GET", f"{base}/healthz")[0], 200)
+
+                (Path(tmp) / "exits.py").unlink()
+                self.assertEqual(discover(base, tmp), (200, {"workflows": []}))
+
+    def test_a_hung_import_times_out_while_health_stays_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "hangs.py").write_text(
+                'import time\nWORKFLOW_NAME = "hangs"\ntime.sleep(60)\n'
+            )
+            with self.discovery_server(timeout_seconds=1) as base:
+                results: list[tuple[int, dict]] = []
+                request = threading.Thread(target=lambda: results.append(discover(base, tmp)))
+                request.start()
+                self.assertEqual(http_json("GET", f"{base}/healthz")[0], 200)
+                request.join(timeout=10)
+                self.assertEqual(results[0][0], 504)
+
+    def test_passes_do_not_share_env_and_see_workflow_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "envy.py").write_text(
+                "import os\n"
+                'SEEN = os.environ.get("LEAKED", "unset")\n'
+                'os.environ["LEAKED"] = "set-by-module"\n'
+                'WORKFLOW_NAME = "envy"\n'
+                'SCHEDULE = {"schedule_id": "envy", "interval_seconds": 60,\n'
+                '            "input": {"seen": SEEN, "dirs": os.environ.get("WORKFLOW_DIRS")}}\n\n'
+                "async def handler(inp, ctx):\n    return inp\n"
+            )
+            with self.discovery_server() as base:
+                for _ in range(2):
+                    status, body = discover(base, tmp)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(
+                        body["workflows"][0]["schedule"]["input"], {"seen": "unset", "dirs": tmp}
+                    )
+                self.assertNotIn("LEAKED", os.environ)
+
+    def test_disabled_workflows_are_not_imported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "kept.py").write_text(
+                'WORKFLOW_NAME = "kept"\n\nasync def handler(inp, ctx):\n    return inp\n'
+            )
+            (Path(tmp) / "disabled.py").write_text('WORKFLOW_NAME = "disabled"\nraise SystemExit(1)\n')
+            with self.discovery_server() as base:
+                status, body = discover(
+                    base, tmp, WORKFLOW_ENABLE_MODE="allowlist", WORKFLOW_ALLOWED_NAMES="kept"
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual([w["workflow_name"] for w in body["workflows"]], ["kept"])
+
+    def test_unknown_paths_are_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.discovery_server() as base:
+                self.assertEqual(http_json("GET", f"{base}/discover")[0], 404)
+                self.assertEqual(http_json("POST", f"{base}/run")[0], 404)
+                self.assertEqual(http_json("POST", f"{base}/discover", {"dirs": tmp})[0], 400)
+                self.assertEqual(
+                    http_json("POST", f"{base}/discover", {"workflow_dirs": tmp, "env": {"X": 1}})[0],
+                    400,
+                )
 
 
 if __name__ == "__main__":

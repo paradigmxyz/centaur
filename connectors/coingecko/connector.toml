@@ -1,0 +1,3 @@
+description = "CoinGecko Pro: coin prices, market caps, history, trending, search, categories, exchanges"
+
+secrets = [{type = "http", name = "COINGECKO_API_KEY", mode = "inject", inject_header = "x-cg-pro-api-key", hosts = ["pro-api.coingecko.com"]}]

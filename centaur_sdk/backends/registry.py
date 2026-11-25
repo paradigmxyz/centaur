@@ -4,8 +4,8 @@ Server mode (default): ``StubBackend`` — returns key names as values so the
 firewall can replace them with real secrets in-flight.  ``EnvBackend`` is
 **banned** in server mode; see the ruff per-file-ignores in pyproject.toml.
 
-CLI mode: call ``configure()`` explicitly with ``EnvBackend`` or
-``DotEnvBackend`` before using ``secret()``.
+CLI mode: call ``configure()`` explicitly with ``EnvBackend`` before using
+``secret()``.
 """
 
 from __future__ import annotations

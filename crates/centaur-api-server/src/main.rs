@@ -1,0 +1,318 @@
+mod activity_summary;
+mod args;
+
+use centaur_api_server::{
+    ApiAuthConfig, AppState, build_router_with_app_state, partition_slack_external_team_ids,
+    spawn_scheduled_task_scheduler, spawn_slack_channel_catalog_refresh,
+    warm_slack_public_channel_cache,
+};
+use centaur_session_runtime::SessionRuntime;
+use centaur_session_sqlx::PgSessionStore;
+use centaur_telemetry::{TelemetryConfig, init_telemetry};
+use centaur_workflows::WorkflowRuntime;
+use clap::Parser;
+use thiserror::Error;
+use tokio::net::TcpListener;
+use tracing::{info, warn};
+
+use args::{Args, InstallAgentSandboxCrdsArgs, MigrateArgs};
+
+#[tokio::main]
+async fn main() -> Result<(), ServerError> {
+    init_crypto_provider();
+    let telemetry = init_telemetry(TelemetryConfig::from_env())?;
+
+    if let Some(args) = MigrateArgs::from_command_line() {
+        let result = migrate(args).await;
+        telemetry.shutdown();
+        return result;
+    }
+    if let Some(args) = InstallAgentSandboxCrdsArgs::from_command_line() {
+        let result = install_agent_sandbox_crds(args).await;
+        telemetry.shutdown();
+        return result;
+    }
+
+    let args = Args::parse();
+    info!(enabled = centaur_api_server::mcp_enabled(), "MCP endpoint");
+    let api_auth = ApiAuthConfig::from_env()?;
+    let console_session = args.console_session_config()?;
+    let listener = TcpListener::bind(args.server.bind_addr).await?;
+    info!(
+        bind_addr = %args.server.bind_addr,
+        "starting centaur api-rs server"
+    );
+
+    let mut app_state = AppState::unready(api_auth);
+    if let Some(pool) = args.console_db() {
+        app_state = app_state.with_console_db(pool);
+    }
+    if let Some(pool) = args.console_write_db() {
+        app_state = app_state.with_console_write_db(pool);
+    }
+    if let Some(config) = console_session {
+        app_state = app_state.with_console_session(config);
+    }
+    let app = build_router_with_app_state(app_state.clone());
+    warm_slack_public_channel_cache();
+    let shutdown_state = app_state.clone();
+    let drain_timeout = args.shutdown_execution_drain_timeout();
+    let mut server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                info!("shutdown signal received; handing off in-flight executions");
+                // Hand off before axum starts draining connections: open SSE
+                // streams can keep the server future alive until SIGKILL, and
+                // the lease release must not be lost to that.
+                if let Some(runtime) = shutdown_state.session_runtime() {
+                    runtime.handoff_owned_executions(drain_timeout).await;
+                }
+            })
+            .await
+    });
+
+    tokio::select! {
+        result = &mut server => {
+            result??;
+            telemetry.shutdown();
+            return Ok(());
+        }
+        result = initialize_runtime(args, app_state) => {
+            if let Err(error) = result {
+                server.abort();
+                telemetry.shutdown();
+                return Err(error);
+            }
+        }
+    }
+
+    server.await??;
+    telemetry.shutdown();
+    Ok(())
+}
+
+async fn migrate(args: MigrateArgs) -> Result<(), ServerError> {
+    let store = PgSessionStore::connect(&args.database_url).await?;
+    store.run_migrations(args.text_search).await?;
+    info!(text_search = %args.text_search, "database migrations applied");
+    Ok(())
+}
+
+/// api-rs owns Console's schema: migrate it on every start, then create the
+/// initial operator on a database with no users. Both must finish before
+/// anything below registers principals in it. Unlike the session database,
+/// the Console migrates regardless of `RUN_MIGRATIONS`: its migrations need
+/// only the Console role, which owns its tables, and there is no other way to
+/// apply them.
+async fn prepare_console_db(args: &Args) -> Result<(), ServerError> {
+    let Some(pool) = args.console_write_db() else {
+        return Ok(());
+    };
+    centaur_console_db::migrate(&pool).await?;
+    info!("Console database migrations applied");
+    let Some(admin) = args.console_initial_admin() else {
+        return Ok(());
+    };
+    match centaur_console_db::bootstrap_initial_admin(&pool, &admin).await? {
+        centaur_console_db::Bootstrap::Existing => {}
+        centaur_console_db::Bootstrap::Created { user_id } => info!(
+            user_id,
+            email = %admin.email.trim().to_lowercase(),
+            "created the initial Console admin"
+        ),
+    }
+    Ok(())
+}
+
+async fn install_agent_sandbox_crds(args: InstallAgentSandboxCrdsArgs) -> Result<(), ServerError> {
+    let client = kube::Client::try_default().await?;
+    centaur_sandbox_agent_k8s::install_agent_sandbox_crds(&client, &args.stop_deployments).await?;
+    Ok(())
+}
+
+/// Best effort: a failure here must not keep the control plane from starting.
+async fn seed_legacy_slack_external_team_ids(store: &PgSessionStore, raw: &str) {
+    let entries: Vec<&str> = raw.split([',', ' ', '\t', '\n']).collect();
+    let (team_ids, invalid) = partition_slack_external_team_ids(&entries);
+    if !invalid.is_empty() {
+        warn!(
+            invalid = invalid.join(", "),
+            "skipping invalid SLACKBOT_EXTERNAL_ORG_ALLOWLIST entries"
+        );
+    }
+    if team_ids.is_empty() {
+        return;
+    }
+    match store.seed_slack_external_team_ids(&team_ids).await {
+        Ok(true) => info!(
+            team_count = team_ids.len(),
+            "seeded Slack Connect allowlist from SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+        ),
+        Ok(false) => {}
+        Err(error) => warn!(
+            error = %error,
+            "failed to seed Slack Connect allowlist from SLACKBOT_EXTERNAL_ORG_ALLOWLIST"
+        ),
+    }
+}
+
+async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
+    let store = PgSessionStore::connect(&args.server.database_url).await?;
+    if args.server.run_migrations {
+        store.run_migrations(args.server.text_search).await?;
+    }
+    prepare_console_db(&args).await?;
+    if let Some(raw) = args.server.legacy_slack_external_org_allowlist.as_deref() {
+        seed_legacy_slack_external_team_ids(&store, raw).await;
+    }
+    if let Some(config) = args.activity_summary_config() {
+        let worker = activity_summary::ActivitySummaryWorker::new(store.clone(), config)?;
+        tokio::spawn(worker.run());
+    }
+    let pool = store.pool().clone();
+    let brain = args.brain_client()?;
+    let sandbox_runtime = args.sandbox_runtime().await?;
+    let iron_control = args.iron_control_runtime().await?;
+    let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
+        .with_brain(brain)
+        .with_session_principal_admission(args.session_principal_admission())
+        .with_openai_session_title_generator_from_env();
+    runtime = runtime.with_personas(args.persona_registry()?);
+    if centaur_api_server::mcp_enabled() {
+        let image = args.codemode_image();
+        info!(image = %image, "MCP Code Mode sandboxes enabled");
+        runtime = runtime.with_codemode(image);
+    }
+    let sandbox_capacity_config = args.sandbox_capacity_config();
+    if let Some(config) = sandbox_capacity_config {
+        runtime = runtime.with_sandbox_capacity(config);
+    }
+    let (warm_pools, warm_pool_config) =
+        args.warm_pools(&iron_control.warm_pool_bootstrap_principal)?;
+    runtime = runtime
+        .with_warm_pools(warm_pools, warm_pool_config)
+        .map_err(|error| ServerError::UnsupportedConfig(error.to_string()))?;
+    runtime = runtime.with_sandbox_reaper(args.sandbox_reaper_config());
+    runtime = runtime.with_sandbox_cleanup(args.sandbox_cleanup_config());
+    if let Some(config) = args.session_event_retention_config() {
+        runtime = runtime.with_session_event_retention(config);
+    }
+    let workflow_host_sandbox = args
+        .workflow_host_sandbox_runtime(&iron_control.workflow_host_principal)
+        .await?;
+    let workflows = WorkflowRuntime::new(
+        store,
+        runtime.clone(),
+        workflow_host_sandbox,
+        args.workflow_discovery_client()?,
+        iron_control.workflow_principal_registrar,
+    )
+    .await?;
+    // Console stores scheduled tasks; api-rs runs them.
+    match args.console_db() {
+        Some(console_db) => spawn_scheduled_task_scheduler(console_db, workflows.clone()),
+        None => warn!("Console database is not configured; scheduled tasks will not run"),
+    }
+    // api-rs keeps the Console's Slack channel catalog current.
+    if let Some(console_db) = args.console_write_db() {
+        spawn_slack_channel_catalog_refresh(console_db);
+    }
+    let workflows = Some(workflows);
+
+    // Adopt executions orphaned by another control plane process
+    // (deploy/crash): recover finished turns from recorded sandbox output,
+    // re-attach still running sandboxes, and fail the rest so their threads
+    // unwedge. The scan re-runs periodically because executions can be
+    // orphaned after startup — e.g. a rolling deploy terminates the previous
+    // pod mid-turn after this pod's startup scan already ran.
+    match args.execution_adoption_interval() {
+        Some(interval) => runtime.spawn_orphan_adoption(interval),
+        None => {
+            let adoption_runtime = runtime.clone();
+            tokio::spawn(async move {
+                adoption_runtime.adopt_orphaned_executions().await;
+            });
+        }
+    }
+
+    app_state.mark_ready(runtime, workflows, Some(pool));
+    info!("centaur api-rs runtime initialized");
+    Ok(())
+}
+
+fn init_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM — the signal Kubernetes
+/// sends on pod termination. The binary runs as PID 1 in its container, and
+/// PID 1 ignores signals without installed handlers: without the SIGTERM arm
+/// every rollout burned the full termination grace period and ended in
+/// SIGKILL, never reaching the graceful shutdown path.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(sigterm) => sigterm,
+            Err(error) => {
+                tracing::warn!(%error, "failed to install SIGTERM handler; using ctrl-c only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ServerError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    Store(#[from] centaur_session_sqlx::SessionStoreError),
+    #[error(transparent)]
+    Workflows(#[from] centaur_workflows::WorkflowRuntimeError),
+    #[error(transparent)]
+    KubeConfig(#[from] kube::config::KubeconfigError),
+    #[error(transparent)]
+    KubeInferConfig(#[from] kube::config::InferConfigError),
+    #[error(transparent)]
+    Kube(#[from] kube::Error),
+    #[error(transparent)]
+    Sandbox(#[from] centaur_sandbox_core::SandboxError),
+    #[error(transparent)]
+    AgentSandboxCrds(#[from] centaur_sandbox_agent_k8s::CrdMigrationError),
+    #[error(transparent)]
+    IronProxy(#[from] centaur_iron_proxy::IronProxyConfigError),
+    #[error(transparent)]
+    IronControl(#[from] centaur_iron_control::IronControlError),
+    #[error(transparent)]
+    IronControlRegister(#[from] centaur_iron_control::RegisterError),
+    #[error(transparent)]
+    ConsoleSetup(#[from] centaur_console_db::SetupError),
+    #[error(transparent)]
+    Telemetry(#[from] centaur_telemetry::TelemetryError),
+    #[error(transparent)]
+    ToolDiscovery(#[from] centaur_api_server::ToolDiscoveryError),
+    #[error(transparent)]
+    ActivitySummary(#[from] activity_summary::ActivitySummaryError),
+    #[error(transparent)]
+    ApiAuth(#[from] centaur_api_server::ApiAuthConfigError),
+    #[error("tool source error: {0}")]
+    ToolSource(String),
+    #[error("iron-proxy requires both firewall CA cert and key Secret names")]
+    MissingIronProxyCaSecret,
+    #[error("{0}")]
+    UnsupportedConfig(String),
+}

@@ -1,0 +1,108 @@
+---
+title: Company Context
+description: Choose and enable the company-context ingestion that indexes Slack, Google, and Granola content for agent search.
+---
+
+# Company Context
+
+Company context indexes internal content such as Slack conversations, Google
+Docs, Calendar events, and Granola notes so agents can search it. Ingestion is
+done by the standalone `company-context` service, which is off by default, so a
+default install ingests nothing.
+
+| Values key | Default | What it runs |
+|------------|---------|--------------|
+| `companyContext.enabled` | `false` | The standalone `company-context` service. |
+
+Turning it off stops new ingestion but keeps data already synced.
+
+This key was previously named `experimentalCompanyContext`. The old name is
+still accepted as an alias; when a key is set under both, the old name wins, so
+remove it once you migrate.
+
+## Enable the company-context service
+
+The service indexes content through per-user credentials that people connect
+in the Console, so it starts empty and grows as users connect apps. Each
+indexer only reads what the connecting user can see, and query results are
+limited to what the requesting principal is allowed to see.
+
+### 1. Add the required secrets
+
+The pod does not start unless these keys exist in the shared infra Secret:
+
+| Key | Used for |
+|-----|----------|
+| `OPENAI_API_KEY` | Document embeddings. |
+| `SLACK_BOT_TOKEN` | Listing workspace users so Slack documents show names. |
+| `CENTAUR_JWT_SIGNING_SECRET` | Verifying the sandbox tokens sent to `POST /query`. |
+
+### 2. Choose indexers and scope
+
+Every indexer is on once the service is enabled. Turn off the ones you do not
+want, and narrow Slack before the first sync:
+
+```yaml
+companyContext:
+  enabled: true
+  indexers:
+    drive:
+      enabled: false
+    calendar:
+      enabled: false
+    granola:
+      enabled: true
+    slack:
+      enabled: true
+    custom:
+      enabled: true
+  syncLimits:
+    # Any of public_channel, private_channel, im.
+    slackConversationTypes: [public_channel]
+```
+
+| Indexer | Source credential | Needs |
+|---------|-------------------|-------|
+| `slack` | Each user's Slack OAuth credential (`console.slackDmSync.oauthAppSlug`). | `channels:read` + `channels:history` for public channels, `groups:read` + `groups:history` for private channels, `im:read` + `im:history` for DMs. `files:read` for files. |
+| `drive` | Each user's Google credential (`googleOauthAppSlug`). | `drive.readonly`. |
+| `calendar` | Each user's Google credential (`googleOauthAppSlug`). | `calendar.readonly`. |
+| `granola` | Each user's Granola credential (`granolaOauthAppSlug`). | A connected Granola account. |
+| `custom` | Rows written to `company_context_system.custom_documents`. | Nothing; idle unless a workflow writes documents. |
+
+Slack conversations are discovered from each connected user's memberships, not
+from a workspace-wide channel list. A channel is indexed once a connected user
+is a member of it, and users who never connect Slack add no coverage.
+
+To roll out gradually, list specific users or conversations under
+`syncLimits` (`slackUserIds`, `slackChannelIds`, `googleDriveUserEmails`,
+`googleCalendarUserEmails`, `granolaUserEmails`). An empty list means everyone.
+Narrowing a list removes indexed data that only the excluded entries kept.
+
+### 3. Deploy and verify
+
+Deploy, then check that the `company-context` pod is ready and that a sandbox
+can search:
+
+```bash
+kubectl --context <context> -n <namespace> get pods -l app.kubernetes.io/component=company-context
+```
+
+When the service is enabled, the chart also gives sandboxes
+`COMPANY_CONTEXT_API_URL` so the `company_context` Code Mode connector and the
+`slack search` command can query it.
+
+## Legacy v1 ingestion has been removed
+
+The v1 ingestion paths have been removed: the api-rs Slack, Google Drive,
+Google Calendar, Linear, and Attio ETL workflows, the company-context document
+and embedding workflows, and the Console Slack DM, Google Docs, and Granola sync
+jobs. The `legacyCompanyContext` (formerly `companyContextV1`),
+`apiRs.etl.slack`, `apiRs.etl.linear`, `apiRs.etl.googleDrive`,
+`apiRs.etl.googleCalendar`, `apiRs.etl.companyContextDocuments`, and
+`console.googleDocsSync` values no longer have any effect, and neither do
+`apiRs.etl.companyContextEmbeddings` and the other `apiRs.etl` values, now that
+the `company_context` shell CLI that searched the v1 tables has also been
+removed. Running `company_context` in a sandbox now fails with directions to the
+`company_context` Code Mode connector. Data those paths already synced is kept
+in the database but is no longer updated. Use the company-context service
+described above.

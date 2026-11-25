@@ -1,0 +1,3 @@
+description = "Synoptic: X/Twitter profiles, followers, following, tweets, search, timelines and long-form articles"
+
+secrets = [{type = "http", name = "SYNOPTIC_API_KEY", match_headers = ["x-api-key"], hosts = ["api.synoptic.com"]}]

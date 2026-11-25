@@ -249,6 +249,11 @@ export const slackbotMetrics = {
     labelNames: ['mode', 'outcome'],
     name: 'slackbotv2_forward_messages_total'
   }),
+  generativeUiCards: counter({
+    help: 'json-render cards found in Slack final answers, by outcome (rendered, or why the block stayed as code).',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_generative_ui_cards_total'
+  }),
   handoffRetries: counter({
     help: 'In-process Slack handoff retries after retryable session API failures.',
     labelNames: ['outcome'],
@@ -262,6 +267,11 @@ export const slackbotMetrics = {
     help: 'Unix timestamp of the last successful Slack render completion.',
     labelNames: ['source'],
     name: 'slackbotv2_last_successful_render_timestamp_seconds'
+  }),
+  proactiveDecisions: counter({
+    help: 'Unmentioned replies in subscribed threads by proactive decision outcome.',
+    labelNames: ['outcome'],
+    name: 'slackbotv2_proactive_decisions_total'
   }),
   renderAnswerDivergence: counter({
     help: 'Live renders where the recomposed answer diverged from already-streamed text, so a delta was suppressed to avoid interleaving the message (once per render).',

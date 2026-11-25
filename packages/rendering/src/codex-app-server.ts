@@ -49,6 +49,7 @@ type CodexMapperState = {
   harnessAnswerText: string
   answerText: string
   commentaryByItemId: Map<string, string>
+  unphasedByItemId: Map<string, string>
   harnessCommentaryText: string
   commentaryText: string
   completedItemIds: Set<string>
@@ -64,6 +65,7 @@ type CodexMapperState = {
   emittedActivityRunByTaskId: Map<string, string>
   emittedActivityOutputByTaskId: Map<string, string>
   emittedActivitySignatureByTaskId: Map<string, string>
+  interrupted: boolean
   done: boolean
 }
 
@@ -78,6 +80,10 @@ export type CodexAppServerRendererEventMapperOptions = {
   // consumers that stream text into their own surface (discordbot) pass 0 to
   // emit deltas immediately. Default 500ms (Slack card-first rendering).
   preStreamGraceMs?: number
+  // When a stop interrupts the execution, end without adding the
+  // "Execution interrupted." notice (or the empty-answer placeholder) when no
+  // answer text was produced. Partial answer text is still kept.
+  silentInterrupt?: boolean
 }
 
 export type CodexAppServerToChatStreamOptions = CodexAppServerRendererEventMapperOptions & {
@@ -92,15 +98,19 @@ export class CodexAppServerRendererEventMapper
   private readonly sessionId: string
   private readonly logInfo?: RendererLogInfo
   private readonly unknownAgentMessagePhase: AgentMessagePhase
+  private readonly deferUnphasedAgentMessages: boolean
   private readonly includeTaskOutput: boolean
   private readonly preStreamGraceMs: number
+  private readonly silentInterrupt: boolean
 
   constructor(options: CodexAppServerRendererEventMapperOptions = {}) {
     this.sessionId = options.sessionId ?? ''
     this.logInfo = options.logInfo
     this.unknownAgentMessagePhase = options.unknownAgentMessagePhase ?? 'final_answer'
+    this.deferUnphasedAgentMessages = options.unknownAgentMessagePhase === undefined
     this.includeTaskOutput = options.taskOutput === 'full'
     this.preStreamGraceMs = options.preStreamGraceMs ?? PRE_STREAM_GRACE_MS
+    this.silentInterrupt = options.silentInterrupt === true
   }
 
   process(source: ServerNotification | RustSessionStreamEvent | unknown): RendererEvent[] {
@@ -109,6 +119,12 @@ export class CodexAppServerRendererEventMapper
     const rustMapped = rustSessionEventToServerNotification(source)
     if (rustMapped?.kind === 'failed') return this.fail(rustMapped.error)
     if (rustMapped?.kind === 'completed') return this.complete(rustMapped.resultText)
+    if (rustMapped?.kind === 'cancelled') {
+      this.state.interrupted = true
+      return this.complete(
+        rustMapped.resultText || (this.silentInterrupt ? undefined : rustMapped.notice)
+      )
+    }
     if (rustMapped?.kind === 'status')
       return [{ type: 'renderer.status', status: rustMapped.status }]
     if (rustMapped?.kind === 'notification') return this.processNotification(rustMapped.notification)
@@ -120,6 +136,7 @@ export class CodexAppServerRendererEventMapper
 
   flush(): RendererEvent[] {
     if (this.state.done) return []
+    promoteUnphasedMessages(this.state)
     this.state.done = true
     const out: RendererEvent[] = []
     completeOpenTasks(this.state)
@@ -129,6 +146,7 @@ export class CodexAppServerRendererEventMapper
     out.push({
       type: 'renderer.done',
       answerMarkdown: this.state.answerText,
+      ...(this.state.interrupted ? { interrupted: true } : {}),
       streamFinalUpdates: true,
       threadId: this.state.threadId || undefined
     })
@@ -137,6 +155,7 @@ export class CodexAppServerRendererEventMapper
 
   private complete(resultText?: string): RendererEvent[] {
     if (this.state.done) return []
+    promoteUnphasedMessages(this.state)
     const normalized = resultText?.trim() ?? ''
     if (normalized && !this.state.answerText.trim()) {
       const out: RendererEvent[] = []
@@ -178,6 +197,10 @@ export class CodexAppServerRendererEventMapper
 
     trackAgentMessageLifecycle(event, this.state)
     ensureCommentarySegmentBreak(event, this.state)
+    if (this.deferUnphasedAgentMessages) {
+      prepareUnphasedMessage(event, this.state)
+      if (eventContinuesTurn(event)) this.state.unphasedByItemId.clear()
+    }
 
     const structuredPlan = structuredPlanUpdate(event)
     if (structuredPlan) {
@@ -229,6 +252,15 @@ export class CodexAppServerRendererEventMapper
     if (fileChange) {
       const existing = this.state.taskByUseId.get(fileChangeId(fileChange))
       const task = fileChangeTask(fileChange, String(event?.type ?? ''), existing)
+      const merged = mergeTask(existing, task)
+      this.state.taskByUseId.set(merged.id, merged)
+      this.emitActivitySummary(out)
+    }
+
+    const backgroundAgent = backgroundAgentEvent(event)
+    if (backgroundAgent) {
+      const existing = this.state.taskByUseId.get(String(backgroundAgent.id))
+      const task = backgroundAgentTask(backgroundAgent, String(event?.type ?? ''))
       const merged = mergeTask(existing, task)
       this.state.taskByUseId.set(merged.id, merged)
       this.emitActivitySummary(out)
@@ -302,14 +334,18 @@ export class CodexAppServerRendererEventMapper
     }
 
     if (isTerminalCodexAppServerEvent(event)) {
+      promoteUnphasedMessages(this.state)
       const resultText = terminalResultText(event)
       const willClose = Boolean(resultText || event?.type !== 'result')
       this.logCodexTerminalEventReceived(event, {
         resultText,
         willClose
       })
-      if (resultText && !this.state.answerText.trim()) {
-        this.state.harnessAnswerText += resultText
+      if (isInterruptedTurn(event)) this.state.interrupted = true
+      const finalText =
+        resultText || (this.state.interrupted && !this.silentInterrupt ? INTERRUPTED_TEXT : '')
+      if (finalText && !this.state.answerText.trim()) {
+        this.state.harnessAnswerText += finalText
         recomposeBuffers(this.state)
         this.emitPendingAssistantText(out, { force: true })
       }
@@ -358,6 +394,7 @@ export class CodexAppServerRendererEventMapper
 
   private ensureFinalAnswerText(): void {
     if (this.state.answerText.trim()) return
+    if (this.state.interrupted && this.silentInterrupt) return
     this.state.harnessAnswerText += EMPTY_FINAL_ANSWER_TEXT
     recomposeBuffers(this.state)
   }
@@ -437,32 +474,14 @@ export class CodexAppServerRendererEventMapper
     })
   }
 
-  private activeAssistantBuffer(event: ServerNotification): 'commentary' | 'answer' {
+  private activeAssistantBuffer(
+    event: ServerNotification
+  ): 'commentary' | 'answer' | 'unphased' {
     if (event?.type === 'item.agentMessage.delta' || event?.type === 'item.completed') {
       const codexId = agentMessageEventId(event)
       const itemPhase = this.state.agentMessagePhaseByItemId.get(codexId)
       if (itemPhase) return itemPhase === 'final_answer' ? 'answer' : 'commentary'
-      if (
-        event?.type === 'item.completed' &&
-        (event?.item?.type === 'agentMessage' || event?.item?.type === 'agent_message') &&
-        this.state.taskByUseId.size > 0
-      ) {
-        this.log('codex_renderer_unphased_final_agent_message_classified', {
-          agent_session_id: this.sessionId,
-          centaur_thread_key: event?.centaur_thread_key,
-          execution_id: event?.centaur_execution_id,
-          assignment_generation: event?.centaur_assignment_generation,
-          codex_id: codexId,
-          codex_item_id: codexId,
-          codex_item_type: event?.item?.type,
-          codex_session_id: this.state.threadId || event?.session_id || event?.thread_id,
-          task_count: this.state.taskByUseId.size,
-          commentary_chars: this.state.commentaryText.length,
-          answer_chars: this.state.answerText.length,
-          item_text_chars: String(event?.item?.text ?? '').length
-        })
-        return 'answer'
-      }
+      if (codexId && this.deferUnphasedAgentMessages) return 'unphased'
       if (codexId) return this.unknownAgentMessagePhase === 'final_answer' ? 'answer' : 'commentary'
       return (this.state.agentMessagePhase ?? this.unknownAgentMessagePhase) === 'final_answer'
         ? 'answer'
@@ -473,7 +492,7 @@ export class CodexAppServerRendererEventMapper
 
   private applyAgentMessageUpdate(
     event: ServerNotification,
-    buffer: 'answer' | 'commentary'
+    buffer: 'answer' | 'commentary' | 'unphased'
   ): {
     bufferChanged: boolean
     correction?: { previous: string; canonical: string }
@@ -484,9 +503,9 @@ export class CodexAppServerRendererEventMapper
       if (!itemId || this.state.completedItemIds.has(itemId)) return { bufferChanged: false }
       const delta = extractDeltaText(event)
       if (!delta) return { bufferChanged: false }
-      const byId = buffer === 'answer' ? this.state.answerByItemId : this.state.commentaryByItemId
+      const byId = messageBuffer(this.state, buffer)
       byId.set(itemId, (byId.get(itemId) ?? '') + delta)
-      recomposeBuffers(this.state)
+      if (buffer !== 'unphased') recomposeBuffers(this.state)
       return { bufferChanged: true }
     }
 
@@ -503,12 +522,12 @@ export class CodexAppServerRendererEventMapper
         })
         return { bufferChanged: false }
       }
-      const byId = buffer === 'answer' ? this.state.answerByItemId : this.state.commentaryByItemId
+      const byId = messageBuffer(this.state, buffer)
       const previous = byId.get(itemId) ?? ''
       this.state.completedItemIds.add(itemId)
       if (canonical === previous) return { bufferChanged: false }
       byId.set(itemId, canonical)
-      recomposeBuffers(this.state)
+      if (buffer !== 'unphased') recomposeBuffers(this.state)
       return {
         bufferChanged: true,
         correction: previous ? { previous, canonical } : undefined
@@ -629,10 +648,14 @@ async function* renderChatSdkChunks(
   }
 }
 
+export const INTERRUPTED_TEXT = 'Execution interrupted.'
+
 export type RustSessionMappingResult =
   | { kind: 'notification'; notification: ServerNotification }
   | { kind: 'failed'; error: string }
   | { kind: 'completed'; resultText?: string }
+  // `notice` is the interruption wording shown when no answer text exists.
+  | { kind: 'cancelled'; resultText?: string; notice: string }
   | { kind: 'status'; status: string }
   | null
 
@@ -678,11 +701,11 @@ export function rustSessionEventToServerNotification(source: unknown): RustSessi
 
   if (eventKind === 'session.execution_cancelled') {
     const data = isRecord(source.data) ? source.data : source
-    const resultText =
-      terminalResultText(data).trim() || String(data.error ?? 'Execution interrupted').trim()
+    const resultText = terminalResultText(data).trim()
     return {
-      kind: 'completed',
-      ...(resultText ? { resultText } : {})
+      kind: 'cancelled',
+      ...(resultText ? { resultText } : {}),
+      notice: String(data.error ?? INTERRUPTED_TEXT).trim() || INTERRUPTED_TEXT
     }
   }
 
@@ -715,6 +738,7 @@ function newState(): CodexMapperState {
     harnessAnswerText: '',
     answerText: '',
     commentaryByItemId: new Map(),
+    unphasedByItemId: new Map(),
     harnessCommentaryText: '',
     commentaryText: '',
     completedItemIds: new Set(),
@@ -730,6 +754,7 @@ function newState(): CodexMapperState {
     emittedActivityRunByTaskId: new Map(),
     emittedActivityOutputByTaskId: new Map(),
     emittedActivitySignatureByTaskId: new Map(),
+    interrupted: false,
     done: false
   }
 }
@@ -782,6 +807,10 @@ export function isRetryableCodexErrorNotification(source: unknown): boolean {
   return event.willRetry === true
 }
 
+function isInterruptedTurn(event: any): boolean {
+  return String(event?.turn?.status ?? event?.status ?? '').toLowerCase() === 'interrupted'
+}
+
 function isFailedTurn(event: any): boolean {
   const status = String(event?.turn?.status ?? event?.status ?? '').toLowerCase()
   return status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled'
@@ -817,7 +846,60 @@ function trackAgentMessageLifecycle(event: any, state: CodexMapperState): void {
   if (!phase) return
   state.agentMessagePhase = phase
   const id = agentMessageEventId(event)
-  if (id) state.agentMessagePhaseByItemId.set(id, phase)
+  if (!id) return
+  state.agentMessagePhaseByItemId.set(id, phase)
+  // Deltas received before the phase was known are superseded by the phased text.
+  state.unphasedByItemId.delete(id)
+}
+
+function prepareUnphasedMessage(event: any, state: CodexMapperState): void {
+  if (event?.type !== 'item.started') return
+  const itemType = event?.item?.type
+  if (itemType !== 'agentMessage' && itemType !== 'agent_message') return
+  if (agentMessageItemPhase(event?.item)) state.unphasedByItemId.clear()
+}
+
+function eventContinuesTurn(event: any): boolean {
+  const type = String(event?.type ?? '')
+  if (type.startsWith('item.reasoning.')) return true
+  if (type === 'item.started' || type === 'item.updated' || type === 'item.completed') {
+    // Every item other than a message is work: commands, file changes, tool,
+    // MCP, web search and sub-agent calls, reasoning, compaction, and so on.
+    const itemType = String(event?.item?.type ?? '')
+    return (
+      itemType !== '' &&
+      itemType !== 'agentMessage' &&
+      itemType !== 'agent_message' &&
+      itemType !== 'userMessage' &&
+      itemType !== 'user_message'
+    )
+  }
+  return (
+    type === 'turn.plan.updated' ||
+    type === 'item.plan.delta' ||
+    toolUses(event).length > 0 ||
+    toolResults(event).length > 0
+  )
+}
+
+// Work events discard buffered unphased messages, so every message still
+// buffered at the end of the turn came after the last tool call: the answer.
+function promoteUnphasedMessages(state: CodexMapperState): void {
+  if (state.unphasedByItemId.size === 0) return
+  for (const [id, text] of state.unphasedByItemId) {
+    if (text) state.answerByItemId.set(id, text)
+  }
+  state.unphasedByItemId.clear()
+  recomposeBuffers(state)
+}
+
+function messageBuffer(
+  state: CodexMapperState,
+  buffer: 'answer' | 'commentary' | 'unphased'
+): Map<string, string> {
+  if (buffer === 'answer') return state.answerByItemId
+  if (buffer === 'commentary') return state.commentaryByItemId
+  return state.unphasedByItemId
 }
 
 function agentMessageEventId(event: any): string {
@@ -867,8 +949,18 @@ function recomposeBuffers(state: CodexMapperState): void {
 
 function compose(byItemId: Map<string, string>, trailing: string): string {
   let out = ''
-  for (const value of byItemId.values()) out += value
-  return trailing ? out + trailing : out
+  for (const value of [...byItemId.values(), trailing]) {
+    if (!value) continue
+    if (out) {
+      // Items are separate assistant messages; only deltas within an item
+      // concatenate without a boundary. Preserve any existing newlines.
+      const newlines = (out.match(/\n*$/)?.[0].length ?? 0)
+        + (value.match(/^\n*/)?.[0].length ?? 0)
+      out += '\n'.repeat(Math.max(0, 2 - newlines))
+    }
+    out += value
+  }
+  return out
 }
 
 function extractDeltaText(event: any): string {
@@ -950,6 +1042,32 @@ function fileChangeEvent(event: any): Record<string, any> | null {
   const item = event.item
   if (!item || (item.type !== 'fileChange' && item.type !== 'file_change')) return null
   return item
+}
+
+// Claude Code background subagents, projected by harness-server as
+// `BackgroundAgent` dynamic tool items that stay in progress until the agent
+// reports back.
+function backgroundAgentEvent(event: any): Record<string, any> | null {
+  if (event?.type !== 'item.started' && event?.type !== 'item.completed') return null
+  const item = event.item
+  if (item?.type !== 'dynamicToolCall' || item.tool !== 'BackgroundAgent') return null
+  return item
+}
+
+function backgroundAgentTask(item: any, eventType: string): HarnessTask {
+  const description = String(item.arguments?.description ?? '').trim()
+  const summary = (Array.isArray(item.contentItems) ? item.contentItems : [])
+    .map((part: any) => String(part?.text ?? ''))
+    .join('\n')
+    .trim()
+  const failed = item.status === 'failed' || item.success === false
+  return {
+    id: String(item.id),
+    title: description ? `Agent: ${oneLine(description)}` : 'Agent',
+    status: failed ? 'error' : itemStatus(item, eventType),
+    details: [],
+    output: summary ? [section([text(oneLine(summary, 220))])] : []
+  }
 }
 
 function structuredPlanUpdate(event: any): Array<{ step: string; status?: string }> | null {

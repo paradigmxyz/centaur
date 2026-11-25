@@ -30,9 +30,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use codex_app_server_protocol::UserInput;
 use serde_json::{Value, json};
 
+use crate::protocol::UserInput;
 use crate::server::{BlocksCommand, BlocksState, parse_blocks_line_with_state, write_blocks_error};
 use crate::traits::{
     NormalizedContent, NormalizedEvent, NormalizedTokenUsage, NormalizedToolResult,
@@ -92,9 +92,13 @@ pub fn run_hermes_blocks_server() -> Result<()> {
                 model,
                 provider: _,
                 reasoning,
-                trace_context: _,
+                trace_context,
             }) => {
                 turn += 1;
+                crate::session_prompt::run_session_prompt_hooks(Some(&trace_context), "hermes");
+                // Hermes has no turn telemetry, but programs it runs still
+                // parent their spans on the turn.
+                let _trace_file = crate::turn_trace::TurnTraceFile::write(&trace_context);
                 let result = ensure_child(&mut hermes, model).and_then(|child| {
                     run_hermes_turn(
                         child,

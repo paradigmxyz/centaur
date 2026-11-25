@@ -1,4 +1,4 @@
-"""GSuite API client for Gmail, Calendar, and Drive."""
+"""GSuite API client for Gmail, Calendar, Directory, and Drive."""
 
 import base64
 import io
@@ -6,6 +6,8 @@ import mimetypes
 import os
 import re
 import urllib.request
+import uuid
+from collections.abc import Callable
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlsplit
@@ -14,7 +16,7 @@ import httplib2
 import socks
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import HttpRequest, MediaIoBaseDownload, MediaIoBaseUpload
 
 from centaur_sdk import current_thread_key, save_attachment, secret
 
@@ -83,6 +85,11 @@ def get_gmail_service():
 def get_calendar_service():
     """Get authenticated Calendar service."""
     return build("calendar", "v3", http=_build_http())
+
+
+def get_people_service():
+    """Get the People service using the shared proxy transport."""
+    return build("people", "v1", http=_build_http())
 
 
 def get_drive_service():
@@ -469,6 +476,84 @@ def calendar_events(
     return events
 
 
+# Google Meet is not a plain event field: the body carries a conferencing
+# createRequest and the call must opt in with conferenceDataVersion=1, or
+# Calendar silently drops conferenceData and returns an event with no link.
+_MEET_SOLUTION_KEY = "hangoutsMeet"
+
+
+def _conference_create_request() -> dict:
+    """Body fragment asking Calendar to mint a Google Meet conference.
+
+    ``requestId`` is the mint's idempotency key: Calendar reuses the existing
+    conference when the same id is replayed, so it must be fresh per event.
+    """
+    return {
+        "createRequest": {
+            "requestId": uuid.uuid4().hex,
+            "conferenceSolutionKey": {"type": _MEET_SOLUTION_KEY},
+        }
+    }
+
+
+def _is_material_change(
+    *,
+    summary: str | None,
+    start: str | None,
+    end: str | None,
+    location: str | None,
+    attendees_added: bool,
+    conference_added: bool,
+) -> bool:
+    """Whether an edit is one an attendee needs to be told about.
+
+    When, where, what it is called, who else is coming, and whether there is
+    now a call to join. Description-only edits are deliberately excluded: they
+    are the common case for tidying wording, and mailing everyone for that
+    trains people to ignore the notices that matter.
+
+    The field tests are truthiness, not ``is not None``, to match how
+    calendar_update_event applies them: it writes a field only when the value
+    is truthy, so an empty string changes nothing and must not send mail.
+    Likewise ``attendees_added`` is whether the merge actually appended
+    somebody, not whether the caller passed a list -- re-passing an existing
+    guest is a no-op nobody needs to hear about.
+    """
+    return (
+        any(field for field in (summary, start, end, location))
+        or attendees_added
+        or conference_added
+    )
+
+
+def _meet_link(event: dict) -> str:
+    """Return the event's Google Meet URL, or "" when it has none."""
+    link = event.get("hangoutLink")
+    if link:
+        return link
+
+    for entry in event.get("conferenceData", {}).get("entryPoints", []):
+        if entry.get("entryPointType") == "video" and entry.get("uri"):
+            return entry["uri"]
+
+    return ""
+
+
+def _await_meet_link(service, calendar_id: str, event: dict) -> str:
+    """Return the Meet URL, re-fetching the event once if the mint is pending.
+
+    Calendar can answer the write before the conference exists, leaving a
+    pending createRequest and no entry points. One re-fetch settles it in
+    practice and spares callers from polling.
+    """
+    link = _meet_link(event)
+    if link or not event.get("id"):
+        return link
+
+    refreshed = service.events().get(calendarId=calendar_id, eventId=event["id"]).execute()
+    return _meet_link(refreshed)
+
+
 def calendar_create_event(
     summary: str,
     start: str,
@@ -477,6 +562,7 @@ def calendar_create_event(
     description: str | None = None,
     location: str | None = None,
     attendees: list[str] | None = None,
+    conference: bool = False,
 ) -> dict:
     """Create a calendar event.
 
@@ -488,9 +574,10 @@ def calendar_create_event(
         description: Event description
         location: Event location
         attendees: List of attendee emails
+        conference: Attach a Google Meet conference to the event
 
     Returns:
-        Dict with id, html_link
+        Dict with id, html_link, meet_link (meet_link is "" without conference)
     """
     service = get_calendar_service()
 
@@ -512,12 +599,18 @@ def calendar_create_event(
     if attendees:
         event["attendees"] = [{"email": email} for email in attendees]
 
+    insert_kwargs = {}
+    if conference:
+        event["conferenceData"] = _conference_create_request()
+        insert_kwargs["conferenceDataVersion"] = 1
+
     result = (
         service.events()
         .insert(
             calendarId=calendar_id,
             body=event,
             sendUpdates="all" if attendees else "none",
+            **insert_kwargs,
         )
         .execute()
     )
@@ -525,6 +618,7 @@ def calendar_create_event(
     return {
         "id": result.get("id", ""),
         "html_link": result.get("htmlLink", ""),
+        "meet_link": _await_meet_link(service, calendar_id, result) if conference else "",
     }
 
 
@@ -537,6 +631,8 @@ def calendar_update_event(
     description: str | None = None,
     location: str | None = None,
     add_attendees: list[str] | None = None,
+    conference: bool = False,
+    notify: bool | None = None,
 ) -> dict:
     """Update a calendar event.
 
@@ -549,9 +645,13 @@ def calendar_update_event(
         description: New description
         location: New location
         add_attendees: List of attendee emails to add
+        conference: Attach a Google Meet conference if the event lacks one
+        notify: Email the attendees. Defaults to notifying when the event has
+            attendees and the change is material (see _is_material_change);
+            pass True or False to decide explicitly.
 
     Returns:
-        Dict with id, html_link
+        Dict with id, html_link, meet_link ("" when the event has no Meet)
     """
     service = get_calendar_service()
 
@@ -575,13 +675,37 @@ def calendar_update_event(
         else:
             event["end"] = {"date": end}
 
+    attendees_added = False
     if add_attendees:
         existing = event.get("attendees", [])
         existing_emails = {a.get("email", "").lower() for a in existing}
         for email in add_attendees:
             if email.lower() not in existing_emails:
                 existing.append({"email": email})
+                existing_emails.add(email.lower())
+                attendees_added = True
         event["attendees"] = existing
+
+    # conferenceDataVersion defaults to 0, under which Calendar ignores the
+    # conferenceData we just read back -- that is what keeps an existing Meet
+    # intact on an ordinary update.
+    update_kwargs = {}
+    conference_added = False
+    if conference:
+        update_kwargs["conferenceDataVersion"] = 1
+        if not event.get("conferenceData"):
+            event["conferenceData"] = _conference_create_request()
+            conference_added = True
+
+    if notify is None:
+        notify = bool(event.get("attendees")) and _is_material_change(
+            summary=summary,
+            start=start,
+            end=end,
+            location=location,
+            attendees_added=attendees_added,
+            conference_added=conference_added,
+        )
 
     result = (
         service.events()
@@ -589,7 +713,8 @@ def calendar_update_event(
             calendarId=calendar_id,
             eventId=event_id,
             body=event,
-            sendUpdates="all" if add_attendees else "none",
+            sendUpdates="all" if notify else "none",
+            **update_kwargs,
         )
         .execute()
     )
@@ -597,7 +722,36 @@ def calendar_update_event(
     return {
         "id": result.get("id", ""),
         "html_link": result.get("htmlLink", ""),
+        "meet_link": _await_meet_link(service, calendar_id, result) if conference else "",
     }
+
+
+def calendar_delete_event(
+    event_id: str,
+    calendar_id: str = "primary",
+    notify: bool = True,
+) -> dict:
+    """Delete a calendar event.
+
+    Args:
+        event_id: Event ID to delete
+        calendar_id: Calendar ID (default: primary)
+        notify: Email the attendees that the event was cancelled. Defaults to
+            True: a cancellation nobody is told about just leaves the meeting
+            sitting on everyone's calendar.
+
+    Returns:
+        Dict with id, deleted
+    """
+    service = get_calendar_service()
+
+    service.events().delete(
+        calendarId=calendar_id,
+        eventId=event_id,
+        sendUpdates="all" if notify else "none",
+    ).execute()
+
+    return {"id": event_id, "deleted": True}
 
 
 def calendar_rsvp(
@@ -687,15 +841,22 @@ def drive_list(
 
     q_parts.append("trashed = false")
 
+    # The default "user" corpus omits shared drive content reached only through
+    # membership, even with includeItemsFromAllDrives.
     kwargs = {
         "pageSize": max_results,
-        "fields": "files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
+        "fields": "incompleteSearch,files(id, name, mimeType, size, modifiedTime, webViewLink, parents)",
         "q": " and ".join(q_parts) if q_parts else None,
+        "corpora": "allDrives",
         "includeItemsFromAllDrives": True,
         "supportsAllDrives": True,
     }
 
     results = service.files().list(**kwargs).execute()
+    if results.get("incompleteSearch"):
+        raise RuntimeError(
+            "Google Drive could not search all drives; narrow the search to a specific drive"
+        )
 
     return [
         {
@@ -709,6 +870,43 @@ def drive_list(
         }
         for f in results.get("files", [])
     ]
+
+
+def drive_list_drives(max_results: int = 100) -> list[dict]:
+    """List the shared drives the account is a member of.
+
+    Args:
+        max_results: Maximum number of results
+
+    Returns:
+        List of drive dicts with id and name. Use the id as ``folder_id`` in
+        ``drive_list`` to browse a drive's top level.
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    drives: list[dict] = []
+    page_token: str | None = None
+
+    while len(drives) < max_results:
+        request_args = {
+            "pageSize": min(100, max_results - len(drives)),
+            "fields": "nextPageToken,drives(id,name)",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.drives().list(**request_args).execute()
+        drives.extend(
+            {"id": drive["id"], "name": drive.get("name", "")}
+            for drive in result.get("drives", [])
+        )
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return drives[:max_results]
 
 
 def _drive_download_bytes(file_id: str) -> tuple[dict, bytes]:
@@ -1435,13 +1633,13 @@ def drive_label_folder(
 def drive_setup_channel_permissions(
     file_id: str,
     channel_member_emails: list[str],
-    requester_email: str,
+    requester_email: str | None,
 ) -> dict:
-    """Set up file permissions for Slack channel members and transfer ownership.
+    """Set up file permissions for Slack channel members and optionally transfer ownership.
 
     This function:
     1. Shares the file with all channel members (writer role)
-    2. Transfers ownership to the requester
+    2. Transfers ownership when a requester is provided
 
     Note: The original owner (service account) is automatically downgraded to
     editor by Google Drive when ownership is transferred, and retains access.
@@ -1452,7 +1650,7 @@ def drive_setup_channel_permissions(
         file_id: The Google Drive file ID
         channel_member_emails: List of email addresses for channel members
             (obtained from Slack via get_channel_members_with_emails)
-        requester_email: Email of the person who requested the file (new owner)
+        requester_email: Optional email of the person who requested the file (new owner)
 
     Returns:
         Dict with results: shared_with, new_owner, errors
@@ -1759,6 +1957,101 @@ def docs_get_text(document_id: str) -> str:
         return extract_text_from_content(content)
 
 
+DRIVE_COMMENT_FIELDS = (
+    "id,content,htmlContent,anchor,quotedFileContent,resolved,deleted,"
+    "createdTime,modifiedTime,assigneeEmailAddress,mentionedEmailAddresses,"
+    "author(displayName,photoLink,me),"
+    "replies(id,content,htmlContent,action,deleted,createdTime,modifiedTime,"
+    "assigneeEmailAddress,mentionedEmailAddresses,author(displayName,photoLink,me))"
+)
+
+
+def _normalize_drive_comment_user(user: dict) -> dict:
+    return {
+        "display_name": user.get("displayName", ""),
+        "photo_link": user.get("photoLink", ""),
+        "is_me": user.get("me", False),
+    }
+
+
+def _normalize_drive_reply(reply: dict) -> dict:
+    return {
+        "id": reply.get("id", ""),
+        "content": reply.get("content", ""),
+        "html_content": reply.get("htmlContent", ""),
+        "action": reply.get("action", ""),
+        "deleted": reply.get("deleted", False),
+        "created_time": reply.get("createdTime", ""),
+        "modified_time": reply.get("modifiedTime", ""),
+        "author": _normalize_drive_comment_user(reply.get("author") or {}),
+        "assignee_email": reply.get("assigneeEmailAddress", ""),
+        "mentioned_emails": reply.get("mentionedEmailAddresses") or [],
+    }
+
+
+def _normalize_drive_comment(comment: dict) -> dict:
+    quoted_content = comment.get("quotedFileContent") or {}
+    return {
+        "id": comment.get("id", ""),
+        "content": comment.get("content", ""),
+        "html_content": comment.get("htmlContent", ""),
+        "anchor": comment.get("anchor", ""),
+        "quoted_file_content": {
+            "mime_type": quoted_content.get("mimeType", ""),
+            "value": quoted_content.get("value", ""),
+        },
+        "resolved": comment.get("resolved", False),
+        "deleted": comment.get("deleted", False),
+        "created_time": comment.get("createdTime", ""),
+        "modified_time": comment.get("modifiedTime", ""),
+        "author": _normalize_drive_comment_user(comment.get("author") or {}),
+        "assignee_email": comment.get("assigneeEmailAddress", ""),
+        "mentioned_emails": comment.get("mentionedEmailAddresses") or [],
+        "replies": [_normalize_drive_reply(reply) for reply in comment.get("replies", [])],
+    }
+
+
+def docs_list_comments(
+    document_id: str,
+    max_results: int = 100,
+    include_deleted: bool = False,
+) -> list[dict]:
+    """List comments and replies on a Google Doc.
+
+    Args:
+        document_id: The document ID
+        max_results: Maximum number of comments to return
+        include_deleted: Whether to include deleted comments and replies
+
+    Returns:
+        Comments with their quoted document content and replies
+    """
+    if max_results < 1:
+        raise ValueError("max_results must be at least 1")
+
+    service = get_drive_service()
+    comments: list[dict] = []
+    page_token: str | None = None
+
+    while len(comments) < max_results:
+        request_args = {
+            "fileId": document_id,
+            "pageSize": min(100, max_results - len(comments)),
+            "includeDeleted": include_deleted,
+            "fields": f"nextPageToken,comments({DRIVE_COMMENT_FIELDS})",
+        }
+        if page_token:
+            request_args["pageToken"] = page_token
+
+        result = service.comments().list(**request_args).execute()
+        comments.extend(_normalize_drive_comment(comment) for comment in result.get("comments", []))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+
+    return comments[:max_results]
+
+
 def docs_append(
     document_id: str,
     text: str,
@@ -2017,20 +2310,51 @@ def docs_insert(
     return {"document_id": result.get("document_id", "")}
 
 
-def docs_create(title: str, content: str | None = None) -> dict:
+def _drive_create_native(title: str, mime_type: str, folder_id: str) -> tuple[str, str]:
+    """Create an empty native Google file inside a folder or shared drive.
+
+    The Docs, Sheets, and Slides ``create`` calls cannot set a parent, so a
+    file that must live in a specific folder is created through Drive.
+
+    Returns:
+        Tuple of file id and name
+    """
+    created = (
+        get_drive_service()
+        .files()
+        .create(
+            body={"name": title, "mimeType": mime_type, "parents": [folder_id]},
+            fields="id, name",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    return created.get("id", ""), created.get("name", "")
+
+
+def docs_create(
+    title: str, content: str | None = None, folder_id: str | None = None
+) -> dict:
     """Create a new Google Doc.
 
     Args:
         title: Document title
         content: Optional initial content to add
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with document_id, title, and url
     """
     service = get_docs_service()
 
-    doc = service.documents().create(body={"title": title}).execute()
-    document_id = doc.get("documentId", "")
+    if folder_id:
+        document_id, doc_title = _drive_create_native(
+            title, "application/vnd.google-apps.document", folder_id
+        )
+    else:
+        doc = service.documents().create(body={"title": title}).execute()
+        document_id = doc.get("documentId", "")
+        doc_title = doc.get("title", "")
 
     if content:
         requests = [{"insertText": {"location": {"index": 1}, "text": content}}]
@@ -2040,7 +2364,7 @@ def docs_create(title: str, content: str | None = None) -> dict:
 
     return {
         "document_id": document_id,
-        "title": doc.get("title", ""),
+        "title": doc_title,
         "url": f"https://docs.google.com/document/d/{document_id}/edit",
     }
 
@@ -2059,20 +2383,31 @@ def _quote_sheet_title(title: str) -> str:
     return f"'{escaped_title}'"
 
 
-def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
+def sheets_create(
+    title: str, content: list[list[str]] | None = None, folder_id: str | None = None
+) -> dict:
     """Create a new Google Sheet.
 
     Args:
         title: Spreadsheet title
         content: Optional 2D array of initial data (rows x cols)
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with spreadsheet_id, title, and url
     """
     service = get_sheets_service()
 
-    spreadsheet = service.spreadsheets().create(body={"properties": {"title": title}}).execute()
-    spreadsheet_id = spreadsheet.get("spreadsheetId", "")
+    if folder_id:
+        spreadsheet_id, sheet_title = _drive_create_native(
+            title, "application/vnd.google-apps.spreadsheet", folder_id
+        )
+    else:
+        spreadsheet = (
+            service.spreadsheets().create(body={"properties": {"title": title}}).execute()
+        )
+        spreadsheet_id = spreadsheet.get("spreadsheetId", "")
+        sheet_title = spreadsheet.get("properties", {}).get("title", "")
 
     if content:
         service.spreadsheets().values().update(
@@ -2084,7 +2419,7 @@ def sheets_create(title: str, content: list[list[str]] | None = None) -> dict:
 
     return {
         "spreadsheet_id": spreadsheet_id,
-        "title": spreadsheet.get("properties", {}).get("title", ""),
+        "title": sheet_title,
         "url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit",
     }
 
@@ -2149,6 +2484,41 @@ def sheets_read(spreadsheet_id: str, range_notation: str = "A1:Z1000") -> dict:
         .execute()
     )
 
+    return _sheets_read_result(spreadsheet_id, range_notation, result)
+
+
+def sheets_batch_read(spreadsheet_id: str, range_notations: list[str]) -> list[dict]:
+    """Read data from one Google Sheet, across several ranges.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        range_notations: A1 notation range (e.g., "Sheet1!A1:D10" or "A1:Z1000")
+
+    Returns:
+        List of dicts in requested order, each with the same spreadsheet_id,
+        range, headers, rows, and raw_values fields as sheets_read.
+        The first row of each range is treated as its headers.
+    """
+    if not range_notations:
+        raise ValueError("Provide at least one range")
+
+    service = get_sheets_service()
+
+    result = (
+        service.spreadsheets()
+        .values()
+        .batchGet(spreadsheetId=spreadsheet_id, ranges=range_notations)
+        .execute()
+    )
+
+    return [
+        _sheets_read_result(spreadsheet_id, range_notation, value_range)
+        for range_notation, value_range in zip(range_notations, result["valueRanges"], strict=True)
+    ]
+
+
+def _sheets_read_result(spreadsheet_id: str, range_notation: str, result: dict) -> dict:
+    """Normalize a values response for single and batch reads."""
     values = result.get("values", [])
 
     if not values:
@@ -2316,6 +2686,408 @@ def sheets_write_table(
     }
 
 
+_A1_CELL_RE = re.compile(r"^\$?([A-Za-z]*)\$?(\d*)$")
+
+_HORIZONTAL_ALIGNMENTS = {"LEFT", "CENTER", "RIGHT"}
+_VERTICAL_ALIGNMENTS = {"TOP", "MIDDLE", "BOTTOM"}
+_WRAP_STRATEGIES = {"OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"}
+_NUMBER_FORMAT_TYPES = {
+    "TEXT",
+    "NUMBER",
+    "PERCENT",
+    "CURRENCY",
+    "DATE",
+    "TIME",
+    "DATE_TIME",
+    "SCIENTIFIC",
+}
+
+
+def _column_index(letters: str) -> int:
+    """Zero-based column index for A1 column letters (A -> 0, AA -> 26)."""
+    index = 0
+    for letter in letters.upper():
+        index = index * 26 + (ord(letter) - ord("A") + 1)
+    return index - 1
+
+
+def _split_sheet_range(range_notation: str) -> tuple[str | None, str | None]:
+    """Split ``'Tab'!A1:B2`` into its tab title and cell part."""
+    notation = range_notation.strip()
+    if notation.startswith("'"):
+        index = 1
+        title_chars: list[str] = []
+        while index < len(notation):
+            char = notation[index]
+            if char == "'":
+                if notation[index + 1 : index + 2] == "'":
+                    title_chars.append("'")
+                    index += 2
+                    continue
+                break
+            title_chars.append(char)
+            index += 1
+        else:
+            raise ValueError(f"Unterminated quoted sheet title in range: {range_notation}")
+        rest = notation[index + 1 :]
+        if not rest:
+            return "".join(title_chars), None
+        if not rest.startswith("!"):
+            raise ValueError(f"Invalid A1 range: {range_notation}")
+        return "".join(title_chars), rest[1:] or None
+    if "!" in notation:
+        title, cells = notation.rsplit("!", 1)
+        return title, cells or None
+    return None, notation or None
+
+
+def _parse_a1_cells(cells: str) -> dict | None:
+    """Parse ``A1``, ``A1:C3``, ``A:C``, ``2:5`` or ``A2:C`` into GridRange bounds.
+
+    Returns None when ``cells`` is not A1 notation.
+    """
+    parts = cells.split(":")
+    if len(parts) > 2:
+        return None
+    parsed = []
+    for part in parts:
+        match = _A1_CELL_RE.match(part.strip())
+        if not match or not (match.group(1) or match.group(2)):
+            return None
+        column = _column_index(match.group(1)) if match.group(1) else None
+        row = int(match.group(2)) - 1 if match.group(2) else None
+        if row is not None and row < 0:
+            return None
+        parsed.append((column, row))
+
+    grid: dict[str, int] = {}
+    start_column, start_row = parsed[0]
+    end_column, end_row = parsed[-1]
+    if len(parsed) == 1 and (start_column is None or start_row is None):
+        # A lone ``A`` or ``5`` is not a valid A1 range.
+        return None
+    columns = [c for c in (start_column, end_column) if c is not None]
+    rows = [r for r in (start_row, end_row) if r is not None]
+    if start_column is not None:
+        grid["startColumnIndex"] = min(columns)
+        if end_column is not None:
+            grid["endColumnIndex"] = max(columns) + 1
+    elif end_column is not None:
+        grid["endColumnIndex"] = end_column + 1
+    if start_row is not None:
+        grid["startRowIndex"] = min(rows)
+        if end_row is not None:
+            grid["endRowIndex"] = max(rows) + 1
+    elif end_row is not None:
+        grid["endRowIndex"] = end_row + 1
+    return grid
+
+
+def _sheet_properties_list(service, spreadsheet_id: str) -> list[dict]:
+    result = (
+        service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets.properties(sheetId,title,index)")
+        .execute()
+    )
+    properties = [sheet.get("properties", {}) for sheet in result.get("sheets", [])]
+    return sorted(properties, key=lambda p: p.get("index", 0))
+
+
+def _resolve_sheet_id(sheets: list[dict], title: str | None, spreadsheet_id: str) -> int:
+    if not sheets:
+        raise ValueError(f"Spreadsheet {spreadsheet_id} has no sheets")
+    if title is None:
+        return sheets[0].get("sheetId", 0)
+    for sheet in sheets:
+        if sheet.get("title") == title:
+            return sheet.get("sheetId", 0)
+    titles = ", ".join(repr(s.get("title", "")) for s in sheets)
+    raise ValueError(f"No sheet titled {title!r} in spreadsheet (tabs: {titles})")
+
+
+def _grid_range(sheets: list[dict], range_notation: str, spreadsheet_id: str) -> dict:
+    """Convert an A1 range into a Sheets API GridRange.
+
+    A range without a tab title addresses the first tab, unless the whole
+    string is a tab title, in which case it addresses that entire tab.
+    """
+    title, cells = _split_sheet_range(range_notation)
+    if title is None and cells is not None and any(sheet.get("title") == cells for sheet in sheets):
+        title, cells = cells, None
+    grid: dict = {"sheetId": _resolve_sheet_id(sheets, title, spreadsheet_id)}
+    if cells is None:
+        return grid
+    bounds = _parse_a1_cells(cells)
+    if bounds is None:
+        raise ValueError(f"Invalid A1 range: {range_notation}")
+    grid.update(bounds)
+    return grid
+
+
+def _parse_color(color: str) -> dict:
+    """Convert ``#RGB`` or ``#RRGGBB`` into a Sheets API Color."""
+    value = color.strip().lstrip("#")
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    if len(value) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in value):
+        raise ValueError(f"Color must be a hex string like '#1a73e8', got {color!r}")
+    return {
+        "red": int(value[0:2], 16) / 255,
+        "green": int(value[2:4], 16) / 255,
+        "blue": int(value[4:6], 16) / 255,
+    }
+
+
+def _choice(name: str, value: str, allowed: set[str]) -> str:
+    normalized = value.upper()
+    if normalized not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(sorted(allowed))}, got {value!r}")
+    return normalized
+
+
+def _cell_format(
+    *,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+    strikethrough: bool | None = None,
+    font_size: int | None = None,
+    font_family: str | None = None,
+    text_color: str | None = None,
+    background_color: str | None = None,
+    horizontal_alignment: str | None = None,
+    vertical_alignment: str | None = None,
+    wrap_strategy: str | None = None,
+    number_format_type: str | None = None,
+    number_format_pattern: str | None = None,
+) -> tuple[dict, list[str]]:
+    """Build a CellFormat and its ``userEnteredFormat`` field mask."""
+    cell_format: dict = {}
+    fields: list[str] = []
+    text_format: dict = {}
+    for key, value in (
+        ("bold", bold),
+        ("italic", italic),
+        ("underline", underline),
+        ("strikethrough", strikethrough),
+        ("fontFamily", font_family),
+    ):
+        if value is not None:
+            text_format[key] = value
+    if font_size is not None:
+        if font_size <= 0:
+            raise ValueError("font_size must be positive")
+        text_format["fontSize"] = font_size
+    if text_color is not None:
+        text_format["foregroundColorStyle"] = {"rgbColor": _parse_color(text_color)}
+    if text_format:
+        cell_format["textFormat"] = text_format
+        fields.extend(f"userEnteredFormat.textFormat.{key}" for key in text_format)
+    if background_color is not None:
+        cell_format["backgroundColorStyle"] = {"rgbColor": _parse_color(background_color)}
+        fields.append("userEnteredFormat.backgroundColorStyle")
+    if horizontal_alignment is not None:
+        cell_format["horizontalAlignment"] = _choice(
+            "horizontal_alignment", horizontal_alignment, _HORIZONTAL_ALIGNMENTS
+        )
+        fields.append("userEnteredFormat.horizontalAlignment")
+    if vertical_alignment is not None:
+        cell_format["verticalAlignment"] = _choice(
+            "vertical_alignment", vertical_alignment, _VERTICAL_ALIGNMENTS
+        )
+        fields.append("userEnteredFormat.verticalAlignment")
+    if wrap_strategy is not None:
+        cell_format["wrapStrategy"] = _choice("wrap_strategy", wrap_strategy, _WRAP_STRATEGIES)
+        fields.append("userEnteredFormat.wrapStrategy")
+    if number_format_type is not None or number_format_pattern is not None:
+        number_format = {
+            "type": _choice(
+                "number_format_type", number_format_type or "NUMBER", _NUMBER_FORMAT_TYPES
+            )
+        }
+        if number_format_pattern is not None:
+            number_format["pattern"] = number_format_pattern
+        cell_format["numberFormat"] = number_format
+        fields.append("userEnteredFormat.numberFormat")
+    return cell_format, fields
+
+
+def sheets_format(
+    spreadsheet_id: str,
+    range_notation: str,
+    *,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+    strikethrough: bool | None = None,
+    font_size: int | None = None,
+    font_family: str | None = None,
+    text_color: str | None = None,
+    background_color: str | None = None,
+    horizontal_alignment: str | None = None,
+    vertical_alignment: str | None = None,
+    wrap_strategy: str | None = None,
+    number_format_type: str | None = None,
+    number_format_pattern: str | None = None,
+) -> dict:
+    """Format the cells of an A1 range. Only the options given are changed.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        range_notation: A1 range ("Sheet1!A1:D1", "A:A", "2:2", or a tab title
+            for the whole tab); without a tab title, the first tab is used
+        bold, italic, underline, strikethrough: Text style on (True) or off (False)
+        font_size: Font size in points
+        font_family: Font family, such as "Roboto Mono"
+        text_color: Text color as hex, such as "#ffffff"
+        background_color: Cell fill color as hex, such as "#1a73e8"
+        horizontal_alignment: LEFT, CENTER, or RIGHT
+        vertical_alignment: TOP, MIDDLE, or BOTTOM
+        wrap_strategy: OVERFLOW_CELL, LEGACY_WRAP, CLIP, or WRAP
+        number_format_type: TEXT, NUMBER, PERCENT, CURRENCY, DATE, TIME,
+            DATE_TIME, or SCIENTIFIC (default NUMBER when only a pattern is given)
+        number_format_pattern: Sheets number format pattern, such as "#,##0.00"
+
+    Returns:
+        Dict with spreadsheet_id, range, grid_range, and the fields updated
+    """
+    cell_format, fields = _cell_format(
+        bold=bold,
+        italic=italic,
+        underline=underline,
+        strikethrough=strikethrough,
+        font_size=font_size,
+        font_family=font_family,
+        text_color=text_color,
+        background_color=background_color,
+        horizontal_alignment=horizontal_alignment,
+        vertical_alignment=vertical_alignment,
+        wrap_strategy=wrap_strategy,
+        number_format_type=number_format_type,
+        number_format_pattern=number_format_pattern,
+    )
+    if not fields:
+        raise ValueError("Provide at least one format option")
+
+    service = get_sheets_service()
+    sheets = _sheet_properties_list(service, spreadsheet_id)
+    grid_range = _grid_range(sheets, range_notation, spreadsheet_id)
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": grid_range,
+                        "cell": {"userEnteredFormat": cell_format},
+                        "fields": ",".join(fields),
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "range": range_notation,
+        "grid_range": grid_range,
+        "fields": fields,
+    }
+
+
+def sheets_freeze(
+    spreadsheet_id: str,
+    sheet_title: str | None = None,
+    rows: int | None = None,
+    columns: int | None = None,
+) -> dict:
+    """Freeze the top rows and/or left columns of a tab; 0 unfreezes.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        sheet_title: Tab title (default: the first tab)
+        rows: Number of rows to freeze
+        columns: Number of columns to freeze
+
+    Returns:
+        Dict with spreadsheet_id, sheet_id, and the frozen counts that were set
+    """
+    grid_properties: dict[str, int] = {}
+    if rows is not None:
+        if rows < 0:
+            raise ValueError("rows must not be negative")
+        grid_properties["frozenRowCount"] = rows
+    if columns is not None:
+        if columns < 0:
+            raise ValueError("columns must not be negative")
+        grid_properties["frozenColumnCount"] = columns
+    if not grid_properties:
+        raise ValueError("Provide rows and/or columns")
+
+    service = get_sheets_service()
+    sheets = _sheet_properties_list(service, spreadsheet_id)
+    sheet_id = _resolve_sheet_id(sheets, sheet_title, spreadsheet_id)
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": sheet_id, "gridProperties": grid_properties},
+                        "fields": ",".join(f"gridProperties.{key}" for key in grid_properties),
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": sheet_id,
+        "frozen_row_count": grid_properties.get("frozenRowCount"),
+        "frozen_column_count": grid_properties.get("frozenColumnCount"),
+    }
+
+
+def sheets_raw_batch_update(spreadsheet_id: str, requests: list[dict]) -> dict:
+    """Send Sheets API ``spreadsheets.batchUpdate`` requests as given.
+
+    Use for formatting the helpers do not cover: borders (updateBorders),
+    merges (mergeCells), column widths (updateDimensionProperties,
+    autoResizeDimensions), conditional formats (addConditionalFormatRule),
+    banding (addBanding), and so on. Requests address tabs by numeric
+    ``sheetId``, which ``sheets_tabs`` returns.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID (from URL)
+        requests: List of Sheets API Request objects
+
+    Returns:
+        The batchUpdate response, with ``replies`` in request order
+    """
+    if not requests:
+        raise ValueError("Provide at least one request")
+    service = get_sheets_service()
+    return (
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+        .execute()
+    )
+
+
+def sheets_tabs(spreadsheet_id: str) -> list[dict]:
+    """List a spreadsheet's tabs in order, with sheet_id, title, and index."""
+    service = get_sheets_service()
+    return [
+        {
+            "sheet_id": sheet.get("sheetId", 0),
+            "title": sheet.get("title", ""),
+            "index": sheet.get("index", 0),
+        }
+        for sheet in _sheet_properties_list(service, spreadsheet_id)
+    ]
+
+
 # Slides functions
 
 
@@ -2324,23 +3096,29 @@ def get_slides_service():
     return build("slides", "v1", http=_build_http())
 
 
-def slides_create(title: str) -> dict:
+def slides_create(title: str, folder_id: str | None = None) -> dict:
     """Create a new Google Slides presentation.
 
     Args:
         title: Presentation title
+        folder_id: Optional parent folder or shared drive ID
 
     Returns:
         Dict with presentation_id, title, and url
     """
-    service = get_slides_service()
-
-    presentation = service.presentations().create(body={"title": title}).execute()
-    presentation_id = presentation.get("presentationId", "")
+    if folder_id:
+        presentation_id, presentation_title = _drive_create_native(
+            title, "application/vnd.google-apps.presentation", folder_id
+        )
+    else:
+        service = get_slides_service()
+        presentation = service.presentations().create(body={"title": title}).execute()
+        presentation_id = presentation.get("presentationId", "")
+        presentation_title = presentation.get("title", "")
 
     return {
         "presentation_id": presentation_id,
-        "title": presentation.get("title", ""),
+        "title": presentation_title,
         "url": f"https://docs.google.com/presentation/d/{presentation_id}/edit",
     }
 
@@ -2662,8 +3440,89 @@ def analytics_get_daily_users(
     )
 
 
+# Directory functions
+
+
+def directory_list() -> list[dict]:
+    """List all visible Directory profiles.
+
+    Returns:
+        People with resource_name, name, and email_addresses
+    """
+    service = get_people_service()
+    request_args = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "pageSize": 1000,
+    }
+
+    return _paginate_directory_people(service.people().listDirectoryPeople, request_args)
+
+
+def directory_search(query: str, max_results: int = 20) -> list[dict]:
+    """Search Directory profiles.
+
+    Args:
+        query: People API prefix search query, e.g. name, email
+        max_results: Maximum number of people to return
+
+    Returns:
+        People with resource_name, name, and email_addresses.
+    """
+    service = get_people_service()
+    request_args = {
+        "readMask": "names,emailAddresses",
+        "sources": ["DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"],
+        "query": query,
+        "pageSize": max_results,
+    }
+
+    return _paginate_directory_people(
+        service.people().searchDirectoryPeople, request_args, max_results=max_results
+    )
+
+
+def _paginate_directory_people(
+    request: Callable[..., HttpRequest],
+    request_args: dict,
+    max_results: int | None = None,
+) -> list[dict]:
+    """Execute directory requests, paginate, and return normalized people."""
+    people: list[dict] = []
+
+    while max_results is None or len(people) < max_results:
+        result = request(**request_args).execute()
+
+        for person in result.get("people") or []:
+            names = person.get("names") or []
+            primary_name = next(
+                (name for name in names if (name.get("metadata") or {}).get("primary")),
+                names[0] if names else {},
+            )
+            people.append(
+                {
+                    "resource_name": person.get("resourceName", ""),
+                    "name": primary_name.get("displayName", ""),
+                    "email_addresses": [
+                        email["value"]
+                        for email in person.get("emailAddresses") or []
+                        if email.get("value")
+                    ],
+                }
+            )
+
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+        # People requires every other parameter, including pageSize, to stay
+        # unchanged while following a page token.
+        request_args["pageToken"] = page_token
+
+    return people[:max_results]
+
+
 class GSuiteClient:
-    """GSuite API client wrapping Gmail, Calendar, Drive, Docs, Sheets, Slides, and Analytics."""
+    """GSuite client for Gmail, Calendar, Directory, Drive, Docs, Sheets, Slides, and Analytics."""
 
     # --- Gmail ---
 
@@ -2812,6 +3671,7 @@ class GSuiteClient:
         description: str | None = None,
         location: str | None = None,
         attendees: list[str] | None = None,
+        conference: bool = False,
     ) -> dict:
         """Create a calendar event.
 
@@ -2823,9 +3683,10 @@ class GSuiteClient:
             description: Event description
             location: Event location
             attendees: List of attendee emails
+            conference: Attach a Google Meet conference to the event
 
         Returns:
-            Dict with id, html_link
+            Dict with id, html_link, meet_link
         """
         return calendar_create_event(
             summary,
@@ -2835,6 +3696,7 @@ class GSuiteClient:
             description=description,
             location=location,
             attendees=attendees,
+            conference=conference,
         )
 
     def calendar_update_event(
@@ -2847,6 +3709,8 @@ class GSuiteClient:
         description: str | None = None,
         location: str | None = None,
         add_attendees: list[str] | None = None,
+        conference: bool = False,
+        notify: bool | None = None,
     ) -> dict:
         """Update a calendar event.
 
@@ -2859,9 +3723,12 @@ class GSuiteClient:
             description: New description
             location: New location
             add_attendees: List of attendee emails to add
+            conference: Attach a Google Meet conference if the event lacks one
+            notify: Email the attendees; defaults to notifying on a material
+                change to an event that has attendees
 
         Returns:
-            Dict with id, html_link
+            Dict with id, html_link, meet_link
         """
         return calendar_update_event(
             event_id,
@@ -2872,7 +3739,27 @@ class GSuiteClient:
             description=description,
             location=location,
             add_attendees=add_attendees,
+            conference=conference,
+            notify=notify,
         )
+
+    def calendar_delete_event(
+        self,
+        event_id: str,
+        calendar_id: str = "primary",
+        notify: bool = True,
+    ) -> dict:
+        """Delete a calendar event.
+
+        Args:
+            event_id: Event ID to delete
+            calendar_id: Calendar ID (default: primary)
+            notify: Email the attendees that the event was cancelled
+
+        Returns:
+            Dict with id, deleted
+        """
+        return calendar_delete_event(event_id, calendar_id=calendar_id, notify=notify)
 
     def calendar_rsvp(
         self,
@@ -2938,6 +3825,18 @@ class GSuiteClient:
             List of file dicts with id, name, mimeType, size, modifiedTime, webViewLink
         """
         return drive_list(query=query, max_results=max_results, full_text=full_text)
+
+    def drive_list_drives(self, max_results: int = 100) -> list[dict]:
+        """List the shared drives the account is a member of.
+
+        Args:
+            max_results: Maximum number of results
+
+        Returns:
+            List of drive dicts with id and name. Pass an id as ``folder_id`` to
+            ``drive_list`` to browse that drive's top level.
+        """
+        return drive_list_drives(max_results=max_results)
 
     def drive_get(self, file_id: str) -> dict:
         """Get file metadata from Google Drive.
@@ -3175,14 +4074,14 @@ class GSuiteClient:
         self,
         file_id: str,
         channel_member_emails: list[str],
-        requester_email: str,
+        requester_email: str | None,
     ) -> dict:
-        """Set up file permissions for Slack channel members and transfer ownership.
+        """Set up file permissions and optionally transfer ownership.
 
         Args:
             file_id: The Google Drive file ID
             channel_member_emails: List of email addresses for channel members
-            requester_email: Email of the person who requested the file (new owner)
+            requester_email: Optional email of the person who requested the file (new owner)
 
         Returns:
             Dict with results: shared_with, new_owner, errors
@@ -3225,6 +4124,28 @@ class GSuiteClient:
             Plain text content of the document
         """
         return docs_get_text(document_id)
+
+    def docs_list_comments(
+        self,
+        document_id: str,
+        max_results: int = 100,
+        include_deleted: bool = False,
+    ) -> list[dict]:
+        """List comments and replies on a Google Doc.
+
+        Args:
+            document_id: The document ID
+            max_results: Maximum number of comments to return
+            include_deleted: Whether to include deleted comments and replies
+
+        Returns:
+            Comments with their quoted document content and replies
+        """
+        return docs_list_comments(
+            document_id,
+            max_results=max_results,
+            include_deleted=include_deleted,
+        )
 
     def docs_append(
         self,
@@ -3368,31 +4289,40 @@ class GSuiteClient:
             expected_revision_id=expected_revision_id,
         )
 
-    def docs_create(self, title: str, content: str | None = None) -> dict:
+    def docs_create(
+        self, title: str, content: str | None = None, folder_id: str | None = None
+    ) -> dict:
         """Create a new Google Doc.
 
         Args:
             title: Document title
             content: Optional initial content to add
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with document_id, title, and url
         """
-        return docs_create(title, content=content)
+        return docs_create(title, content=content, folder_id=folder_id)
 
     # --- Sheets ---
 
-    def sheets_create(self, title: str, content: list[list[str]] | None = None) -> dict:
+    def sheets_create(
+        self,
+        title: str,
+        content: list[list[str]] | None = None,
+        folder_id: str | None = None,
+    ) -> dict:
         """Create a new Google Sheet.
 
         Args:
             title: Spreadsheet title
             content: Optional 2D array of initial data (rows x cols)
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with spreadsheet_id, title, and url
         """
-        return sheets_create(title, content=content)
+        return sheets_create(title, content=content, folder_id=folder_id)
 
     def sheets_add_tab(
         self,
@@ -3423,6 +4353,15 @@ class GSuiteClient:
             Dict with spreadsheet_id, range, headers, and rows (list of dicts)
         """
         return sheets_read(spreadsheet_id, range_notation=range_notation)
+
+    def sheets_batch_read(self, spreadsheet_id: str, range_notations: list[str]) -> list[dict]:
+        """Read multiple A1 ranges from one spreadsheet in one API request.
+
+        Returns a list of dicts in requested order with the same fields as
+        sheets_read. The range list must be non-empty; the first row of each
+        range is treated as its headers.
+        """
+        return sheets_batch_read(spreadsheet_id, range_notations)
 
     def sheets_update(
         self,
@@ -3501,18 +4440,114 @@ class GSuiteClient:
             value_input_option=value_input_option,
         )
 
+    def sheets_format(
+        self,
+        spreadsheet_id: str,
+        range_notation: str,
+        bold: bool | None = None,
+        italic: bool | None = None,
+        underline: bool | None = None,
+        strikethrough: bool | None = None,
+        font_size: int | None = None,
+        font_family: str | None = None,
+        text_color: str | None = None,
+        background_color: str | None = None,
+        horizontal_alignment: str | None = None,
+        vertical_alignment: str | None = None,
+        wrap_strategy: str | None = None,
+        number_format_type: str | None = None,
+        number_format_pattern: str | None = None,
+    ) -> dict:
+        """Format the cells of an A1 range. Only the options given are changed.
+
+        Args:
+            spreadsheet_id: The spreadsheet ID (from URL)
+            range_notation: A1 range ("Sheet1!A1:D1", "A:A", "2:2", or a tab
+                title for the whole tab); without a tab title, the first tab
+            bold, italic, underline, strikethrough: Text style on or off
+            font_size: Font size in points
+            font_family: Font family, such as "Roboto Mono"
+            text_color: Text color as hex, such as "#ffffff"
+            background_color: Cell fill color as hex, such as "#1a73e8"
+            horizontal_alignment: LEFT, CENTER, or RIGHT
+            vertical_alignment: TOP, MIDDLE, or BOTTOM
+            wrap_strategy: OVERFLOW_CELL, LEGACY_WRAP, CLIP, or WRAP
+            number_format_type: TEXT, NUMBER, PERCENT, CURRENCY, DATE, TIME,
+                DATE_TIME, or SCIENTIFIC
+            number_format_pattern: Number format pattern, such as "#,##0.00"
+
+        Returns:
+            Dict with spreadsheet_id, range, grid_range, and the fields updated
+        """
+        return sheets_format(
+            spreadsheet_id,
+            range_notation,
+            bold=bold,
+            italic=italic,
+            underline=underline,
+            strikethrough=strikethrough,
+            font_size=font_size,
+            font_family=font_family,
+            text_color=text_color,
+            background_color=background_color,
+            horizontal_alignment=horizontal_alignment,
+            vertical_alignment=vertical_alignment,
+            wrap_strategy=wrap_strategy,
+            number_format_type=number_format_type,
+            number_format_pattern=number_format_pattern,
+        )
+
+    def sheets_freeze(
+        self,
+        spreadsheet_id: str,
+        sheet_title: str | None = None,
+        rows: int | None = None,
+        columns: int | None = None,
+    ) -> dict:
+        """Freeze the top rows and/or left columns of a tab; 0 unfreezes.
+
+        Args:
+            spreadsheet_id: The spreadsheet ID (from URL)
+            sheet_title: Tab title (default: the first tab)
+            rows: Number of rows to freeze
+            columns: Number of columns to freeze
+
+        Returns:
+            Dict with spreadsheet_id, sheet_id, and the frozen counts set
+        """
+        return sheets_freeze(spreadsheet_id, sheet_title=sheet_title, rows=rows, columns=columns)
+
+    def sheets_tabs(self, spreadsheet_id: str) -> list[dict]:
+        """List a spreadsheet's tabs in order, with sheet_id, title, and index."""
+        return sheets_tabs(spreadsheet_id)
+
+    def sheets_raw_batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+        """Send Sheets API spreadsheets.batchUpdate requests as given.
+
+        Use for borders (updateBorders), merges (mergeCells), column widths
+        (updateDimensionProperties, autoResizeDimensions), conditional formats
+        (addConditionalFormatRule), banding (addBanding), and other requests
+        the helpers do not cover. Requests address tabs by numeric sheetId,
+        which sheets_tabs returns.
+
+        Returns:
+            The batchUpdate response, with replies in request order
+        """
+        return sheets_raw_batch_update(spreadsheet_id, requests)
+
     # --- Slides ---
 
-    def slides_create(self, title: str) -> dict:
+    def slides_create(self, title: str, folder_id: str | None = None) -> dict:
         """Create a new Google Slides presentation.
 
         Args:
             title: Presentation title
+            folder_id: Optional parent folder or shared drive ID
 
         Returns:
             Dict with presentation_id, title, and url
         """
-        return slides_create(title)
+        return slides_create(title, folder_id=folder_id)
 
     # --- Analytics ---
 
@@ -3636,6 +4671,16 @@ class GSuiteClient:
     ) -> dict:
         """Get daily active users over time."""
         return analytics_get_daily_users(start_date=start_date, end_date=end_date)
+
+    # --- Directory ---
+
+    def directory_list(self) -> list[dict]:
+        """List all visible Workspace directory profiles with names and emails."""
+        return directory_list()
+
+    def directory_search(self, query: str, max_results: int = 20) -> list[dict]:
+        """Search Workspace directory profiles by prefix query."""
+        return directory_search(query, max_results=max_results)
 
 
 def _client() -> GSuiteClient:

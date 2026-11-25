@@ -50,16 +50,65 @@ if [ -n "${TOOL_DIRS:-}" ]; then
 fi
 
 if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then
-    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude"
-    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/uploads" "$HOME_DIR/branches"
+    mkdir -p "$STATE_DIR/workspace" "$STATE_DIR/uploads" "$STATE_DIR/branches" "$STATE_DIR/codex" "$STATE_DIR/claude" "$STATE_DIR/pi" "$STATE_DIR/omp"
+    rm -rf "$HOME_DIR/.codex" "$HOME_DIR/.claude" "$HOME_DIR/.pi" "$HOME_DIR/.omp" "$HOME_DIR/uploads" "$HOME_DIR/branches"
     ln -s "$STATE_DIR/codex" "$HOME_DIR/.codex"
     ln -s "$STATE_DIR/claude" "$HOME_DIR/.claude"
+    ln -s "$STATE_DIR/pi" "$HOME_DIR/.pi"
+    ln -s "$STATE_DIR/omp" "$HOME_DIR/.omp"
     ln -s "$STATE_DIR/uploads" "$HOME_DIR/uploads"
     ln -s "$STATE_DIR/branches" "$HOME_DIR/branches"
     export CENTAUR_PERSISTENT_STATE=1
 fi
 
-mkdir -p "$HOME_DIR/.config/amp"
+mkdir -p "$HOME_DIR/.config/amp" "$HOME_DIR/.pi/agent"
+
+# Pi: declare Gemini models newer than Pi's bundled catalog. The `google`
+# provider reads GEMINI_API_KEY, an iron-proxy placeholder in the sandbox.
+# Keep the IDs in sync with MODELS in crates/harness-server/src/pi.rs.
+cat > "$HOME_DIR/.pi/agent/models.json" <<'EOF'
+{
+  "providers": {
+    "google": {
+      "models": [
+        {
+          "id": "gemini-4-carbon",
+          "name": "Gemini 4 Carbon",
+          "api": "google-generative-ai",
+          "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+          "reasoning": true,
+          "thinkingLevelMap": {"off": null, "minimal": null, "low": "low", "medium": "medium", "high": "high", "xhigh": null, "max": null},
+          "input": ["text", "image"],
+          "contextWindow": 1048576,
+          "maxTokens": 32768
+        },
+        {
+          "id": "gemini-4-hydrogen",
+          "name": "Gemini 4 Hydrogen",
+          "api": "google-generative-ai",
+          "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+          "reasoning": true,
+          "thinkingLevelMap": {"off": null, "minimal": null, "low": "low", "medium": "medium", "high": "high", "xhigh": null, "max": null},
+          "input": ["text", "image"],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "gemini-4-neon",
+          "name": "Gemini 4 Neon",
+          "api": "google-generative-ai",
+          "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+          "reasoning": true,
+          "thinkingLevelMap": {"off": null, "minimal": null, "low": "low", "medium": "medium", "high": "high", "xhigh": null, "max": null},
+          "input": ["text", "image"],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        }
+      ]
+    }
+  }
+}
+EOF
 
 # ── Write harness configs (no MCP — adds ~10s startup overhead) ───────────────
 cat > "$HOME_DIR/.config/amp/settings.json" <<EOF
@@ -300,6 +349,9 @@ if overlay_raw:
 
 path.write_text(text)
 PYEOF
+    # Optional enrichment: never block sandbox startup on the model catalog.
+    configure-codex-models "$HOME_DIR/.codex/config.toml" \
+        || echo "configure-codex-models failed; using Codex's bundled model catalog" >&2
 else
     echo "missing Codex harness config: $HARNESS_CONFIG_DIR/codex/config.toml" >&2
     exit 1
@@ -372,17 +424,6 @@ case "$CLAUDE_CODE_AUTH_MODE" in
         ;;
 esac
 
-# ── Pi-mono settings ─────────────────────────────────────────────────────────
-mkdir -p "$HOME_DIR/.pi/agent/extensions"
-cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
-{
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-20250514",
-  "thinkingLevel": "medium",
-  "autoCompaction": true
-}
-EOF
-
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"
@@ -414,6 +455,10 @@ fi
 # ── Ensure uploads directory exists ──────────────────────────────────────────
 mkdir -p "$HOME_DIR/uploads"
 
+# Code Mode connectors that read or write files take paths under the home
+# directory, which holds the workspace, uploads, and branches.
+export CENTAUR_CODEMODE_FILES_DIR="${CENTAUR_CODEMODE_FILES_DIR:-$HOME_DIR}"
+
 # ── Copy project skills into workspace (so `skill` tool discovers them) ──────
 WORKSPACE_DIR="$WORKSPACE_DIR" install-tool-shims --refresh-skills \
     || echo "warning: failed to reload Centaur skills" >&2
@@ -436,20 +481,14 @@ unset _centaur_tools_auto_reload
 # ── Assemble system prompt from bind mounts ──────────────────────────────────
 # Base prompt: mounted as AGENTS_BASE.md when present, fallback to baked-in AGENTS.md.
 # Prompt overlays from mounted repos are appended when present.
+# The selected persona is appended when AGENTS_PERSONA.md exists in the sandbox home.
+# harness-server recomposes this file before its first turn, once the session's
+# credentials are bound, to add overlay session-prompt.sh hook output and pick
+# up overlay prompt changes made since a warm sandbox booted.
 TARGET_PROMPT="$WORKSPACE_DIR/AGENTS.md"
-compose-system-prompt --home-dir "$HOME_DIR" --target-prompt "$TARGET_PROMPT"
-
-if [ "${CENTAUR_SANDBOX_OBSERVABILITY_ENABLED:-true}" = "false" ] && [ -f "$TARGET_PROMPT" ]; then
-    cat >> "$TARGET_PROMPT" <<'EOF'
-
----
-
-[Observability access]
-This sandbox does not have Centaur observability access. Do not use vlogs, vmetrics, Grafana, or related internal logs/metrics tools.
-EOF
-fi
-
-# Persona prompt injection is done by the API when it writes AGENTS_BASE.md.
+compose-system-prompt \
+    --home-dir "$HOME_DIR" \
+    --target-prompt "$TARGET_PROMPT"
 
 # Switch to workspace so the harness reads workspace/AGENTS.md (with persona overlay)
 cd "$WORKSPACE_DIR"

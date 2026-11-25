@@ -2,24 +2,47 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "definitions": {
+    "slackbotv2ProactivityRules": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["name", "when"],
+        "properties": {
+          "name": { "type": "string", "pattern": "\\S" },
+          "when": { "type": "string", "pattern": "\\S" },
+          "context": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "podScheduling": {
+      "type": "object",
+      "properties": {
+        "nodeSelector": { "type": "object" },
+        "affinity": { "type": "object" },
+        "tolerations": { "type": "array" }
+      }
+    },
     "consoleConfig": {
       "type": "object",
       "properties": {
-        "replicaCount": { "type": "integer" },
         "publicUrl": { "type": "string" },
-        "allowedHosts": {
-          "type": "array",
-          "items": { "type": "string" },
-          "uniqueItems": true
-        },
-        "sentryDsn": { "type": "string" },
-        "railsEnv": { "type": "string" },
-        "image": {
+        "oktaOauth": {
           "type": "object",
           "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string" }
+            "enabled": { "type": "boolean" },
+            "issuer": { "type": "string" },
+            "tokenEndpointAuthMethod": {
+              "type": "string",
+              "enum": ["client_secret_basic", "client_secret_post"]
+            }
+          }
+        },
+        "chat": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
           }
         },
         "database": {
@@ -50,46 +73,7 @@
             "host": { "type": "string" },
             "tls": { "type": "array" }
           }
-        },
-        "worker": {
-          "type": "object",
-          "properties": {
-            "replicaCount": { "type": "integer" },
-            "resources": { "type": "object" }
-          }
-        },
-        "sqlExporter": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "image": {
-              "type": "object",
-              "properties": {
-                "repository": { "type": "string" },
-                "tag": { "type": "string" },
-                "pullPolicy": { "type": "string" }
-              }
-            },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "databaseUrlSecretKey": { "type": "string", "minLength": 1 },
-            "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "minInterval": { "type": "string", "minLength": 1 },
-            "scrapeTimeout": { "type": "string", "minLength": 1 },
-            "metrics": {
-              "type": "object",
-              "properties": {
-                "scrapeAnnotations": { "type": "boolean" },
-                "path": { "type": "string" },
-                "annotations": {
-                  "type": "object",
-                  "additionalProperties": { "type": "string" }
-                }
-              }
-            },
-            "resources": { "type": "object" }
-          }
-        },
-        "resources": { "type": "object" }
+        }
       }
     }
   },
@@ -106,7 +90,9 @@
       "type": "object",
       "properties": {
         "existingCaSecretName": { "type": "string" },
+        "existingCaSecretKey": { "type": "string", "minLength": 1 },
         "existingCaKeySecretName": { "type": "string" },
+        "existingCaKeySecretKey": { "type": "string", "minLength": 1 },
         "ca": {
           "type": "object",
           "properties": {
@@ -141,7 +127,6 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "port": { "type": "integer" },
         "repo": { "type": "string" },
         "ref": { "type": "string" },
         "visibility": { "type": "string" },
@@ -190,6 +175,7 @@
               "toolsSubdir": { "type": "string" },
               "workflowsSubdir": { "type": "string" },
               "skillsSubdir": { "type": "string" },
+              "connectorsSubdir": { "type": "string" },
               "promptPath": { "type": "string" },
               "personasSubdir": { "type": "string" }
             },
@@ -210,7 +196,45 @@
               "name": { "type": "string", "minLength": 1 },
               "baseUrl": { "type": "string", "pattern": "^https://" },
               "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
-              "defaultModel": { "type": "string", "minLength": 1 }
+              "defaultModel": { "type": "string", "minLength": 1 },
+              "webSearch": { "type": "boolean" },
+              "models": {
+                "type": "object",
+                "propertyNames": { "pattern": "\\S" },
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "displayName": { "type": "string", "pattern": "\\S" },
+                    "aliases": {
+                      "type": "array",
+                      "items": { "type": "string", "pattern": "\\S" },
+                      "uniqueItems": true
+                    },
+                    "description": { "type": "string", "pattern": "\\S" },
+                    "contextWindow": { "type": "integer", "minimum": 1 },
+                    "inputModalities": {
+                      "type": "array",
+                      "items": { "type": "string", "enum": ["text", "image"] },
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "contains": { "const": "text" }
+                    },
+                    "reasoningEfforts": {
+                      "type": "array",
+                      "items": { "type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] },
+                      "uniqueItems": true
+                    },
+                    "defaultReasoning": { "type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] },
+                    "reasoningAliases": {
+                      "type": "object",
+                      "propertyNames": { "pattern": "\\S" },
+                      "additionalProperties": { "type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] }
+                    }
+                  },
+                  "required": ["displayName"],
+                  "additionalProperties": false
+                }
+              }
             },
             "required": ["name", "baseUrl", "apiKeyEnv"],
             "additionalProperties": false
@@ -222,19 +246,36 @@
       "type": "object",
       "properties": {
         "nodeSelector": { "type": "object" },
+        "hostUsers": { "type": ["boolean", "null"] },
+        "containerSecurityContext": { "type": "object" },
         "tolerations": { "type": "array" },
         "runtimeClassName": { "type": "string" },
+        "serviceAccountName": { "type": "string" },
         "reposPath": { "type": "string" },
         "resources": { "type": "object" },
         "telemetry": {
           "type": "object",
           "properties": {
-            "captureTranscripts": { "type": "boolean" }
+            "captureTranscripts": { "type": "boolean" },
+            "captureToolTraces": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "codemode": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" }
           }
         }
       }
     },
     "repoCache": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
@@ -291,9 +332,6 @@
             "failureThreshold": { "type": "integer" }
           }
         },
-        "nodeSelector": { "type": "object" },
-        "tolerations": { "type": "array" },
-        "affinity": { "type": "object" },
         "resources": { "type": "object" }
       }
     },
@@ -324,95 +362,131 @@
         }
       }
     },
-    "apiRs": {
+    "proxySync": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
-        "syncInfraSecrets": { "type": "boolean" },
-        "mcpPublicUrl": { "type": "string" },
-        "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
-        "sandboxHotIdleGraceSecs": { "type": "integer", "minimum": 0 },
-        "workflowHostSandbox": { "type": "boolean" },
-        "workflowHostResources": { "type": "object" },
-        "etl": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "databaseMaxConnections": { "type": "integer", "minimum": 1 },
+        "metrics": {
           "type": "object",
           "properties": {
-            "slack": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
               "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" },
-                "syncBackfillLookbackDays": { "type": "integer" },
-                "syncThreadLookbackDays": { "type": "integer" },
-                "indexPrivateChannels": { "type": "boolean" },
-                "excludedChannelPatterns": { "type": "string" },
-                "attachments": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "maxBytes": { "type": "integer" }
-                  }
-                },
-                "backfill": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "intervalSeconds": { "type": "integer" },
-                    "channelBatchLimit": { "type": "integer" },
-                    "channelPagesPerJob": { "type": "integer" }
-                  }
-                },
-                "retention": {
-                  "type": "object",
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "intervalMinutes": { "type": "integer" },
-                    "etlDays": { "type": "integer" },
-                    "dmDays": { "type": "integer" }
-                  }
-                }
-              }
-            },
-            "linear": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" }
-              }
-            },
-            "googleDrive": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" }
-              }
-            },
-            "googleCalendar": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "syncIntervalSeconds": { "type": "integer" }
-              }
-            },
-            "companyContextDocuments": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "intervalSeconds": { "type": "integer" },
-                "maxWindowSeconds": { "type": "integer" },
-                "batchSize": { "type": "integer", "minimum": 1 }
-              }
-            },
-            "companyContextEmbeddings": {
-              "type": "object",
-              "properties": {
-                "enabled": { "type": "boolean" },
-                "intervalSeconds": { "type": "integer", "minimum": 1 },
-                "batchSize": { "type": "integer", "minimum": 1 },
-                "model": { "type": "string", "minLength": 1 }
-              }
+              "additionalProperties": { "type": "string" }
             }
           }
         },
+        "resources": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
+      }
+    },
+    "tokenBroker": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "pollIntervalSeconds": { "type": "integer", "minimum": 1 },
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "databaseMaxConnections": { "type": "integer", "minimum": 1 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "path": { "type": "string" },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "resources": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
+      }
+    },
+    "brain": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "defaultModel": { "type": "string" },
+        "defaultThinking": { "type": "string" },
+        "openaiBaseUrl": { "type": "string" },
+        "trustReleaseCa": { "type": "boolean" },
+        "databaseUrl": {
+          "type": "object",
+          "properties": {
+            "existingSecretName": { "type": "string" },
+            "secretKey": { "type": "string" }
+          }
+        },
+        "extraEnv": { "type": "object" },
+        "resources": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        }
+      }
+    },
+    "apiRs": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
+      "type": "object",
+      "properties": {
+        "syncInfraSecrets": { "type": "boolean" },
+        "mcpEnabled": { "type": "boolean" },
+        "mcpPublicUrl": { "type": "string" },
+        "sessionPrincipalAdmission": {
+          "type": "string",
+          "enum": ["automatic", "preapproved"]
+        },
+        "sandboxRunningLimit": { "type": "integer", "minimum": 0 },
+        "sandboxWarmPools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["harness", "repoCache", "size"],
+            "properties": {
+              "harness": {
+                "type": "string",
+                "enum": ["codex", "amp", "claudecode", "hermes", "pi", "omp"]
+              },
+              "repoCache": { "type": "string", "enum": ["all", "public", "none"] },
+              "persona": { "type": "string", "minLength": 1 },
+              "size": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "sessionEventsRetentionDays": { "type": "integer", "minimum": 0, "maximum": 3650 },
+        "sessionEventsRetentionSweepIntervalSecs": { "type": "integer", "minimum": 1 },
+        "sandboxOrphanSweepGraceSecs": { "type": "integer", "minimum": 1 },
+        "workflowHostResources": { "type": "object" },
         "metrics": {
           "type": "object",
           "properties": {
@@ -426,24 +500,71 @@
         },
         "extraEnv": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "required": ["valueFrom"],
+                "additionalProperties": false,
+                "properties": { "valueFrom": { "type": "object", "minProperties": 1 } }
+              }
+            ]
+          }
         }
       }
     },
     "slackbotv2": {
       "type": "object",
       "properties": {
+        "extraCaCertificates": { "type": "string" },
+        "agentViewEnabled": { "type": "boolean" },
         "mcpPublicUrl": { "type": "string" },
-        "codexNanocodexRolloutPercent": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
-        },
         "responseMetadataMode": {
           "type": "string",
           "enum": ["first", "always", "never"]
         },
         "responseServiceTierEnabled": { "type": "boolean" },
+        "generativeUi": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "tables": { "type": "integer", "minimum": 1 },
+                "charts": { "type": "integer", "minimum": 1 },
+                "fields": { "type": "integer", "minimum": 1 },
+                "tableRows": { "type": "integer", "minimum": 1 },
+                "tableColumns": { "type": "integer", "minimum": 1 },
+                "chartLabel": { "type": "integer", "minimum": 1 },
+                "chartTitle": { "type": "integer", "minimum": 1 },
+                "chartSeries": { "type": "integer", "minimum": 1 },
+                "chartPoints": { "type": "integer", "minimum": 1 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "proactivity": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "classifier": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "openaiBaseUrl": { "type": "string" },
+            "timeoutMs": { "type": "integer", "minimum": 1 },
+            "debounceMs": { "type": "integer", "minimum": 0 },
+            "defaultRules": { "$ref": "#/definitions/slackbotv2ProactivityRules" },
+            "channelRules": {
+              "type": "object",
+              "propertyNames": { "pattern": "^[A-Z0-9]+$" },
+              "additionalProperties": { "$ref": "#/definitions/slackbotv2ProactivityRules" }
+            }
+          },
+          "additionalProperties": false
+        },
         "metrics": {
           "type": "object",
           "properties": {
@@ -461,7 +582,27 @@
         }
       }
     },
+    "externalDatabase": {
+      "type": "object",
+      "properties": {
+        "cidrs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "podSelector": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
+          }
+        },
+        "namespace": { "type": "string", "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "textSearch": { "enum": ["", "paradedb", "postgres"] }
+      }
+    },
     "postgres": {
+      "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",
       "properties": {
         "persistence": {
@@ -479,6 +620,12 @@
         }
       }
     },
+    "workflowDiscovery": {
+      "type": "object",
+      "properties": {
+        "resources": { "type": "object" }
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "properties": {
@@ -488,10 +635,6 @@
           "items": { "type": "string" }
         },
         "apiIngressSourceNamespaces": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "metricsIngressSourceNamespaces": {
           "type": "array",
           "items": { "type": "string" }
         },

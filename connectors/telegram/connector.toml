@@ -1,0 +1,3 @@
+description = "Telegram Bot API: send and forward messages, read updates and chats, manage webhooks"
+
+secrets = [{type = "http", name = "TELEGRAM_BOT_TOKEN", match_path = true, hosts = ["api.telegram.org"]}]

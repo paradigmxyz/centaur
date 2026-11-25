@@ -125,7 +125,7 @@ class CopyPublishedToolsTest(unittest.TestCase):
             root = Path(tmp) / "tools"
             tools = [
                 ("infra", "vlogs", "vlogs", "vlogs"),
-                ("infra", "centaur_investigator", "centaur_investigator", "centaur-investigator"),
+                ("infra", "infra_probe", "infra_probe", "infra-probe"),
                 ("research", "websearch", "websearch", "websearch"),
             ]
             for category, dirname, project, script in tools:
@@ -137,12 +137,12 @@ class CopyPublishedToolsTest(unittest.TestCase):
 
             with mock.patch.dict(
                 "os.environ",
-                {"TOOL_BLOCKLIST": "vlogs,centaur_investigator,centaur-investigator"},
+                {"TOOL_BLOCKLIST": "vlogs,infra_probe,infra-probe"},
             ):
                 scripts = install_tool_shims._discover_scripts([root])
 
             self.assertNotIn("vlogs", scripts)
-            self.assertNotIn("centaur-investigator", scripts)
+            self.assertNotIn("infra-probe", scripts)
             self.assertIn("websearch", scripts)
 
 
@@ -164,6 +164,60 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertIn(f"exec {bin_dir / 'centaur-tools'} run websearch", content)
             self.assertNotIn("uvx --from", content)
             self.assertNotIn("/app/tools/research/websearch", content)
+
+    def test_centaur_tools_list_emits_analytics_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "websearch",
+                            "project_dir": "/app/tools/research/websearch",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools", index_path, ""
+            )
+            analytics_log = root / "tool-analytics.log"
+            env = {
+                **os.environ,
+                "CENTAUR_THREAD_KEY": "cli:test-thread",
+                "CENTAUR_TOOL_ANALYTICS_LOG_PATH": str(analytics_log),
+            }
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "list"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout, "websearch\t/app/tools/research/websearch\n"
+            )
+            analytics_events = [
+                json.loads(line) for line in analytics_log.read_text().splitlines()
+            ]
+            self.assertEqual(
+                [event["event"] for event in analytics_events],
+                ["tool_call_started", "tool_call_completed"],
+            )
+            for event in analytics_events:
+                self.assertEqual(event["tool_name"], "centaur-tools")
+                self.assertEqual(event["tool_method"], "list")
+                self.assertEqual(event["thread_key"], "cli:test-thread")
+            self.assertEqual(analytics_events[1]["exit_code"], 0)
+            self.assertEqual(analytics_events[1]["success"], "true")
+            self.assertIn("duration_ms", analytics_events[1])
 
     def test_centaur_tools_run_uses_catalog_entry_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,6 +366,53 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("usage: centaur-tools", result.stderr)
 
+    def test_tool_runs_write_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps([{"name": "websearch", "project_dir": str(root / "websearch")}])
+            )
+            install_tool_shims._write_catalog(bin_dir / "centaur-tools", index_path, "")
+            env_log = root / "env.json"
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os\n"
+                "keys = ['PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX']\n"
+                "with open(os.environ['ENV_LOG'], 'w') as f:\n"
+                "    json.dump({k: os.environ.get(k) for k in keys}, f)\n"
+            )
+            fake_uvx.chmod(0o755)
+            env = os.environ.copy()
+            env.pop("PYTHONPYCACHEPREFIX", None)
+            env.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+                    "ENV_LOG": str(env_log),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "CENTAUR_TOOL_ANALYTICS_LOG_PATH": "off",
+                }
+            )
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "run", "websearch"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(env_log.read_text()),
+                {"PYTHONDONTWRITEBYTECODE": None, "PYTHONPYCACHEPREFIX": None},
+            )
+
     def test_call_runner_loads_hyphenated_tool_as_normalized_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -388,6 +489,76 @@ class GeneratedShimTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), "package-loaded:ok")
 
+    def test_call_reads_thread_key_from_sandbox_context_file(self) -> None:
+        # A claimed warm sandbox has no CENTAUR_THREAD_KEY, only the context
+        # file harness-server writes before the first turn.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            fake_bin = root / "fake-bin"
+            project_dir = root / "whoami"
+            bin_dir.mkdir()
+            fake_bin.mkdir()
+            project_dir.mkdir()
+            (project_dir / "client.py").write_text(
+                "from centaur_sdk.tool_sdk import get_tool_context\n"
+                "\n"
+                "def whoami():\n"
+                "    return get_tool_context().thread_key\n"
+            )
+            index_path = bin_dir / ".centaur-tools.json"
+            index_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "whoami",
+                            "project_dir": str(project_dir),
+                            "package": "whoami",
+                            "entrypoint": "cli:app",
+                            "client_module": "client.py",
+                        }
+                    ]
+                )
+                + "\n"
+            )
+            install_tool_shims._write_catalog(
+                bin_dir / "centaur-tools",
+                index_path,
+                str(Path(__file__).resolve().parents[2]),
+            )
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import subprocess\n"
+                "import sys\n"
+                "\n"
+                "raise SystemExit(subprocess.call([sys.executable, *sys.argv[4:]]))\n"
+            )
+            fake_uvx.chmod(0o755)
+            context_file = root / "sandbox.json"
+            context_file.write_text(json.dumps({"version": 1, "thread_key": "slack:T1:C1:1.0"}))
+            analytics_log = root / "tool-analytics.log"
+
+            env = os.environ.copy()
+            env.pop("CENTAUR_THREAD_KEY", None)
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+            env["CENTAUR_SANDBOX_CONTEXT_FILE"] = str(context_file)
+            env["CENTAUR_TOOL_ANALYTICS_LOG_PATH"] = str(analytics_log)
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "call", "whoami", "whoami"],
+                check=False,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), "slack:T1:C1:1.0")
+            events = [json.loads(line) for line in analytics_log.read_text().splitlines()]
+            self.assertTrue(events)
+            for event in events:
+                self.assertEqual(event["thread_key"], "slack:T1:C1:1.0")
+
 
 class RefreshInstallTest(unittest.TestCase):
     def test_install_removes_stale_generated_shims(self) -> None:
@@ -436,6 +607,116 @@ class RefreshInstallTest(unittest.TestCase):
             self.assertFalse((bin_dir / "gone").exists())
             index = json.loads((bin_dir / ".centaur-tools.json").read_text())
             self.assertEqual([tool["name"] for tool in index], ["websearch"])
+
+
+class RetiredToolShimTest(unittest.TestCase):
+    def _install(self, tool_dir: Path, bin_dir: Path) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), mock.patch.object(
+            install_tool_shims, "RETIRED_TOOLS", {"old_tool": "new_connector"}
+        ):
+            install_tool_shims._install_tool_shims([tool_dir], bin_dir, refresh=False)
+
+    def test_retired_tool_shim_points_to_connector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            tool_dir.mkdir()
+            bin_dir.mkdir()
+
+            self._install(tool_dir, bin_dir)
+
+            result = subprocess.run(
+                [str(bin_dir / "old_tool"), "v2", "search", "anything"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("The `old_tool` CLI has been removed", result.stderr)
+            self.assertIn("centaur-codemode load new_connector", result.stderr)
+            index = json.loads((bin_dir / ".centaur-tools.json").read_text())
+            self.assertEqual(index, [])
+
+            for args in (
+                ["run", "old_tool", "search", "x"],
+                ["call", "old_tool", "search", "{}"],
+                ["which", "old_tool"],
+            ):
+                result = subprocess.run(
+                    [str(bin_dir / "centaur-tools"), *args],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, args)
+                self.assertIn("centaur-codemode load new_connector", result.stderr, args)
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "run", "missing"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr.strip(), "unknown tool: missing")
+
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "list"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("old_tool", result.stdout)
+
+    def test_mounted_tool_takes_precedence_over_retired_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            package_dir = tool_dir / "research" / "old_tool"
+            package_dir.mkdir(parents=True)
+            bin_dir.mkdir()
+            (package_dir / "pyproject.toml").write_text(
+                '[project]\nname = "old_tool"\n\n[project.scripts]\nold_tool = "client:main"\n'
+            )
+
+            self._install(tool_dir, bin_dir)
+
+            shim = (bin_dir / "old_tool").read_text()
+            self.assertIn(" run old_tool ", shim)
+            self.assertNotIn("has been removed", shim)
+
+    def test_retired_shim_does_not_replace_unmanaged_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool_dir = root / "tools"
+            bin_dir = root / "bin"
+            tool_dir.mkdir()
+            bin_dir.mkdir()
+            (bin_dir / "old_tool").write_text("#!/bin/sh\necho mine\n")
+
+            self._install(tool_dir, bin_dir)
+
+            self.assertEqual((bin_dir / "old_tool").read_text(), "#!/bin/sh\necho mine\n")
+
+    def test_company_context_is_retired_to_its_connector(self) -> None:
+        self.assertEqual(install_tool_shims.RETIRED_TOOLS["company_context"], "company_context")
+
+    def test_centaur_console_is_retired_to_its_connector(self) -> None:
+        self.assertEqual(install_tool_shims.RETIRED_TOOLS["centaur-console"], "centaur_console")
+
+    def test_tools_replaced_by_same_named_connectors_are_retired(self) -> None:
+        for name in (
+            "coindesk", "edgar", "fedreg", "googlenews", "kalshi", "laminar", "mercator",
+            "polymarket", "preqin", "reth", "theblock", "vlogs", "vmetrics",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(install_tool_shims.RETIRED_TOOLS[name], name)
+
 
 if __name__ == "__main__":
     unittest.main()

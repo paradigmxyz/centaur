@@ -19,6 +19,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - agents.x-k8s.io
   resources:
   - sandboxes
@@ -50,10 +58,3 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch

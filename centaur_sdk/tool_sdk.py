@@ -18,6 +18,12 @@ from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
+# harness-server writes the sandbox context file before a sandbox's first
+# turn. Warm sandboxes boot before a session claims them, so their environment
+# has no CENTAUR_THREAD_KEY and this file is the only place it appears.
+SANDBOX_CONTEXT_FILE_ENV = "CENTAUR_SANDBOX_CONTEXT_FILE"
+DEFAULT_SANDBOX_CONTEXT_FILE = Path(".centaur") / "sandbox.json"
+
 
 @dataclass
 class ToolContext:
@@ -79,12 +85,47 @@ def secret(key: str, default: str | None = None) -> str:
     raise KeyError(f"Missing secret '{key}'{ctx_name}")
 
 
+def sandbox_context_path() -> Path:
+    """Return where harness-server writes this sandbox's context file."""
+    configured = os.environ.get(SANDBOX_CONTEXT_FILE_ENV, "").strip()
+    if configured:
+        return Path(configured)
+    return Path.home() / DEFAULT_SANDBOX_CONTEXT_FILE
+
+
+def sandbox_context() -> dict[str, Any]:
+    """Return the sandbox context file's contents, or ``{}`` before it exists.
+
+    The file records the session's ``thread_key``, the harness and persona, and
+    under ``sandbox`` the Console principal, capabilities, and redacted grants.
+    It is informational: never base an authorization decision on it.
+    """
+    try:
+        context = json.loads(sandbox_context_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return context if isinstance(context, dict) else {}
+
+
+def sandbox_thread_key() -> str | None:
+    """Return the thread key of the session this sandbox serves, if known."""
+    thread_key = os.environ.get("CENTAUR_THREAD_KEY", "").strip()
+    if thread_key:
+        return thread_key
+    thread_key = sandbox_context().get("thread_key")
+    if isinstance(thread_key, str) and thread_key.strip():
+        return thread_key.strip()
+    return None
+
+
 def current_thread_key() -> str:
     """Return the active thread key for a tool call."""
     try:
         thread_key = _tool_ctx.get().thread_key
     except LookupError:
         thread_key = None
+    if not thread_key:
+        thread_key = sandbox_thread_key()
     if not thread_key:
         raise RuntimeError(
             "this operation must run inside a scoped thread: no thread_key "
@@ -224,7 +265,7 @@ def _sandbox_uploads_dir() -> Path | None:
     configured = os.environ.get("CENTAUR_UPLOADS_DIR", "").strip()
     if configured:
         return Path(configured)
-    if os.environ.get("CENTAUR_THREAD_KEY", "").strip():
+    if sandbox_thread_key():
         return Path.home() / "uploads"
     return None
 

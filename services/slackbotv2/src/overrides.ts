@@ -1,20 +1,26 @@
+import { configuredModels, findConfiguredModel, mentionsSelectionName } from './model-catalog'
+import { escapeRegExp } from './utils'
+
 /**
  * Inline message directives, restored from the v1 slackbot:
- *   --claude | --claude-code | --amp | --codex | --nanocodex
+ *   --claude | --claude-code | --amp | --codex | --nanocode | --pi | --omp
  *                                                  pick the harness for the thread
  *   --bedrock                                    codex via the AWS Bedrock provider
  *   --meta                                       codex via Meta AI direct
  *   --provider <name>                            codex via a configured provider
+ *   --persona <id> (or --persona=<id>)           pick the persona independently
  *   --model <name> (or --model=<name>)           pick the model within that harness
- *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocodex)
+ *   -rsn <effort> (or -rsn=<effort>)             per-turn reasoning effort (codex/nanocode/claude-code/pi/omp)
  *   --fable | --opus | --sonnet | --haiku        model shortcuts (imply claude-code)
  *
  * Flags are stripped from the text before it reaches the agent. The harness
  * applies at session creation — an explicit harness flag on a thread pinned to
- * another harness restarts the thread on the requested one. Harness/model/provider
- * choices are sticky at the Slack thread level: the last flag wins for later
- * turns in the same thread. `--model` accepts either a full model id
- * (claude-sonnet-4-6, gpt-5.2, ...), an amp mode (deep/fast), or a Claude alias
+ * another harness restarts the thread on the requested one. The persona chosen
+ * when the session is created is pinned for the lifetime of the thread; later
+ * persona flags are stripped but do not change it. Harness, model, and provider
+ * choices are sticky at the Slack thread level. `--model`
+ * accepts either a full model id (claude-sonnet-4-6, gpt-5.2, ...), an amp mode
+ * (deep/fast), or a Claude alias
  * (fable/opus/sonnet/haiku) which expands to the full id. Reasoning effort only
  * affects the codex-compatible harnesses and stays per-turn; other harnesses
  * ignore it. The provider rides the blocks-protocol
@@ -23,19 +29,26 @@
  */
 
 /**
- * A resolved bundle of harness knobs (harness + model/provider/reasoning), all
- * optional. Shared by the inline flag parser and per-channel defaults so both
- * speak the same vocabulary.
+ * A resolved bundle of persona and harness knobs, all optional. Shared by the
+ * inline flag parser and per-channel defaults so both speak the same model and
+ * provider vocabulary.
  */
 export type HarnessOverrides = {
   harnessType?: string
   model?: string
+  personaId?: string
   provider?: string
   reasoning?: string
+  selectionError?: string
 }
 
 export type MessageOverrides = HarnessOverrides & {
   cleanedText: string
+}
+
+export type PersonaOverride = {
+  cleanedText: string
+  personaId?: string
 }
 
 // Flag name -> HarnessType wire value (serde lowercase of the Rust enum).
@@ -46,7 +59,9 @@ const HARNESS_FLAGS: Record<string, string> = {
   claudecode: 'claudecode',
   codex: 'codex',
   hermes: 'hermes',
-  nanocodex: 'nanocodex'
+  nanocode: 'nanocode',
+  pi: 'pi',
+  omp: 'omp'
 }
 
 // Provider flags select a model provider within the codex harness (and imply
@@ -62,10 +77,10 @@ const PROVIDER_FLAGS: Record<string, ProviderMapping> = {
 // Claude model aliases, usable both as bare flags (--opus) and as --model
 // values (--model opus). Bare-flag form also implies the claude-code harness.
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
-  fable: 'claude-fable-5',
-  haiku: 'claude-haiku-4-5',
-  opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6'
+  fable: 'claude-fable-5-2',
+  haiku: 'claude-haiku-5-5',
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5'
 }
 
 const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
@@ -76,7 +91,7 @@ const MODEL_SHORTCUTS: Record<string, { harnessType: string; model: string }> =
     ])
   )
 
-const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocodex'])
+const STRATEGY_HARNESSES = new Set(['amp', 'claudecode', 'codex', 'hermes', 'nanocode', 'pi', 'omp'])
 const STRATEGY_PROVIDERS = new Set(['amazon-bedrock', 'openrouter', 'responses'])
 const STRATEGY_REASONING_EFFORTS = new Set([
   'none',
@@ -85,18 +100,24 @@ const STRATEGY_REASONING_EFFORTS = new Set([
   'medium',
   'high',
   'xhigh',
-  'max'
+  'max',
+  'ultra'
 ])
 
 const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'claude-fable-5': 'claudecode',
+  'claude-fable-5-1': 'claudecode',
+  'claude-fable-5-2': 'claudecode',
   'claude-haiku-4-5': 'claudecode',
+  'claude-haiku-5-5': 'claudecode',
   'claude-opus-4-7': 'claudecode',
   'claude-opus-4-8': 'claudecode',
   'claude-opus-5': 'claudecode',
   'claude-opus-5-fast': 'claudecode',
+  'claude-opus-5-5': 'claudecode',
   'claude-sonnet-4-6': 'claudecode',
   'claude-sonnet-5': 'claudecode',
+  'claude-sonnet-5-5': 'claudecode',
   deep: 'amp',
   fast: 'amp',
   'gpt-5.4': 'codex',
@@ -107,30 +128,33 @@ const STRATEGY_MODEL_HARNESSES: Record<string, string> = {
   'gpt-5.5-pro': 'codex',
   'gpt-5.6-luna': 'codex',
   'gpt-5.6-sol': 'codex',
-  'gpt-5.6-terra': 'codex'
+  'gpt-5.6-terra': 'codex',
+  'gpt-6-astra': 'codex',
+  'gpt-6-sol': 'codex',
+  'gpt-6.1-sol': 'codex',
+  'gpt-6.1-terra': 'codex',
+  'gpt-6.2-astra': 'codex',
+  'gpt-6.2-sol': 'codex',
+  'gpt-6-luna': 'codex'
 }
 
 // Values are one horizontal-whitespace-delimited token; a newline after the
 // value starts the user's prompt, not part of the model/reasoning value.
-const MODEL_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
+const FLAG_VALUE_SEPARATOR = String.raw`(?:[^\S\r\n]*=[^\S\r\n]*|[^\S\r\n]+)`
 const FLAG_VALUE_BOUNDARY = String.raw`(?=[^\S\r\n]|\r?\n|\r|<br\s*/?>|$)`
 
-const MODEL_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--model${MODEL_VALUE_SEPARATOR}([A-Za-z0-9._/-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
+const MODEL_FLAG_PATTERN = valueFlagPattern('--model', String.raw`[A-Za-z0-9][A-Za-z0-9._/-]*`)
+const PROVIDER_FLAG_PATTERN = valueFlagPattern(
+  '--provider',
+  String.raw`[A-Za-z][A-Za-z0-9_-]*`
 )
+const PERSONA_ID_SOURCE = String.raw`[A-Za-z0-9][A-Za-z0-9._-]*`
+const PERSONA_FLAG_PATTERN = valueFlagPattern('--persona', PERSONA_ID_SOURCE)
+/** Matches a whole persona id, in the shape `--persona` accepts. */
+export const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_SOURCE}$`)
 
-const PROVIDER_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)--provider${MODEL_VALUE_SEPARATOR}([A-Za-z][A-Za-z0-9_-]*)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
-
-// Single dash by design: a short per-turn knob (`-rsn high`), so it can't reuse
-// the `--`-prefixed flagPattern() helper. Value-capturing like --model.
-const REASONING_FLAG_PATTERN = new RegExp(
-  String.raw`(?:^|\s)-rsn${MODEL_VALUE_SEPARATOR}([A-Za-z-]+)${FLAG_VALUE_BOUNDARY}`,
-  'i'
-)
+// Single dash by design: a short per-turn knob (`-rsn high`).
+const REASONING_FLAG_PATTERN = valueFlagPattern('-rsn', String.raw`[A-Za-z-]+`)
 
 // Codex reasoning efforts (turn/start `effort`), plus convenience aliases.
 const REASONING_EFFORTS: Record<string, string> = {
@@ -145,7 +169,8 @@ const REASONING_EFFORTS: Record<string, string> = {
   xhigh: 'xhigh',
   xhi: 'xhigh',
   'x-high': 'xhigh',
-  max: 'max'
+  max: 'max',
+  ultra: 'ultra'
 }
 
 export function extractMessageOverrides(text: string): MessageOverrides {
@@ -206,10 +231,16 @@ export function extractMessageOverrides(text: string): MessageOverrides {
 
   return {
     cleanedText: cleaned === text ? text : cleaned.trim(),
-    harnessType,
-    model,
-    provider,
-    reasoning
+    ...resolveConfiguredSelection({ harnessType, model, provider, reasoning }, true)
+  }
+}
+
+export function extractPersonaOverride(text: string): PersonaOverride {
+  const match = PERSONA_FLAG_PATTERN.exec(text)
+  if (!match) return { cleanedText: text }
+  return {
+    cleanedText: stripMatch(text, match).trim(),
+    personaId: match[1]!
   }
 }
 
@@ -237,7 +268,7 @@ export function validateStrategyOverrides(
   const providerRaw = cleanString(raw.provider)
   if (providerRaw) {
     const normalized = providerRaw.toLowerCase()
-    if (!STRATEGY_PROVIDERS.has(normalized)) return {}
+    if (!STRATEGY_PROVIDERS.has(normalized) && !configuredModels().some(model => model.provider === normalized)) return {}
     provider = normalized
     if (harnessType && harnessType !== 'codex') return {}
     harnessType = 'codex'
@@ -245,7 +276,7 @@ export function validateStrategyOverrides(
 
   const modelRaw = cleanString(raw.model)
   if (modelRaw) {
-    const modelHarness = STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
+    const modelHarness = findConfiguredModel(modelRaw, provider) ? 'codex' : STRATEGY_MODEL_HARNESSES[modelRaw.toLowerCase()]
     if (!modelHarness) return {}
     if (harnessType && harnessType !== modelHarness) return {}
     model = modelRaw.toLowerCase()
@@ -257,12 +288,16 @@ export function validateStrategyOverrides(
     const normalized = reasoningRaw.toLowerCase()
     if (!STRATEGY_REASONING_EFFORTS.has(normalized)) return {}
     reasoning =
-      harnessType === undefined || harnessType === 'codex' || harnessType === 'nanocodex'
+      harnessType === undefined ||
+      harnessType === 'codex' ||
+      harnessType === 'nanocode' ||
+      harnessType === 'pi' ||
+      harnessType === 'omp'
         ? normalized
         : undefined
   }
 
-  return { harnessType, model, provider, reasoning }
+  return resolveConfiguredSelection({ harnessType, model, provider, reasoning })
 }
 
 /**
@@ -309,7 +344,7 @@ export function normalizeHarnessOverrides(
     if (!reasoning) onError?.(`unknown reasoning effort "${reasoningRaw}"`)
   }
 
-  return { harnessType, model, provider, reasoning }
+  return resolveConfiguredSelection({ harnessType, model, provider, reasoning })
 }
 
 function cleanString(value: unknown): string | undefined {
@@ -343,7 +378,14 @@ function customProviderDefaultModel(provider: string): string | undefined {
 }
 
 function flagPattern(flag: string): RegExp {
-  return new RegExp(`(?:^|\\s)--${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`, 'i')
+  return new RegExp(`(?:^|\\s)--${escapeRegExp(flag)}(?=\\s|$)`, 'i')
+}
+
+function valueFlagPattern(flag: string, valuePattern: string): RegExp {
+  return new RegExp(
+    String.raw`(?:^|\s)${escapeRegExp(flag)}${FLAG_VALUE_SEPARATOR}(${valuePattern})${FLAG_VALUE_BOUNDARY}`,
+    'i'
+  )
 }
 
 function stripMatch(text: string, match: RegExpExecArray): string {
@@ -354,4 +396,75 @@ function stripMatch(text: string, match: RegExpExecArray): string {
   const separator =
     before && after && !/\s$/.test(before) && !/^\s/.test(after) ? ' ' : ''
   return `${before}${separator}${after}`
+}
+
+export function parseEnabledHarnesses(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined
+  const harnesses = value.split(',').map(harness => harness.trim().toLowerCase())
+  if (harnesses.some(harness => !STRATEGY_HARNESSES.has(harness))) {
+    throw new Error('SLACKBOTV2_ENABLED_HARNESSES must contain known comma-separated harness types')
+  }
+  return [...new Set(harnesses)]
+}
+
+// Unknown harnesses (for example one a thread pinned before it was removed)
+// count as disabled so callers fall back to the deployment default.
+export function isHarnessEnabled(harness: string, enabledHarnesses?: readonly string[]): boolean {
+  if (!STRATEGY_HARNESSES.has(harness)) return false
+  return enabledHarnesses === undefined || enabledHarnesses.includes(harness)
+}
+
+function resolveConfiguredSelection(overrides: HarnessOverrides, explicit = false): HarnessOverrides {
+  if (!overrides.model && overrides.provider) {
+    const model = customProviderDefaultModel(overrides.provider)
+    if (model) overrides = { ...overrides, model }
+  }
+  if (!overrides.model) return overrides
+  const candidates = configuredModels().filter(model =>
+    [model.id, `${model.provider}/${model.id}`, ...model.aliases].some(name => name.toLowerCase() === overrides.model?.toLowerCase()))
+  if (candidates.length === 0) return overrides
+  const model = findConfiguredModel(overrides.model, overrides.provider)
+  if (!model || (overrides.harnessType && overrides.harnessType !== 'codex')) {
+    return explicit ? { selectionError: 'That model selection is ambiguous or incompatible with the requested provider or harness. Choose its configured provider and use the Codex harness.' } : {}
+  }
+  return { ...overrides, harnessType: 'codex', model: model.id, provider: model.provider }
+}
+
+/** Shared spoken names for the classifier and the pinned-selection guard. */
+export function modelSelectionNames(model: string): string[] {
+  const names = [model, model.replace(/-/g, ' ')]
+  const gpt = /^gpt-([0-9.]+)(?:-(.+))?$/.exec(model)
+  if (gpt) {
+    const versionedName = [gpt[1], gpt[2]?.replace(/-/g, ' ')].filter(Boolean).join(' ')
+    names.push(versionedName, `gpt ${versionedName}`, `gpt${versionedName}`,
+      `codex ${versionedName}`, `codex${versionedName}`)
+    const defaults: Record<string, string> = {
+      'gpt-6.2-sol': 'sol', 'gpt-6.1-terra': 'terra', 'gpt-6-luna': 'luna', 'gpt-6.2-astra': 'astra'
+    }
+    if (defaults[model]) names.push(defaults[model])
+  }
+  const claude = /^claude-([a-z]+)-([0-9]+(?:-[0-9]+)*)(.*)$/.exec(model)
+  if (claude) {
+    const versionedName = `${claude[1]} ${claude[2]!.replace(/-/g, '.')}${claude[3]!.replace(/-/g, ' ')}`
+    names.push(versionedName, `claude ${versionedName}`)
+    names.push(...Object.entries(CLAUDE_MODEL_ALIASES)
+      .filter(([, id]) => id === model).map(([alias]) => alias))
+    if (model === CLAUDE_MODEL_ALIASES.opus) names.push('claude')
+  }
+  return [...new Set(names)]
+}
+
+/** A classifier cannot replace a pinned selection unless its target is actually named. */
+export function namesRequestedSelection(text: string, overrides: HarnessOverrides): boolean {
+  if (overrides.model) {
+    const model = findConfiguredModel(overrides.model, overrides.provider)
+    const providerNames = model && customProviderDefaultModel(model.provider) === model.id
+      ? [model.provider, model.providerName] : []
+    const names = model ? [model.id, model.displayName, ...model.aliases, ...providerNames]
+      : modelSelectionNames(overrides.model)
+    return mentionsSelectionName(text, names)
+  }
+  if (overrides.provider) return mentionsSelectionName(text, [overrides.provider])
+  return Boolean(overrides.harnessType && mentionsSelectionName(text,
+    Object.entries(HARNESS_FLAGS).filter(([, value]) => value === overrides.harnessType).map(([key]) => key)))
 }

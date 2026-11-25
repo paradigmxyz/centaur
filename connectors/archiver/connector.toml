@@ -1,0 +1,10 @@
+description = "Document extraction via Reducto and public Google Docs/Drive exports for investment materials"
+
+# Copied from tools/research/archiver. The connector uses REDUCTO_API_KEY;
+# BROWSER_USE_API_KEY is declared for parity with the Python tool but unused,
+# because browser-use cloud is only reached over a CDP WebSocket, which a cell
+# cannot open.
+secrets = [
+    {type = "http", name = "REDUCTO_API_KEY", mode = "inject", inject_header = "Authorization", inject_formatter = "Bearer {{ .Value }}", hosts = ["platform.reducto.ai"]},
+    {type = "http", name = "BROWSER_USE_API_KEY", match_query = true, hosts = ["connect.browser-use.com"]},
+]

@@ -1,0 +1,3 @@
+description = "Plural (Open States): state legislation, legislators, committees, events and jurisdictions"
+
+secrets = [{ type = "http", name = "PLURAL_API_KEY", mode = "inject", inject_header = "X-API-KEY", hosts = ["v3.openstates.org"] }]

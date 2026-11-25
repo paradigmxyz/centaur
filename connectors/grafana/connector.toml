@@ -1,0 +1,5 @@
+description = "Grafana: dashboards, datasources, MetricsQL and LogsQL queries, alert rules, annotations"
+
+secrets = [
+  {type = "http", name = "GRAFANA_API_KEY", match_headers = ["Authorization"]},
+]

@@ -6,11 +6,16 @@ import {
   forwardToSessionApi,
   harnessRestartPreamble,
   interruptSessionExecution,
+  isSessionPrincipalAdmissionDenied,
+  isSlackFileUrl,
+  NON_SLACK_FILE_URL_ERROR,
   openSessionEventStream,
   resolveSlackHomeTeamId,
+  SessionApiError,
   serializeAttachment,
   serializeMessage
 } from '../src/session-api'
+import { generativeUiTurnNote } from '../src/generative-ui'
 import { renderSlackDisplayText } from '../src/slack-display-text'
 import type {
   ForwardSessionInput,
@@ -24,6 +29,21 @@ type RecordedRequest = {
   body: unknown
   url: string
 }
+
+describe('session admission errors', () => {
+  test('recognizes only the typed preapproval denial', () => {
+    const error = new SessionApiError({
+      action: 'create session',
+      body: JSON.stringify({ code: 'session_principal_not_preapproved' }),
+      retryable: false,
+      status: 403,
+      statusText: 'Forbidden'
+    })
+
+    expect(isSessionPrincipalAdmissionDenied(error)).toBe(true)
+    expect(isSessionPrincipalAdmissionDenied(new Error('forbidden'))).toBe(false)
+  })
+})
 
 function apiMessage(
   text: string,
@@ -232,7 +252,7 @@ describe('Slack home team API metadata', () => {
 })
 
 describe('session event streaming', () => {
-  test('passes activity summary events through to the renderer source stream', async () => {
+  test('passes activity summary and steering events through to the renderer source stream', async () => {
     const encoded = new TextEncoder().encode(
       [
         'id: 1',
@@ -240,6 +260,10 @@ describe('session event streaming', () => {
         'data: {"summary":"The agent is reading App Server events."}',
         '',
         'id: 2',
+        'event: session.steering_delivered',
+        'data: {"execution_id":"exec-1","input_line_count":1}',
+        '',
+        'id: 3',
         'event: session.execution_completed',
         'data: {"result_text":"done"}',
         '',
@@ -272,15 +296,21 @@ describe('session event streaming', () => {
       eventId: 1,
       eventKind: 'session.activity_summary'
     })
-    expect(events[1]).toMatchObject({
-      event: 'session.execution_completed',
+    expect(events[1]).toEqual({
+      data: { execution_id: 'exec-1', input_line_count: 1 },
+      event: 'session.steering_delivered',
       eventId: 2,
+      eventKind: 'session.steering_delivered'
+    })
+    expect(events[2]).toMatchObject({
+      event: 'session.execution_completed',
+      eventId: 3,
       eventKind: 'session.execution_completed'
     })
-    expect(seenEventIds).toEqual([1, 2])
+    expect(seenEventIds).toEqual([1, 2, 3])
   })
 
-  test('uses interrupted wording for cancelled executions without error text', async () => {
+  test('passes cancelled executions through without interruption wording', async () => {
     const encoded = new TextEncoder().encode(
       [
         'id: 1',
@@ -312,7 +342,7 @@ describe('session event streaming', () => {
 
     expect(events).toEqual([
       {
-        data: { error: 'Execution interrupted' },
+        data: { status: 'cancelled', reason: 'turn_interrupted' },
         event: 'session.execution_cancelled',
         eventId: 1,
         eventKind: 'session.execution_cancelled'
@@ -426,7 +456,7 @@ describe('Slack display text fallback', () => {
     expect(context?.text).toContain('session_context.slack.channel_id: C1')
     expect(context?.text).toContain('session_context.slack.thread_ts: 1700000000.000100')
     expect(context?.text).toContain('thread_key: slack:C1:1700000000.000100')
-    expect(context?.text).toContain('slack upload C1 /path/to/file --thread 1700000000.000100')
+    expect(context?.text).toContain('tools.slack.upload_file({ channel: "C1", thread_ts: "1700000000.000100"')
     expect(context?.text).toContain('Do not recover this destination with Slack search.')
   })
 
@@ -597,52 +627,121 @@ describe('Slack attachment serialization', () => {
     expect(Date.now() - startedAt).toBeLessThan(500)
     expect(attachment.fetchError).toBe('fetch Slack attachment timed out after 25ms')
   })
+
+  test('trusts only Slack file origins', () => {
+    for (const url of [
+      'https://files.slack.com/files-pri/T1-F1/download/a.png',
+      'https://files.slack-gov.com/files-pri/T1-F1/a.png'
+    ]) {
+      expect(isSlackFileUrl(url), url).toBe(true)
+    }
+    for (const url of [
+      'https://slack.com/api/auth.test',
+      'https://slack.com/files/a.png',
+      'http://slack.test/files/a.png',
+      'https://files.example/a.png',
+      'https://files.slack.com.example/a.png',
+      'https://files.slack.com@files.example/a.png',
+      'http://files.slack.com/a.png',
+      'not a url'
+    ]) {
+      expect(isSlackFileUrl(url), url).toBe(false)
+    }
+  })
+
+  test('sends the bot token only to Slack-hosted raw event files', async () => {
+    const requests: { authorization: string | null; url: string }[] = []
+    const fetchFn = (async (input, init) => {
+      requests.push({
+        authorization: new Headers(init?.headers).get('authorization'),
+        url: String(input)
+      })
+      return new Response('file-bytes')
+    }) as SlackbotV2Options['fetch']
+    const slackFileUrl = 'https://files.slack.com/files-pri/T1-F1/download/slack.png'
+
+    const message = await serializeMessage(
+      {
+        attachments: [],
+        author: {
+          fullName: 'Test User',
+          isBot: false,
+          isMe: false,
+          userId: 'U1',
+          userName: 'test'
+        },
+        id: '1700000000.000100',
+        isMention: true,
+        links: [],
+        metadata: { dateSent: new Date('2026-06-10T00:00:00.000Z') },
+        raw: {
+          files: [
+            { id: 'F1', mimetype: 'image/png', name: 'slack.png', url_private_download: slackFileUrl },
+            {
+              id: 'F2',
+              mimetype: 'image/png',
+              name: 'elsewhere.png',
+              url_private_download: 'https://files.example/elsewhere.png'
+            }
+          ],
+          team_id: 'T1',
+          text: 'see attached'
+        },
+        text: 'see attached',
+        threadId: 'slack:C1:1700000000.000100'
+      } as unknown as Parameters<typeof serializeMessage>[0],
+      options(fetchFn)
+    )
+
+    expect(requests).toEqual([{ authorization: 'Bearer xoxb-test', url: slackFileUrl }])
+    expect(message.attachments).toEqual([
+      expect.objectContaining({
+        dataBase64: Buffer.from('file-bytes').toString('base64'),
+        name: 'slack.png'
+      }),
+      expect.objectContaining({ fetchError: NON_SLACK_FILE_URL_ERROR, name: 'elsewhere.png' })
+    ])
+    expect(message.attachments[1]).not.toHaveProperty('dataBase64')
+  })
+})
+
+describe('forwardToSessionApi generative UI note', () => {
+  const cardNotes = (requests: RecordedRequest[]) =>
+    lineContent(executeLine(requests)).filter(part =>
+      textPartIncludes(part, '# Slack card (generative UI)')
+    )
+
+  test('puts the note right before the user text when the turn carries one', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), generativeUi: { enabled: true, limits: { tables: 1, charts: 2 } } },
+      forwardInput(apiMessage('summarize the close'), {
+        generativeUiNote: generativeUiTurnNote({ tables: 1, charts: 2 })
+      })
+    )
+    const notes = cardNotes(requests)
+    expect(notes).toHaveLength(1)
+    const text = String(notes[0]!.text)
+    expect(text).toContain('tagged json-render')
+    expect(text).toContain('- Table:')
+    expect(text).toContain('tables: 1, charts: 2')
+    const content = lineContent(executeLine(requests))
+    const noteIndex = content.findIndex(part => textPartIncludes(part, '# Slack card (generative UI)'))
+    expect(noteIndex).toBe(content.length - 2)
+    expect(textPartIncludes(content[content.length - 1]!, 'summarize the close')).toBe(true)
+  })
+
+  test('sends no note when the turn does not carry one, even with the flag on', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await forwardToSessionApi(
+      { ...options(fetchFn), generativeUi: { enabled: true } },
+      forwardInput(apiMessage('summarize the close'))
+    )
+    expect(cardNotes(requests)).toHaveLength(0)
+  })
 })
 
 describe('forwardToSessionApi overrides', () => {
-  test('creates session with default codex harness', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('codex')
-  })
-
-  test('creates session with parsed harness override', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), { harnessType: 'claudecode' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { harness_type?: string }).harness_type).toBe('claudecode')
-  })
-
-  test('includes model override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('review this'), {
-        harnessType: 'claudecode',
-        model: 'claude-sonnet-4-6'
-      })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const inputLines = (execute?.body as { input_lines: string[] }).input_lines
-    expect(inputLines).toHaveLength(1)
-    const line = JSON.parse(inputLines[0]!)
-    expect(line.model).toBe('claude-sonnet-4-6')
-    expect(lineContent(line).some(part => textPartIncludes(part, '# Requester Context'))).toBe(true)
-    expect(line.message.content.at(-1)).toEqual({ type: 'text', text: 'review this' })
-  })
-
-  test('omits model field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('model' in line).toBe(false)
-  })
-
   test('includes provider override on the execute input line', async () => {
     const { fetchFn, requests } = fakeApi()
     await forwardToSessionApi(
@@ -664,25 +763,6 @@ describe('forwardToSessionApi overrides', () => {
     const execute = requests.find(request => request.url.endsWith('/execute'))
     const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
     expect('provider' in line).toBe(false)
-  })
-
-  test('includes reasoning override on the execute input line', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('audit this'), { reasoning: 'high' })
-    )
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect(line.reasoning).toBe('high')
-  })
-
-  test('omits reasoning field when no override is set', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const execute = requests.find(request => request.url.endsWith('/execute'))
-    const line = JSON.parse((execute?.body as { input_lines: string[] }).input_lines[0]!)
-    expect('reasoning' in line).toBe(false)
   })
 
   test('includes default idle timeout on execute requests', async () => {
@@ -759,6 +839,51 @@ describe('forwardToSessionApi overrides', () => {
     )
   })
 
+  test('restarts an existing disabled harness instead of routing back to it on conflict', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [
+        {
+          body: {
+            error: 'session slack:C1:1700000000.000100 already exists with harness_type amp, requested codex',
+            ok: false
+          },
+          status: 409
+        },
+        { status: 200 }
+      ]
+    })
+    await forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex', 'claudecode'] },
+      forwardInput(apiMessage('hi'))
+    )
+    const creates = requests.filter(request => request.url.endsWith('.000100'))
+    expect(creates.map(request => request.body)).toEqual([
+      expect.objectContaining({ harness_type: 'codex' }),
+      expect.objectContaining({ harness_type: 'codex', on_harness_conflict: 'restart' })
+    ])
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
+  })
+
+  test('rejects disabled harnesses before making any session API requests', async () => {
+    const { fetchFn, requests } = fakeApi()
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex'] },
+      forwardInput(apiMessage('hi'), { harnessType: 'amp' })
+    )).rejects.toThrow('Harness amp is not enabled for this deployment')
+    expect(requests).toEqual([])
+  })
+
+  test('does not execute when the API resolves a disabled harness', async () => {
+    const { fetchFn, requests } = fakeApi({
+      createSession: [{ status: 200, body: { harness_type: 'amp' } }]
+    })
+    await expect(forwardToSessionApi(
+      { ...options(fetchFn), enabledHarnesses: ['codex'] },
+      forwardInput(apiMessage('hi'))
+    )).rejects.toThrow('Harness amp is not enabled for this deployment')
+    expect(requests.some(request => request.url.endsWith('/execute'))).toBe(false)
+  })
+
   test('surfaces non-conflict create failures', async () => {
     const { fetchFn } = fakeApi({
       createSession: [{ body: { error: 'boom', ok: false }, status: 500 }]
@@ -780,85 +905,6 @@ describe('forwardToSessionApi overrides', () => {
 })
 
 describe('forwardToSessionApi harness restart', () => {
-  test('explicit harness override requests restart on conflict', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('switch me'), { harnessType: 'codex' })
-    )
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect((create?.body as { on_harness_conflict?: string }).on_harness_conflict).toBe('restart')
-  })
-
-  test('default create does not request restart', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await forwardToSessionApi(options(fetchFn), forwardInput(apiMessage('hi')))
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
-  })
-
-  test('records a Slack-owned harness assignment on session creation and execution', async () => {
-    const { fetchFn, requests } = fakeApi({
-      createSession: [
-        {
-          body: {
-            harness_switched: false,
-            harness_type: 'nanocodex'
-          },
-          status: 200
-        }
-      ]
-    })
-    const harnessAssignment = {
-      experiment: 'codex_nanocodex_ab',
-      requestedHarness: 'codex',
-      cohort: 'nanocodex',
-      rolloutPercent: 50
-    }
-    let resolvedHarness: string | undefined
-    let resolvedExperiment: string | undefined
-
-    await forwardToSessionApi(
-      options(fetchFn),
-      forwardInput(apiMessage('hi'), {
-        harnessAssignment,
-        harnessType: 'nanocodex',
-        restartOnHarnessConflict: false
-      }),
-      {
-        onSessionCreated: async outcome => {
-          resolvedHarness = outcome.harnessType
-          resolvedExperiment = outcome.harnessAssignment?.experiment
-        }
-      }
-    )
-
-    expect(resolvedHarness).toBe('nanocodex')
-    expect(resolvedExperiment).toBe('codex_nanocodex_ab')
-    const create = requests.find(request => request.url.endsWith('.000100'))
-    expect(create?.body).toMatchObject({
-      harness_type: 'nanocodex',
-      metadata: {
-        harness_assignment: {
-          experiment: 'codex_nanocodex_ab',
-          requested_harness: 'codex',
-          cohort: 'nanocodex',
-          rollout_percent: 50
-        }
-      }
-    })
-    expect('on_harness_conflict' in (create?.body as object)).toBe(false)
-    expect(executeBody(requests).metadata).toMatchObject({
-      harness_type: 'nanocodex',
-      harness_assignment: {
-        experiment: 'codex_nanocodex_ab',
-        requested_harness: 'codex',
-        cohort: 'nanocodex',
-        rollout_percent: 50
-      }
-    })
-  })
-
   test('harness_switched response fires onSessionRestarted and prepends the preamble', async () => {
     const { fetchFn, requests } = fakeApi({
       createSession: [{ body: { ok: true, harness_switched: true }, status: 200 }]
@@ -997,96 +1043,6 @@ describe('session principal display name', () => {
     }
   }
 
-  test('uses the GitHub handle from the requester Slack profile for PR attribution', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url => {
-        if (url.includes('conversations.info')) {
-          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-        }
-        if (url.includes('users.profile.get')) {
-          return Response.json({
-            ok: true,
-            profile: {
-              display_name: 'Ada Lovelace',
-              fields: {
-                XfGithub: { label: 'GitHub', value: 'https://github.com/ada-lovelace' }
-              },
-              name: 'ada'
-            }
-          })
-        }
-        if (url.includes('users.info')) {
-          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-        }
-        return Response.json({ ok: true })
-      },
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
-      }
-    )
-
-    const requesterContext = lineContent(executeLine(requests)).find(part =>
-      textPartIncludes(part, '# Requester Context')
-    )
-    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: @ada-lovelace')
-    expect(requesterContext?.text).toContain('Prompted by: @ada-lovelace')
-    expect(requesterContext?.text).toContain('Assign the PR to the requester when possible: `ada-lovelace`')
-  })
-
-  test('uses the requester Slack display name for PR attribution when no GitHub handle exists', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url => {
-        if (url.includes('conversations.info')) {
-          return Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-        }
-        if (url.includes('users.profile.get')) {
-          return Response.json({
-            ok: true,
-            profile: {
-              display_name: 'Ada Lovelace',
-              fields: {},
-              name: 'ada'
-            }
-          })
-        }
-        if (url.includes('users.info')) {
-          return Response.json({ ok: true, user: { profile: { display_name: 'Ada Lovelace' } } })
-        }
-        return Response.json({ ok: true })
-      },
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('please PR')))
-      }
-    )
-
-    const requesterContext = lineContent(executeLine(requests)).find(part =>
-      textPartIncludes(part, '# Requester Context')
-    )
-    expect(requesterContext?.text).toContain('GitHub handle from Slack profile: unavailable')
-    expect(requesterContext?.text).toContain('Prompted by: Ada Lovelace')
-    expect(requesterContext?.text).toContain(
-      'Use the requester\'s Slack display name or username because no verified GitHub handle is available.'
-    )
-    expect(requesterContext?.text).not.toContain('Omit the `Prompted by` line')
-  })
-
-  test('channel sessions name the principal after the channel', async () => {
-    const { fetchFn, requests } = fakeApi()
-    await withSlackStub(
-      url =>
-        url.includes('conversations.info')
-          ? Response.json({ channel: { id: 'C1', name_normalized: 'eng-oncall' }, ok: true })
-          : Response.json({ ok: true }),
-      async () => {
-        await forwardToSessionApi(slackOptions(fetchFn), forwardInput(apiMessage('hi')))
-      }
-	    )
-	    expect(createBody(requests).metadata?.slack_conversation_name).toBe('eng-oncall')
-	    expect(createBody(requests).metadata?.slack_channel_id).toBe('C1')
-	  })
-
   test('continues creating the session when the channel lookup never settles', async () => {
     const { fetchFn, requests } = fakeApi()
     let slackCalls = 0
@@ -1108,78 +1064,6 @@ describe('session principal display name', () => {
     expect(slackCalls).toBe(1)
     expect('slack_conversation_name' in (createBody(requests).metadata ?? {})).toBe(false)
     expect(requests.some(request => request.url.endsWith('/execute'))).toBe(true)
-  })
-
-  test('DM sessions include the email of a home-team partner', async () => {
-    const { fetchFn, requests } = fakeApi()
-    const dm = apiMessage('hi')
-    dm.threadId = 'slack:D9:1700000000.000100'
-    dm.raw = { channel: 'D9' }
-    await withSlackStub(
-      url => {
-        if (url.includes('users.info')) {
-          return Response.json({
-            ok: true,
-            user: {
-              is_stranger: false,
-              profile: { display_name: 'Ada Lovelace', email: 'ada@example.com' },
-              team_id: 'T1'
-            }
-          })
-        }
-        return Response.json({
-          ok: true,
-          profile: { display_name: 'Ada Lovelace' }
-        })
-      },
-      async () => {
-        await forwardToSessionApi(
-          { ...slackOptions(fetchFn), slackHomeTeamId: 'T1' },
-          forwardInput(dm)
-        )
-      }
-    )
-    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Ada Lovelace')
-    expect(createBody(requests).metadata?.slack_channel_id).toBe('D9')
-    expect(createBody(requests).metadata?.slack_team_id).toBe('T1')
-    expect(createBody(requests).metadata?.slack_user_email).toBe('ada@example.com')
-    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
-  })
-
-  test('DM sessions omit the email of an external-team partner', async () => {
-    const { fetchFn, requests } = fakeApi()
-    const dm = apiMessage('hi')
-    dm.threadId = 'slack:D9:1700000000.000100'
-    dm.raw = { channel: 'D9' }
-    await withSlackStub(
-      url => {
-        if (url.includes('users.info')) {
-          return Response.json({
-            ok: true,
-            user: {
-              is_stranger: true,
-              profile: { display_name: 'Grace Hopper', email: 'grace@example.com' },
-              team_id: 'T2'
-            }
-          })
-        }
-        return Response.json({
-          ok: true,
-          profile: { display_name: 'Grace Hopper' }
-        })
-      },
-      async () => {
-        await forwardToSessionApi(
-          { ...slackOptions(fetchFn), slackHomeTeamId: 'T1' },
-          forwardInput(dm)
-        )
-      }
-    )
-
-    expect(createBody(requests).metadata?.slack_conversation_name).toBe('Grace Hopper')
-    expect(createBody(requests).metadata?.slack_user_email).toBeUndefined()
-    expect(createBody(requests).metadata?.slack_user_id).toBe('U1')
-    expect(createBody(requests).metadata?.slack_team_id).toBe('T2')
   })
 
   test('DM metadata falls back to the event team when the profile lookup fails', async () => {

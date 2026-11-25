@@ -1,0 +1,8 @@
+description = "Browser Use cloud browsers driven over CDP (navigate, rendered HTML, JavaScript, click, coordinate click and scroll, type, screenshots), the Browser Use LLM gateway (OpenAI Responses) and Browser Use web search"
+
+# Browser Use's REST API takes the key only in X-Browser-Use-API-Key; the LLM
+# gateway and search accept it there too. A browser's CDP endpoint needs no
+# key: its URL is the credential.
+secrets = [
+    {type = "http", name = "BROWSER_USE_API_KEY", mode = "inject", inject_header = "X-Browser-Use-API-Key", hosts = ["api.browser-use.com"]},
+]

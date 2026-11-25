@@ -1,0 +1,287 @@
+use super::*;
+
+#[test]
+fn harness_auth_fragments_are_baked_in() {
+    let codex = harness_auth_fragment("codex", "api_key").unwrap().unwrap();
+    let codex_placeholders = placeholder_env(&[codex]);
+    assert_eq!(
+        codex_placeholders.get("OPENAI_API_KEY").map(String::as_str),
+        Some("OPENAI_API_KEY")
+    );
+
+    // access_token carries the token-broker credential, not a replace
+    // placeholder, so it contributes no sandbox placeholder env.
+    let codex_access = harness_auth_fragment("codex", "access_token")
+        .unwrap()
+        .unwrap();
+    assert!(placeholder_env(&[codex_access]).is_empty());
+
+    let openrouter = harness_auth_fragment("openrouter", "api_key")
+        .unwrap()
+        .unwrap();
+    let openrouter_placeholders = placeholder_env(&[openrouter]);
+    assert_eq!(
+        openrouter_placeholders
+            .get("OPENROUTER_API_KEY")
+            .map(String::as_str),
+        Some("OPENROUTER_API_KEY")
+    );
+
+    let hermes = harness_auth_fragment("hermes", "api_key").unwrap().unwrap();
+    assert_eq!(
+        hermes.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+        Some("inference-api.nousresearch.com")
+    );
+    let hermes_placeholders = placeholder_env(&[hermes]);
+    assert_eq!(
+        hermes_placeholders.get("NOUS_API_KEY").map(String::as_str),
+        Some("NOUS_API_KEY")
+    );
+
+    let meta_ai = harness_auth_fragment("meta-ai", "api_key")
+        .unwrap()
+        .unwrap();
+    let meta_ai_placeholders = placeholder_env(&[meta_ai]);
+    assert_eq!(
+        meta_ai_placeholders
+            .get("META_AI_API_KEY")
+            .map(String::as_str),
+        Some("META_AI_API_KEY")
+    );
+
+    let google = harness_auth_fragment("google", "api_key").unwrap().unwrap();
+    assert_eq!(
+        google.transforms[0].config.secrets[0].rules[0]["host"].as_str(),
+        Some("generativelanguage.googleapis.com")
+    );
+    let google_placeholders = placeholder_env(&[google]);
+    assert_eq!(
+        google_placeholders
+            .get("GEMINI_API_KEY")
+            .map(String::as_str),
+        Some("GEMINI_API_KEY")
+    );
+
+    let claude_code = harness_auth_fragment("claude-code", "api_key")
+        .unwrap()
+        .unwrap();
+    let claude_code_placeholders = placeholder_env(&[claude_code]);
+    assert_eq!(
+        claude_code_placeholders
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
+        Some("ANTHROPIC_API_KEY")
+    );
+
+    assert!(harness_auth_fragment("codex", "bogus").unwrap().is_none());
+
+    let infra = infra_fragment().unwrap();
+    assert_eq!(
+        infra.top_level["proxy"]["upstream_response_header_timeout"].as_str(),
+        Some("120s")
+    );
+    let placeholders = placeholder_env(&[infra]);
+    for name in ["GITHUB_TOKEN", "SLACK_BOT_TOKEN"] {
+        assert_eq!(placeholders.get(name).map(String::as_str), None);
+    }
+}
+
+#[test]
+fn custom_provider_fragments_are_scoped_and_declare_placeholders() {
+    let fragments = custom_provider_auth_fragments(
+        r#"{
+            "private_responses": {
+                "name": "Private Responses",
+                "baseUrl": "https://inference.example.com/v1",
+                "apiKeyEnv": "PRIVATE_RESPONSES_API_KEY",
+                "defaultModel": "example-model"
+            }
+        }"#,
+    )
+    .unwrap();
+    let placeholders = placeholder_env(&fragments);
+    assert_eq!(
+        placeholders
+            .get("PRIVATE_RESPONSES_API_KEY")
+            .map(String::as_str),
+        Some("PRIVATE_RESPONSES_API_KEY")
+    );
+
+    let yaml = serde_yaml::to_string(&fragments[0]).unwrap();
+    assert!(yaml.contains("host: inference.example.com"));
+    assert!(yaml.contains("proxy_value: PRIVATE_RESPONSES_API_KEY"));
+    assert!(!yaml.contains("https://"));
+}
+
+#[test]
+fn custom_provider_default_model_is_optional() {
+    let fragments = custom_provider_auth_fragments(
+        r#"{
+            "private_responses": {
+                "name": "Private Responses",
+                "baseUrl": "https://inference.example.com/v1",
+                "apiKeyEnv": "PRIVATE_RESPONSES_API_KEY"
+            }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(fragments.len(), 1);
+}
+
+#[test]
+fn custom_provider_web_search_must_be_boolean() {
+    let provider = |web_search: serde_json::Value| {
+        serde_json::json!({"private": {
+            "name": "Private", "baseUrl": "https://inference.example.com/v1",
+            "apiKeyEnv": "PRIVATE_API_KEY", "webSearch": web_search
+        }})
+        .to_string()
+    };
+    for valid in [true, false] {
+        assert!(custom_provider_auth_fragments(&provider(valid.into())).is_ok());
+    }
+    assert!(custom_provider_auth_fragments(&provider("disabled".into())).is_err());
+}
+
+#[test]
+fn custom_provider_fragments_reject_unsafe_or_malformed_config() {
+    for raw in [
+        r#"{"bad.id":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"http://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://user@inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://inference.example.com:443/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://127.0.0.1/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"bad-key","defaultModel":"model"}}"#,
+        r#"{"private":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":""}}"#,
+        "not-json",
+    ] {
+        assert!(
+            custom_provider_auth_fragments(raw).is_err(),
+            "accepted {raw}"
+        );
+    }
+}
+
+#[test]
+fn custom_provider_model_metadata_does_not_change_credential_scope() {
+    let provider = serde_json::json!({
+        "name": "Private Responses",
+        "baseUrl": "https://inference.example.com/v1",
+        "apiKeyEnv": "PRIVATE_RESPONSES_API_KEY"
+    });
+    let plain = serde_json::json!({"private": provider});
+    let mut catalog = plain.clone();
+    catalog["private"]["models"] = serde_json::json!({
+        "reasoning-model": {
+            "displayName": "Reasoning Model",
+            "aliases": ["reasoner"],
+            "description": "General-purpose model",
+            "contextWindow": 1000000,
+            "inputModalities": ["text", "image"],
+            "reasoningEfforts": ["low", "high"],
+            "defaultReasoning": "high",
+            "reasoningAliases": {"max": "high"}
+        },
+        "basic-model": {"displayName": "Basic Model"}
+    });
+    let plain = custom_provider_auth_fragments(&plain.to_string()).unwrap();
+    let catalog = custom_provider_auth_fragments(&catalog.to_string()).unwrap();
+    assert_eq!(
+        serde_yaml::to_string(&plain).unwrap(),
+        serde_yaml::to_string(&catalog).unwrap()
+    );
+}
+
+#[test]
+fn custom_provider_model_metadata_rejects_invalid_contracts() {
+    for model in [
+        serde_json::json!({"displayName": " "}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["banana"]}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["high"], "defaultReasoning": "banana"}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["high"], "reasoningAliases": {"max": "banana"}}),
+        serde_json::json!({"displayName": "Model", "contextWindow": 0}),
+        serde_json::json!({"displayName": "Model", "contextWindow": -1}),
+        serde_json::json!({"displayName": "Model", "contextWindow": 1.5}),
+        serde_json::json!({"displayName": "Model", "inputModalities": []}),
+        serde_json::json!({"displayName": "Model", "inputModalities": ["image"]}),
+        serde_json::json!({"displayName": "Model", "inputModalities": ["text", "text"]}),
+        serde_json::json!({"displayName": "Model", "inputModalities": ["text", "audio"]}),
+        serde_json::json!({"displayName": "Model", "aliases": [""]}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": "high"}),
+        serde_json::json!({"displayName": "Model", "defaultReasoning": "high"}),
+        serde_json::json!({"displayName": "Model", "reasoningEfforts": ["high"], "reasoningAliases": {"max": "low"}}),
+        serde_json::json!({"displayName": "Model", "apiKeyEnv": "OTHER_KEY"}),
+    ] {
+        let config = serde_json::json!({"private": {
+            "name": "Private", "baseUrl": "https://inference.example.com/v1",
+            "apiKeyEnv": "PRIVATE_API_KEY", "models": {"model": model}
+        }});
+        assert!(
+            custom_provider_auth_fragments(&config.to_string()).is_err(),
+            "accepted {config}"
+        );
+    }
+}
+
+#[test]
+fn pg_sandbox_dsns_reads_name_and_database_from_fragments() {
+    // A listener with a sandbox_env (the api-rs-internal annotation api-rs
+    // stamps from each tool's declared pg_dsn name/database) is surfaced; a
+    // listener without one (proxy-only) is skipped. Results are sorted/deduped.
+    let fragment = load_fragment_str(
+        r#"
+postgres:
+  - name: reshift_dsn
+    sandbox_env:
+      name: RESHIFT_DSN
+      database: warehouse
+  - name: analytics_dsn
+    sandbox_env:
+      name: ANALYTICS_DSN
+      database: analytics
+  - name: proxy_only
+"#,
+    )
+    .unwrap();
+
+    let dsns = pg_sandbox_dsns(&[fragment.clone(), fragment]);
+    assert_eq!(
+        dsns,
+        vec![
+            ("ANALYTICS_DSN".to_owned(), "analytics".to_owned()),
+            ("RESHIFT_DSN".to_owned(), "warehouse".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn shipped_proxy_allowlist_preserves_integration_headers() {
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../../../services/iron-proxy/iron-proxy.yaml")).unwrap();
+    let transforms = config["transforms"].as_sequence().unwrap();
+    let header_allowlist = transforms
+        .iter()
+        .find(|transform| transform["name"].as_str() == Some("header_allowlist"))
+        .unwrap();
+    let headers = header_allowlist["config"]["headers"].as_sequence().unwrap();
+
+    for header in ["mcp-protocol-version", "mcp-session-id"] {
+        assert!(headers.iter().any(|entry| entry.as_str() == Some(header)));
+    }
+
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.as_str() == Some("project-access-token"))
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.as_str() == Some("originator"))
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.as_str() == Some("version"))
+    );
+}

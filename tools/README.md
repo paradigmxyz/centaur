@@ -57,20 +57,24 @@ centaur-tools list
 my-tool --help
 ```
 
+To retire a tool CLI that a Code Mode connector replaces, delete the package and
+add its script name to `RETIRED_TOOLS` in `install_tool_shims.py`, mapped to the
+connector. Old prompts, scheduled tasks, and workflows that still run the
+command, or call it through `centaur-tools run` or `call`, then fail with
+directions to the connector instead of `command not found`. A mounted tool with
+the same script name takes precedence.
 
 ## Available Plugins
 
 The open-source tool inventory lives in this `tools/` tree and changes over time. To see what ships in a running sandbox, use `centaur-tools list`; private deployments may mount additional overlay tool directories.
 
-- `centaur_investigator`: parse Centaur Slack thread references and enrich them
-  with best-effort vlogs/vmetrics context without exposing message context.
-- `centaur-console`: inspect sandbox permissions and configured OAuth apps, and
-  manage the linked user's scheduled tasks.
-- `centaur-skills`: discover, author, and manage editors for private and public Console-authored skills.
+- `centaur-skills`: discover merged repository and overlay skills alongside
+  private and public Console-authored skills, and manage Console skills.
 - `datadog`: query Datadog logs, metrics, monitors, hosts, and dashboards
   read-only with `DD_API_KEY` and `DD_APP_KEY`.
-- `preqin`: query Preqin Operational API fund and fund-manager data, with
-  redacted auth diagnostics for `PREQIN_*` credentials.
+- `prose-lint`: score a draft from 0 to 1 for wordiness, mannered prose,
+  hedging, and citations with the OpenAI Decisions API; iron-proxy replaces
+  the `OPENAI_API_KEY` placeholder.
 
 ## Sandbox Tool Paths
 
@@ -94,3 +98,5 @@ SESSION_SANDBOX_PASSTHROUGH_ENV=TOOLS_PATH,TOOLS_OVERLAY_PATH
 
 The repo-cache is responsible for syncing `acme/centaur-overlay`; sandbox
 startup only points `centaur-tools` at the already-mounted source tree.
+
+- [`runlayer`](infra/runlayer/README.md): personal Runlayer tools in DMs and channels.

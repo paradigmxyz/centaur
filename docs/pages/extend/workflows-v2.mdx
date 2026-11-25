@@ -20,7 +20,7 @@ files can assume about their runtime.
 | Runtime owner | Python API service | `api-rs` |
 | Durable state | Python workflow engine tables | Absurd queue/checkpoint tables |
 | Python execution | In-process with the API | Separate workflow-host sandbox |
-| Workflow discovery | Python imports all workflow files | `api-rs` asks the Python host to discover workflow metadata |
+| Workflow discovery | Python imports all workflow files | `api-rs` asks the `workflow-discovery` service, which runs the Python host, for workflow metadata |
 | Agent turns | Python control plane helpers | `ctx.agent_turn(...)` delegates to the `api-rs` session runtime |
 | Webhooks | Python workflow router | `api-rs` `/api/webhooks/{slug}` |
 | Schedules | Python workflow scheduler | Absurd schedule tasks |
@@ -66,6 +66,7 @@ Supported v2 primitives:
 | `WEBHOOKS` | Supported |
 | `SCHEDULE` | Supported |
 | `WORKFLOW_PRINCIPAL` | Supported for workflow-host sandbox tool permissions |
+| `WORKFLOW_STARTERS` | Supported to limit which API caller classes may start runs |
 
 ## Required migrations
 
@@ -84,7 +85,7 @@ Supported workflow-host modules are `api.workflow_engine`,
 
 Do not import unrelated API-service internals or another workflow domain's local
 helpers. Domain-specific helpers should live next to the workflows that own
-them, for example `workflows/slack/metrics.py`.
+them, for example `workflows/<domain>/helpers.py`.
 
 If a workflow needs a helper, move it into the workflow file, a shared overlay
 module, or a supported workflow-host API module.
@@ -189,20 +190,20 @@ WORKFLOW_PRINCIPAL = "finance-automation"
 
 The string form resolves the existing principal by foreign ID or OID and fails
 startup when it does not exist. It does not create or update the principal. The
-`True` form remains `workflow-` plus the slugged `WORKFLOW_NAME`. Any
-`WORKFLOW_PRINCIPAL` value requires `apiRs.workflowHostSandbox=true`, which
-renders `WORKFLOW_HOST_SANDBOX=true`; startup fails if a workflow declares a
-principal while workflow-host sandboxing is disabled.
+`True` form remains `workflow-` plus the slugged `WORKFLOW_NAME`.
 
 #### Pick the model and reasoning effort
 
 `ctx.agent_turn(...)` accepts optional `model`, `provider`, and `reasoning`
 kwargs. They ride the turn exactly like the Slack `--model` / `--bedrock` /
 `-rsn` flags: `model` selects the model within the harness, `reasoning` sets the
-codex reasoning effort (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`),
-and `provider` selects the codex model provider. `provider` and `reasoning` only
-affect the codex harness; claude and amp ignore them. `reasoning` also accepts
-the `reasoning_effort` and `effort` aliases. When a kwarg is omitted the
+reasoning effort (codex: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`;
+claude: `low`/`medium`/`high`/`xhigh`/`max`), and `provider` selects the codex
+model provider. `provider` only affects the codex harness, and amp ignores
+`reasoning`. A `reasoning` value the harness does not support is ignored. On
+claude, `reasoning` applies to that turn only; a turn without it runs the
+configured default. `reasoning` also accepts the `reasoning_effort` and
+`effort` aliases. When a kwarg is omitted the
 deployment/baked harness default stands — dispatched turns are no longer pinned
 to the deployment default.
 
@@ -331,16 +332,20 @@ Start with an import and discovery check in the same image that production will
 run:
 
 ```bash
-WORKFLOW_DIRS=/opt/centaur/workflows python3 /usr/local/bin/workflow-host <<'EOF'
-{"type":"discover"}
-EOF
+python3 /usr/local/bin/workflow-host serve &
+curl -sS -X POST localhost:8090/discover \
+  -d '{"workflow_dirs": "/opt/centaur/workflows", "env": {}}'
 ```
+
+A `200` lists each discovered workflow with its schedule, webhooks, principal,
+and starters. Module load errors appear on the server's stderr as
+`workflow_load_error`; a failed pass returns `500` with the error and traceback.
 
 Then create a real run:
 
 ```bash
-CENTAUR_API_TOKEN=$(kubectl exec -n centaur-system deploy/centaur-centaur-console -- \
-  bin/rails runner 'print ApiServer::Jwt.encode_for_console_service')
+CENTAUR_API_TOKEN=$(kubectl get secret -n centaur-system centaur-infra-env \
+  -o jsonpath='{.data.CENTAUR_APIRS_ADMIN_API_KEY}' | base64 -d)
 
 curl -s "$CENTAUR_API_URL/api/workflows/runs" \
   -H "Authorization: Bearer $CENTAUR_API_TOKEN" \

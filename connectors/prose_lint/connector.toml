@@ -1,0 +1,5 @@
+description = "OpenAI Decisions API: score drafts for wordiness, mannered prose, hedging and citations"
+
+secrets = [
+    { type = "http", name = "OPENAI_API_KEY", mode = "replace", match_headers = ["Authorization"], hosts = ["api.openai.com"] },
+]

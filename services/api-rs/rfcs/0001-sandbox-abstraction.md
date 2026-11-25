@@ -112,7 +112,7 @@ This backend is the fastest way to prove the abstraction without Kubernetes.
 
 Agent Sandbox CRD backend:
 
-- translate `SandboxSpec` into `agents.x-k8s.io/v1alpha1` Sandbox resources
+- translate `SandboxSpec` into `agents.x-k8s.io/v1beta1` Sandbox resources
 - configure state volume claim templates
 - implement pause/resume through replica patches
 - delete CRD-owned state on stop

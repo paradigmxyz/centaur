@@ -1,0 +1,6 @@
+description = "GitHub: search pull requests, issues and code; read repos, files, trees, commits, CI runs, checks and releases; create, edit, review and merge PRs and issues; plus any other GitHub REST API endpoint, without cloning"
+
+# No declared secrets. As for git and gh in the sandbox, the credential is the
+# platform GITHUB_TOKEN grant: the runtime environment carries the
+# GITHUB_TOKEN placeholder and iron-proxy swaps in the real token for
+# api.github.com on the wire.

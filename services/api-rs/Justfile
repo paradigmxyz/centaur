@@ -2,18 +2,19 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 kopium_version := "0.23.0"
 
-# Latest upstream Agent Sandbox release when this was pinned: v0.4.6.
-agent_sandbox_ref := "d0c124d4a1fded4ed4aecb92753696b4dd8de17b"
-agent_sandbox_crd_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/helm/crds/agents.x-k8s.io_sandboxes.yaml"
-agent_sandbox_crd_tmp := "target/codegen/agents.x-k8s.io_sandboxes.yaml"
+# Upstream Agent Sandbox v1.0.9, matching the chart's vendored agent-sandbox
+# subchart and its CRDs.
+agent_sandbox_ref := "b1277676f8bf0e82ea299928997ecf5d696a92f1"
+# Repository-relative, so kopium records a stable path in the generated header.
+agent_sandbox_crd := "contrib/chart/charts/agent-sandbox/crds/agents.x-k8s.io_sandboxes.yaml"
 agent_sandbox_generated := "crates/centaur-sandbox-agent-k8s/src/generated/agents_x_k8s_io.rs"
-agent_sandbox_controller_image := "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.4.6"
+agent_sandbox_controller_image := "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.9"
 agent_sandbox_rbac_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/k8s/rbac.generated.yaml"
 agent_sandbox_controller_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/k8s/controller.yaml"
 kind_e2e_cluster := "centaur-api-rs-e2e"
 kind_e2e_context := "kind-" + kind_e2e_cluster
 kind_e2e_namespace := "centaur-sandbox-e2e"
-kind_e2e_tmp := "target/e2e"
+kind_e2e_tmp := "../../target/e2e"
 kind_e2e_agent_image := "centaur-agent:latest"
 kind_e2e_agent_dockerfile := env_var_or_default("KIND_E2E_AGENT_DOCKERFILE", "services/sandbox/Dockerfile")
 kind_e2e_agent_target := env_var_or_default("KIND_E2E_AGENT_TARGET", "sandbox")
@@ -27,22 +28,19 @@ install-codegen-tools:
 
 codegen-agent-sandbox-crd:
     command -v kopium >/dev/null || { echo "kopium is required. Run: just install-codegen-tools" >&2; exit 127; }
-    mkdir -p "$(dirname "{{agent_sandbox_crd_tmp}}")" "$(dirname "{{agent_sandbox_generated}}")"
-    curl -fsSL "{{agent_sandbox_crd_url}}" -o "{{agent_sandbox_crd_tmp}}"
-    kopium --filename "{{agent_sandbox_crd_tmp}}" --api-version v1alpha1 --schema disabled --derive PartialEq > "{{agent_sandbox_generated}}"
-    cargo fmt --all
+    cd ../.. && kopium --filename "{{agent_sandbox_crd}}" --api-version v1beta1 --schema disabled --derive PartialEq > "{{agent_sandbox_generated}}"
+    cargo fmt -p centaur-sandbox-agent-k8s
 
 kind-e2e-up:
     command -v kind >/dev/null || { echo "kind is required" >&2; exit 127; }
     command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
     kind get clusters | grep -qx "{{kind_e2e_cluster}}" || kind create cluster --name "{{kind_e2e_cluster}}" --wait 120s
     mkdir -p "{{kind_e2e_tmp}}"
-    curl -fsSL "{{agent_sandbox_crd_url}}" -o "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
     curl -fsSL "{{agent_sandbox_rbac_url}}" -o "{{kind_e2e_tmp}}/rbac.generated.yaml"
     curl -fsSL "{{agent_sandbox_controller_url}}" \
       | sed 's#ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*#{{agent_sandbox_controller_image}}#' \
       > "{{kind_e2e_tmp}}/controller.yaml"
-    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
+    kubectl --context "{{kind_e2e_context}}" apply --server-side -f "../../{{agent_sandbox_crd}}"
     kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/rbac.generated.yaml"
     kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/controller.yaml"
     kubectl --context "{{kind_e2e_context}}" create namespace "{{kind_e2e_namespace}}" --dry-run=client -o yaml | kubectl --context "{{kind_e2e_context}}" apply -f -
@@ -88,12 +86,6 @@ kind-e2e-load-images: kind-e2e-up
 
     load_if_missing "{{kind_e2e_agent_image}}"
     load_if_missing "{{kind_e2e_iron_proxy_image}}"
-
-e2e-kind: kind-e2e-up
-    SANDBOX_E2E_IMPLS=all \
-    SANDBOX_E2E_K8S_CONTEXT="{{kind_e2e_context}}" \
-    SANDBOX_E2E_K8S_NAMESPACE="{{kind_e2e_namespace}}" \
-    cargo test -p centaur-sandbox-e2e --test invariants -- --ignored --nocapture
 
 kind-e2e-down:
     kind delete cluster --name "{{kind_e2e_cluster}}"

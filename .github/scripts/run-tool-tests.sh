@@ -31,9 +31,17 @@ while IFS= read -r project_file; do
     )"
     ln -s "${tool_dir}" "${test_package_dir}/${script_module}"
 
+    test_pythonpath="${test_package_dir}:${repo_root}"
+    # Keep legacy folder imports unless they would shadow an installed dependency.
+    if ! uv run --no-sync python -c \
+      'import importlib.metadata, sys; sys.exit(sys.argv[1] not in {d.metadata["Name"] for d in importlib.metadata.distributions()})' \
+      "${tool_dir##*/}"; then
+      test_pythonpath="${test_pythonpath}:${tool_dir%/*}"
+    fi
+
     while IFS= read -r test_file; do
       relative_test="${test_file#"${tool_dir}/"}"
-      PYTHONPATH="${test_package_dir}:${repo_root}:${tool_dir%/*}" \
+      PYTHONPATH="${test_pythonpath}" \
         uv run --no-sync python -m pytest \
           --import-mode=importlib \
           "${relative_test}"

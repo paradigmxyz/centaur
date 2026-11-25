@@ -1,17 +1,16 @@
 """Granola CLI for AI agents."""
 
+import json
 from datetime import datetime
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-import json
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
+
+load_dotenv()
 
 app = typer.Typer(name="granola", help="Query Granola meeting notes and transcripts")
 
@@ -39,6 +38,10 @@ def health():
 console = Console()
 
 
+def _print_json(data: object) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+
 def _format_date(date_str: str | None) -> str:
     """Format ISO date string to readable format."""
     if not date_str:
@@ -55,12 +58,21 @@ def list_notes(
     limit: int = typer.Option(20, "--limit", "-n", help="Max notes to return"),
     full: bool = typer.Option(False, "--full", "-f", help="Show full titles"),
     after: str | None = typer.Option(None, "--after", help="Created after (ISO date)"),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or a human-readable table.",
+    ),
 ):
     """List recent meeting notes across the workspace."""
     from .client import _client
 
     client = _client()
     notes = client.list_all_notes(limit=limit, created_after=after)
+
+    if json_output:
+        _print_json(notes)
+        return
 
     if not notes:
         console.print("[yellow]No meeting notes found.[/yellow]")
@@ -90,12 +102,21 @@ def get_note(
     note_id: str = typer.Argument(..., help="Note ID, meeting UUID, or Granola share link"),
     raw: bool = typer.Option(False, "--raw", "-r", help="Output raw markdown"),
     transcript: bool = typer.Option(False, "--transcript", "-t", help="Include transcript"),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ):
     """Get a specific meeting note by ID."""
     from .client import _client
 
     client = _client()
     note = client.get_note(note_id, include_transcript=transcript)
+
+    if json_output and not raw:
+        _print_json(note)
+        return
 
     title = note.get("title") or "Untitled"
     created = _format_date(note.get("created_at"))
@@ -132,12 +153,21 @@ def get_note(
 @app.command("transcript")
 def get_transcript(
     note_id: str = typer.Argument(..., help="Note ID, meeting UUID, or Granola share link"),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or human-readable text.",
+    ),
 ):
     """Get the transcript for a meeting note."""
     from .client import _client
 
     client = _client()
     utterances = client.get_transcript(note_id)
+
+    if json_output:
+        _print_json(utterances)
+        return
 
     if not utterances:
         console.print("[yellow]No transcript available.[/yellow]")
@@ -153,6 +183,11 @@ def get_transcript(
 def search_notes(
     query: str = typer.Argument(..., help="Search query (title match)"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    json_output: bool = typer.Option(
+        True,
+        "--json/--table",
+        help="Output JSON (default) or a human-readable table.",
+    ),
 ):
     """Search meeting notes by title."""
     from .client import _client
@@ -162,6 +197,10 @@ def search_notes(
 
     query_lower = query.lower()
     matches = [n for n in notes if query_lower in (n.get("title") or "").lower()][:limit]
+
+    if json_output:
+        _print_json(matches)
+        return
 
     if not matches:
         console.print(f"[yellow]No notes matching: {query}[/yellow]")

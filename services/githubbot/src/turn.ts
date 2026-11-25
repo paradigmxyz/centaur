@@ -57,6 +57,11 @@ export type TurnResult = {
   fallbackText: string;
 };
 
+export function turnOutputChars(result: TurnResult): number {
+  if (result.failed) return result.errorText.length;
+  return (result.answer || result.fallbackText).length;
+}
+
 const THREAD_KEY_PATTERN =
   /^github:([^/:]+)\/([^:]+):(?:issue:(\d+)|(\d+)(?::rc:(\d+))?)$/;
 

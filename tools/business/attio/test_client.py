@@ -159,3 +159,52 @@ def test_retry_after_http_date_is_parsed() -> None:
     now = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 
     assert client._retry_delay("Sat, 08 Aug 2026 12:00:05 GMT", now=now) == 5.0
+
+
+def test_update_task_marks_task_complete() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/v2/tasks/task-123"
+        assert request.read() == b'{"data":{"is_completed":true}}'
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": {"task_id": "task-123"},
+                    "content_plaintext": "Follow up",
+                    "is_completed": True,
+                }
+            },
+        )
+
+    client = AttioClient(api_key="test-key")
+    client._client = httpx.Client(
+        base_url="https://api.attio.com/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.update_task("task-123", is_completed=True)
+
+    assert result["is_completed"] is True
+
+
+def test_update_task_rejects_empty_update() -> None:
+    client = AttioClient(api_key="test-key")
+
+    with pytest.raises(ValueError, match="At least one task field"):
+        client.update_task("task-123")
+
+
+def test_delete_task() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v2/tasks/task-123"
+        return httpx.Response(200, json={})
+
+    client = AttioClient(api_key="test-key")
+    client._client = httpx.Client(
+        base_url="https://api.attio.com/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert client.delete_task("task-123") is True

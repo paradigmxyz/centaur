@@ -1,0 +1,27 @@
+{
+  "name": "centaur",
+  "owner": {
+    "name": "Paradigm",
+    "url": "https://github.com/paradigmxyz"
+  },
+  "description": "Official Centaur plugins for agent clients.",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "centaur",
+      "displayName": "Centaur",
+      "source": "./plugins/centaur",
+      "description": "Use your team's approved Centaur tools through MCP.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Paradigm",
+        "url": "https://github.com/paradigmxyz"
+      },
+      "homepage": "https://centaur.run",
+      "repository": "https://github.com/paradigmxyz/centaur",
+      "license": "Apache-2.0 OR MIT",
+      "keywords": ["centaur", "mcp", "tools", "agents"],
+      "category": "developer-tools"
+    }
+  ]
+}

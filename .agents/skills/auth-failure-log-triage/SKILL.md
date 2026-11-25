@@ -1,6 +1,6 @@
 ---
 name: auth-failure-log-triage
-description: "Investigate reported auth, credential, permission, API proxy, 401, 403, 503, OAuth, token, or secret-resolution failures by querying VictoriaLogs first. Use when a user says an integration auth failed, a tool got unauthorized/forbidden/service unavailable, an api-proxy request failed, or asks why credentials/secrets are not working."
+description: "Investigate reported auth, credential, permission, API proxy, 401, 403, 503, OAuth, token, or secret-resolution failures by querying VictoriaLogs first through the `vlogs` Code Mode connector. Use when a user says an integration auth failed, a tool got unauthorized/forbidden/service unavailable, an api-proxy request failed, or asks why credentials/secrets are not working."
 ---
 
 # Auth Failure Log Triage
@@ -10,39 +10,46 @@ When a user reports an auth, permission, credential, API proxy, OAuth, token, se
 ## Workflow
 
 1. Confirm the affected surface from the user message: tool/integration name, URL host, thread key, execution id, pod/service, and rough time window.
-2. Discover `vlogs` if needed:
-
-```bash
-call discover vlogs
-```
+2. Query logs with the `vlogs` connector in Code Mode (`centaur-codemode exec --result-only`). `centaur-codemode load vlogs` prints every function and its arguments.
 
 3. Query likely auth failures in the last 24h, narrowing when the user gave a host, pod, thread, or execution id.
 
 For Centaur API proxy / Iron Proxy issues:
 
-```bash
-call vlogs query '{"query":"kubernetes.pod_name:centaur-api-proxy-* AND (audit.status_code:401 OR audit.status_code:403 OR audit.status_code:503 OR \"failed to fetch secret\" OR unauthorized OR forbidden OR auth OR oauth OR token OR secret)","start":"24h","limit":100}'
+```js
+return await tools.vlogs.query({
+  query: 'kubernetes.pod_name:centaur-api-proxy-* AND (audit.status_code:401 OR audit.status_code:403 OR audit.status_code:503 OR "failed to fetch secret" OR unauthorized OR forbidden OR auth OR oauth OR token OR secret)',
+  start: "24h",
+  limit: 100,
+});
 ```
 
 For a specific thread:
 
-```bash
-call vlogs thread_trace '{"thread_key":"THREAD_KEY","start":"24h","limit":500}'
-call vlogs tool_usage_by_thread '{"thread_key":"THREAD_KEY","start":"24h","limit":200}'
+```js
+const thread_key = "THREAD_KEY";
+const [trace, usage] = await Promise.allSettled([
+  tools.vlogs.thread_trace({ thread_key, start: "24h", limit: 500 }),
+  tools.vlogs.tool_usage_by_thread({ thread_key, start: "24h", limit: 200 }),
+]);
+return { trace, usage };
 ```
 
 For a specific execution:
 
-```bash
-call vlogs execution_timeline '{"execution_id":"EXECUTION_ID"}'
+```js
+return await tools.vlogs.execution_timeline({ execution_id: "EXECUTION_ID" });
 ```
 
 4. If the direct query is empty, find labels first:
 
-```bash
-call vlogs field_values '{"field":"service","query":"*proxy*","start":"24h","limit":200}'
-call vlogs field_names '{"query":"service:iron-proxy","start":"24h"}'
-call vlogs streams '{"query":"proxy","start":"24h"}'
+```js
+const [services, fields, streams] = await Promise.allSettled([
+  tools.vlogs.field_values({ field: "service", query: "*proxy*", start: "24h", limit: 200 }),
+  tools.vlogs.field_names({ query: "service:iron-proxy", start: "24h" }),
+  tools.vlogs.streams({ query: "proxy", start: "24h" }),
+]);
+return { services, fields, streams };
 ```
 
 5. Summarize only what the logs support:

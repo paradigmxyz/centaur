@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# Brings up the e2e stack on a dedicated kind cluster and runs the scenarios.
+#
+#   e2e/stack.sh up            create/update the cluster and deploy everything
+#   e2e/stack.sh test [files]  run the e2e scenarios (or the given files)
+#   e2e/stack.sh logs          print pods, events, and component logs, and
+#                              save full logs to CENTAUR_E2E_LOG_DIR
+#   e2e/stack.sh down          delete the cluster
+#
+# The stack is the chart's Slack path (Postgres, console, proxy-sync, api-rs,
+# slackbotv2, sandboxes, per-sandbox iron-proxies) plus fakes for the outside
+# world: Slack, the model providers, which CoreDNS resolves to an in-cluster
+# scripted model server, and a remote development environment behind a WSS SSH
+# gateway, which CoreDNS resolves the same way. The test runner reaches the fakes,
+# Postgres, api-rs, and the console on localhost through NodePorts mapped by
+# e2e/infra/kind.yaml.
+#
+# Images are built from the working tree and loaded into kind by default. Set
+# CENTAUR_E2E_IMAGE_TAG (e.g. main or sha-abc1234) to pull published images.
+#
+# CENTAUR_E2E_AUTH_MODE picks how the harnesses authenticate, for both Codex
+# and Claude Code: api_key (default) or access_token, the ChatGPT and Claude.ai
+# subscription path, where the console brokers the tokens iron-proxy injects.
+# `test` runs against whichever mode the stack was last brought up in; CI runs
+# only e2e/tests/harnesses.test.ts in access_token mode. Going
+# from access_token back to api_key needs `down` first: api-rs does not remove
+# the subscription credentials it registered, so they would still be injected.
+# Every command uses a private kubeconfig, never the ambient context.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+CLUSTER="${CENTAUR_E2E_CLUSTER:-centaur-e2e}"
+RELEASE=centaur # contrib/scripts/bootstrap-k8s-secrets.sh assumes this name
+NODE="${CLUSTER}-control-plane"
+# The node directory sandboxes mount (sandbox.reposPath in e2e/infra/values.yaml)
+# and the workflow directory under it that tests install workflow files into.
+REPOS_DIR=/var/lib/centaur-e2e/repos
+WORKFLOW_DIR="$REPOS_DIR/centaur-e2e/workflows"
+NAMESPACE=centaur
+SLACK_NAMESPACE=centaur-e2e-slack
+MODEL_NAMESPACE=centaur-e2e-model
+SSH_NAMESPACE=centaur-e2e-ssh
+# Fixture values, not credentials: the fakes and the stack must agree on them.
+SLACK_BOT_TOKEN=xoxb-centaur-e2e
+SLACK_SIGNING_SECRET=centaur-e2e-signing-secret
+# Admin bearer for api-rs operator routes the tests call.
+API_ADMIN_KEY=centaur-e2e-api-admin-key
+OPENAI_TEST_KEY=sk-e2e-openai-test-key
+ANTHROPIC_TEST_KEY=sk-ant-e2e-anthropic-test-key
+CUSTOM_TEST_KEY=e2e-custom-provider-test-key
+# Subscription access tokens as the console's broker would mint them, and the
+# ChatGPT workspace the e2e subscription belongs to.
+CODEX_ACCESS_TOKEN=e2e-chatgpt-access-token
+CLAUDE_ACCESS_TOKEN=e2e-claude-access-token
+CHATGPT_ACCOUNT_ID=e2e00000-0000-4000-8000-00000000c0de
+# Derives every sandbox's disposable SSH identity (at least 32 bytes).
+SSH_SEED=centaur-e2e-ssh-seed-fixture-0123456789
+AUTH_MODE="${CENTAUR_E2E_AUTH_MODE:-api_key}"
+# Full component logs, including those of pods a test restarted.
+LOG_DIR="${CENTAUR_E2E_LOG_DIR:-${TMPDIR:-/tmp}/${CLUSTER}-logs}"
+case "$AUTH_MODE" in
+  api_key | access_token) ;;
+  *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
+esac
+IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker brain:brain iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox)
+
+export KUBECONFIG
+KUBECONFIG="$(mktemp)"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$KUBECONFIG" "$WORK"' EXIT
+
+use_cluster() {
+  kind get kubeconfig --name "$CLUSTER" > "$KUBECONFIG"
+}
+
+apply_stdin() {
+  kubectl apply -f - > /dev/null
+}
+
+up() {
+  if kind get clusters | grep -qx "$CLUSTER"; then
+    use_cluster
+    if ! docker port "${CLUSTER}-control-plane" | grep -q '^30082/tcp' \
+      || [[ "$(kubectl get node "${CLUSTER}-control-plane" -o jsonpath='{.status.capacity.pods}')" -lt 250 ]]; then
+      echo "cluster $CLUSTER predates e2e/infra/kind.yaml; run e2e/stack.sh down first" >&2
+      exit 1
+    fi
+  else
+    kind create cluster --name "$CLUSTER" --config e2e/infra/kind.yaml --kubeconfig "$KUBECONFIG" --wait 120s
+  fi
+
+  # Pods inherit the host's DNS search domains, so every external lookup first
+  # tries names like api.openai.com.<host-domain> through the host's resolver,
+  # which is slow under load. resolv.conf is bind-mounted, so write in place.
+  docker exec "${CLUSTER}-control-plane" sh -c \
+    "grep -v '^search ' /etc/resolv.conf > /tmp/resolv.conf && cat /tmp/resolv.conf > /etc/resolv.conf"
+
+  docker exec "$NODE" mkdir -p "$WORKFLOW_DIR"
+
+  kubectl -n kube-system create configmap coredns --from-file=Corefile=e2e/infra/Corefile \
+    --dry-run=client -o yaml | apply_stdin
+  kubectl -n kube-system rollout restart deploy/coredns > /dev/null
+
+  local image_args=() entry service key tag
+  for entry in "${IMAGES[@]}"; do
+    service="${entry%%:*}" key="${entry#*:}"
+    if [[ -n "${CENTAUR_E2E_IMAGE_TAG:-}" ]]; then
+      image_args+=(
+        --set "${key}.image.repository=ghcr.io/paradigmxyz/centaur/centaur-${service}"
+        --set "${key}.image.tag=${CENTAUR_E2E_IMAGE_TAG}"
+      )
+      # Pull the multi-GB agent image now, not inside a sandbox's ready timeout.
+      if [[ "$service" == agent ]]; then
+        docker exec "${CLUSTER}-control-plane" crictl pull \
+          "ghcr.io/paradigmxyz/centaur/centaur-agent:${CENTAUR_E2E_IMAGE_TAG}"
+      fi
+    else
+      just build-one "$service"
+      # Tag by content so a rebuilt image changes the release values and Helm
+      # rolls exactly the pods whose image changed.
+      tag="e2e-$(docker image inspect -f '{{.Id}}' "centaur-${service}:latest" | cut -c8-19)"
+      docker tag "centaur-${service}:latest" "centaur-${service}:${tag}"
+      kind load docker-image --name "$CLUSTER" "centaur-${service}:${tag}"
+      image_args+=(
+        --set "${key}.image.repository=centaur-${service}"
+        --set "${key}.image.tag=${tag}"
+      )
+    fi
+  done
+
+  SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN" \
+  SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
+  SLACKBOT_API_KEY="$(openssl rand -hex 32)" \
+  OP_SERVICE_ACCOUNT_TOKEN=unused OP_VAULT=unused \
+    contrib/scripts/bootstrap-k8s-secrets.sh --namespace "$NAMESPACE"
+  # iron-proxy's env secret source resolves the provider keys from here.
+  kubectl -n "$NAMESPACE" patch secret centaur-infra-env --type merge -p \
+    "{\"stringData\":{\"OPENAI_API_KEY\":\"$OPENAI_TEST_KEY\",\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_TEST_KEY\",\"E2E_CUSTOM_API_KEY\":\"$CUSTOM_TEST_KEY\",\"OPENAI_CODEX_ACCOUNT_ID\":\"$CHATGPT_ACCOUNT_ID\",\"CENTAUR_APIRS_ADMIN_API_KEY\":\"$API_ADMIN_KEY\",\"CENTAUR_SSH_SEED\":\"$SSH_SEED\"}}" > /dev/null
+  # iron-proxy pods mount the release CA at this path; trusting it lets them
+  # verify the model server, whose certificate the same CA signs below.
+  kubectl -n "$NAMESPACE" create secret generic centaur-e2e-iron-proxy-env \
+    --from-literal=SSL_CERT_FILE=/etc/iron-proxy-ca/ca-cert.pem \
+    --dry-run=client -o yaml | apply_stdin
+
+  load_release_ca
+  deploy_model_server
+  deploy_ssh_gateway
+  deploy_fake_slack
+
+  # An interrupted install leaves the release locked as pending; start it over.
+  if helm status "$RELEASE" -n "$NAMESPACE" -o json 2> /dev/null | grep -q '"status":"pending-'; then
+    helm uninstall "$RELEASE" -n "$NAMESPACE" --wait > /dev/null
+  fi
+  # The chart's 1Password Connect dependency resolves only from a registered repo.
+  helm repo add onepassword https://1password.github.io/connect-helm-charts --force-update > /dev/null
+  helm dependency build contrib/chart > /dev/null
+  helm upgrade --install "$RELEASE" contrib/chart -n "$NAMESPACE" \
+    -f contrib/chart/values.dev.yaml -f e2e/infra/values.yaml \
+    --set "sandbox.codexAuthMode=${AUTH_MODE}" --set "sandbox.claudeCodeAuthMode=${AUTH_MODE}" \
+    ${image_args[@]+"${image_args[@]}"} --wait --timeout 20m &
+  local helm_pid=$!
+  # In access_token mode api-rs refuses to start until the console holds the
+  # broker credentials, and the console comes up in the same release.
+  if [[ "$AUTH_MODE" == access_token ]]; then
+    seed_broker_credentials
+  fi
+  wait "$helm_pid"
+  kubectl apply -f e2e/infra/test-access.yaml > /dev/null
+  wait_for_test_access
+  admit_external_team
+}
+
+# The NodePorts and the policy admitting them take a moment to start routing;
+# until then connections are reset, so wait before declaring the stack up.
+wait_for_test_access() {
+  # api-rs serves the Console, so the Console NodePort is probed with a Console
+  # page. `/login` is the server-rendered sign-in page, selected by the Host
+  # matching console.publicUrl (http://127.0.0.1:30082 in e2e/infra/values.yaml);
+  # the Console host has no separate health route.
+  for _ in $(seq 60); do
+    if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30081/readyz 2> /dev/null &&
+      curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:30082/login 2> /dev/null &&
+      timeout 2 bash -c '< /dev/tcp/127.0.0.1/30432' 2> /dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "api-rs, console, and Postgres NodePorts did not become reachable" >&2
+  return 1
+}
+
+# Admits EXTERNAL_TEAM in e2e/fakes/slack-fixture.ts, a Slack Connect partner.
+admit_external_team() {
+  curl -fsS -o /dev/null -X PUT http://127.0.0.1:30081/api/slack/external-team-ids \
+    -H "Authorization: Bearer $API_ADMIN_KEY" -H 'Content-Type: application/json' \
+    -d '{"slack_external_team_ids":["TE2EEXT01"]}'
+}
+
+# Stores the subscription access tokens as token-broker would after a refresh.
+# Without a refresh token token-broker never tries to refresh them. api-rs
+# creates the Console schema at startup, then exits until these credentials
+# exist, so wait for the schema and write them straight into the Console
+# database, encrypted with the release's Active Record keys.
+# A key of the release's infra Secret.
+infra_secret() {
+  kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath="{.data.$1}" | base64 -d
+}
+
+seed_broker_credentials() {
+  local postgres="statefulset/${RELEASE}-centaur-postgres"
+  local psql=(kubectl -n "$NAMESPACE" exec -i "$postgres" -- psql -U tempo -d iron_control_production -v ON_ERROR_STOP=1 -qtA)
+  until [[ "$("${psql[@]}" -c "SELECT to_regclass('public.broker_credentials') IS NOT NULL" 2> /dev/null)" == t ]]; do
+    sleep 2
+  done
+  E2E_AR_PRIMARY_KEY="$(infra_secret IRON_CONTROL_AR_ENCRYPTION_PRIMARY_KEY)" \
+  E2E_AR_SALT="$(infra_secret IRON_CONTROL_AR_ENCRYPTION_KEY_DERIVATION_SALT)" \
+  CODEX_ACCESS_TOKEN="$CODEX_ACCESS_TOKEN" CLAUDE_ACCESS_TOKEN="$CLAUDE_ACCESS_TOKEN" \
+    bun e2e/infra/broker-credentials-sql.ts | "${psql[@]}"
+  # Skip the crash-loop backoff api-rs built up while it waited.
+  kubectl -n "$NAMESPACE" delete pod -l app.kubernetes.io/component=api-rs --wait=false > /dev/null
+}
+
+# The release's iron-proxy CA, which iron-proxy pods trust (see
+# centaur-e2e-iron-proxy-env); the fakes they reach present certificates it signs.
+load_release_ca() {
+  kubectl -n "$NAMESPACE" get secret centaur-firewall-ca-key -o jsonpath='{.data.ca-cert\.pem}' \
+    | base64 -d > "$WORK/ca.pem"
+  kubectl -n "$NAMESPACE" get secret centaur-firewall-ca-key -o jsonpath='{.data.ca-key\.pem}' \
+    | base64 -d > "$WORK/ca-key.pem"
+}
+
+# issue_cert NAME DNS... writes $WORK/NAME.crt and $WORK/NAME.key, signed by the release CA.
+issue_cert() {
+  local name="$1" sans
+  shift
+  sans="$(printf 'DNS:%s,' "$@")"
+  openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$1" \
+    -keyout "$WORK/$name.key" -out "$WORK/$name.csr" 2> /dev/null
+  printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "${sans%,}" > "$WORK/$name.cnf"
+  openssl x509 -req -in "$WORK/$name.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca-key.pem" \
+    -CAcreateserial -days 30 -sha256 -extfile "$WORK/$name.cnf" -out "$WORK/$name.crt" 2> /dev/null
+}
+
+deploy_model_server() {
+  issue_cert model-server api.openai.com chatgpt.com api.anthropic.com custom-provider.test
+
+  kubectl create namespace "$MODEL_NAMESPACE" --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$MODEL_NAMESPACE" create secret tls model-server-tls \
+    --cert="$WORK/model-server.crt" --key="$WORK/model-server.key" --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$MODEL_NAMESPACE" create secret generic model-server \
+    --from-literal=CHATGPT_ACCOUNT_ID="$CHATGPT_ACCOUNT_ID" --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$MODEL_NAMESPACE" create configmap model-server \
+    --from-file=e2e/fakes/model-server.ts --dry-run=client -o yaml | apply_stdin
+  kubectl apply -f e2e/infra/model-server.yaml > /dev/null
+  kubectl -n "$MODEL_NAMESPACE" rollout restart deploy/model-server > /dev/null
+  kubectl -n "$MODEL_NAMESPACE" rollout status deploy/model-server --timeout=180s
+}
+
+# The remote development environment e2e/tests/ssh.test.ts reaches through
+# iron-proxy's SSH listener. Its fixture key pair is generated once per
+# cluster: the gateway authorizes the public half, and tests grant the private
+# half to the principals that may use it.
+deploy_ssh_gateway() {
+  docker build -q ${CENTAUR_BUILD_HTTP_PROXY:+--build-arg "http_proxy=$CENTAUR_BUILD_HTTP_PROXY"} \
+    -t centaur-e2e-ssh-gateway:latest e2e/infra/ssh-gateway > /dev/null
+  kind load docker-image --name "$CLUSTER" centaur-e2e-ssh-gateway:latest
+  issue_cert ssh-gateway workspace.ssh-gateway.test
+
+  kubectl create namespace "$SSH_NAMESPACE" --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$SSH_NAMESPACE" create secret tls ssh-gateway-tls \
+    --cert="$WORK/ssh-gateway.crt" --key="$WORK/ssh-gateway.key" --dry-run=client -o yaml | apply_stdin
+  if ! kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key > /dev/null 2>&1; then
+    ssh-keygen -q -t ed25519 -N '' -C centaur-e2e -f "$WORK/ssh-gateway-key"
+    kubectl -n "$SSH_NAMESPACE" create secret generic ssh-gateway-key \
+      --from-file=id_ed25519="$WORK/ssh-gateway-key" \
+      --from-file=authorized_keys="$WORK/ssh-gateway-key.pub" > /dev/null
+  fi
+  kubectl apply -f e2e/infra/ssh-gateway.yaml > /dev/null
+  kubectl -n "$SSH_NAMESPACE" rollout restart deploy/ssh-gateway > /dev/null
+  kubectl -n "$SSH_NAMESPACE" rollout status deploy/ssh-gateway --timeout=180s
+}
+
+deploy_fake_slack() {
+  kubectl create namespace "$SLACK_NAMESPACE" --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$SLACK_NAMESPACE" create configmap fake-slack \
+    --from-file=e2e/fakes/fake-slack.ts --from-file=e2e/fakes/slack-fixture.ts --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$SLACK_NAMESPACE" create secret generic fake-slack \
+    --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN" \
+    --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
+    --from-literal=SLACK_EVENTS_URL="http://${RELEASE}-centaur-slackbotv2.${NAMESPACE}.svc.cluster.local:3001/api/webhooks/slack" \
+    --dry-run=client -o yaml | apply_stdin
+  kubectl -n "$SLACK_NAMESPACE" apply -f e2e/infra/fake-slack.yaml > /dev/null
+  kubectl -n "$SLACK_NAMESPACE" rollout restart deploy/fake-slack > /dev/null
+  kubectl -n "$SLACK_NAMESPACE" rollout status deploy/fake-slack --timeout=180s
+}
+
+run_tests() {
+  use_cluster
+  remove_sandboxes
+  # Workflows installed by earlier runs would otherwise be discovered forever.
+  docker exec "$NODE" sh -c "mkdir -p '$WORKFLOW_DIR' && rm -f '$WORKFLOW_DIR'/*.py"
+  export E2E_KIND_NODE="$NODE" E2E_WORKFLOW_DIR="$WORKFLOW_DIR"
+  local password
+  password="$(kubectl -n "$NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
+  export E2E_SLACK_URL=http://127.0.0.1:30443
+  export E2E_MODEL_URL=http://127.0.0.1:30080
+  export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
+  # The Console database (console.database.name), created by the bundled Postgres on first boot.
+  export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
+  export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
+  # The Console's bootstrap admin, for the session API (API clients), and a
+  # bearer key minted as that admin for the operator API.
+  export E2E_CONSOLE_URL=http://127.0.0.1:30082
+  E2E_CONSOLE_ADMIN_EMAIL="$(infra_secret IRON_CONTROL_INITIAL_USER_EMAIL)"
+  E2E_CONSOLE_ADMIN_PASSWORD="$(infra_secret IRON_CONTROL_INITIAL_USER_PASSWORD)"
+  export E2E_CONSOLE_ADMIN_EMAIL E2E_CONSOLE_ADMIN_PASSWORD
+  E2E_CONSOLE_API_KEY="$(CONSOLE_URL="$E2E_CONSOLE_URL" ADMIN_EMAIL="$E2E_CONSOLE_ADMIN_EMAIL" \
+    ADMIN_PASSWORD="$E2E_CONSOLE_ADMIN_PASSWORD" bun e2e/infra/console-api-key.ts)"
+  export E2E_CONSOLE_API_KEY
+  # The private key the SSH gateway authorizes, for tests to store and grant.
+  E2E_SSH_PRIVATE_KEY="$(kubectl -n "$SSH_NAMESPACE" get secret ssh-gateway-key -o jsonpath='{.data.id_ed25519}' | base64 -d)"
+  export E2E_SSH_PRIVATE_KEY
+  # Expect the credentials of the auth mode the stack runs in.
+  E2E_AUTH_MODE="$(kubectl -n "$NAMESPACE" get "deploy/${RELEASE}-centaur-api-rs" \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CODEX_AUTH_MODE")].value}')"
+  export E2E_AUTH_MODE
+  if [[ "$E2E_AUTH_MODE" == access_token ]]; then
+    export E2E_OPENAI_CREDENTIAL="Bearer $CODEX_ACCESS_TOKEN" E2E_ANTHROPIC_CREDENTIAL="Bearer $CLAUDE_ACCESS_TOKEN"
+    export E2E_CHATGPT_ACCOUNT_ID="$CHATGPT_ACCOUNT_ID"
+  else
+    export E2E_OPENAI_CREDENTIAL="Bearer $OPENAI_TEST_KEY" E2E_ANTHROPIC_CREDENTIAL="$ANTHROPIC_TEST_KEY"
+  fi
+  # A wider burst of cold sandboxes overloads the single kind node.
+  # Arguments pick test files (e.g. e2e/tests/lifecycle.test.ts); default is all.
+  local targets=("$@")
+  [[ "${#targets[@]}" -gt 0 ]] || targets=(./e2e/tests)
+  mkdir -p "$LOG_DIR"
+  rm -f "$LOG_DIR"/*.log
+  export E2E_LOG_DIR="$LOG_DIR"
+  if ! bun test --max-concurrency=4 "${targets[@]}"; then
+    dump_logs
+    return 1
+  fi
+}
+
+# Prints what is needed to debug a failed deploy or test run.
+dump_logs() {
+  kubectl get pods -A -o wide || true
+  kubectl get events -A --sort-by=.lastTimestamp | tail -50 || true
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --tail=-1 \
+    | grep -E '"level":"(warn|error)"' | tail -100 || true
+  # A container that restarted took its logs with it; show how it ended.
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-slackbotv2" --previous --tail=50 2> /dev/null || true
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --previous --tail=50 2> /dev/null || true
+  kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-api-rs" --tail=-1 \
+    | grep -E '"level":"(WARN|ERROR)"' | tail -50 || true
+  kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=100 || true
+  kubectl -n "$SSH_NAMESPACE" logs deploy/ssh-gateway --all-containers --prefix --tail=50 || true
+  kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 | grep -v '_delivered"' | tail -100 || true
+  # In-cluster lookups (Postgres, the fakes, the model server) all go through
+  # CoreDNS; its errors plugin logs failed upstream and plugin lookups.
+  kubectl -n kube-system logs -l k8s-app=kube-dns --prefix --tail=100 || true
+
+  mkdir -p "$LOG_DIR"
+  local component
+  for component in slackbotv2 api-rs brain; do
+    kubectl -n "$NAMESPACE" logs "deploy/${RELEASE}-centaur-${component}" --tail=-1 \
+      > "$LOG_DIR/${component}.log" 2>&1 || true
+  done
+  kubectl -n "$SLACK_NAMESPACE" logs deploy/fake-slack --tail=-1 > "$LOG_DIR/fake-slack.log" 2>&1 || true
+  kubectl -n "$MODEL_NAMESPACE" logs deploy/model-server --tail=-1 > "$LOG_DIR/model-server.log" 2>&1 || true
+  kubectl -n "$SSH_NAMESPACE" logs deploy/ssh-gateway --all-containers --prefix --tail=-1 > "$LOG_DIR/ssh-gateway.log" 2>&1 || true
+  kubectl -n kube-system logs -l k8s-app=kube-dns --prefix --tail=-1 > "$LOG_DIR/coredns.log" 2>&1 || true
+  echo "full logs: $LOG_DIR"
+}
+
+# Earlier runs leave a sandbox and iron-proxy per thread (they idle for hours).
+# Remove them so each run starts on an unloaded node.
+remove_sandboxes() {
+  kubectl -n "$NAMESPACE" delete sandboxes.agents.x-k8s.io --all --wait=false > /dev/null
+  kubectl -n "$NAMESPACE" delete pods,services,networkpolicies,configmaps,secrets \
+    -l centaur.ai/managed-by=api-rs --wait=false > /dev/null
+}
+
+case "${1:-}" in
+  up) up ;;
+  test) shift; run_tests "$@" ;;
+  logs) use_cluster; dump_logs ;;
+  down) kind delete cluster --name "$CLUSTER" ;;
+  *) echo "usage: $0 up|test|logs|down" >&2; exit 2 ;;
+esac
