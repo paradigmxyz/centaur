@@ -229,9 +229,9 @@ function SystemPromptSection() {
           label="Custom instructions"
           hint={
             <>
-              Added to every nanocode turn after Centaur&apos;s built-in prompt. An edit applies to each thread&apos;s
-              next turn. Leave it empty to add nothing. {bytes.toLocaleString()} / {SYSTEM_PROMPT_MAX_BYTES.toLocaleString()}{" "}
-              bytes.
+              Added to nanocode threads after Centaur&apos;s built-in prompt. A thread keeps the prompt it started with, so
+              an edit applies to new threads. Leave it empty to add nothing. {bytes.toLocaleString()} /{" "}
+              {SYSTEM_PROMPT_MAX_BYTES.toLocaleString()} bytes.
             </>
           }
           error={tooLong ? "The system prompt is too long." : undefined}

@@ -127,8 +127,8 @@ impl BrainClient {
     ///
     /// `tool_token` is the turn's Code Mode token: the brain forwards it with
     /// every Code Mode call, and without one the turn has no Code Mode tools.
-    /// `system_prompt` is the deployment's custom system prompt, empty when it
-    /// has none; `None` leaves the thread's current prompt in place.
+    /// `system_prompt` is the deployment's custom system prompt, if any. The
+    /// thread's first turn pins it for the thread's life.
     pub async fn submit_turn(
         &self,
         thread_key: &ThreadKey,
@@ -262,9 +262,8 @@ struct SubmitTurn<'a> {
     /// principal; absent when the turn gets no Code Mode tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_token: Option<&'a str>,
-    /// The deployment's custom system prompt, empty when it has none. Absent
-    /// when it could not be read, or for a steer, so the brain keeps the
-    /// thread's current prompt.
+    /// The deployment's custom system prompt; absent when there is none. The
+    /// brain applies the one the thread's first turn brought.
     #[serde(skip_serializing_if = "Option::is_none")]
     system_prompt: Option<&'a str>,
 }
@@ -538,7 +537,7 @@ mod tests {
                 line,
                 false,
                 Some("token"),
-                Some(""),
+                Some("Answer in French."),
             )
             .await
             .unwrap();
@@ -552,9 +551,9 @@ mod tests {
         // No token is sent as no field, not as null.
         assert!(turns[0].body.get("tool_token").is_none());
         assert_eq!(turns[1].body["tool_token"], "token");
-        // An unknown system prompt is no field; an empty one is sent.
+        // No system prompt is no field.
         assert!(turns[0].body.get("system_prompt").is_none());
-        assert_eq!(turns[1].body["system_prompt"], "");
+        assert_eq!(turns[1].body["system_prompt"], "Answer in French.");
         assert_eq!(turns[0].body["input_line"]["type"], "user");
         assert_eq!(
             turns[0].body["input_line"]["message"]["content"][0]["text"],

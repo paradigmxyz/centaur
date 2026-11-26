@@ -758,8 +758,8 @@ impl SessionRuntime {
         self
     }
 
-    /// Read the deployment's custom system prompt for every `nanocode` turn,
-    /// so an edit reaches a thread's next turn.
+    /// Read the deployment's custom system prompt for every `nanocode` turn.
+    /// A thread's first turn pins it, so an edit applies to new threads.
     pub fn with_system_prompt_source(
         mut self,
         source: Option<Arc<dyn SystemPromptSource>>,
@@ -2261,20 +2261,21 @@ impl SessionRuntime {
         ))
     }
 
-    /// The custom system prompt for one `nanocode` turn: empty when none is
-    /// set, and `None` when there is no source or it cannot be read, so the
-    /// brain keeps the thread's current prompt instead of dropping it.
+    /// The custom system prompt for one `nanocode` turn, or `None` when there
+    /// is no source or none is set. A prompt that cannot be read is logged and
+    /// treated as none: the turn still runs, and a thread's first turn pins
+    /// what it brings.
     async fn brain_system_prompt(&self, thread_key: &ThreadKey) -> Option<String> {
         let source = self.system_prompts.as_ref()?;
         match source.system_prompt().await {
-            Ok(prompt) => Some(prompt.unwrap_or_default()),
+            Ok(prompt) => prompt,
             Err(error) => {
                 warn!(
                     component = COMPONENT_SESSION_RUNTIME,
                     event = "session_brain_system_prompt_failed",
                     thread_key = %thread_key,
                     %error,
-                    "reading the custom system prompt failed; the thread keeps its current prompt"
+                    "reading the custom system prompt failed; the turn runs without it"
                 );
                 None
             }
@@ -7790,16 +7791,11 @@ mod tests {
             .into_iter()
             .map(|turn| turn.body.get("system_prompt").cloned())
             .collect::<Vec<_>>();
-        // No source, or one that fails, sends no prompt, so the brain keeps
-        // the thread's; an unset prompt is sent empty, so the brain drops it.
+        // Only a set prompt is sent: no source, an unset prompt, and one that
+        // cannot be read all send none.
         assert_eq!(
             prompts,
-            [
-                None,
-                Some(json!("Answer in French.")),
-                Some(json!("")),
-                None
-            ]
+            [None, Some(json!("Answer in French.")), None, None]
         );
     }
 

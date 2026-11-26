@@ -38,12 +38,23 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The thread with its nanocode session, assigning one if it is new.
-    async fn thread(&self, thread_key: String) -> Result<ThreadRef, Box<Response>> {
-        match self.sessions.resolve(&thread_key).await {
-            Ok(session_id) => Ok(ThreadRef {
+    /// The thread with its nanocode session, assigning one if it is new. With
+    /// `pin`, a thread with no pinned system prompt pins this one (`None` pins
+    /// none); see [`SessionIds::pin`].
+    async fn thread(
+        &self,
+        thread_key: String,
+        pin: Option<Option<&str>>,
+    ) -> Result<ThreadRef, Box<Response>> {
+        let resolved = match pin {
+            Some(system_prompt) => self.sessions.pin(&thread_key, system_prompt).await,
+            None => self.sessions.resolve(&thread_key).await,
+        };
+        match resolved {
+            Ok(resolved) => Ok(ThreadRef {
                 key: thread_key,
-                session_id,
+                session_id: resolved.session_id,
+                system_prompt: resolved.system_prompt,
             }),
             Err(failure) => {
                 warn!(%failure, "cannot resolve the thread's session");
@@ -77,8 +88,8 @@ struct SubmitRequest {
     /// retry of a request, which must not look like a different turn.
     #[serde(default)]
     tool_token: Option<String>,
-    /// The deployment's custom system prompt, from the Console; empty when it
-    /// has none. Absent keeps the thread's current prompt, as for a steer.
+    /// The deployment's custom system prompt, from the Console; absent or
+    /// blank when it has none. The thread's first turn pins it for life.
     #[serde(default)]
     system_prompt: Option<String>,
 }
@@ -92,7 +103,12 @@ async fn submit(
         return error(StatusCode::BAD_REQUEST, "request_id is required");
     }
     let tool_token = verified_token(&state, &thread_key, request.tool_token.as_deref());
-    let thread = match state.thread(thread_key).await {
+    // The thread's first turn pins its custom system prompt for life.
+    let system_prompt = crate::prompt::custom(request.system_prompt.as_deref());
+    let thread = match state
+        .thread(thread_key, Some(system_prompt.as_deref()))
+        .await
+    {
         Ok(thread) => thread,
         Err(response) => return *response,
     };
@@ -102,10 +118,6 @@ async fn submit(
         input_line: request.input_line,
         steer: request.steer,
         tool_token,
-        system_prompt: request
-            .system_prompt
-            .as_deref()
-            .map(|prompt| crate::prompt::custom(Some(prompt))),
         reply,
     })
     .await;
@@ -154,7 +166,7 @@ fn verified_token(state: &AppState, thread_key: &str, token: Option<&str>) -> Op
 }
 
 async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
-    let thread = match state.thread(thread_key).await {
+    let thread = match state.thread(thread_key, None).await {
         Ok(thread) => thread,
         Err(response) => return *response,
     };
@@ -170,7 +182,7 @@ async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -
 }
 
 async fn interrupt(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
-    let thread = match state.thread(thread_key).await {
+    let thread = match state.thread(thread_key, None).await {
         Ok(thread) => thread,
         Err(response) => return *response,
     };
@@ -219,10 +231,11 @@ async fn follow(
     execution_id: Option<String>,
     sender: mpsc::Sender<Event>,
 ) {
-    let thread = match state.sessions.resolve(&thread_key).await {
-        Ok(session_id) => ThreadRef {
+    let mut thread = match state.sessions.resolve(&thread_key).await {
+        Ok(resolved) => ThreadRef {
             key: thread_key.clone(),
-            session_id,
+            session_id: resolved.session_id,
+            system_prompt: resolved.system_prompt,
         },
         Err(failure) => {
             let _ = sender
@@ -236,6 +249,13 @@ async fn follow(
     let mut projector: Option<Projector> = None;
     let mut cursor = 0;
     loop {
+        // Until its first turn pins a prompt the thread has no events; look
+        // again each round so the stream picks that turn up.
+        if thread.system_prompt.is_none()
+            && let Ok(resolved) = state.sessions.resolve(&thread_key).await
+        {
+            thread.system_prompt = resolved.system_prompt;
+        }
         let Some(page) = page(&state, &thread, cursor).await else {
             let _ = sender.send(stream_error("the brain is unavailable")).await;
             return;
@@ -806,16 +826,15 @@ mod tests {
             .collect()
     }
 
-    /// The custom system prompt follows the base prompt and the Code Mode
-    /// instructions. An edit reaches the next turn on an idle thread, which is
-    /// reopened with it; a turn that does not say keeps the thread's prompt,
-    /// and an empty prompt removes it. A stream following the thread carries
-    /// on across the reopen.
+    /// A thread's first turn pins its custom system prompt, after the base
+    /// prompt and the Code Mode instructions, for life: later turns keep it
+    /// whatever they bring, and a new thread takes the current one. Reads
+    /// before the first turn pin nothing, and a stream following the thread
+    /// from before its first turn sees every turn.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_system_prompt_edit_reaches_the_next_turn() {
+    async fn the_first_turn_pins_the_system_prompt() {
         let (brain, _, bodies) = brain_with_cells(None).await;
-        let thread = "slack:T:C:prompt";
-        let turn = |request_id: &str, system_prompt: Option<&str>| {
+        let turn = |thread: &str, request_id: &str, system_prompt: Option<&str>| {
             let (token, _) = brain.token(thread, now());
             let mut body = json!({
                 "request_id": request_id,
@@ -827,26 +846,34 @@ mod tests {
             }
             body
         };
-        // The latest instructions the model saw: the last developer text that
-        // carries the brain's base prompt.
+        // The instructions of the latest model request: the developer texts
+        // that carry the brain's base prompt. A pinned prompt is sent once.
         let latest = || {
             let bodies = bodies.lock().unwrap();
             developer_texts(bodies.last().unwrap())
                 .into_iter()
-                .rfind(|text| text.contains(crate::prompt::BASE.trim()))
-                .expect("the base prompt reaches the model")
+                .filter(|text| text.contains(crate::prompt::BASE.trim()))
+                .collect::<Vec<_>>()
         };
+        let thread = "slack:T:C:prompt";
 
+        let status = brain
+            .client
+            .get(format!("{}/v1/threads/{thread}", brain.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            status.json::<Value>().await.unwrap(),
+            json!({"running": null, "queued": []})
+        );
         let follower = tokio::spawn({
             let client = brain.client.clone();
             let url = format!("{}/v1/threads/{thread}/events", brain.url);
             async move {
                 let mut response = client.get(url).send().await.unwrap();
                 let mut seen = String::new();
-                while !seen.contains("\"execution_id\":\"exe_4\"")
-                    || !seen.contains("session.execution_completed")
-                    || seen.matches("session.execution_completed").count() < 4
-                {
+                while seen.matches("session.execution_completed").count() < 3 {
                     match response.chunk().await.unwrap() {
                         Some(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
                         None => break,
@@ -856,49 +883,51 @@ mod tests {
             }
         });
 
+        for (request_id, system_prompt) in [
+            ("exe_1", Some("  Answer like a pirate.\n")),
+            ("exe_2", Some("Answer like a poet.")),
+            ("exe_3", None),
+        ] {
+            let (status, body) = brain
+                .submit_body(thread, turn(thread, request_id, system_prompt))
+                .await;
+            assert_eq!(status, 200, "{body}");
+            let stream = events(&brain, thread, request_id).await;
+            assert!(stream.contains("The answer is 42."), "{stream}");
+            let instructions = latest();
+            assert_eq!(instructions.len(), 1, "{instructions:?}");
+            let text = &instructions[0];
+            let tools = text
+                .find(centaur_codemode_protocol::tools::INSTRUCTIONS)
+                .expect("the Code Mode instructions reach the model");
+            let custom = text.find("---\n\nAnswer like a pirate.\n").expect(text);
+            assert!(tools < custom, "the custom prompt comes last");
+            assert!(!text.contains("poet"), "{text}");
+        }
+
+        let other = "slack:T:C:other";
         let (status, body) = brain
-            .submit_body(thread, turn("exe_1", Some("  Answer like a pirate.\n")))
+            .submit_body(other, turn(other, "exe_4", Some("Answer like a poet.")))
             .await;
         assert_eq!(status, 200, "{body}");
-        events(&brain, thread, "exe_1").await;
-        let first = latest();
-        let tools = first
-            .find(centaur_codemode_protocol::tools::INSTRUCTIONS)
-            .expect("the Code Mode instructions reach the model");
-        let custom = first.find("Answer like a pirate.").unwrap();
-        assert!(tools < custom, "the custom prompt comes last");
-        assert!(first.contains("---\n\nAnswer like a pirate.\n"), "{first}");
+        events(&brain, other, "exe_4").await;
+        let instructions = latest();
+        assert!(instructions[0].contains("---\n\nAnswer like a poet.\n"));
 
+        let none = "slack:T:C:none";
         let (status, body) = brain
-            .submit_body(thread, turn("exe_2", Some("Answer like a poet.")))
+            .submit_body(none, turn(none, "exe_5", Some(" ")))
             .await;
         assert_eq!(status, 200, "{body}");
-        let stream = events(&brain, thread, "exe_2").await;
-        assert!(stream.contains("The answer is 42."), "{stream}");
-        let second = latest();
-        assert!(second.contains("---\n\nAnswer like a poet.\n"), "{second}");
-        assert!(!second.contains("pirate"), "{second}");
-
-        let (status, body) = brain.submit_body(thread, turn("exe_3", None)).await;
-        assert_eq!(status, 200, "{body}");
-        events(&brain, thread, "exe_3").await;
-        assert!(latest().contains("Answer like a poet."));
-
-        let (status, body) = brain.submit_body(thread, turn("exe_4", Some(""))).await;
-        assert_eq!(status, 200, "{body}");
-        events(&brain, thread, "exe_4").await;
-        let cleared = latest();
-        assert!(!cleared.contains("Answer like"), "{cleared}");
-        assert!(
-            cleared.contains(centaur_codemode_protocol::tools::INSTRUCTIONS),
-            "{cleared}"
-        );
+        events(&brain, none, "exe_5").await;
+        let instructions = latest();
+        assert!(!instructions[0].contains("Answer like"), "{instructions:?}");
 
         let followed = tokio::time::timeout(Duration::from_secs(30), follower)
             .await
             .expect("the follower sees every turn")
             .unwrap();
-        for execution in ["exe_1", "exe_2", "exe_3", "exe_4"] {
+        for execution in ["exe_1", "exe_2", "exe_3"] {
             assert!(
                 followed.contains(&format!("\"execution_id\":\"{execution}\"")),
                 "{execution}: {followed}"

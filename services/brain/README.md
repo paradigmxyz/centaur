@@ -61,19 +61,15 @@ instructions are, separated by horizontal rules:
 3. the deployment's custom system prompt, when it is not empty.
 
 The custom prompt is edited on the Console's System Settings page. api-rs reads
-it for every `nanocode` turn and sends it as `system_prompt`, empty when none is
-set. When api-rs cannot read it, and for steers, the field is absent, and the
-thread keeps the prompt it has.
+it for every `nanocode` turn and sends it as `system_prompt`, absent when none
+is set or it cannot be read (the turn then runs without it).
 
-nanocode fixes a session's instructions when it opens the session. When a turn
-brings a different custom prompt and the thread is idle, the brain closes the
-session and reopens it with the new prompt before it queues the turn; event
-streams following the thread carry on. A busy thread keeps its prompt, and the
-change applies to the first turn submitted once it is idle. Each turn stores
-the prompt it was submitted with in its own nanocode metadata, and a thread
-reopened after a restart takes the prompt of its unfinished turn, so a resumed
-turn keeps its prompt. With the OpenAI harness the conversation keeps earlier
-developer instructions, and a changed prompt is added as newer ones.
+A thread's first turn pins the prompt it brings, empty for none, in
+`nanocode.thread_sessions.system_prompt`, and the thread keeps that prompt for
+life: nanocode fixes a session's instructions when it opens the session, so a
+Console edit applies to new threads. A restart reopens a thread with its pinned
+prompt. A thread with no pinned prompt has never had a turn, so status, event,
+and interrupt requests for it answer without opening a session.
 
 ## Code Mode
 
