@@ -7192,6 +7192,14 @@ fn is_transient_steering_startup_error(error: &SessionRuntimeError) -> bool {
 
 fn harness_thread_id_from_output_line(line: &str) -> Option<String> {
     let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("method").and_then(Value::as_str) == Some("thread/started") {
+        return value
+            .pointer("/params/thread/id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|thread_id| !thread_id.is_empty())
+            .map(ToOwned::to_owned);
+    }
     let event_type = value.get("type").and_then(Value::as_str);
     if event_type != Some("thread.started") {
         return None;
@@ -8989,6 +8997,35 @@ mod tests {
             harness_thread_id_from_output_line(r#"{"type":"turn.started","turn_id":"turn-1"}"#),
             None
         );
+    }
+
+    #[test]
+    fn harness_thread_id_is_extracted_from_codex_thread_started_notification() {
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{"id":"codex-thread-3","turns":[]}}}"#
+            ),
+            Some("codex-thread-3".to_owned())
+        );
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{"id":"  "}}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            harness_thread_id_from_output_line(
+                r#"{"method":"thread/started","params":{"thread":{}}}"#
+            ),
+            None
+        );
+        for line in [
+            r#"{"method":"turn/started","params":{"threadId":"codex-thread-3","turn":{"id":"turn-1"}}}"#,
+            r#"{"method":"thread/status/changed","params":{"threadId":"codex-thread-3","status":{"type":"idle"}}}"#,
+            r#"{"method":"item/completed","params":{"thread":{"id":"codex-thread-3"}}}"#,
+        ] {
+            assert_eq!(harness_thread_id_from_output_line(line), None, "{line}");
+        }
     }
 
     #[test]
@@ -12274,6 +12311,44 @@ mod adoption_tests {
             Some("Completed after reattach.")
         );
         assert_eq!(backend.opens(), 2);
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stdout_pump_persists_the_codex_thread_id_from_thread_started() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:codex-thread-id-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-thread-id"), true).await;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, mut stdout, _stdin) = mock_io();
+        backend.push_io(io).await;
+
+        let runtime = runtime_with(&store, backend.clone());
+        claim_test_stdout_owner(&runtime, &execution_id).await;
+        runtime
+            .ensure_session_pipe(&thread_key, "sbx-thread-id")
+            .await
+            .expect("open pipe");
+        stdout
+            .write_all(
+                b"{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"codex-thread-9\"}}}\n",
+            )
+            .await
+            .unwrap();
+        stdout
+            .write_all(&completed_output_bytes("Done."))
+            .await
+            .unwrap();
+
+        wait_for_event(&store, &thread_key, "session.execution_completed").await;
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(session.harness_thread_id.as_deref(), Some("codex-thread-9"));
         reset_test_store(&store).await;
     }
 
