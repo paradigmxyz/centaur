@@ -6,7 +6,7 @@ use centaur_api_server::{
     spawn_scheduled_task_scheduler, spawn_slack_channel_catalog_refresh,
     warm_slack_public_channel_cache,
 };
-use centaur_session_runtime::SessionRuntime;
+use centaur_session_runtime::{SessionRuntime, SystemPromptSource};
 use centaur_session_sqlx::PgSessionStore;
 use centaur_telemetry::{TelemetryConfig, init_telemetry};
 use centaur_workflows::WorkflowRuntime;
@@ -157,6 +157,19 @@ async fn seed_legacy_slack_external_team_ids(store: &PgSessionStore, raw: &str) 
     }
 }
 
+/// The custom system prompt set on the Console's System Settings page, which
+/// `nanocode` turns apply.
+struct ConsoleSystemPrompt(sqlx::PgPool);
+
+#[async_trait::async_trait]
+impl SystemPromptSource for ConsoleSystemPrompt {
+    async fn system_prompt(&self) -> Result<Option<String>, String> {
+        centaur_console_db::areas::admin::system_prompt(&self.0)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), ServerError> {
     let store = PgSessionStore::connect(&args.server.database_url).await?;
     if args.server.run_migrations {
@@ -177,6 +190,9 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
         .with_brain(brain)
         .with_codemode_token_signer(args.codemode_token_signer()?)
+        .with_system_prompt_source(args.console_db().map(|pool| {
+            std::sync::Arc::new(ConsoleSystemPrompt(pool)) as std::sync::Arc<dyn SystemPromptSource>
+        }))
         .with_session_principal_admission(args.session_principal_admission())
         .with_openai_session_title_generator_from_env();
     runtime = runtime.with_personas(args.persona_registry()?);

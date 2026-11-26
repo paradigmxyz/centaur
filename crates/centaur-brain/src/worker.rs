@@ -33,6 +33,7 @@ use tracing::{info, warn};
 use crate::{
     blocks::{self, Input},
     codemode::{self, CodeMode},
+    prompt,
 };
 
 const PG_CONNECTIONS: usize = 8;
@@ -60,6 +61,15 @@ pub struct Config {
     pub code_mode: Option<Arc<CodeMode>>,
 }
 
+/// A thread's custom system prompt, from the Console: `None` when there is
+/// none. A submission carries `Option<Custom>`, where `None` means the
+/// submitter did not say, so the thread keeps the prompt it has.
+pub type Custom = Option<String>;
+
+/// The turn metadata key that holds the custom system prompt a turn was
+/// submitted with. An empty string records that it had none.
+const SYSTEM_PROMPT_KEY: &str = "system_prompt";
+
 /// A Centaur thread and the nanocode session that holds it.
 #[derive(Clone, Debug)]
 pub struct ThreadRef {
@@ -75,6 +85,8 @@ pub enum Command {
         steer: bool,
         /// The turn's verified Code Mode token, kept in its own metadata.
         tool_token: Option<codemode::TurnToken>,
+        /// The custom system prompt for this turn, also kept in its metadata.
+        system_prompt: Option<Custom>,
         reply: oneshot::Sender<Result<SubmitOutcome, SubmitError>>,
     },
     Interrupt {
@@ -186,11 +198,24 @@ struct Brain {
 }
 
 /// One Centaur thread: a nanocode session and its durable inbox.
+///
+/// nanocode fixes a session's instructions when it opens the session, so a
+/// thread whose custom system prompt changes is retired and reopened with the
+/// new one once it is idle (see [`Brain::retire`]). The replacement keeps the
+/// same `wake` channel, so event streams following the thread carry on.
 struct Thread {
     session_id: String,
     inbox: TurnInbox<OneLog>,
-    wake: watch::Sender<u64>,
+    wake: Arc<watch::Sender<u64>>,
     driving: AtomicBool,
+    /// The custom system prompt the session was opened with.
+    custom: Custom,
+    /// Submissions hold it shared; retiring the thread holds it exclusively,
+    /// so no turn is submitted to a thread that is being retired.
+    gate: tokio::sync::RwLock<()>,
+    /// Set once the thread is retired; a submission that finds it set looks
+    /// the thread up again.
+    retired: AtomicBool,
     /// Kept alive for the inbox's lifetime.
     _runtime: Nanocode,
 }
@@ -204,22 +229,30 @@ impl Brain {
                 input_line,
                 steer,
                 tool_token,
+                system_prompt,
                 reply,
             } => {
                 let outcome = self
-                    .submit(&thread, &request_id, &input_line, steer, tool_token)
+                    .submit(
+                        &thread,
+                        &request_id,
+                        &input_line,
+                        steer,
+                        tool_token,
+                        system_prompt,
+                    )
                     .await;
                 let _ = reply.send(outcome);
             }
             Command::Interrupt { thread, reply } => {
-                let outcome = match self.thread(&thread, None).await {
+                let outcome = match self.thread(&thread, None, None).await {
                     Ok(thread) => thread.interrupt().await,
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(outcome);
             }
             Command::Status { thread, reply } => {
-                let outcome = match self.thread(&thread, None).await {
+                let outcome = match self.thread(&thread, None, None).await {
                     Ok(thread) => thread.status().await,
                     Err(error) => Err(error.to_string()),
                 };
@@ -230,7 +263,7 @@ impl Brain {
                 after,
                 reply,
             } => {
-                let outcome = match self.thread(&thread, None).await {
+                let outcome = match self.thread(&thread, None, None).await {
                     Ok(thread) => thread.page(after).await,
                     Err(error) => Err(error.to_string()),
                 };
@@ -246,6 +279,7 @@ impl Brain {
         input_line: &Value,
         steer: bool,
         tool_token: Option<codemode::TurnToken>,
+        system_prompt: Option<Custom>,
     ) -> Result<SubmitOutcome, SubmitError> {
         let line = serde_json::to_string(input_line)
             .map_err(|error| SubmitError::BadRequest(error.to_string()))?;
@@ -257,39 +291,92 @@ impl Brain {
                 ));
             }
         };
-        let model = turn.model.as_deref().and_then(|model| model.parse().ok());
-        let thread = self
-            .thread(thread_ref, model)
-            .await
-            .map_err(|error| SubmitError::Internal(error.to_string()))?;
-        let outcome = thread
-            .submit(request_id, &turn.text, &thread_ref.key, steer, tool_token)
-            .await?;
-        thread.drive();
-        Ok(outcome)
+        let model: Option<ModelSelection> =
+            turn.model.as_deref().and_then(|model| model.parse().ok());
+        loop {
+            let thread = self
+                .thread(thread_ref, model.clone(), system_prompt.as_ref())
+                .await
+                .map_err(|error| SubmitError::Internal(error.to_string()))?;
+            let _gate = thread.gate.read().await;
+            if thread.retired.load(Ordering::Acquire) {
+                continue;
+            }
+            let outcome = thread
+                .submit(
+                    request_id,
+                    &turn.text,
+                    &thread_ref.key,
+                    steer,
+                    tool_token.clone(),
+                    system_prompt.as_ref(),
+                )
+                .await?;
+            // Under the gate, so a thread with work is never retired.
+            thread.drive();
+            return Ok(outcome);
+        }
     }
 
     /// The open thread, opening it (and resuming its pending turns) if needed.
+    ///
+    /// With `custom`, a thread open with another custom system prompt is
+    /// reopened with this one if it is idle. A busy thread keeps its prompt,
+    /// and the change applies to the first turn submitted once it is idle.
     async fn thread(
         self: &Arc<Self>,
         thread: &ThreadRef,
         model: Option<ModelSelection>,
+        custom: Option<&Custom>,
     ) -> Result<Arc<Thread>, Error> {
         let session_id = thread.session_id.clone();
-        if let Some(thread) = self.open_thread(&session_id) {
-            return Ok(thread);
+        let current = |open: &Thread| custom.is_none_or(|custom| *custom == open.custom);
+        if let Some(open) = self.open_thread(&session_id)
+            && current(&open)
+        {
+            return Ok(open);
         }
         let _opening = self.opening.lock().await;
-        if let Some(thread) = self.open_thread(&session_id) {
-            return Ok(thread);
+        let mut wake = None;
+        if let Some(open) = self.open_thread(&session_id) {
+            if current(&open) || !self.retire(&open).await {
+                return Ok(open);
+            }
+            info!(session_id, "reopening the session with a new system prompt");
+            wake = Some(Arc::clone(&open.wake));
         }
-        let thread = Arc::new(self.open(&session_id, &thread.key, model).await?);
+        let thread = Arc::new(
+            self.open(&session_id, &thread.key, model, custom, wake)
+                .await?,
+        );
         self.threads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id, Arc::clone(&thread));
         thread.drive();
         Ok(thread)
+    }
+
+    /// Retire an idle thread so it can be reopened: no submission in flight
+    /// and no unfinished turn. Returns whether it was retired. A driver that is
+    /// still polling the empty inbox stops once it sees the thread retired.
+    async fn retire(&self, thread: &Thread) -> bool {
+        let Ok(_gate) = thread.gate.try_write() else {
+            return false;
+        };
+        match thread.inbox.log().pending().await {
+            Ok(pending) if pending.is_empty() => {}
+            _ => return false,
+        }
+        thread.retired.store(true, Ordering::Release);
+        self.threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&thread.session_id);
+        if let Err(error) = thread.inbox.shutdown().await {
+            warn!(session_id = %thread.session_id, %error, "shutting down a retired session failed");
+        }
+        true
     }
 
     fn open_thread(&self, session_id: &str) -> Option<Arc<Thread>> {
@@ -300,11 +387,16 @@ impl Brain {
             .cloned()
     }
 
+    /// Open a thread's session. Its custom system prompt is the one its
+    /// unfinished turn was submitted with, so a turn resumed after a restart
+    /// keeps its prompt; with no such turn, it is `custom`.
     async fn open(
         &self,
         session_id: &str,
         thread_key: &str,
         model: Option<ModelSelection>,
+        custom: Option<&Custom>,
+        wake: Option<Arc<watch::Sender<u64>>>,
     ) -> Result<Thread, Error> {
         let policy = Policy {
             restarts: TURN_RESTARTS,
@@ -329,9 +421,17 @@ impl Brain {
         }
         let tools = tools.build()?;
         let code_mode = self.code_mode.is_some();
+        let custom = match unfinished_custom(&parts.log).await? {
+            Some(stored) => stored,
+            None => custom.cloned().flatten(),
+        };
+        let instructions: Arc<str> = prompt::compose(code_mode, custom.as_deref()).into();
         let mut runtime = Nanocode::builder()
-            .openai(openai(self.openai_base_url.as_deref(), code_mode)?)
-            .claude(claude(self.anthropic_base_url.as_deref(), code_mode))
+            .openai(openai(
+                self.openai_base_url.as_deref(),
+                Arc::clone(&instructions),
+            )?)
+            .claude(claude(self.anthropic_base_url.as_deref(), instructions))
             .tools(tools)
             .without_cua()
             .runner_management(false)
@@ -346,10 +446,20 @@ impl Brain {
         // Everything already in the log is durable; later events become
         // visible only once the host has committed them.
         let durable = last_seq(&parts.log).await?;
-        let (wake, _) = watch::channel(durable);
+        let wake = match wake {
+            Some(wake) => {
+                wake.send_if_modified(|latest| {
+                    let newer = durable > *latest;
+                    *latest = (*latest).max(durable);
+                    newer
+                });
+                wake
+            }
+            None => Arc::new(watch::channel(durable).0),
+        };
         let host = Arc::new(Host {
             log: Arc::clone(&parts.log),
-            wake: wake.clone(),
+            wake: Arc::clone(&wake),
         });
         let record = SessionRecord::root(
             session_id,
@@ -366,12 +476,19 @@ impl Brain {
         )
         .await?;
         nanocode_executor::spawn(pump);
-        info!(session_id, "opened session");
+        info!(
+            session_id,
+            custom_system_prompt = custom.is_some(),
+            "opened session"
+        );
         Ok(Thread {
             session_id: session_id.to_owned(),
             inbox,
             wake,
             driving: AtomicBool::new(false),
+            custom,
+            gate: tokio::sync::RwLock::new(()),
+            retired: AtomicBool::new(false),
             _runtime: runtime,
         })
     }
@@ -385,6 +502,7 @@ impl Thread {
         thread_key: &str,
         steer: bool,
         tool_token: Option<codemode::TurnToken>,
+        system_prompt: Option<&Custom>,
     ) -> Result<SubmitOutcome, SubmitError> {
         let internal = |error: &dyn std::fmt::Display| SubmitError::Internal(error.to_string());
         let running = self.running().await.map_err(|error| internal(&error))?;
@@ -394,6 +512,9 @@ impl Thread {
         let mut metadata = json!({"thread_key": thread_key});
         if let Some(token) = tool_token {
             metadata["tool_token"] = json!(token);
+        }
+        if let Some(custom) = system_prompt {
+            metadata[SYSTEM_PROMPT_KEY] = json!(custom.as_deref().unwrap_or_default());
         }
         let submission = Submission {
             request_id: request_id.to_owned(),
@@ -535,6 +656,9 @@ impl Thread {
         let thread = Arc::clone(self);
         nanocode_executor::spawn(async move {
             loop {
+                if thread.retired.load(Ordering::Acquire) {
+                    break;
+                }
                 match thread.inbox.drive(None).await {
                     Ok(Driven::Idle) => {
                         let pending = thread.inbox.log().pending().await;
@@ -553,12 +677,13 @@ impl Thread {
             }
             thread.driving.store(false, Ordering::Release);
             // A turn submitted between the last check and the flag reset.
-            if thread
-                .inbox
-                .log()
-                .pending()
-                .await
-                .is_ok_and(|pending| !pending.is_empty())
+            if !thread.retired.load(Ordering::Acquire)
+                && thread
+                    .inbox
+                    .log()
+                    .pending()
+                    .await
+                    .is_ok_and(|pending| !pending.is_empty())
             {
                 thread.drive();
             }
@@ -573,7 +698,7 @@ impl Thread {
 struct Host {
     log: Arc<OneLog>,
     /// The highest committed seq.
-    wake: watch::Sender<u64>,
+    wake: Arc<watch::Sender<u64>>,
 }
 
 impl InboxHost for Host {
@@ -612,10 +737,33 @@ async fn last_seq(log: &OneLog) -> Result<u64, Error> {
     }
 }
 
+/// The custom system prompt the thread's unfinished turn was submitted with:
+/// the running turn's, or else the first queued one's. `None` when there is no
+/// unfinished turn or it was submitted without saying.
+async fn unfinished_custom(log: &OneLog) -> Result<Option<Custom>, Error> {
+    let pending = log.pending().await?;
+    let Some(record) = pending
+        .iter()
+        .find(|record| record.state == TurnState::Running)
+        .or_else(|| pending.first())
+    else {
+        return Ok(None);
+    };
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        #[serde(default)]
+        system_prompt: Option<String>,
+    }
+    Ok(serde_json::from_str::<Metadata>(record.metadata.get())
+        .ok()
+        .and_then(|metadata| metadata.system_prompt)
+        .map(|stored| prompt::custom(Some(&stored))))
+}
+
 /// HTTPS SSE: the WebSocket transport does not follow a regional
-/// `OPENAI_BASE_URL`. With Code Mode, its instructions join the session's
-/// developer instructions.
-fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error> {
+/// `OPENAI_BASE_URL`. The thread's instructions follow nanocode's base system
+/// prompt as its additional (developer) instructions.
+fn openai(base_url: Option<&str>, instructions: Arc<str>) -> Result<CodexHarness, Error> {
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "OPENAI_API_KEY".to_owned());
     let mut builder = OpenAi::builder(key)
         .transport(nanocode::oai::transport::ResponsesTransport::Https)
@@ -623,34 +771,24 @@ fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error
     if let Some(base_url) = base_url {
         builder = builder.api_base_url(base_url.trim_end_matches('/'));
     }
-    let harness = CodexHarness::new(builder.build()?);
-    Ok(if code_mode {
-        harness.configure(|builder| {
-            Ok(builder.additional_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS))
-        })
-    } else {
-        harness
-    })
+    Ok(CodexHarness::new(builder.build()?)
+        .configure(move |builder| Ok(builder.additional_instructions(Arc::clone(&instructions)))))
 }
 
-/// With Code Mode, its instructions are the session's project instructions,
-/// which follow the base system prompt. That replaces the environment nanocode
+/// The thread's instructions are the session's project instructions, which
+/// follow the base system prompt. That replaces the environment nanocode
 /// would derive from the process's working directory, which the brain's
 /// agents cannot reach anyway.
-fn claude(base_url: Option<&str>, code_mode: bool) -> ClaudeHarness {
+fn claude(base_url: Option<&str>, instructions: Arc<str>) -> ClaudeHarness {
     let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "ANTHROPIC_API_KEY".to_owned());
     let base = base_url.map_or("https://api.anthropic.com/v1", |url| {
         url.trim_end_matches('/')
     });
-    let harness = ClaudeHarness::new(ClaudeClient::with_api_key(format!("{base}/messages"), key));
-    if code_mode {
-        harness.configure(|builder| {
+    ClaudeHarness::new(ClaudeClient::with_api_key(format!("{base}/messages"), key)).configure(
+        move |builder| {
             Ok(builder.environment(
-                ClaudeEnvironment::new()
-                    .project_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS),
+                ClaudeEnvironment::new().project_instructions(instructions.to_string()),
             ))
-        })
-    } else {
-        harness
-    }
+        },
+    )
 }

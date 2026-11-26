@@ -4,6 +4,7 @@ mod blocks;
 mod codemode;
 mod migrate;
 mod projector;
+mod prompt;
 mod server;
 mod sessions;
 mod translate;

@@ -18,6 +18,8 @@ import { useSubmit } from "@/lib/use-submit";
 
 import {
   replaceSlackExternalTeams,
+  SYSTEM_PROMPT_MAX_BYTES,
+  updateSystemPrompt,
   updateSystemSettings,
   useSlackExternalTeams,
   useSystemSettings,
@@ -81,8 +83,9 @@ function SystemSettingsPage() {
   return (
     <>
       <ControlTabs />
-      <PageHeader title="Settings" subtitle="Deployment-wide defaults for new control-plane records." />
+      <PageHeader title="Settings" subtitle="Deployment-wide defaults and agent configuration." />
       <DefaultsForm />
+      <SystemPromptSection />
       <SlackConnectSection />
     </>
   );
@@ -189,6 +192,65 @@ function DefaultsForm() {
         </div>
       </form>
     </>
+  );
+}
+
+const encoder = new TextEncoder();
+
+function SystemPromptSection() {
+  const { data: settings } = useSystemSettings();
+  const queryClient = useQueryClient();
+  const save = useSubmit((prompt: string) => updateSystemPrompt(queryClient, prompt));
+  const [text, setText] = useState<string | null>(null);
+  const value = text ?? settings.system_prompt ?? "";
+  const bytes = encoder.encode(value.trim()).length;
+  const tooLong = bytes > SYSTEM_PROMPT_MAX_BYTES;
+
+  const onSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const body = await save.run(value);
+      setText(body.data.system_prompt ?? "");
+      toast.success(body.data.system_prompt ? "System prompt updated." : "System prompt cleared.");
+    } catch {
+      // Shown inline below.
+    }
+  };
+
+  return (
+    <section id="system-prompt" aria-labelledby="system-prompt-heading" className="mt-6 max-w-4xl rounded-xl border bg-card p-5 shadow-xs">
+      <h2 id="system-prompt-heading" className="mb-3 text-sm font-medium">
+        System Prompt
+      </h2>
+      {save.error ? <ErrorAlert className="mb-4">{errorMessage(save.error)}</ErrorAlert> : null}
+      <form onSubmit={onSubmit} className="space-y-4">
+        <FieldShell
+          id="system_prompt"
+          label="Custom instructions"
+          hint={
+            <>
+              Added to every nanocode turn after Centaur&apos;s built-in prompt. An edit applies to each thread&apos;s
+              next turn. Leave it empty to add nothing. {bytes.toLocaleString()} / {SYSTEM_PROMPT_MAX_BYTES.toLocaleString()}{" "}
+              bytes.
+            </>
+          }
+          error={tooLong ? "The system prompt is too long." : undefined}
+        >
+          <Textarea
+            id="system_prompt"
+            rows={12}
+            placeholder="Instructions every agent turn should follow."
+            className="font-mono"
+            value={value}
+            aria-invalid={tooLong || undefined}
+            onChange={(event) => setText(event.target.value)}
+          />
+        </FieldShell>
+        <Button type="submit" disabled={save.pending || tooLong}>
+          Save system prompt
+        </Button>
+      </form>
+    </section>
   );
 }
 

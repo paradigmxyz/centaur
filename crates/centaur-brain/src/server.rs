@@ -77,6 +77,10 @@ struct SubmitRequest {
     /// retry of a request, which must not look like a different turn.
     #[serde(default)]
     tool_token: Option<String>,
+    /// The deployment's custom system prompt, from the Console; empty when it
+    /// has none. Absent keeps the thread's current prompt, as for a steer.
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 async fn submit(
@@ -98,6 +102,10 @@ async fn submit(
         input_line: request.input_line,
         steer: request.steer,
         tool_token,
+        system_prompt: request
+            .system_prompt
+            .as_deref()
+            .map(|prompt| crate::prompt::custom(Some(prompt))),
         reply,
     })
     .await;
@@ -409,14 +417,22 @@ mod tests {
             request_id: &str,
             token: Option<&str>,
         ) -> (u16, Value) {
-            let response = self
-                .client
-                .post(format!("{}/v1/threads/{thread_key}/turns", self.url))
-                .json(&json!({
+            self.submit_body(
+                thread_key,
+                json!({
                     "request_id": request_id,
                     "input_line": {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
                     "tool_token": token,
-                }))
+                }),
+            )
+            .await
+        }
+
+        async fn submit_body(&self, thread_key: &str, body: Value) -> (u16, Value) {
+            let response = self
+                .client
+                .post(format!("{}/v1/threads/{thread_key}/turns", self.url))
+                .json(&body)
                 .send()
                 .await
                 .unwrap();
@@ -776,5 +792,117 @@ mod tests {
             .find(|item| item["type"] == "function_call_output")
             .unwrap();
         assert_eq!(output["call_id"], "call_cell_1");
+    }
+
+    /// The developer texts of one model request, in order.
+    fn developer_texts(body: &Value) -> Vec<String> {
+        body["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["role"] == "developer")
+            .flat_map(|item| item["content"].as_array().cloned().unwrap_or_default())
+            .filter_map(|part| part["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The custom system prompt follows the base prompt and the Code Mode
+    /// instructions. An edit reaches the next turn on an idle thread, which is
+    /// reopened with it; a turn that does not say keeps the thread's prompt,
+    /// and an empty prompt removes it. A stream following the thread carries
+    /// on across the reopen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_system_prompt_edit_reaches_the_next_turn() {
+        let (brain, _, bodies) = brain_with_cells(true, None).await;
+        let thread = "slack:T:C:prompt";
+        let turn = |request_id: &str, system_prompt: Option<&str>| {
+            let (token, _) = brain.token(thread, now());
+            let mut body = json!({
+                "request_id": request_id,
+                "input_line": {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
+                "tool_token": token,
+            });
+            if let Some(system_prompt) = system_prompt {
+                body["system_prompt"] = json!(system_prompt);
+            }
+            body
+        };
+        // The latest instructions the model saw: the last developer text that
+        // carries the brain's base prompt.
+        let latest = || {
+            let bodies = bodies.lock().unwrap();
+            developer_texts(bodies.last().unwrap())
+                .into_iter()
+                .rfind(|text| text.contains(crate::prompt::BASE.trim()))
+                .expect("the base prompt reaches the model")
+        };
+
+        let follower = tokio::spawn({
+            let client = brain.client.clone();
+            let url = format!("{}/v1/threads/{thread}/events", brain.url);
+            async move {
+                let mut response = client.get(url).send().await.unwrap();
+                let mut seen = String::new();
+                while !seen.contains("\"execution_id\":\"exe_4\"")
+                    || !seen.contains("session.execution_completed")
+                    || seen.matches("session.execution_completed").count() < 4
+                {
+                    match response.chunk().await.unwrap() {
+                        Some(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+                        None => break,
+                    }
+                }
+                seen
+            }
+        });
+
+        let (status, body) = brain
+            .submit_body(thread, turn("exe_1", Some("  Answer like a pirate.\n")))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, thread, "exe_1").await;
+        let first = latest();
+        let tools = first
+            .find(centaur_codemode_protocol::tools::INSTRUCTIONS)
+            .expect("the Code Mode instructions reach the model");
+        let custom = first.find("Answer like a pirate.").unwrap();
+        assert!(tools < custom, "the custom prompt comes last");
+        assert!(first.contains("---\n\nAnswer like a pirate.\n"), "{first}");
+
+        let (status, body) = brain
+            .submit_body(thread, turn("exe_2", Some("Answer like a poet.")))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let stream = events(&brain, thread, "exe_2").await;
+        assert!(stream.contains("The answer is 42."), "{stream}");
+        let second = latest();
+        assert!(second.contains("---\n\nAnswer like a poet.\n"), "{second}");
+        assert!(!second.contains("pirate"), "{second}");
+
+        let (status, body) = brain.submit_body(thread, turn("exe_3", None)).await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, thread, "exe_3").await;
+        assert!(latest().contains("Answer like a poet."));
+
+        let (status, body) = brain.submit_body(thread, turn("exe_4", Some(""))).await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, thread, "exe_4").await;
+        let cleared = latest();
+        assert!(!cleared.contains("Answer like"), "{cleared}");
+        assert!(
+            cleared.contains(centaur_codemode_protocol::tools::INSTRUCTIONS),
+            "{cleared}"
+        );
+
+        let followed = tokio::time::timeout(Duration::from_secs(30), follower)
+            .await
+            .expect("the follower sees every turn")
+            .unwrap();
+        for execution in ["exe_1", "exe_2", "exe_3", "exe_4"] {
+            assert!(
+                followed.contains(&format!("\"execution_id\":\"{execution}\"")),
+                "{execution}: {followed}"
+            );
+        }
     }
 }

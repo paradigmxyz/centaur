@@ -27,8 +27,8 @@ pub use proxies::{
     create_proxy, delete_proxy, update_proxy,
 };
 pub use system_settings::{
-    RoleRow, SystemSettingRow, SystemSettingValues, existing_role_ids, replace_default_roles,
-    roles, system_setting, write_system_settings,
+    RoleRow, SYSTEM_PROMPT_MAX_BYTES, SystemSettingRow, SystemSettingValues, existing_role_ids,
+    replace_default_roles, roles, system_prompt, system_setting, write_system_settings,
 };
 pub use users::{
     ApproverRow, UserRow, admin_user, admin_users, approve_user, demote_user, disable_user,

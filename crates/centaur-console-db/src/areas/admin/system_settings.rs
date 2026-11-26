@@ -13,16 +13,21 @@ use crate::write;
 const SETTING_COLUMNS: &str = "\
     id, default_sandbox_repo_cache, default_sandbox_observability_enabled, \
     default_sandbox_sessions_read_enabled, default_sandbox_workflows_read_enabled, \
-    default_sandbox_workflows_write_enabled, updated_at";
+    default_sandbox_workflows_write_enabled, system_prompt, updated_at";
 
 /// The columns a settings write assigns, in bind order.
-const SETTING_VALUE_COLUMNS: [&str; 5] = [
+const SETTING_VALUE_COLUMNS: [&str; 6] = [
     "default_sandbox_repo_cache",
     "default_sandbox_observability_enabled",
     "default_sandbox_sessions_read_enabled",
     "default_sandbox_workflows_read_enabled",
     "default_sandbox_workflows_write_enabled",
+    "system_prompt",
 ];
+
+/// The longest custom system prompt, in bytes. It reaches every agent turn,
+/// so it stays well inside a model's context.
+pub const SYSTEM_PROMPT_MAX_BYTES: usize = 32 * 1024;
 
 /// The values the System Settings page may change. This is also the row
 /// projection for those columns and the `data` of the settings payload, so the
@@ -34,6 +39,8 @@ pub struct SystemSettingValues {
     pub default_sandbox_sessions_read_enabled: bool,
     pub default_sandbox_workflows_read_enabled: bool,
     pub default_sandbox_workflows_write_enabled: bool,
+    /// The custom system prompt for agent turns; `None` when unset.
+    pub system_prompt: Option<String>,
 }
 
 /// The stored singleton: its id, its values, and when they last changed.
@@ -89,6 +96,19 @@ pub async fn system_setting(pool: &PgPool) -> Result<SystemSettingRow> {
     record.ok_or_else(missing)
 }
 
+/// The custom system prompt for agent turns, or `None` when it is unset or
+/// blank. Unlike [`system_setting`], it never creates the settings row, so a
+/// read-only pool can serve it.
+pub async fn system_prompt(pool: &PgPool) -> Result<Option<String>> {
+    let prompt: Option<Option<String>> = sqlx::query_scalar(&format!(
+        "SELECT system_prompt FROM {} WHERE singleton ORDER BY id LIMIT 1",
+        SystemSettingModel::TABLE
+    ))
+    .fetch_optional(pool)
+    .await?;
+    Ok(prompt.flatten().filter(|prompt| !prompt.trim().is_empty()))
+}
+
 /// Saves the settings, then replaces the default roles, in one transaction. An
 /// unchanged settings write is skipped so `updated_at` keeps its value, and the
 /// default roles are only replaced when the request sent `default_role_ids`.
@@ -121,6 +141,7 @@ async fn update_in(
         .bind(values.default_sandbox_sessions_read_enabled)
         .bind(values.default_sandbox_workflows_read_enabled)
         .bind(values.default_sandbox_workflows_write_enabled)
+        .bind(&values.system_prompt)
         .bind(id)
         .execute(&mut *connection)
         .await?;

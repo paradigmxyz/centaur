@@ -202,11 +202,16 @@ export interface SystemSettings {
   default_sandbox_workflows_read_enabled: boolean;
   default_sandbox_workflows_write_enabled: boolean;
   default_role_ids: string[];
+  /** Custom system prompt for nanocode turns; `null` when unset. */
+  system_prompt: string | null;
   roles: SettingsRole[];
   updated_at: string;
 }
 
-export type SystemSettingsInput = Omit<SystemSettings, "roles" | "updated_at">;
+export type SystemSettingsInput = Omit<SystemSettings, "roles" | "updated_at" | "system_prompt">;
+
+/** The longest custom system prompt the API accepts, in bytes. */
+export const SYSTEM_PROMPT_MAX_BYTES = 32 * 1024;
 
 const settingsBase = "/api/v1/console/system_settings";
 const settingsKey = adminKeys.detail("system_settings");
@@ -222,6 +227,13 @@ export function useSystemSettings() {
 
 export async function updateSystemSettings(queryClient: QueryClient, data: SystemSettingsInput) {
   const body = await api.patch<DataEnvelope<SystemSettings>>(settingsBase, { data });
+  queryClient.setQueryData(settingsKey, body);
+  return body;
+}
+
+/** Save only the custom system prompt; an empty prompt clears it. */
+export async function updateSystemPrompt(queryClient: QueryClient, systemPrompt: string) {
+  const body = await api.patch<DataEnvelope<SystemSettings>>(settingsBase, { data: { system_prompt: systemPrompt } });
   queryClient.setQueryData(settingsKey, body);
   return body;
 }

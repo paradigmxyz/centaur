@@ -21,7 +21,7 @@ Thread keys are percent-encoded path segments.
 | Route | Purpose |
 |-------|---------|
 | `GET /healthz` | Readiness and liveness. |
-| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer", "tool_token"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. `tool_token` is optional; see [Code Mode](#code-mode). |
+| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer", "tool_token", "system_prompt"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. `tool_token` is optional; see [Code Mode](#code-mode). `system_prompt` is optional; see [System prompt](#system-prompt). |
 | `GET /v1/threads/{thread_key}` | The thread's unfinished turns: `{"running", "queued"}`. |
 | `POST /v1/threads/{thread_key}/interrupt` | Cancel the running turn. |
 | `GET /v1/threads/{thread_key}/events?after_event_id=N[&execution_id=R]` | The thread's session event stream, in the same SSE format as api-rs `/api/session/{key}/events`. |
@@ -48,6 +48,33 @@ The brain commits the log before it publishes events, so a client never sees an
 event that a crash could take back. After a crash, nanocode resumes an
 interrupted turn from its last commit point, up to three times.
 
+## System prompt
+
+Each thread's model sees nanocode's own system prompt for its provider, then
+the brain's instructions: OpenAI models get them as additional developer
+instructions, Anthropic models as project instructions. The brain's
+instructions are, separated by horizontal rules:
+
+1. the base prompt, `crates/centaur-brain/src/prompts/base.md`, always;
+2. with Code Mode, `crates/centaur-brain/src/prompts/code_mode.md` and the
+   Code Mode tool instructions;
+3. the deployment's custom system prompt, when it is not empty.
+
+The custom prompt is edited on the Console's System Settings page. api-rs reads
+it for every `nanocode` turn and sends it as `system_prompt`, empty when none is
+set. When api-rs cannot read it, and for steers, the field is absent, and the
+thread keeps the prompt it has.
+
+nanocode fixes a session's instructions when it opens the session. When a turn
+brings a different custom prompt and the thread is idle, the brain closes the
+session and reopens it with the new prompt before it queues the turn; event
+streams following the thread carry on. A busy thread keeps its prompt, and the
+change applies to the first turn submitted once it is idle. Each turn stores
+the prompt it was submitted with in its own nanocode metadata, and a thread
+reopened after a restart takes the prompt of its unfinished turn, so a resumed
+turn keeps its prompt. With the OpenAI harness the conversation keeps earlier
+developer instructions, and a changed prompt is added as newer ones.
+
 ## Code Mode
 
 With Code Mode configured (`CENTAUR_CODEMODE_EXECUTOR_URL` and
@@ -56,7 +83,8 @@ tools, defined by `centaur_codemode_protocol::tools`:
 `centaur_catalog_search` and `centaur_catalog_load` call the executor's catalog
 (`/v1/search`, `/v1/load`), and `centaur_execute` runs a cell on it (`/v1/exec`,
 with the model's tool call id as `cell_id`). The Code Mode instructions join the
-session's developer instructions. The startup log says whether the tools are on.
+thread's instructions (see [System prompt](#system-prompt)). The startup log says
+whether the tools are on.
 
 api-rs sends a turn token as `tool_token` with each turn it submits. The brain
 verifies it (signature, issuer, audience, expiry) and that its `thread_key` is

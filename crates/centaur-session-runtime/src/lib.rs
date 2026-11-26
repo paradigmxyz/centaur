@@ -58,8 +58,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 use tracing::{Instrument, Span, debug, error, info, info_span, warn};
 
 pub use brain::{
-    BrainByteStream, BrainClient, BrainError, BrainEventStream, ThreadStatus, TurnInterrupt,
-    TurnSubmitted,
+    BrainByteStream, BrainClient, BrainError, BrainEventStream, SystemPromptSource, ThreadStatus,
+    TurnInterrupt, TurnSubmitted,
 };
 pub use cleanup::SessionSandboxCleanupConfig;
 pub use codemode::CodemodeEndpoint;
@@ -181,6 +181,9 @@ pub struct SessionRuntime {
     /// Signs the Code Mode turn token handed to the brain with each
     /// `nanocode` turn. Without it, `nanocode` turns get no Code Mode tools.
     codemode_token_signer: Option<Arc<TurnTokenSigner>>,
+    /// The deployment's custom system prompt for `nanocode` turns. Without
+    /// it, the brain applies only its built-in prompt.
+    system_prompts: Option<Arc<dyn SystemPromptSource>>,
     warm_pools: Option<WarmPools>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -717,6 +720,7 @@ impl SessionRuntime {
             session_principal_admission: SessionPrincipalAdmission::default(),
             brain: None,
             codemode_token_signer: None,
+            system_prompts: None,
             warm_pools: None,
             personas: None,
             session_title_generator: None,
@@ -751,6 +755,16 @@ impl SessionRuntime {
     /// turns run without them.
     pub fn with_codemode_token_signer(mut self, signer: Option<Arc<TurnTokenSigner>>) -> Self {
         self.codemode_token_signer = signer;
+        self
+    }
+
+    /// Read the deployment's custom system prompt for every `nanocode` turn,
+    /// so an edit reaches a thread's next turn.
+    pub fn with_system_prompt_source(
+        mut self,
+        source: Option<Arc<dyn SystemPromptSource>>,
+    ) -> Self {
+        self.system_prompts = source;
         self
     }
 
@@ -2220,6 +2234,7 @@ impl SessionRuntime {
         let tool_token = self
             .brain_tool_token(thread_key, session, &request_id, input.metadata.as_ref())
             .await;
+        let system_prompt = self.brain_system_prompt(thread_key).await;
         let submitted = brain
             .submit_turn(
                 thread_key,
@@ -2227,6 +2242,7 @@ impl SessionRuntime {
                 input_line,
                 false,
                 tool_token.as_deref(),
+                system_prompt.as_deref(),
             )
             .await?;
         info!(
@@ -2243,6 +2259,26 @@ impl SessionRuntime {
             &submitted,
             input.idempotency_key,
         ))
+    }
+
+    /// The custom system prompt for one `nanocode` turn: empty when none is
+    /// set, and `None` when there is no source or it cannot be read, so the
+    /// brain keeps the thread's current prompt instead of dropping it.
+    async fn brain_system_prompt(&self, thread_key: &ThreadKey) -> Option<String> {
+        let source = self.system_prompts.as_ref()?;
+        match source.system_prompt().await {
+            Ok(prompt) => Some(prompt.unwrap_or_default()),
+            Err(error) => {
+                warn!(
+                    component = COMPONENT_SESSION_RUNTIME,
+                    event = "session_brain_system_prompt_failed",
+                    thread_key = %thread_key,
+                    %error,
+                    "reading the custom system prompt failed; the thread keeps its current prompt"
+                );
+                None
+            }
+        }
     }
 
     /// The Code Mode turn token for one `nanocode` turn, or `None` when the
@@ -2389,7 +2425,7 @@ impl SessionRuntime {
             };
             let steer_request_id = brain::new_request_id();
             match brain
-                .submit_turn(thread_key, &steer_request_id, input_line, true, None)
+                .submit_turn(thread_key, &steer_request_id, input_line, true, None, None)
                 .await
             {
                 Ok(submitted) if submitted.steered => {}
@@ -7716,6 +7752,54 @@ mod tests {
                 .body
                 .get("tool_token")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn nanocode_turns_carry_the_custom_system_prompt() {
+        struct Fixed(Result<Option<String>, String>);
+
+        #[async_trait::async_trait]
+        impl SystemPromptSource for Fixed {
+            async fn system_prompt(&self) -> Result<Option<String>, String> {
+                self.0.clone()
+            }
+        }
+
+        let fake_brain = crate::fake_brain::FakeBrain::start().await;
+        let brain = BrainClient::new(fake_brain.url()).unwrap();
+        let thread_key = nanocode_test_thread_key();
+        let session = nanocode_test_session(&thread_key);
+        let sources: [Option<Result<Option<String>, String>>; 4] = [
+            None,
+            Some(Ok(Some("Answer in French.".to_owned()))),
+            Some(Ok(None)),
+            Some(Err("the console database is down".to_owned())),
+        ];
+        for source in sources {
+            nanocode_test_runtime(&brain)
+                .with_system_prompt_source(
+                    source.map(|prompt| Arc::new(Fixed(prompt)) as Arc<dyn SystemPromptSource>),
+                )
+                .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
+                .await
+                .expect("submit turn");
+        }
+        let prompts = fake_brain
+            .recorded_turns()
+            .into_iter()
+            .map(|turn| turn.body.get("system_prompt").cloned())
+            .collect::<Vec<_>>();
+        // No source, or one that fails, sends no prompt, so the brain keeps
+        // the thread's; an unset prompt is sent empty, so the brain drops it.
+        assert_eq!(
+            prompts,
+            [
+                None,
+                Some(json!("Answer in French.")),
+                Some(json!("")),
+                None
+            ]
         );
     }
 
