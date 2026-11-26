@@ -21,8 +21,6 @@ repository-wide Cargo workspace. Important crate boundaries:
   control-plane integration and authorization resources.
 - `centaur-telemetry`: shared tracing and metrics support.
 
-Read the relevant RFC under `rfcs/` before changing a core protocol.
-
 ## Invariants
 
 - The session flow remains create/reuse -> append messages -> execute -> replay
