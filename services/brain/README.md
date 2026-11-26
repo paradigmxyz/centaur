@@ -21,7 +21,7 @@ Thread keys are percent-encoded path segments.
 | Route | Purpose |
 |-------|---------|
 | `GET /healthz` | Readiness and liveness. |
-| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer", "tool_token"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. `tool_token` is optional; see [Code Mode](#code-mode). |
+| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer", "tool_token", "hands_token"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. Both tokens are optional; see [Code Mode](#code-mode) and [Hands](#hands). |
 | `GET /v1/threads/{thread_key}` | The thread's unfinished turns: `{"running", "queued"}`. |
 | `POST /v1/threads/{thread_key}/interrupt` | Cancel the running turn. |
 | `GET /v1/threads/{thread_key}/events?after_event_id=N[&execution_id=R]` | The thread's session event stream, in the same SSE format as api-rs `/api/session/{key}/events`. |
@@ -90,6 +90,63 @@ the cell's outcome as unknown instead of running it again. Tool calls appear on
 the event stream as Codex `mcpToolCall` items (server `centaur`) with their
 arguments and result text or error.
 
+## Hands
+
+With `CENTAUR_HANDS_URL` set (api-rs's base URL), every thread gets two native
+nanocode tools, `centaur_hand_checkout {size?}` and `centaur_hand_release {}`.
+A hand is a single-use Linux machine that api-rs leases from a warm pool: a
+shell, files, git, and network access whose credentials its own proxy injects,
+so the hand holds placeholders only.
+
+api-rs sends a separate hands token as `hands_token` next to `tool_token` when
+hands are enabled. It has the same grant and TTL but the `centaur-hands`
+audience, so the Code Mode token that goes to the executor and tenancy proxy
+cannot authorize a lease. The brain carries the hands token without verifying
+it (the lease API verifies it and is its only audience) and keeps it in the
+turn's own metadata as `hands_token`. Every lease call uses that token and
+never `tool_token`; a turn submitted without one has no hand access, and its
+hand tools report that hands are unavailable for the turn.
+
+Checkout calls `POST /api/hands/leases` with the turn's hands token, connects
+to the returned hand through nanocode's runner pool, selects it for the
+session, and writes the lease's `env` to `~/.centaur/env.sh` on the hand with
+its shell tool. The tool returns the hand's name and description. Checkout is
+idempotent per thread: a thread that already has a hand gets that one back, and
+a failed attach releases the lease rather than leaving a machine leased but
+unused. Attach and detach are serialized per thread, so a reattach racing a
+checkout leaves one hand and one relay.
+
+Hands need nanocode's own code mode, so with hands on a thread is exposed
+`DirectAndCodeMode` (`exec` and `wait` in addition to the direct tools) instead
+of `DirectOnly`. A hand's tools are called from inside a cell, for example
+`return await tools.exec_command({ cmd: "pwd" })`, and `tools.hands()` lists
+the attached hand with its tools. The hands note joins whatever instructions
+Code Mode already contributes, and only when hands are configured.
+
+nanocode refuses a plaintext attachment target whose host is not literal
+loopback, while a lease names the hand by its pod IP. The brain therefore opens
+a loopback relay per hand and connects through that; the relay forwards bytes
+unchanged, and the hand token still authenticates the WebSocket handshake. It
+is aborted on release.
+
+Each turn renews the thread's lease (`POST /api/hands/leases/{id}/renew`), which
+also rebinds the proxy to the turn's requester. Renewal and reattachment run
+detached and best effort, so a slow or unavailable hands API never holds up
+turn submission; a release that overlaps a renew still wins, because a renew
+only updates the lease it was renewing. Because only a hands token authorizes
+the lease API, a lease left by a previous brain process is found with
+`GET /api/hands/leases/current` on the thread's first turn afterwards and
+reattached. A transient failure of that lookup is retried on the next turn;
+an authentication failure or a 404 is not. A hand that has run nothing for
+`CENTAUR_HANDS_IDLE_SECONDS` is disconnected and released; its tokens may have
+expired by then, in which case the lease simply expires on its own. The idle
+timer holds its thread weakly, so a closed thread is not kept alive. A release
+accepts any 2xx answer, including api-rs's `204 No Content`.
+
+Both tools are external effects: their calls are committed to the session log
+before they run, and a turn resumed after a crash mid-call records the outcome
+as unknown rather than repeating it.
+
 ## Migrations
 
 The brain owns its schema, separately from api-rs. `centaur-brain migrate`
@@ -117,6 +174,11 @@ DSN. nanocode creates its own tables inside `nanocode` at runtime.
   stay off.
 - `CENTAUR_CODEMODE_EXECUTOR_URL` — base URL of the Code Mode executor. With the
   public key, this turns on the Code Mode tools.
+- `CENTAUR_HANDS_URL` — api-rs base URL. When set, every thread gets the hand
+  tools and nanocode's code mode to run their tools in.
+- `CENTAUR_HANDS_IDLE_SECONDS` — seconds without hand activity before the
+  thread's hand is released; defaults to `600`, and `0` never releases a hand
+  automatically. The chart sets it from `hands.idleSeconds`.
 - `BRAIN_DEFAULT_MODEL` — default model for turns that name none; defaults to
   `luna`.
 - `BRAIN_DEFAULT_THINKING` — default reasoning effort; defaults to `low`.

@@ -64,6 +64,27 @@ brain:
   enabled: true
   trustReleaseCa: true
 
+# Hands: nanocode turns can check out a single-use Linux box from a warm pool.
+# e2e/stack.sh builds and loads centaur-hand and sets the image tag; the pool is
+# one default-size hand, and kind's default pod and service ranges stay denied
+# to hand egress. e2e/infra/model-server.yaml adds an e2e-only policy admitting
+# the in-cluster model server so a hand's proxy can reach the fake provider hosts.
+hands:
+  enabled: true
+  image:
+    repository: centaur-hand
+    tag: latest
+    pullPolicy: IfNotPresent
+  pool:
+    default:
+      size: 1
+    large:
+      size: 0
+  maxHands: 4
+  clusterCidrs:
+    - "10.244.0.0/16"
+    - "10.96.0.0/12"
+
 # The Code Mode executor and its tenancy iron-proxy give nanocode turns the
 # Code Mode tools. e2e/stack.sh creates centaur-e2e-codemode (turn-token
 # keypair and sync token). Like per-sandbox proxies, the tenancy iron-proxy

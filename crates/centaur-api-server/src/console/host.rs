@@ -29,6 +29,7 @@ use crate::AppState;
 const API_RS_PREFIXES: &[&str] = &[
     "/api/session",
     "/api/sandboxes",
+    "/api/hands",
     "/api/slack",
     "/api/workflows",
     "/api/scheduled-tasks",
@@ -232,6 +233,7 @@ mod tests {
             "/.well-known/oauth-protected-resource/mcp",
             "/api/session/slack:1",
             "/api/sandboxes/drain",
+            "/api/hands/leases",
             "/api/slack/files",
             "/api/workflows/runs",
             "/api/scheduled-tasks/task/runs",
@@ -251,6 +253,7 @@ mod tests {
             "/mcp",
             "/oauth/token",
             "/api/session/slack:1",
+            "/api/hands/leases/current",
             "/api/webhooks/hook",
             "/api/v1/api_keys",
             "/api/v1/console/me",

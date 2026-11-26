@@ -128,3 +128,27 @@ spec:
       ports:
         - protocol: TCP
           port: 8443
+---
+# A hand's iron-proxy reaches the fake provider hosts through the model server.
+# Hand egress denies the cluster's pod and service ranges (hands.clusterCidrs in
+# e2e/infra/values.yaml), so this additive policy is the one exception, like
+# e2e-iron-proxy-to-model-server for per-sandbox proxies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: e2e-hand-to-model-server
+  namespace: centaur
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/workload: hand
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: centaur-e2e-model
+      ports:
+        - protocol: TCP
+          port: 8443

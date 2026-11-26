@@ -308,6 +308,49 @@ codemode:
       tolerations: []
       resources: {}
 
+# Hands: single-use Linux boxes for nanocode brain turns. Off by default.
+# api-rs keeps a warm pool of hand pods, leases one to a thread, and deletes it
+# when the lease ends. Each hand pod runs the hand image plus a per-hand
+# iron-proxy sidecar that holds the leased principal's credentials.
+hands:
+  enabled: false
+  image:
+    repository: centaur-hand
+    tag: latest
+    pullPolicy: Always
+  # Ready hands kept per size. A cold checkout creates one and waits for it.
+  pool:
+    default:
+      size: 2
+    large:
+      size: 0
+  # Hand container resources per size (Kubernetes ResourceRequirements).
+  # The sidecar uses ironProxy.resources.
+  resources:
+    default: {}
+    large: {}
+  # Lease lifetime. The brain renews at turn start and releases on idle.
+  leaseSeconds: 3600
+  # Idle seconds after which the brain releases a hand. Enforced by the brain;
+  # api-rs records it for operators. Must be at least 1: the brain rejects 0.
+  idleSeconds: 1800
+  # Cap on warming + ready + leased hands. 0 leaves the pool unbounded.
+  maxHands: 20
+  # In-cluster pod and service ranges hands may not reach. Hand egress is
+  # otherwise 0.0.0.0/0: the proxy injects credentials, not network policy.
+  clusterCidrs:
+    - "10.42.0.0/16"
+    - "10.43.0.0/16"
+  # Namespace hand pods run in. Empty uses the release namespace; a different
+  # namespace is rejected because the chart's RBAC and NetworkPolicies are
+  # release-namespace scoped.
+  namespace: ""
+  replenishIntervalSeconds: 5
+  sweepIntervalSeconds: 30
+  coldCreateTimeoutSeconds: 60
+  warmingTimeoutSeconds: 300
+  orphanGraceSeconds: 120
+
 sandbox:
   image:
     repository: centaur-agent

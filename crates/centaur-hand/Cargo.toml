@@ -1,0 +1,37 @@
+[package]
+name = "centaur-hand"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The hand daemon: a slim Linux box that a nanocode brain drives over the hand protocol"
+publish = false
+
+[lib]
+name = "centaur_hand"
+path = "src/lib.rs"
+
+[[bin]]
+name = "centaur-hand"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+nanocode = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202", default-features = false }
+nanocode-executor = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202" }
+nanocode-home = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202" }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+nanocode = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202", default-features = false }
+nanocode-executor = { git = "https://github.com/nanocodexyz/nanocode", rev = "553d76ee73be6044fe27a8198c6f50d2e54fa202" }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

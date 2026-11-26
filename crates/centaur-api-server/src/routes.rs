@@ -50,6 +50,7 @@ use crate::{
     api_jwt::{bearer_jwt_from_headers, decode_jwt_payload, verify_console_jwt},
     auth::{ApiAuthConfig, AuthenticatedCaller, CallerClass, Capability},
     console_session::ConsoleSessionConfig,
+    hands::{create_hand_lease, current_hand_lease, release_hand_lease, renew_hand_lease},
     mcp::{mcp_enabled, mcp_get, mcp_post, mcp_protected_resource_metadata},
     slack_external_teams::{get_slack_external_team_ids, replace_slack_external_team_ids},
     slack_proxy::slack_proxy_router,
@@ -77,6 +78,10 @@ pub struct AppState {
     console_write_db: Option<PgPool>,
     /// Rust-issued Console sessions, when the console API layer is enabled.
     console_session: Option<ConsoleSessionConfig>,
+    /// Whether the hands lease routes should exist. The runtime itself is set
+    /// once startup finishes, so routes can be mounted before it is ready.
+    hands_enabled: bool,
+    hands: Arc<RwLock<Option<crate::hands::HandsRuntime>>>,
 }
 
 #[derive(Clone)]
@@ -95,7 +100,35 @@ impl AppState {
             console_db: None,
             console_write_db: None,
             console_session: None,
+            hands_enabled: false,
+            hands: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Mount the hand lease routes. The runtime can be installed later with
+    /// [`Self::set_hands`], so startup does not have to finish before the
+    /// listener starts.
+    pub fn with_hands_enabled(mut self, enabled: bool) -> Self {
+        self.hands_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn hands_enabled(&self) -> bool {
+        self.hands_enabled
+    }
+
+    pub fn set_hands(&self, hands: crate::hands::HandsRuntime) {
+        *self
+            .hands
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hands);
+    }
+
+    pub(crate) fn hands(&self) -> Option<crate::hands::HandsRuntime> {
+        self.hands
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Enables the browser-facing Console layer. Mounted only when configured.
@@ -371,6 +404,15 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/api/webhooks/{slug}", any(invoke_workflow_webhook))
         .merge(protected);
+    if state.hands_enabled() {
+        // Hands authenticate with the turn token itself, not the Console or
+        // ingress API keys, so these routes deliberately bypass GuardedRoutes.
+        app = app
+            .route("/api/hands/leases", post(create_hand_lease))
+            .route("/api/hands/leases/current", get(current_hand_lease))
+            .route("/api/hands/leases/{lease_id}/renew", post(renew_hand_lease))
+            .route("/api/hands/leases/{lease_id}", delete(release_hand_lease));
+    }
     if state.console_session().is_some() {
         app = app
             .merge(crate::console::router(state.clone()))

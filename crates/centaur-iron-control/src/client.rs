@@ -196,6 +196,15 @@ impl IronControlClient {
     pub async fn delete_proxy(&self, id: &str) -> Result<()> {
         in_process::delete_proxy(&self.pool, id).await
     }
+
+    /// List proxies whose labels contain every entry in `labels`. Used to
+    /// reconcile objects whose owning row was lost before it was written.
+    pub async fn list_proxies_by_labels(
+        &self,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Vec<Proxy>> {
+        in_process::list_proxies_by_labels(&self.pool, labels).await
+    }
 }
 
 impl RoleSecretWriter for IronControlClient {

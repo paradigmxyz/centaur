@@ -63,7 +63,7 @@ case "$AUTH_MODE" in
   api_key | access_token) ;;
   *) echo "CENTAUR_E2E_AUTH_MODE must be api_key or access_token, not $AUTH_MODE" >&2; exit 2 ;;
 esac
-IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker brain:brain iron-proxy:ironProxy slackbotv2:slackbotv2 agent:sandbox)
+IMAGES=(api-rs:apiRs proxy-sync:proxySync codemode:codemode token-broker:tokenBroker brain:brain iron-proxy:ironProxy hand:hands slackbotv2:slackbotv2 agent:sandbox)
 
 export KUBECONFIG
 KUBECONFIG="$(mktemp)"
@@ -325,6 +325,10 @@ run_tests() {
   export E2E_SLACK_URL=http://127.0.0.1:30443
   export E2E_MODEL_URL=http://127.0.0.1:30080
   export E2E_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/ai_v2"
+  # Hand pods and Secrets are removed with the other api-rs resources above,
+  # so a previous run's hand_boxes rows would point at pods that no longer
+  # exist. Start every run from an empty pool; api-rs replenishes it.
+  reset_hands
   # The Console database (console.database.name), created by the bundled Postgres on first boot.
   export E2E_IRON_CONTROL_DATABASE_URL="postgres://tempo:${password}@127.0.0.1:30432/iron_control_production"
   export E2E_API_URL=http://127.0.0.1:30081 E2E_API_KEY="$API_ADMIN_KEY"
@@ -400,6 +404,13 @@ remove_sandboxes() {
   kubectl -n "$NAMESPACE" delete sandboxes.agents.x-k8s.io --all --wait=false > /dev/null
   kubectl -n "$NAMESPACE" delete pods,services,networkpolicies,configmaps,secrets \
     -l centaur.ai/managed-by=api-rs --wait=false > /dev/null
+}
+
+# Drops the warm-pool state whose pods remove_sandboxes deleted, so the pool
+# does not lease a hand that is already gone.
+reset_hands() {
+  kubectl -n "$NAMESPACE" exec -i "statefulset/${RELEASE}-centaur-postgres" -- \
+    psql -U tempo -d ai_v2 -v ON_ERROR_STOP=1 -qtA -c 'delete from hand_boxes' > /dev/null 2>&1 || true
 }
 
 case "${1:-}" in

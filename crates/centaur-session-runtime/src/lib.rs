@@ -18,7 +18,7 @@ use std::{
 };
 
 pub use centaur_codemode_protocol::token::TurnTokenSigner;
-use centaur_codemode_protocol::token::{ToolPolicy, TurnGrant};
+use centaur_codemode_protocol::token::{HANDS_AUDIENCE, ToolPolicy, TurnGrant};
 use centaur_iron_control::{IronControlError, Principal, SessionRegistrar};
 use centaur_sandbox_core::{
     Mount, ObservedSandbox, RepoCacheAccess, ResourceRequirements, SANDBOX_AGENT_HOME,
@@ -178,9 +178,13 @@ pub struct SessionRuntime {
     /// run there instead of in a sandbox; without it they are rejected at
     /// admission.
     brain: Option<Arc<BrainClient>>,
-    /// Signs the Code Mode turn token handed to the brain with each
-    /// `nanocode` turn. Without it, `nanocode` turns get no Code Mode tools.
+    /// Signs the Code Mode and hands tokens handed to the brain with each
+    /// `nanocode` turn. Without it, `nanocode` turns get no Code Mode tools
+    /// and no hand leases.
     codemode_token_signer: Option<Arc<TurnTokenSigner>>,
+    /// Whether turns also get a hands token, with the same grant as the Code
+    /// Mode token but the `centaur-hands` audience. Set when hands are enabled.
+    hands_tokens: bool,
     warm_pools: Option<WarmPools>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -700,6 +704,12 @@ struct PersonaResolution {
     unavailable_requested_persona_id: Option<String>,
 }
 
+#[derive(Default)]
+struct BrainTurnTokens {
+    tool_token: Option<String>,
+    hands_token: Option<String>,
+}
+
 impl SessionRuntime {
     pub fn new(
         store: PgSessionStore,
@@ -717,6 +727,7 @@ impl SessionRuntime {
             session_principal_admission: SessionPrincipalAdmission::default(),
             brain: None,
             codemode_token_signer: None,
+            hands_tokens: false,
             warm_pools: None,
             personas: None,
             session_title_generator: None,
@@ -751,6 +762,14 @@ impl SessionRuntime {
     /// turns run without them.
     pub fn with_codemode_token_signer(mut self, signer: Option<Arc<TurnTokenSigner>>) -> Self {
         self.codemode_token_signer = signer;
+        self
+    }
+
+    /// Mint a separate hands token for every `nanocode` turn. Set this when
+    /// hands are enabled on this control plane; without it turns get no hand
+    /// leases even if the brain has hand tools configured.
+    pub fn with_hands_tokens(mut self, mint: bool) -> Self {
+        self.hands_tokens = mint;
         self
     }
 
@@ -2217,8 +2236,8 @@ impl SessionRuntime {
             &lines[0],
         );
         let input_line = brain_input_line(&line)?;
-        let tool_token = self
-            .brain_tool_token(thread_key, session, &request_id, input.metadata.as_ref())
+        let tokens = self
+            .brain_turn_tokens(thread_key, session, &request_id, input.metadata.as_ref())
             .await;
         let submitted = brain
             .submit_turn(
@@ -2226,7 +2245,8 @@ impl SessionRuntime {
                 &request_id,
                 input_line,
                 false,
-                tool_token.as_deref(),
+                tokens.tool_token.as_deref(),
+                tokens.hands_token.as_deref(),
             )
             .await?;
         info!(
@@ -2245,29 +2265,36 @@ impl SessionRuntime {
         ))
     }
 
-    /// The Code Mode turn token for one `nanocode` turn, or `None` when the
-    /// turn gets no Code Mode tools: no signer is configured, the session has
+    /// The tokens for one `nanocode` turn. Both are absent when the turn gets
+    /// no Code Mode tools or hands: no signer is configured, the session has
     /// no principal, or resolving its policy failed (the turn then still runs,
     /// only without tools).
     ///
-    /// The token names the session's principal, the requesting user's
+    /// The tokens name the session's principal, the requesting user's
     /// principal (whose always-available OAuth credentials iron-proxy layers
-    /// on top), and the principal's tool filter. Steers do not mint one: a
-    /// steer folds into a turn that already has its own, and re-minting would
-    /// let a second user's credentials into someone else's turn.
-    async fn brain_tool_token(
+    /// on top), and the principal's tool filter. The Code Mode token has the
+    /// `centaur-codemode` audience; the hands token has `centaur-hands`, so
+    /// neither can stand in for the other. Steers do not mint them: a steer
+    /// folds into a turn that already has its own, and re-minting would let a
+    /// second user's credentials into someone else's turn.
+    async fn brain_turn_tokens(
         &self,
         thread_key: &ThreadKey,
         session: &Session,
         execution_id: &str,
         metadata: Option<&Value>,
-    ) -> Option<String> {
-        let signer = self.codemode_token_signer.as_ref()?;
-        let principal = session
+    ) -> BrainTurnTokens {
+        let Some(signer) = self.codemode_token_signer.as_ref() else {
+            return BrainTurnTokens::default();
+        };
+        let Some(principal) = session
             .iron_control_principal
             .as_deref()
             .map(str::trim)
-            .filter(|principal| !principal.is_empty())?;
+            .filter(|principal| !principal.is_empty())
+        else {
+            return BrainTurnTokens::default();
+        };
         let policy = match self.resolve_tool_host_call_policy(principal).await {
             Ok(policy) => policy,
             Err(error) => {
@@ -2279,7 +2306,7 @@ impl SessionRuntime {
                     %error,
                     "resolving the Code Mode tool policy failed; the turn runs without tools"
                 );
-                return None;
+                return BrainTurnTokens::default();
             }
         };
         let requester = self.resolve_requester_principal(thread_key, metadata).await;
@@ -2290,7 +2317,8 @@ impl SessionRuntime {
             execution_id: execution_id.to_owned(),
             tools: codemode_tool_policy(policy.tool_filter()),
         };
-        match signer.sign(&grant, unix_now_secs()) {
+        let now = unix_now_secs();
+        let tool_token = match signer.sign(&grant, now) {
             Ok((token, _)) => Some(token),
             Err(error) => {
                 warn!(
@@ -2302,6 +2330,27 @@ impl SessionRuntime {
                 );
                 None
             }
+        };
+        let hands_token = if self.hands_tokens {
+            match signer.sign_for(&grant, now, HANDS_AUDIENCE) {
+                Ok((token, _)) => Some(token),
+                Err(error) => {
+                    warn!(
+                        component = COMPONENT_SESSION_RUNTIME,
+                        event = "session_brain_hands_token_failed",
+                        thread_key = %thread_key,
+                        %error,
+                        "signing the hands token failed; the turn cannot check out a hand"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        BrainTurnTokens {
+            tool_token,
+            hands_token,
         }
     }
 
@@ -2389,7 +2438,7 @@ impl SessionRuntime {
             };
             let steer_request_id = brain::new_request_id();
             match brain
-                .submit_turn(thread_key, &steer_request_id, input_line, true, None)
+                .submit_turn(thread_key, &steer_request_id, input_line, true, None, None)
                 .await
             {
                 Ok(submitted) if submitted.steered => {}
@@ -7665,7 +7714,7 @@ mod tests {
 
     #[tokio::test]
     async fn nanocode_turns_carry_a_code_mode_token_for_the_session_principal() {
-        use centaur_codemode_protocol::token::{TurnTokenVerifier, testing};
+        use centaur_codemode_protocol::token::{HANDS_AUDIENCE, TurnTokenVerifier, testing};
 
         let fake_brain = crate::fake_brain::FakeBrain::start().await;
         let brain = BrainClient::new(fake_brain.url()).unwrap();
@@ -7683,11 +7732,18 @@ mod tests {
                 .get("tool_token")
                 .is_none()
         );
+        assert!(
+            fake_brain.recorded_turns()[0]
+                .body
+                .get("hands_token")
+                .is_none()
+        );
 
         let (private, public) = testing::pair();
-        let runtime = nanocode_test_runtime(&brain).with_codemode_token_signer(Some(Arc::new(
-            TurnTokenSigner::from_pem(private.as_bytes()).unwrap(),
-        )));
+        let signer = TurnTokenSigner::from_pem(private.as_bytes()).unwrap();
+        let hands_verifier = signer.verifier_for(HANDS_AUDIENCE);
+        let runtime =
+            nanocode_test_runtime(&brain).with_codemode_token_signer(Some(Arc::new(signer)));
         let execution = runtime
             .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
             .await
@@ -7703,6 +7759,34 @@ mod tests {
         assert_eq!(claims.sub, "prn_test");
         assert_eq!(claims.thread_key, thread_key.as_str());
         assert_eq!(claims.execution_id, execution.execution_id);
+        // Hands are not enabled on this runtime, so no hands token is minted.
+        assert!(turns[1].body.get("hands_token").is_none());
+
+        // With hands enabled the same grant also mints a token for the hands
+        // audience, and each verifier rejects the other token.
+        let hands_runtime = runtime.clone().with_hands_tokens(true);
+        let hands_execution = hands_runtime
+            .submit_brain_turn(&brain, &thread_key, &session, nanocode_turn_input(None))
+            .await
+            .expect("submit turn with hands");
+        let turns = fake_brain.recorded_turns();
+        let hands_token = turns[2].body["hands_token"]
+            .as_str()
+            .expect("the turn carries a hands token");
+        let hands_claims = hands_verifier
+            .verify(hands_token)
+            .expect("the hands token verifies for the hands audience");
+        assert_eq!(hands_claims.aud, HANDS_AUDIENCE);
+        assert_eq!(hands_claims.sub, "prn_test");
+        assert_eq!(hands_claims.execution_id, hands_execution.execution_id);
+        assert_eq!(hands_claims.thread_key, thread_key.as_str());
+        assert!(
+            TurnTokenVerifier::from_pem(public.as_bytes())
+                .unwrap()
+                .verify(hands_token)
+                .is_err(),
+            "the Code Mode verifier rejects the hands token"
+        );
 
         // A session with no principal gets no token.
         let mut unowned = session.clone();
@@ -7712,9 +7796,15 @@ mod tests {
             .await
             .expect("submit turn without a principal");
         assert!(
-            fake_brain.recorded_turns()[2]
+            fake_brain.recorded_turns()[3]
                 .body
                 .get("tool_token")
+                .is_none()
+        );
+        assert!(
+            fake_brain.recorded_turns()[3]
+                .body
+                .get("hands_token")
                 .is_none()
         );
     }

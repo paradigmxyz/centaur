@@ -43,7 +43,7 @@ async fn main() -> Result<(), ServerError> {
         "starting centaur api-rs server"
     );
 
-    let mut app_state = AppState::unready(api_auth);
+    let mut app_state = AppState::unready(api_auth).with_hands_enabled(args.hands_enabled());
     if let Some(pool) = args.console_db() {
         app_state = app_state.with_console_db(pool);
     }
@@ -174,9 +174,11 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     let brain = args.brain_client()?;
     let sandbox_runtime = args.sandbox_runtime().await?;
     let iron_control = args.iron_control_runtime().await?;
+    let hands_bootstrap = iron_control.warm_pool_bootstrap_principal.clone();
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
         .with_brain(brain)
         .with_codemode_token_signer(args.codemode_token_signer()?)
+        .with_hands_tokens(args.hands_enabled())
         .with_session_principal_admission(args.session_principal_admission())
         .with_openai_session_title_generator_from_env();
     runtime = runtime.with_personas(args.persona_registry()?);
@@ -220,6 +222,11 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         spawn_slack_channel_catalog_refresh(console_db);
     }
     let workflows = Some(workflows);
+
+    if let Some(hands) = args.hands_runtime(pool.clone(), &hands_bootstrap).await? {
+        hands.spawn_background();
+        app_state.set_hands(hands);
+    }
 
     // Adopt executions orphaned by another control plane process
     // (deploy/crash): recover finished turns from recorded sandbox output,

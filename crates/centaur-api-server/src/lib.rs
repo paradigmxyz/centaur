@@ -5,6 +5,7 @@ pub mod client;
 mod console;
 mod console_session;
 mod error;
+mod hands;
 mod mcp;
 mod routes;
 mod scheduled_tasks;
@@ -18,6 +19,7 @@ pub use centaur_session_runtime::{SandboxRuntime, SessionRuntime};
 pub use console::validate_boolean_settings;
 pub use console_session::{ConsoleSessionConfig, ConsoleSessionConfigError};
 pub use error::ApiError;
+pub use hands::HandsRuntime;
 pub use mcp::mcp_enabled;
 pub use routes::{
     AppState, build_router_with_app_state, build_router_with_runtime,
@@ -205,6 +207,39 @@ mod tests {
                 r#"http_server_requests_total{method="GET",route="/healthz",status="200"}"#
             )
         );
+    }
+
+    #[tokio::test]
+    async fn hand_lease_routes_are_absent_when_hands_are_disabled() {
+        let app = build_router_with_app_state(AppState::unready(test_auth()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/hands/leases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hand_lease_routes_report_404_before_the_pool_is_ready() {
+        let app =
+            build_router_with_app_state(AppState::unready(test_auth()).with_hands_enabled(true));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/hands/leases/current")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

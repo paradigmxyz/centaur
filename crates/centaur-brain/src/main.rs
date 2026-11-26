@@ -2,6 +2,7 @@
 
 mod blocks;
 mod codemode;
+mod hands;
 mod migrate;
 mod projector;
 mod server;
@@ -90,6 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None
         }
     };
+    let hands = hands::from_env()?;
+    match &hands {
+        Some(hands) => tracing::info!(idle = ?hands.idle(), "hand tools are on"),
+        None => tracing::info!("hand tools are off"),
+    }
     let (commands, receiver) = mpsc::unbounded_channel();
     let _worker = worker::spawn(
         worker::Config {
@@ -99,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             openai_base_url: args.openai_base_url,
             anthropic_base_url: args.anthropic_base_url,
             code_mode,
+            hands,
         },
         receiver,
     )?;

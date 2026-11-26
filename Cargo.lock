@@ -571,6 +571,7 @@ dependencies = [
  "bcrypt",
  "centaur-codemode-protocol",
  "centaur-console-db",
+ "centaur-hands",
  "centaur-iron-control",
  "centaur-iron-proxy",
  "centaur-sandbox-agent-k8s",
@@ -631,11 +632,13 @@ dependencies = [
  "harness-server",
  "nanocode",
  "nanocode-executor",
+ "nanocode-home",
  "nanocode-store-sql",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -740,6 +743,44 @@ dependencies = [
  "time",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "centaur-hand"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "nanocode",
+ "nanocode-executor",
+ "nanocode-home",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "centaur-hands"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "centaur-iron-control",
+ "centaur-sandbox-core",
+ "centaur-session-sqlx",
+ "k8s-openapi",
+ "kube",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
