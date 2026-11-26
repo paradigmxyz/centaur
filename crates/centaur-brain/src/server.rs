@@ -102,6 +102,17 @@ async fn submit(
     if request.request_id.trim().is_empty() {
         return error(StatusCode::BAD_REQUEST, "request_id is required");
     }
+    // Checked before anything is stored, so a rejected request leaves no
+    // trace on the thread.
+    let line = match serde_json::to_string(&request.input_line) {
+        Ok(line) => line,
+        Err(failure) => return error(StatusCode::BAD_REQUEST, &failure.to_string()),
+    };
+    match crate::blocks::parse(&line) {
+        Ok(crate::blocks::Input::User(_)) => {}
+        Ok(_) => return error(StatusCode::BAD_REQUEST, "input_line must be a user line"),
+        Err(failure) => return error(StatusCode::BAD_REQUEST, &failure),
+    }
     let tool_token = verified_token(&state, &thread_key, request.tool_token.as_deref());
     // The thread's first turn pins its custom system prompt for life.
     let system_prompt = crate::prompt::custom(request.system_prompt.as_deref());
@@ -368,6 +379,7 @@ mod tests {
         url: String,
         signer: TurnTokenSigner,
         client: reqwest::Client,
+        sessions: SessionIds,
     }
 
     /// A brain on an in-memory log, with Code Mode on the executor at
@@ -396,9 +408,10 @@ mod tests {
             receiver,
         )
         .unwrap();
+        let sessions = SessionIds::new(None).unwrap();
         let state = AppState {
             commands,
-            sessions: SessionIds::new(None).unwrap(),
+            sessions: sessions.clone(),
             verifier: TurnTokenVerifier::from_pem(public.as_bytes()).unwrap(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -408,6 +421,7 @@ mod tests {
             url,
             signer: TurnTokenSigner::from_pem(private.as_bytes()).unwrap(),
             client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            sessions,
         }
     }
 
@@ -933,5 +947,84 @@ mod tests {
                 "{execution}: {followed}"
             );
         }
+    }
+
+    /// Only a valid submitted turn sets a thread up: a rejected request pins
+    /// nothing, and a read in the gap between the pin and the turn creates no
+    /// session, so the session starts with the turn's own model.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_a_valid_turn_sets_up_a_thread() {
+        let (brain, _, bodies) = brain_with_cells(None).await;
+        let thread = "slack:T:C:setup";
+        let (token, _) = brain.token(thread, now());
+        let (status, body) = brain
+            .submit_body(
+                thread,
+                json!({
+                    "request_id": "exe_0",
+                    "input_line": {"type": "interrupt"},
+                    "system_prompt": "Answer like a pirate.",
+                }),
+            )
+            .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(
+            brain.sessions.resolve(thread).await.unwrap().system_prompt,
+            None
+        );
+
+        // The pin a submit makes before it reaches the worker, then reads.
+        brain
+            .sessions
+            .pin(thread, Some("Answer like a poet."))
+            .await
+            .unwrap();
+        let status = brain
+            .client
+            .get(format!("{}/v1/threads/{thread}", brain.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            status.json::<Value>().await.unwrap(),
+            json!({"running": null, "queued": []})
+        );
+        let interrupt = brain
+            .client
+            .post(format!("{}/v1/threads/{thread}/interrupt", brain.url))
+            .json(&json!({"reason": "test"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            interrupt.json::<Value>().await.unwrap()["interrupted"],
+            false
+        );
+
+        let (status, body) = brain
+            .submit_body(
+                thread,
+                json!({
+                    "request_id": "exe_1",
+                    "input_line": {"type": "user", "model": "terra", "message": {"content": [{"type": "text", "text": "hi"}]}},
+                    "tool_token": token,
+                    "system_prompt": "Answer like a pirate.",
+                }),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, thread, "exe_1").await;
+        let bodies = bodies.lock().unwrap();
+        let last = bodies.last().unwrap();
+        assert_eq!(last["model"], "gpt-6.1-terra", "the turn's model");
+        let instructions = developer_texts(last)
+            .into_iter()
+            .find(|text| text.contains(crate::prompt::BASE.trim()))
+            .unwrap();
+        assert!(
+            instructions.contains("Answer like a poet."),
+            "the pinned prompt"
+        );
+        assert!(!instructions.contains("pirate"), "{instructions}");
     }
 }

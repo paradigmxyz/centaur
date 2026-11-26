@@ -97,7 +97,10 @@ function DefaultsForm() {
   const update = useSubmit((values: SystemSettingsInput) => updateSystemSettings(queryClient, values));
   const form = useForm<SystemSettingsInput>({ defaultValues: inputOf(settings) });
   const { reset } = form;
-  useEffect(() => reset(inputOf(settings)), [settings, reset]);
+  // Reset only when the stored defaults change: saving the system prompt
+  // refreshes the same settings and must not discard unsaved edits here.
+  const stored = JSON.stringify(inputOf(settings));
+  useEffect(() => reset(JSON.parse(stored) as SystemSettingsInput), [stored, reset]);
 
   const onSubmit = form.handleSubmit(async (values) => {
     try {

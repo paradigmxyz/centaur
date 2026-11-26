@@ -68,8 +68,13 @@ A thread's first turn pins the prompt it brings, empty for none, in
 `nanocode.thread_sessions.system_prompt`, and the thread keeps that prompt for
 life: nanocode fixes a session's instructions when it opens the session, so a
 Console edit applies to new threads. A restart reopens a thread with its pinned
-prompt. A thread with no pinned prompt has never had a turn, so status, event,
-and interrupt requests for it answer without opening a session.
+prompt.
+
+Only a submitted turn sets a thread up. The brain checks the input line before
+it pins anything, so a rejected request leaves no trace, and the turn creates
+the nanocode session with its own model. Status, event, and interrupt requests
+never create a session: for a thread without one they answer empty, and an
+event stream waiting on such a thread looks again as soon as a thread opens.
 
 ## Code Mode
 

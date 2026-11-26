@@ -155,6 +155,7 @@ async fn run(config: Config, mut commands: mpsc::UnboundedReceiver<Command>) -> 
         code_mode: config.code_mode,
         threads: Default::default(),
         opening: Default::default(),
+        opened: watch::channel(0).0,
     });
     info!(model = %brain.default_model, thinking = ?brain.thinking, "brain ready");
     while let Some(command) = commands.recv().await {
@@ -187,6 +188,18 @@ struct Brain {
     threads: Mutex<HashMap<String, Arc<Thread>>>,
     /// Serializes opening, so a thread is opened once.
     opening: tokio::sync::Mutex<()>,
+    /// Bumped whenever a thread opens, so an event stream waiting for a
+    /// thread's first turn looks again at once.
+    opened: watch::Sender<u64>,
+}
+
+/// How [`Brain::thread`] may open a thread that is not open yet.
+enum Open {
+    /// Only a thread whose nanocode session exists: reads never create one.
+    Existing,
+    /// Create the session if it is new, with this model. Only a submitted
+    /// turn creates a session, so it starts with the turn's model.
+    Create(Option<ModelSelection>),
 }
 
 /// One Centaur thread: a nanocode session and its durable inbox.
@@ -216,7 +229,7 @@ impl Brain {
                 let _ = reply.send(outcome);
             }
             Command::Interrupt { thread, reply } => {
-                let outcome = match self.thread(&thread, None).await {
+                let outcome = match self.thread(&thread, Open::Existing).await {
                     Ok(Some(thread)) => thread.interrupt().await,
                     Ok(None) => Ok(None),
                     Err(error) => Err(error.to_string()),
@@ -224,7 +237,7 @@ impl Brain {
                 let _ = reply.send(outcome);
             }
             Command::Status { thread, reply } => {
-                let outcome = match self.thread(&thread, None).await {
+                let outcome = match self.thread(&thread, Open::Existing).await {
                     Ok(Some(thread)) => thread.status().await,
                     Ok(None) => Ok(ThreadStatus {
                         running: None,
@@ -239,16 +252,19 @@ impl Brain {
                 after,
                 reply,
             } => {
-                let outcome = match self.thread(&thread, None).await {
+                // Subscribed first, so a thread opening after the lookup
+                // still wakes the stream.
+                let opened = self.opened.subscribe();
+                let outcome = match self.thread(&thread, Open::Existing).await {
                     Ok(Some(open)) => open.page(after).await,
-                    // No turn yet, so no events. The closed wake channel has
-                    // the stream poll again.
+                    // No turn yet, so no events. The stream looks again when
+                    // a thread opens.
                     Ok(None) => Ok(Page {
                         session_id: thread.session_id.clone(),
                         events: Vec::new(),
                         next_cursor: after,
                         has_more: false,
-                        wake: watch::channel(after).1,
+                        wake: opened,
                     }),
                     Err(error) => Err(error.to_string()),
                 };
@@ -277,7 +293,7 @@ impl Brain {
         };
         let model = turn.model.as_deref().and_then(|model| model.parse().ok());
         let thread = self
-            .thread(thread_ref, model)
+            .thread(thread_ref, Open::Create(model))
             .await
             .map_err(|error| SubmitError::Internal(error.to_string()))?
             .ok_or_else(|| {
@@ -291,12 +307,13 @@ impl Brain {
     }
 
     /// The open thread, opening it (and resuming its pending turns) if needed.
-    /// A thread whose system prompt is not pinned has never had a turn, so
-    /// there is nothing to open: `None`.
+    /// `None` when `open` is [`Open::Existing`] and the thread has no session
+    /// yet. A thread whose system prompt is not pinned has never had a turn,
+    /// so it has none either.
     async fn thread(
         self: &Arc<Self>,
         thread: &ThreadRef,
-        model: Option<ModelSelection>,
+        open: Open,
     ) -> Result<Option<Arc<Thread>>, Error> {
         let session_id = thread.session_id.clone();
         if let Some(open) = self.open_thread(&session_id) {
@@ -310,11 +327,15 @@ impl Brain {
             return Ok(Some(open));
         }
         let custom = prompt::custom(Some(system_prompt));
-        let thread = Arc::new(self.open(&session_id, &thread.key, model, custom).await?);
+        let Some(thread) = self.open(&session_id, &thread.key, open, custom).await? else {
+            return Ok(None);
+        };
+        let thread = Arc::new(thread);
         self.threads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id, Arc::clone(&thread));
+        self.opened.send_modify(|opened| *opened += 1);
         thread.drive();
         Ok(Some(thread))
     }
@@ -327,20 +348,31 @@ impl Brain {
             .cloned()
     }
 
-    /// Open a thread's session with its pinned custom system prompt.
+    /// Open a thread's session with its pinned custom system prompt, or
+    /// `None` for [`Open::Existing`] when the session does not exist.
     async fn open(
         &self,
         session_id: &str,
         thread_key: &str,
-        model: Option<ModelSelection>,
+        open: Open,
         custom: Option<String>,
-    ) -> Result<Thread, Error> {
+    ) -> Result<Option<Thread>, Error> {
         let policy = Policy {
             restarts: TURN_RESTARTS,
             effects: codemode::effects(),
             ..Policy::default()
         };
         let parts = nanocode::turnlog(Arc::clone(&self.log_host), session_id, policy).await?;
+        let model = match open {
+            Open::Create(model) => model,
+            Open::Existing => {
+                if parts.store.summary(session_id).await?.is_none() {
+                    return Ok(None);
+                }
+                // An existing session keeps the model it was created with.
+                None
+            }
+        };
         // Direct function tools. By default nanocode offers only its own code
         // mode (`exec`, calling the tools from JavaScript) and refuses direct
         // calls; with direct tools, the subagent tools are direct functions
@@ -400,13 +432,13 @@ impl Brain {
             custom_system_prompt = custom.is_some(),
             "opened session"
         );
-        Ok(Thread {
+        Ok(Some(Thread {
             session_id: session_id.to_owned(),
             inbox,
             wake,
             driving: AtomicBool::new(false),
             _runtime: runtime,
-        })
+        }))
     }
 }
 
