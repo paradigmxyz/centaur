@@ -57,8 +57,8 @@ pub struct Config {
     pub thinking: String,
     pub openai_base_url: Option<String>,
     pub anthropic_base_url: Option<String>,
-    /// Registers the Code Mode tools on every thread when set.
-    pub code_mode: Option<Arc<CodeMode>>,
+    /// The Code Mode tools every thread gets.
+    pub code_mode: Arc<CodeMode>,
 }
 
 /// A thread's custom system prompt, from the Console: `None` when there is
@@ -191,7 +191,7 @@ struct Brain {
     thinking: Thinking,
     openai_base_url: Option<String>,
     anthropic_base_url: Option<String>,
-    code_mode: Option<Arc<CodeMode>>,
+    code_mode: Arc<CodeMode>,
     threads: Mutex<HashMap<String, Arc<Thread>>>,
     /// Serializes opening, so a thread is opened once.
     opening: tokio::sync::Mutex<()>,
@@ -404,29 +404,28 @@ impl Brain {
             ..Policy::default()
         };
         let parts = nanocode::turnlog(Arc::clone(&self.log_host), session_id, policy).await?;
+        // Direct function tools. By default nanocode offers only its own code
+        // mode (`exec`, calling the tools from JavaScript) and refuses direct
+        // calls; with direct tools, the subagent tools are direct functions
+        // too.
         let mut tools = Tools::builder()
             .without_defaults()
             .effect_gate(Arc::clone(&parts.gate))
-            .cell_journals(parts.journals.clone());
-        if let Some(code_mode) = &self.code_mode {
-            // Direct function tools. By default nanocode offers only its own
-            // code mode (`exec`, calling the tools from JavaScript) and
-            // refuses direct calls; with direct tools, the subagent tools are
-            // direct functions too.
-            tools = tools.exposure(ToolExposure::DirectOnly);
-            let log: Arc<dyn codemode::Turns> = parts.log.clone();
-            for tool in code_mode.tools(thread_key, &log) {
-                tools = tools.tool(tool);
-            }
+            .cell_journals(parts.journals.clone())
+            .exposure(ToolExposure::DirectOnly);
+        let log: Arc<dyn codemode::Turns> = parts.log.clone();
+        for tool in self.code_mode.tools(thread_key, &log) {
+            tools = tools.tool(tool);
         }
         let tools = tools.build()?;
-        let code_mode = self.code_mode.is_some();
         let custom = match unfinished_custom(&parts.log).await? {
             Some(stored) => stored,
             None => custom.cloned().flatten(),
         };
-        let instructions: Arc<str> = prompt::compose(code_mode, custom.as_deref()).into();
-        let mut runtime = Nanocode::builder()
+        let instructions: Arc<str> = prompt::compose(custom.as_deref()).into();
+        // With direct tools the model would also see nanocode's subagent
+        // tools; a brain turn gets exactly the Code Mode tools.
+        let runtime = Nanocode::builder()
             .openai(openai(
                 self.openai_base_url.as_deref(),
                 Arc::clone(&instructions),
@@ -436,13 +435,10 @@ impl Brain {
             .without_cua()
             .runner_management(false)
             .thinking(self.thinking)
-            .durability(parts.store.clone());
-        if code_mode {
-            // With direct tools the model would also see nanocode's subagent
-            // tools; a brain turn gets exactly the Code Mode tools.
-            runtime = runtime.without_subagents();
-        }
-        let runtime = runtime.build_async().await?;
+            .durability(parts.store.clone())
+            .without_subagents()
+            .build_async()
+            .await?;
         // Everything already in the log is durable; later events become
         // visible only once the host has committed them.
         let durable = last_seq(&parts.log).await?;

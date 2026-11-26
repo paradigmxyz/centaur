@@ -286,8 +286,9 @@ codemode:
   # connector functions for the brain, and a shared tenancy iron-proxy
   # (ironProxy.image with IRON_TENANCY_ENABLED) injects each turn principal's
   # credentials into its connector requests. The turn token api-rs mints is the
-  # only credential on the path. Requires brain.enabled. The per-principal
-  # Code Mode sandboxes above keep serving /mcp.
+  # only credential on the path. The executor and the brain require each
+  # other: enable both or neither. The per-principal Code Mode sandboxes above
+  # keep serving /mcp.
   executor:
     enabled: false
     # Existing Secret with three keys: token-signing-key (Ed25519, PKCS#8 PEM;
@@ -532,6 +533,7 @@ tokenBroker:
 # Model traffic is direct HTTPS. Production model egress should go through a
 # dedicated iron-proxy with a model-only principal (follow-up).
 brain:
+  # Requires codemode.executor.enabled, which gives nanocode turns their tools.
   enabled: false
   replicaCount: 1
   nodeSelector: {}

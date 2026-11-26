@@ -33,8 +33,8 @@ const TAIL_POLL: Duration = Duration::from_secs(5);
 pub struct AppState {
     pub commands: mpsc::UnboundedSender<Command>,
     pub sessions: SessionIds,
-    /// Verifies submitted Code Mode turn tokens; without it they are ignored.
-    pub verifier: Option<TurnTokenVerifier>,
+    /// Verifies submitted Code Mode turn tokens.
+    pub verifier: TurnTokenVerifier,
 }
 
 impl AppState {
@@ -133,13 +133,7 @@ async fn submit(
 /// every `nanocode` turn down. Nothing is stored for it.
 fn verified_token(state: &AppState, thread_key: &str, token: Option<&str>) -> Option<TurnToken> {
     let token = token.map(str::trim).filter(|token| !token.is_empty())?;
-    let Some(verifier) = &state.verifier else {
-        warn!(
-            "a turn brought a Code Mode token, but the brain has no public key to verify it; ignoring it"
-        );
-        return None;
-    };
-    let claims = match verifier.verify(token) {
+    let claims = match state.verifier.verify(token) {
         Ok(claims) => claims,
         Err(failure) => {
             warn!(thread_key, %failure, "ignoring a Code Mode token that does not verify");
@@ -356,21 +350,20 @@ mod tests {
         client: reqwest::Client,
     }
 
-    /// A brain on an in-memory log, with Code Mode when given its URL.
-    async fn brain_with(verify: bool, model_url: &str, code_mode_url: Option<&str>) -> Brain {
+    /// A brain on an in-memory log, with Code Mode on the executor at
+    /// `code_mode_url`.
+    async fn brain_with(model_url: &str, code_mode_url: &str) -> Brain {
         let (private, public) = keys::pair();
         let (commands, receiver) = mpsc::unbounded_channel();
-        let code_mode = code_mode_url.map(|url| {
-            std::sync::Arc::new(
-                crate::codemode::CodeMode::new(
-                    crate::codemode::Endpoints {
-                        executor_url: url.trim_end_matches('/').to_owned(),
-                    },
-                    tokio::runtime::Handle::current(),
-                )
-                .unwrap(),
+        let code_mode = std::sync::Arc::new(
+            crate::codemode::CodeMode::new(
+                crate::codemode::Endpoints {
+                    executor_url: code_mode_url.trim_end_matches('/').to_owned(),
+                },
+                tokio::runtime::Handle::current(),
             )
-        });
+            .unwrap(),
+        );
         worker::spawn(
             worker::Config {
                 database_url: None,
@@ -386,7 +379,7 @@ mod tests {
         let state = AppState {
             commands,
             sessions: SessionIds::new(None).unwrap(),
-            verifier: verify.then(|| TurnTokenVerifier::from_pem(public.as_bytes()).unwrap()),
+            verifier: TurnTokenVerifier::from_pem(public.as_bytes()).unwrap(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -449,7 +442,6 @@ mod tests {
 
     /// A brain whose model runs one cell per turn, on a mock executor.
     async fn brain_with_cells(
-        verify: bool,
         gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     ) -> (
         Brain,
@@ -468,38 +460,47 @@ mod tests {
         )
         .await;
         let (model_url, bodies) = model_server(gate).await;
-        (
-            brain_with(verify, &model_url, Some(&executor)).await,
-            seen,
-            bodies,
-        )
+        (brain_with(&model_url, &executor).await, seen, bodies)
     }
 
-    /// A token that does not verify, or one the brain cannot verify, is
-    /// dropped: the turn still runs, and its tool calls reach no executor.
+    /// A token that does not verify is dropped: the turn still runs, and its
+    /// tool calls reach no executor.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_turn_token_that_does_not_verify_is_dropped_not_fatal() {
-        for verify in [true, false] {
-            let (brain, seen, _) = brain_with_cells(verify, None).await;
-            let (valid, _) = brain.token("slack:T:C:1", now());
-            let (other, _) = brain.token("slack:T:C:2", now());
-            let (expired, _) = brain.token("slack:T:C:1", now() - 2 * 3600);
-            let tokens: Vec<Option<&str>> = if verify {
-                vec![Some(&other), Some("junk"), Some(&expired), None]
-            } else {
-                vec![Some(&valid)]
-            };
-            for (index, token) in tokens.into_iter().enumerate() {
-                let request_id = format!("exe_{index}");
-                let (status, body) = brain.submit("slack:T:C:1", &request_id, token).await;
-                assert_eq!(status, 200, "{body}");
-                assert_eq!(body["created"], true, "{body}");
-                let stream = events(&brain, "slack:T:C:1", &request_id).await;
-                assert!(stream.contains("The answer is 42."), "{stream}");
-                assert!(stream.contains(crate::codemode::UNAVAILABLE), "{stream}");
-            }
-            assert!(seen.lock().unwrap().is_empty());
+        let (brain, seen, _) = brain_with_cells(None).await;
+        let (other_thread, _) = brain.token("slack:T:C:2", now());
+        let (expired, _) = brain.token("slack:T:C:1", now() - 2 * 3600);
+        let (private, _) = keys::pair();
+        let (other_key, _) = TurnTokenSigner::from_pem(private.as_bytes())
+            .unwrap()
+            .sign(
+                &TurnGrant {
+                    principal: "prn_channel".into(),
+                    requester: None,
+                    thread_key: "slack:T:C:1".into(),
+                    execution_id: "exe_1".into(),
+                    tools: ToolPolicy::default(),
+                },
+                now(),
+            )
+            .unwrap();
+        let tokens = [
+            Some(other_thread.as_str()),
+            Some("junk"),
+            Some(expired.as_str()),
+            Some(other_key.as_str()),
+            None,
+        ];
+        for (index, token) in tokens.into_iter().enumerate() {
+            let request_id = format!("exe_{index}");
+            let (status, body) = brain.submit("slack:T:C:1", &request_id, token).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["created"], true, "{body}");
+            let stream = events(&brain, "slack:T:C:1", &request_id).await;
+            assert!(stream.contains("The answer is 42."), "{stream}");
+            assert!(stream.contains(crate::codemode::UNAVAILABLE), "{stream}");
         }
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// api-rs mints a new token for every retry of a request. The retry is the
@@ -507,7 +508,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_retry_is_the_same_turn_with_its_first_token() {
         let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let (brain, seen, _) = brain_with_cells(true, Some(std::sync::Arc::clone(&gate))).await;
+        let (brain, seen, _) = brain_with_cells(Some(std::sync::Arc::clone(&gate))).await;
         let thread = "slack:T:C:1";
         let (first, _) = brain.token(thread, now() - 60);
         let (second, _) = brain.token(thread, now());
@@ -632,8 +633,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_queued_turns_token_does_not_reach_the_running_turn() {
         let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let (brain, seen, bodies) =
-            brain_with_cells(true, Some(std::sync::Arc::clone(&gate))).await;
+        let (brain, seen, bodies) = brain_with_cells(Some(std::sync::Arc::clone(&gate))).await;
         let thread = "slack:T:C:8";
         let (first, _) = brain.token(thread, now() - 60);
         let (second, _) = brain.token(thread, now());
@@ -679,7 +679,7 @@ mod tests {
         )
         .await;
         let (model_url, bodies) = model_server(None).await;
-        let brain = brain_with(true, &model_url, Some(&executor)).await;
+        let brain = brain_with(&model_url, &executor).await;
         let thread = "slack:T:C:9";
         let (token, _) = brain.token(thread, now());
         let (status, body) = brain.submit(thread, "exe_1", Some(&token)).await;
@@ -813,7 +813,7 @@ mod tests {
     /// on across the reopen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_system_prompt_edit_reaches_the_next_turn() {
-        let (brain, _, bodies) = brain_with_cells(true, None).await;
+        let (brain, _, bodies) = brain_with_cells(None).await;
         let thread = "slack:T:C:prompt";
         let turn = |request_id: &str, system_prompt: Option<&str>| {
             let (token, _) = brain.token(thread, now());

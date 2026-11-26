@@ -185,11 +185,19 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
     }
     let pool = store.pool().clone();
     let brain = args.brain_client()?;
+    let codemode_token_signer = args.codemode_token_signer()?;
+    if brain.is_some() && codemode_token_signer.is_none() {
+        return Err(ServerError::UnsupportedConfig(
+            "CENTAUR_BRAIN_URL requires CENTAUR_CODEMODE_TOKEN_SIGNING_KEY: nanocode turns \
+             get their only tools from Code Mode"
+                .to_owned(),
+        ));
+    }
     let sandbox_runtime = args.sandbox_runtime().await?;
     let iron_control = args.iron_control_runtime().await?;
     let mut runtime = SessionRuntime::new(store.clone(), sandbox_runtime, iron_control.registrar)
         .with_brain(brain)
-        .with_codemode_token_signer(args.codemode_token_signer()?)
+        .with_codemode_token_signer(codemode_token_signer)
         .with_system_prompt_source(args.console_db().map(|pool| {
             std::sync::Arc::new(ConsoleSystemPrompt(pool)) as std::sync::Arc<dyn SystemPromptSource>
         }))
