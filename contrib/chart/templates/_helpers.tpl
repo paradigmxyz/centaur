@@ -391,6 +391,6 @@ sync-token).
 - name: {{ .name }}
   valueFrom:
     secretKeyRef:
-      name: {{ required "codemode.executor.existingSecretName is required when codemode.executor.enabled=true" .root.Values.codemode.executor.existingSecretName | quote }}
+      name: {{ required "codemode.executor.existingSecretName is required when brain.enabled=true" .root.Values.codemode.executor.existingSecretName | quote }}
       key: {{ .key }}
 {{- end -}}

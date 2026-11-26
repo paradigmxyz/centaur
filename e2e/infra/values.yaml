@@ -70,7 +70,6 @@ brain:
 # loads centaur-e2e-iron-proxy-env, so it trusts the fakes' certificates.
 codemode:
   executor:
-    enabled: true
     existingSecretName: centaur-e2e-codemode
 
 # The test runner reaches the Console (served by api-rs) through its NodePort

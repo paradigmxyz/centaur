@@ -354,7 +354,7 @@ spec:
             - name: CENTAUR_BRAIN_URL
               value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "brain")) .Values.brain.port | quote }}
 {{- end }}
-{{- if .Values.codemode.executor.enabled }}
+{{- if .Values.brain.enabled }}
             # Signs the turn token api-rs hands the brain with every nanocode
             # turn; only api-rs holds this key.
 {{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_SIGNING_KEY" "key" "token-signing-key") | indent 12 }}

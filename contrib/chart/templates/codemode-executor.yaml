@@ -4,12 +4,10 @@ connector functions for the brain. Every request carries the turn token api-rs
 minted, which the executor verifies, and every connector request leaves
 through the tenancy iron-proxy with that token as Proxy-Authorization. The
 proxy fetches the turn's principal configuration from proxy-sync and injects
-its credentials, so the executor holds none.
+its credentials, so the executor holds none. Rendered with the brain, its only
+client, whose turns get their only tools from Code Mode.
 */ -}}
-{{- if .Values.codemode.executor.enabled }}
-{{- if not .Values.brain.enabled }}
-{{- fail "codemode.executor.enabled requires brain.enabled: the brain is the executor's only client" }}
-{{- end }}
+{{- if .Values.brain.enabled }}
 {{- $executor := .Values.codemode.executor -}}
 {{- $executorName := include "centaur.codemodeExecutorName" . -}}
 {{- $proxyName := include "centaur.codemodeIronProxyName" . -}}

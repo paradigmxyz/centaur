@@ -6,8 +6,8 @@ over its own session log, so the brain owns turn queueing, steering,
 cancellation, crash recovery, and the transcript. api-rs stays the front door:
 it authorizes the caller, then submits turns, interrupts, and proxies the
 event stream. It writes no execution rows or session events for these turns.
-The service is off by default (`brain.enabled`), and requires Code Mode
-(`codemode.executor.enabled`).
+The service is off by default (`brain.enabled`); enabling it also runs the Code
+Mode executor (`codemode.executor`), which it requires.
 
 ## HTTP
 

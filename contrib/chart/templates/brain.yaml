@@ -1,7 +1,4 @@
 {{- if .Values.brain.enabled }}
-{{- if not .Values.codemode.executor.enabled }}
-{{- fail "brain.enabled requires codemode.executor.enabled: Code Mode gives nanocode turns their only tools" }}
-{{- end }}
 {{- $name := include "centaur.componentName" (dict "root" . "component" "brain") }}
 {{- $brain := .Values.brain }}
 {{- $databaseUrl := $brain.databaseUrl }}
