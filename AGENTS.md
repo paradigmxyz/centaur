@@ -182,7 +182,6 @@ scoped access.
 - `docs/pages/quickstart.mdx`: local stack and end-to-end smoke path.
 - `contrib/chart/values.yaml`: supported deployment configuration.
 - Service `README.md` files, where present: behavior and environment variables.
-- `services/api-rs/rfcs/`: control-plane and sandbox design contracts.
 
 "Chat SDK" means the Vercel Chat SDK. When adapter behavior matters, inspect
 the source checkout at `~/github/vercel/chat` rather than generated files under
