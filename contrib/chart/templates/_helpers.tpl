@@ -87,6 +87,18 @@ the database endpoint can resolve to.
 {{- required "secretManager.existingSecretName is required" .Values.secretManager.existingSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- /*
+The Secret per-sandbox and tenancy iron-proxy pods load with envFrom. Falls
+back to the infrastructure Secret when ironProxy.existingSecretName is empty.
+*/ -}}
+{{- define "centaur.ironProxySecretEnvName" -}}
+{{- if .Values.ironProxy.existingSecretName -}}
+{{- .Values.ironProxy.existingSecretName | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "centaur.secretEnvName" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "centaur.trustedCaSecretName" -}}
 {{- required "firewall.existingCaSecretName is required" .Values.firewall.existingCaSecretName | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

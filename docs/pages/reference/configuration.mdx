@@ -13,6 +13,7 @@ Use these as the main extension points:
 | Source | Use |
 | --- | --- |
 | `secretManager.existingSecretName` | Required runtime secrets such as database, Slack, sandbox signing, and 1Password credentials. |
+| `ironProxy.existingSecretName` | Optional Secret that iron-proxy pods load instead of `secretManager.existingSecretName`. Holds only what the proxies need: the 1Password token, or the credential values for the `env` source. |
 | `apiRs.extraEnv` | Rust API feature flags, telemetry exporter settings, and deployment-specific overrides. |
 | `apiRs.metrics.*` | Prometheus/VictoriaMetrics scrape metadata for the Rust API `/metrics` endpoint. |
 | `apiRs.nodeSelector`, `apiRs.affinity`, `apiRs.tolerations` | Controls scheduling for api-rs pods, including dedicated tainted node pools. |
