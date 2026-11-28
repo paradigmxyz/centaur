@@ -116,6 +116,7 @@
         },
         "secretSource": { "type": "string" },
         "secretTtl": { "type": "string" },
+        "existingSecretName": { "type": "string" },
         "upstreamDenyCidrs": {
           "type": "array",
           "items": { "type": "string" }

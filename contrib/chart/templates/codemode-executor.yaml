@@ -207,7 +207,7 @@ spec:
           # else in them reaches a tenant.
           envFrom:
             - secretRef:
-                name: {{ include "centaur.secretEnvName" . }}
+                name: {{ include "centaur.ironProxySecretEnvName" . }}
 {{- if and (has .Values.ironProxy.secretSource (list "env" "onepassword")) .Values.secrets.bootstrapSecretName }}
             - secretRef:
                 name: {{ .Values.secrets.bootstrapSecretName | quote }}

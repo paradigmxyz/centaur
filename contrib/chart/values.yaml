@@ -43,6 +43,12 @@ ironProxy:
     - "10.42.0.0/16"
   secretSource: onepassword
   secretTtl: 10m
+  # Secret the per-sandbox and tenancy iron-proxy pods load with envFrom.
+  # Empty loads secretManager.existingSecretName, which also holds the
+  # control plane's database URLs and signing keys. Set it to a Secret holding
+  # only what the proxies need: the 1Password token for 1Password sources, or
+  # the credential values for the env source.
+  existingSecretName: ""
   # Requests/limits for each per-sandbox iron-proxy pod (k8s resources map).
   resources: {}
 
