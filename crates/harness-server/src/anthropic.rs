@@ -362,8 +362,29 @@ pub struct AnthropicMessage {
     pub model: Option<String>,
     pub stop_reason: Option<String>,
     pub usage: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_content")]
     pub content: Vec<AnthropicContentBlock>,
+}
+
+/// Message content is either a list of blocks or, as Claude Code sends for
+/// some user messages, a plain string; a string becomes one text block.
+fn deserialize_content<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AnthropicContentBlock>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Content {
+        Text(String),
+        Blocks(Vec<AnthropicContentBlock>),
+    }
+    Ok(match Option::<Content>::deserialize(deserializer)? {
+        Some(Content::Text(text)) => vec![AnthropicContentBlock::Text { text }],
+        Some(Content::Blocks(blocks)) => blocks,
+        None => Vec::new(),
+    })
 }
 
 impl AnthropicMessage {
@@ -639,6 +660,25 @@ fn exit_code_from_prefix(content: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_event_accepts_string_content() {
+        let event: AnthropicStreamEvent = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":"background task finished"}}"#,
+        )
+        .expect("user event with string content");
+        let AnthropicStreamEvent::User { message, .. } = &event else {
+            panic!("expected user event");
+        };
+        assert!(matches!(
+            message.content.as_slice(),
+            [AnthropicContentBlock::Text { text }] if text == "background task finished"
+        ));
+        assert!(matches!(
+            AnthropicEventNormalizer::default().normalize(event),
+            NormalizedEvent::ToolResults(results) if results.is_empty()
+        ));
+    }
 
     #[test]
     fn assistant_event_exposes_token_usage() {
