@@ -111,7 +111,7 @@ spec:
               value: info
             - name: CENTAUR_SSH_TARGETS
               value: {{ .Values.proxySync.sshTargets | toJson | quote }}
-{{- if .Values.codemode.executor.enabled }}
+{{- if .Values.brain.enabled }}
             # Code Mode principal config for the tenancy iron-proxy: the sync
             # token authenticates the proxy, the public key verifies the turn
             # token it forwards.
@@ -151,7 +151,7 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if .Values.codemode.executor.enabled }}
+{{- if .Values.brain.enabled }}
         # The Code Mode tenancy iron-proxy fetches turn principal configuration.
         - podSelector:
             matchLabels:

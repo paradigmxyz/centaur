@@ -116,14 +116,12 @@ spec:
               value: /etc/centaur-ca
 {{- end }}
 {{- end }}
-{{- if .Values.codemode.executor.enabled }}
             # Code Mode tools for nanocode turns: exec, search, and load go to
             # the executor with the turn token. The brain verifies turn tokens
             # with the public key; it cannot mint them.
             - name: CENTAUR_CODEMODE_EXECUTOR_URL
               value: {{ printf "http://%s:8790" (include "centaur.codemodeExecutorName" .) | quote }}
 {{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY" "key" "token-public-key") | indent 12 }}
-{{- end }}
             - name: RUST_LOG
               value: info
 {{- range $name, $value := $brain.extraEnv }}

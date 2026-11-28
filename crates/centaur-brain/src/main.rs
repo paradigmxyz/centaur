@@ -4,6 +4,7 @@ mod blocks;
 mod codemode;
 mod migrate;
 mod projector;
+mod prompt;
 mod server;
 mod sessions;
 mod translate;
@@ -74,22 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     let sessions = sessions::SessionIds::new(args.database_url.as_deref())?;
     let setup = codemode::Setup::from_env()?;
-    let code_mode = match setup.endpoints {
-        Some(endpoints) => {
-            tracing::info!(
-                executor = %endpoints.executor_url,
-                "Code Mode tools are on"
-            );
-            Some(std::sync::Arc::new(codemode::CodeMode::new(
-                endpoints,
-                tokio::runtime::Handle::current(),
-            )?))
-        }
-        None => {
-            tracing::info!("Code Mode tools are off");
-            None
-        }
-    };
+    tracing::info!(executor = %setup.endpoints.executor_url, "Code Mode executor");
+    let code_mode = std::sync::Arc::new(codemode::CodeMode::new(
+        setup.endpoints,
+        tokio::runtime::Handle::current(),
+    )?);
     let (commands, receiver) = mpsc::unbounded_channel();
     let _worker = worker::spawn(
         worker::Config {

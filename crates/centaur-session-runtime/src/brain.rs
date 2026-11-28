@@ -127,6 +127,8 @@ impl BrainClient {
     ///
     /// `tool_token` is the turn's Code Mode token: the brain forwards it with
     /// every Code Mode call, and without one the turn has no Code Mode tools.
+    /// `system_prompt` is the deployment's custom system prompt, if any. The
+    /// thread's first turn pins it for the thread's life.
     pub async fn submit_turn(
         &self,
         thread_key: &ThreadKey,
@@ -134,6 +136,7 @@ impl BrainClient {
         input_line: Value,
         steer: bool,
         tool_token: Option<&str>,
+        system_prompt: Option<&str>,
     ) -> Result<TurnSubmitted, BrainError> {
         let response = self
             .control
@@ -143,6 +146,7 @@ impl BrainClient {
                 input_line,
                 steer,
                 tool_token,
+                system_prompt,
             })
             .send()
             .await?;
@@ -258,6 +262,17 @@ struct SubmitTurn<'a> {
     /// principal; absent when the turn gets no Code Mode tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_token: Option<&'a str>,
+    /// The deployment's custom system prompt; absent when there is none. The
+    /// brain applies the one the thread's first turn brought.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_prompt: Option<&'a str>,
+}
+
+/// Where `nanocode` turns get the deployment's custom system prompt.
+#[async_trait::async_trait]
+pub trait SystemPromptSource: Send + Sync {
+    /// The custom system prompt, or `None` when none is set.
+    async fn system_prompt(&self) -> Result<Option<String>, String>;
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -501,7 +516,7 @@ mod tests {
         });
 
         let submitted = client
-            .submit_turn(&thread_key(), "exe_abc", line.clone(), false, None)
+            .submit_turn(&thread_key(), "exe_abc", line.clone(), false, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -516,7 +531,14 @@ mod tests {
 
         // Resubmitting the same request id is an idempotent replay.
         let replay = client
-            .submit_turn(&thread_key(), "exe_abc", line, false, Some("token"))
+            .submit_turn(
+                &thread_key(),
+                "exe_abc",
+                line,
+                false,
+                Some("token"),
+                Some("Answer in French."),
+            )
             .await
             .unwrap();
         assert!(!replay.created);
@@ -529,6 +551,9 @@ mod tests {
         // No token is sent as no field, not as null.
         assert!(turns[0].body.get("tool_token").is_none());
         assert_eq!(turns[1].body["tool_token"], "token");
+        // No system prompt is no field.
+        assert!(turns[0].body.get("system_prompt").is_none());
+        assert_eq!(turns[1].body["system_prompt"], "Answer in French.");
         assert_eq!(turns[0].body["input_line"]["type"], "user");
         assert_eq!(
             turns[0].body["input_line"]["message"]["content"][0]["text"],
@@ -548,6 +573,7 @@ mod tests {
                 "exe_abc",
                 json!({"type": "user"}),
                 false,
+                None,
                 None,
             )
             .await

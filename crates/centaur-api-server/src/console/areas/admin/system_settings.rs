@@ -8,7 +8,8 @@
 use axum::{extract::State, http::StatusCode, response::Response, routing::get};
 use centaur_console_db::ConsoleUser;
 use centaur_console_db::areas::admin::{
-    RoleRow, SystemSettingValues, existing_role_ids, roles, system_setting, write_system_settings,
+    RoleRow, SYSTEM_PROMPT_MAX_BYTES, SystemSettingValues, existing_role_ids, roles,
+    system_setting, write_system_settings,
 };
 use centaur_console_db::model::{ConsoleModel, Role as RoleModel};
 use centaur_console_db::validation::{ValidateFields, rules};
@@ -31,7 +32,8 @@ const REPO_CACHE_VALUES: [&str; 3] = ["none", "public", "all"];
 
 /// A settings write. An absent key leaves its column alone; an explicit `null`
 /// fails the model's inclusion validation, except for `default_role_ids`, where
-/// it clears the default set.
+/// it clears the default set, and `system_prompt`, where it (like a blank
+/// prompt) clears the prompt.
 #[derive(Deserialize, garde::Validate)]
 struct UpdateSystemSettings {
     #[serde(default, deserialize_with = "nullable_field")]
@@ -54,6 +56,22 @@ struct UpdateSystemSettings {
     #[serde(default, deserialize_with = "nullable_field")]
     #[garde(skip)]
     default_role_ids: Option<Option<Vec<String>>>,
+    /// The custom system prompt for agent turns.
+    #[serde(default, deserialize_with = "nullable_field")]
+    #[garde(custom(system_prompt_fits))]
+    system_prompt: Option<Option<String>>,
+}
+
+/// A custom system prompt is at most [`SYSTEM_PROMPT_MAX_BYTES`].
+fn system_prompt_fits(value: &Option<Option<String>>, _: &()) -> garde::Result {
+    match value {
+        Some(Some(prompt)) if prompt.trim().len() > SYSTEM_PROMPT_MAX_BYTES => {
+            Err(garde::Error::new(format!(
+                "is too long (maximum is {SYSTEM_PROMPT_MAX_BYTES} bytes)"
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `PUT slack_external_teams` accepts a list, or one string split on whitespace
@@ -152,6 +170,14 @@ async fn update(
 fn apply_settings(values: &mut SystemSettingValues, data: &UpdateSystemSettings) {
     if let Some(Some(repo_cache)) = &data.default_sandbox_repo_cache {
         values.default_sandbox_repo_cache = repo_cache.clone();
+    }
+    // Stored trimmed; blank or `null` stores no prompt.
+    if let Some(prompt) = &data.system_prompt {
+        values.system_prompt = prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(str::to_owned);
     }
     for (stored, value) in [
         (
@@ -365,6 +391,45 @@ mod tests {
                 "default_sandbox_observability_enabled".to_owned(),
                 "default_sandbox_repo_cache".to_owned(),
             ])
+        );
+    }
+
+    #[test]
+    fn the_system_prompt_is_bounded_and_nullable() {
+        for prompt in [json!(null), json!(""), json!("Answer in French.")] {
+            assert_eq!(rejected(json!({ "system_prompt": prompt })), None);
+        }
+        let long = "x".repeat(SYSTEM_PROMPT_MAX_BYTES + 1);
+        assert_eq!(
+            rejected(json!({ "system_prompt": long })),
+            Some(vec!["system_prompt".to_owned()])
+        );
+        // Surrounding whitespace is trimmed before it counts.
+        let padded = format!("  {}  ", "x".repeat(SYSTEM_PROMPT_MAX_BYTES));
+        assert_eq!(rejected(json!({ "system_prompt": padded })), None);
+    }
+
+    #[test]
+    fn a_blank_or_null_system_prompt_clears_it() {
+        let stored = |body: serde_json::Value| {
+            let data: UpdateSystemSettings = serde_json::from_value(body).unwrap();
+            let mut values = SystemSettingValues {
+                default_sandbox_repo_cache: "all".to_owned(),
+                default_sandbox_observability_enabled: true,
+                default_sandbox_sessions_read_enabled: false,
+                default_sandbox_workflows_read_enabled: false,
+                default_sandbox_workflows_write_enabled: false,
+                system_prompt: Some("old".to_owned()),
+            };
+            apply_settings(&mut values, &data);
+            values.system_prompt
+        };
+        assert_eq!(stored(json!({})), Some("old".to_owned()));
+        assert_eq!(stored(json!({ "system_prompt": null })), None);
+        assert_eq!(stored(json!({ "system_prompt": " \n" })), None);
+        assert_eq!(
+            stored(json!({ "system_prompt": "  new\n" })),
+            Some("new".to_owned())
         );
     }
 

@@ -182,7 +182,7 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if .Values.codemode.executor.enabled }}
+{{- if .Values.brain.enabled }}
         # The Code Mode tenancy iron-proxy forwards the executor's Console and
         # connector calls, with the turn principal's credentials.
         - podSelector:
@@ -421,7 +421,7 @@ spec:
           port: {{ .Values.brain.port }}
   egress:
     {{- include "centaur.postgresEgress" . | nindent 4 }}
-{{- if .Values.codemode.executor.enabled }}
+{{- if .Values.brain.enabled }}
     # Code Mode: exec, search, and load go to the executor.
     - to:
         - podSelector:
@@ -666,7 +666,7 @@ spec:
         - podSelector:
             matchLabels:
               centaur.ai/iron-proxy: "true"
-{{- if .Values.codemode.executor.enabled }}
+{{- if .Values.brain.enabled }}
         # The Code Mode tenancy iron-proxy resolves 1password_connect sources too.
         - podSelector:
             matchLabels:

@@ -46,18 +46,18 @@ pub const BUSY: &str = "Code Mode is busy; retry in a few seconds.";
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// Where the Code Mode executor is, when Code Mode is configured.
+/// Where the Code Mode executor is.
 #[derive(Clone, Debug)]
 pub struct Endpoints {
     pub executor_url: String,
 }
 
-/// The brain's Code Mode configuration, from its environment.
+/// The brain's Code Mode configuration, from its environment. Code Mode is
+/// required: without it a brain turn has no tools at all.
 pub struct Setup {
-    /// Verifies the turn tokens api-rs submits; `None` ignores them.
-    pub verifier: Option<TurnTokenVerifier>,
-    /// `Some` registers the tools.
-    pub endpoints: Option<Endpoints>,
+    /// Verifies the turn tokens api-rs submits.
+    pub verifier: TurnTokenVerifier,
+    pub endpoints: Endpoints,
 }
 
 impl Setup {
@@ -67,35 +67,26 @@ impl Setup {
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
         let get = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
-        let verifier = get(TOKEN_PUBLIC_KEY_ENV)
-            .map(|pem| TurnTokenVerifier::from_pem(pem.as_bytes()))
-            .transpose()
-            .map_err(|error| format!("{TOKEN_PUBLIC_KEY_ENV}: {error}"))?;
-        let executor_url = get(EXECUTOR_URL_ENV);
-        let endpoints = match (executor_url, &verifier) {
-            (Some(executor_url), Some(_)) => Some(Endpoints {
-                executor_url: executor_url.trim_end_matches('/').to_owned(),
-            }),
-            (executor, _) => {
+        let (pem, executor_url) = match (get(TOKEN_PUBLIC_KEY_ENV), get(EXECUTOR_URL_ENV)) {
+            (Some(pem), Some(executor_url)) => (pem, executor_url),
+            (pem, executor_url) => {
                 let missing = [
-                    (EXECUTOR_URL_ENV, executor.is_none()),
-                    (TOKEN_PUBLIC_KEY_ENV, verifier.is_none()),
+                    (TOKEN_PUBLIC_KEY_ENV, pem.is_none()),
+                    (EXECUTOR_URL_ENV, executor_url.is_none()),
                 ]
                 .into_iter()
                 .filter_map(|(name, missing)| missing.then_some(name))
                 .collect::<Vec<_>>();
-                if missing.len() < 2 {
-                    warn!(
-                        missing = missing.join(", "),
-                        "Code Mode is partly configured; its tools are off"
-                    );
-                }
-                None
+                return Err(format!("Code Mode is required; set {}", missing.join(" and ")).into());
             }
         };
+        let verifier = TurnTokenVerifier::from_pem(pem.as_bytes())
+            .map_err(|error| format!("{TOKEN_PUBLIC_KEY_ENV}: {error}"))?;
         Ok(Self {
             verifier,
-            endpoints,
+            endpoints: Endpoints {
+                executor_url: executor_url.trim_end_matches('/').to_owned(),
+            },
         })
     }
 }
@@ -977,7 +968,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn tools_are_on_only_when_fully_configured() {
+    fn code_mode_must_be_fully_configured() {
         let (_, public) = keys::pair();
         let all = |name: &str| {
             Some(match name {
@@ -987,27 +978,29 @@ pub(crate) mod tests {
             })
         };
         let setup = Setup::from_lookup(all).unwrap();
-        assert!(setup.verifier.is_some());
+        assert_eq!(setup.endpoints.executor_url, "http://executor:8080");
+
+        let error = |lookup: &dyn Fn(&str) -> Option<String>| {
+            Setup::from_lookup(lookup).err().unwrap().to_string()
+        };
         assert_eq!(
-            setup.endpoints.unwrap().executor_url,
-            "http://executor:8080"
+            error(&|name| (name == TOKEN_PUBLIC_KEY_ENV).then(|| public.clone())),
+            format!("Code Mode is required; set {EXECUTOR_URL_ENV}")
         );
-
-        let key_only =
-            Setup::from_lookup(|name| (name == TOKEN_PUBLIC_KEY_ENV).then(|| public.clone()))
-                .unwrap();
-        assert!(key_only.verifier.is_some());
-        assert!(key_only.endpoints.is_none());
-
-        let url_only =
-            Setup::from_lookup(|name| (name == EXECUTOR_URL_ENV).then(|| all(name)).flatten())
-                .unwrap();
-        assert!(url_only.verifier.is_none());
-        assert!(url_only.endpoints.is_none());
-
+        assert_eq!(
+            error(&|name| (name == EXECUTOR_URL_ENV).then(|| all(name)).flatten()),
+            format!("Code Mode is required; set {TOKEN_PUBLIC_KEY_ENV}")
+        );
+        assert_eq!(
+            error(&|_| Some(" ".to_owned())),
+            format!("Code Mode is required; set {TOKEN_PUBLIC_KEY_ENV} and {EXECUTOR_URL_ENV}")
+        );
         assert!(
-            Setup::from_lookup(|name| (name == TOKEN_PUBLIC_KEY_ENV).then(|| "junk".to_owned()))
-                .is_err()
+            error(&|name| match name {
+                TOKEN_PUBLIC_KEY_ENV => Some("junk".to_owned()),
+                _ => all(name),
+            })
+            .starts_with(TOKEN_PUBLIC_KEY_ENV)
         );
     }
 

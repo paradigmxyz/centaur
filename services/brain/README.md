@@ -6,7 +6,8 @@ over its own session log, so the brain owns turn queueing, steering,
 cancellation, crash recovery, and the transcript. api-rs stays the front door:
 it authorizes the caller, then submits turns, interrupts, and proxies the
 event stream. It writes no execution rows or session events for these turns.
-The service is off by default (`brain.enabled`).
+The service is off by default (`brain.enabled`); enabling it also runs the Code
+Mode executor (`codemode.executor`), which it requires.
 
 ## HTTP
 
@@ -21,7 +22,7 @@ Thread keys are percent-encoded path segments.
 | Route | Purpose |
 |-------|---------|
 | `GET /healthz` | Readiness and liveness. |
-| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer", "tool_token"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. `tool_token` is optional; see [Code Mode](#code-mode). |
+| `POST /v1/threads/{thread_key}/turns` | Submit a turn: `{"request_id", "input_line", "steer", "tool_token", "system_prompt"}`. Idempotent by `request_id`; a different input under the same id is a 409. `steer: true` folds the turn into the running one when there is one. `tool_token` is optional; see [Code Mode](#code-mode). `system_prompt` is optional; see [System prompt](#system-prompt). |
 | `GET /v1/threads/{thread_key}` | The thread's unfinished turns: `{"running", "queued"}`. |
 | `POST /v1/threads/{thread_key}/interrupt` | Cancel the running turn. |
 | `GET /v1/threads/{thread_key}/events?after_event_id=N[&execution_id=R]` | The thread's session event stream, in the same SSE format as api-rs `/api/session/{key}/events`. |
@@ -48,21 +49,48 @@ The brain commits the log before it publishes events, so a client never sees an
 event that a crash could take back. After a crash, nanocode resumes an
 interrupted turn from its last commit point, up to three times.
 
+## System prompt
+
+Each thread's model sees nanocode's own system prompt for its provider, then
+the brain's instructions: OpenAI models get them as additional developer
+instructions, Anthropic models as project instructions. The brain's
+instructions are, separated by horizontal rules:
+
+1. the base prompt, `crates/centaur-brain/src/prompts/base.md`;
+2. the Code Mode tool instructions;
+3. the deployment's custom system prompt, when it is not empty.
+
+The custom prompt is edited on the Console's System Settings page. api-rs reads
+it for every `nanocode` turn and sends it as `system_prompt`, absent when none
+is set or it cannot be read (the turn then runs without it).
+
+A thread's first turn pins the prompt it brings, empty for none, in
+`nanocode.thread_sessions.system_prompt`, and the thread keeps that prompt for
+life: nanocode fixes a session's instructions when it opens the session, so a
+Console edit applies to new threads. A restart reopens a thread with its pinned
+prompt.
+
+Only a submitted turn sets a thread up. The brain checks the input line before
+it pins anything, so a rejected request leaves no trace, and the turn creates
+the nanocode session with its own model. Status, event, and interrupt requests
+never create a session: for a thread without one they answer empty, and an
+event stream waiting on such a thread looks again as soon as a thread opens.
+
 ## Code Mode
 
-With Code Mode configured (`CENTAUR_CODEMODE_EXECUTOR_URL` and
-`CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY`), every thread gets three native nanocode
-tools, defined by `centaur_codemode_protocol::tools`:
+Code Mode is required: the brain refuses to start without
+`CENTAUR_CODEMODE_EXECUTOR_URL` and `CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY`, since
+its turns have no other tools. Every thread gets three native nanocode tools,
+defined by `centaur_codemode_protocol::tools`:
 `centaur_catalog_search` and `centaur_catalog_load` call the executor's catalog
 (`/v1/search`, `/v1/load`), and `centaur_execute` runs a cell on it (`/v1/exec`,
 with the model's tool call id as `cell_id`). The Code Mode instructions join the
-session's developer instructions. The startup log says whether the tools are on.
+thread's instructions (see [System prompt](#system-prompt)).
 
 api-rs sends a turn token as `tool_token` with each turn it submits. The brain
 verifies it (signature, issuer, audience, expiry) and that its `thread_key` is
-the thread's. A token that fails, or any token when no public key is
-configured, is logged and dropped: the turn still runs, only without Code
-Mode, so a key mismatch never fails every turn.
+the thread's. A token that fails is logged and dropped: the turn still runs,
+only without Code Mode, so a key mismatch never fails every turn.
 
 The token lives in its turn's own nanocode metadata, and nowhere else: nanocode
 stores it with the turn, keeps it across a restart for a resumed turn, and
@@ -112,11 +140,10 @@ DSN. nanocode creates its own tables inside `nanocode` at runtime.
   Secret named by `brain.databaseUrl.existingSecretName`; the migration init
   container enables the login with that password on every start, so rotating
   it means changing the Secret and restarting the pod.
-- `CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY` — SPKI PEM Ed25519 key that verifies
-  turn tokens. Without it, submitted tokens are ignored and the Code Mode tools
-  stay off.
-- `CENTAUR_CODEMODE_EXECUTOR_URL` — base URL of the Code Mode executor. With the
-  public key, this turns on the Code Mode tools.
+- `CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY` — required SPKI PEM Ed25519 key that
+  verifies turn tokens.
+- `CENTAUR_CODEMODE_EXECUTOR_URL` — required base URL of the Code Mode
+  executor.
 - `BRAIN_DEFAULT_MODEL` — default model for turns that name none; defaults to
   `luna`.
 - `BRAIN_DEFAULT_THINKING` — default reasoning effort; defaults to `low`.

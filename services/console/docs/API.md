@@ -2272,7 +2272,8 @@ A `link_id` that belongs to another client returns `404`.
 
 ### System settings
 
-Deployment-wide defaults for new control-plane records. Admin-only.
+Deployment-wide defaults for new control-plane records and the custom system
+prompt for agent turns. Admin-only.
 
 `GET /api/v1/console/system_settings`:
 
@@ -2285,6 +2286,7 @@ Deployment-wide defaults for new control-plane records. Admin-only.
     "default_sandbox_workflows_read_enabled": false,
     "default_sandbox_workflows_write_enabled": false,
     "default_role_ids": ["role_…"],
+    "system_prompt": null,
     "roles": [{ "id": "role_…", "foreign_id": "infra", "name": "Infra", "assign_by_default": true }],
     "updated_at": "…"
   }
@@ -2294,11 +2296,17 @@ Deployment-wide defaults for new control-plane records. Admin-only.
 `roles` lists every role (by name, then foreign ID). New principals with no
 preassigned roles receive the roles in `default_role_ids`.
 
+`system_prompt` is the deployment's custom system prompt, or `null` when unset.
+Only `nanocode` threads apply it so far: the brain adds it after its built-in
+prompt. A thread keeps the prompt its first turn brought, so an edit applies to
+new threads.
+
 `PUT`/`PATCH /api/v1/console/system_settings` takes `{"data": {...}}` with any of the
 `default_sandbox_*` fields (`default_sandbox_repo_cache` is `none`, `public`,
 or `all`) and `default_role_ids`, a list of role oids that replaces the default
-set (`[]` clears it; omitted keeps it). Invalid values and unknown role oids
-return `422` and change nothing. The response matches `GET`.
+set (`[]` clears it; omitted keeps it), and `system_prompt`, stored trimmed
+(`null` or a blank string clears it; at most 32 KiB). Invalid values and
+unknown role oids return `422` and change nothing. The response matches `GET`.
 
 #### Slack Connect workspaces
 

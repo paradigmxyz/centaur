@@ -33,17 +33,28 @@ const TAIL_POLL: Duration = Duration::from_secs(5);
 pub struct AppState {
     pub commands: mpsc::UnboundedSender<Command>,
     pub sessions: SessionIds,
-    /// Verifies submitted Code Mode turn tokens; without it they are ignored.
-    pub verifier: Option<TurnTokenVerifier>,
+    /// Verifies submitted Code Mode turn tokens.
+    pub verifier: TurnTokenVerifier,
 }
 
 impl AppState {
-    /// The thread with its nanocode session, assigning one if it is new.
-    async fn thread(&self, thread_key: String) -> Result<ThreadRef, Box<Response>> {
-        match self.sessions.resolve(&thread_key).await {
-            Ok(session_id) => Ok(ThreadRef {
+    /// The thread with its nanocode session, assigning one if it is new. With
+    /// `pin`, a thread with no pinned system prompt pins this one (`None` pins
+    /// none); see [`SessionIds::pin`].
+    async fn thread(
+        &self,
+        thread_key: String,
+        pin: Option<Option<&str>>,
+    ) -> Result<ThreadRef, Box<Response>> {
+        let resolved = match pin {
+            Some(system_prompt) => self.sessions.pin(&thread_key, system_prompt).await,
+            None => self.sessions.resolve(&thread_key).await,
+        };
+        match resolved {
+            Ok(resolved) => Ok(ThreadRef {
                 key: thread_key,
-                session_id,
+                session_id: resolved.session_id,
+                system_prompt: resolved.system_prompt,
             }),
             Err(failure) => {
                 warn!(%failure, "cannot resolve the thread's session");
@@ -77,6 +88,10 @@ struct SubmitRequest {
     /// retry of a request, which must not look like a different turn.
     #[serde(default)]
     tool_token: Option<String>,
+    /// The deployment's custom system prompt, from the Console; absent or
+    /// blank when it has none. The thread's first turn pins it for life.
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 async fn submit(
@@ -87,8 +102,24 @@ async fn submit(
     if request.request_id.trim().is_empty() {
         return error(StatusCode::BAD_REQUEST, "request_id is required");
     }
+    // Checked before anything is stored, so a rejected request leaves no
+    // trace on the thread.
+    let line = match serde_json::to_string(&request.input_line) {
+        Ok(line) => line,
+        Err(failure) => return error(StatusCode::BAD_REQUEST, &failure.to_string()),
+    };
+    match crate::blocks::parse(&line) {
+        Ok(crate::blocks::Input::User(_)) => {}
+        Ok(_) => return error(StatusCode::BAD_REQUEST, "input_line must be a user line"),
+        Err(failure) => return error(StatusCode::BAD_REQUEST, &failure),
+    }
     let tool_token = verified_token(&state, &thread_key, request.tool_token.as_deref());
-    let thread = match state.thread(thread_key).await {
+    // The thread's first turn pins its custom system prompt for life.
+    let system_prompt = crate::prompt::custom(request.system_prompt.as_deref());
+    let thread = match state
+        .thread(thread_key, Some(system_prompt.as_deref()))
+        .await
+    {
         Ok(thread) => thread,
         Err(response) => return *response,
     };
@@ -125,13 +156,7 @@ async fn submit(
 /// every `nanocode` turn down. Nothing is stored for it.
 fn verified_token(state: &AppState, thread_key: &str, token: Option<&str>) -> Option<TurnToken> {
     let token = token.map(str::trim).filter(|token| !token.is_empty())?;
-    let Some(verifier) = &state.verifier else {
-        warn!(
-            "a turn brought a Code Mode token, but the brain has no public key to verify it; ignoring it"
-        );
-        return None;
-    };
-    let claims = match verifier.verify(token) {
+    let claims = match state.verifier.verify(token) {
         Ok(claims) => claims,
         Err(failure) => {
             warn!(thread_key, %failure, "ignoring a Code Mode token that does not verify");
@@ -152,7 +177,7 @@ fn verified_token(state: &AppState, thread_key: &str, token: Option<&str>) -> Op
 }
 
 async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
-    let thread = match state.thread(thread_key).await {
+    let thread = match state.thread(thread_key, None).await {
         Ok(thread) => thread,
         Err(response) => return *response,
     };
@@ -168,7 +193,7 @@ async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -
 }
 
 async fn interrupt(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
-    let thread = match state.thread(thread_key).await {
+    let thread = match state.thread(thread_key, None).await {
         Ok(thread) => thread,
         Err(response) => return *response,
     };
@@ -217,10 +242,11 @@ async fn follow(
     execution_id: Option<String>,
     sender: mpsc::Sender<Event>,
 ) {
-    let thread = match state.sessions.resolve(&thread_key).await {
-        Ok(session_id) => ThreadRef {
+    let mut thread = match state.sessions.resolve(&thread_key).await {
+        Ok(resolved) => ThreadRef {
             key: thread_key.clone(),
-            session_id,
+            session_id: resolved.session_id,
+            system_prompt: resolved.system_prompt,
         },
         Err(failure) => {
             let _ = sender
@@ -234,6 +260,13 @@ async fn follow(
     let mut projector: Option<Projector> = None;
     let mut cursor = 0;
     loop {
+        // Until its first turn pins a prompt the thread has no events; look
+        // again each round so the stream picks that turn up.
+        if thread.system_prompt.is_none()
+            && let Ok(resolved) = state.sessions.resolve(&thread_key).await
+        {
+            thread.system_prompt = resolved.system_prompt;
+        }
         let Some(page) = page(&state, &thread, cursor).await else {
             let _ = sender.send(stream_error("the brain is unavailable")).await;
             return;
@@ -346,23 +379,23 @@ mod tests {
         url: String,
         signer: TurnTokenSigner,
         client: reqwest::Client,
+        sessions: SessionIds,
     }
 
-    /// A brain on an in-memory log, with Code Mode when given its URL.
-    async fn brain_with(verify: bool, model_url: &str, code_mode_url: Option<&str>) -> Brain {
+    /// A brain on an in-memory log, with Code Mode on the executor at
+    /// `code_mode_url`.
+    async fn brain_with(model_url: &str, code_mode_url: &str) -> Brain {
         let (private, public) = keys::pair();
         let (commands, receiver) = mpsc::unbounded_channel();
-        let code_mode = code_mode_url.map(|url| {
-            std::sync::Arc::new(
-                crate::codemode::CodeMode::new(
-                    crate::codemode::Endpoints {
-                        executor_url: url.trim_end_matches('/').to_owned(),
-                    },
-                    tokio::runtime::Handle::current(),
-                )
-                .unwrap(),
+        let code_mode = std::sync::Arc::new(
+            crate::codemode::CodeMode::new(
+                crate::codemode::Endpoints {
+                    executor_url: code_mode_url.trim_end_matches('/').to_owned(),
+                },
+                tokio::runtime::Handle::current(),
             )
-        });
+            .unwrap(),
+        );
         worker::spawn(
             worker::Config {
                 database_url: None,
@@ -375,10 +408,11 @@ mod tests {
             receiver,
         )
         .unwrap();
+        let sessions = SessionIds::new(None).unwrap();
         let state = AppState {
             commands,
-            sessions: SessionIds::new(None).unwrap(),
-            verifier: verify.then(|| TurnTokenVerifier::from_pem(public.as_bytes()).unwrap()),
+            sessions: sessions.clone(),
+            verifier: TurnTokenVerifier::from_pem(public.as_bytes()).unwrap(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -387,6 +421,7 @@ mod tests {
             url,
             signer: TurnTokenSigner::from_pem(private.as_bytes()).unwrap(),
             client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            sessions,
         }
     }
 
@@ -409,14 +444,22 @@ mod tests {
             request_id: &str,
             token: Option<&str>,
         ) -> (u16, Value) {
-            let response = self
-                .client
-                .post(format!("{}/v1/threads/{thread_key}/turns", self.url))
-                .json(&json!({
+            self.submit_body(
+                thread_key,
+                json!({
                     "request_id": request_id,
                     "input_line": {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
                     "tool_token": token,
-                }))
+                }),
+            )
+            .await
+        }
+
+        async fn submit_body(&self, thread_key: &str, body: Value) -> (u16, Value) {
+            let response = self
+                .client
+                .post(format!("{}/v1/threads/{thread_key}/turns", self.url))
+                .json(&body)
                 .send()
                 .await
                 .unwrap();
@@ -433,7 +476,6 @@ mod tests {
 
     /// A brain whose model runs one cell per turn, on a mock executor.
     async fn brain_with_cells(
-        verify: bool,
         gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     ) -> (
         Brain,
@@ -452,38 +494,47 @@ mod tests {
         )
         .await;
         let (model_url, bodies) = model_server(gate).await;
-        (
-            brain_with(verify, &model_url, Some(&executor)).await,
-            seen,
-            bodies,
-        )
+        (brain_with(&model_url, &executor).await, seen, bodies)
     }
 
-    /// A token that does not verify, or one the brain cannot verify, is
-    /// dropped: the turn still runs, and its tool calls reach no executor.
+    /// A token that does not verify is dropped: the turn still runs, and its
+    /// tool calls reach no executor.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_turn_token_that_does_not_verify_is_dropped_not_fatal() {
-        for verify in [true, false] {
-            let (brain, seen, _) = brain_with_cells(verify, None).await;
-            let (valid, _) = brain.token("slack:T:C:1", now());
-            let (other, _) = brain.token("slack:T:C:2", now());
-            let (expired, _) = brain.token("slack:T:C:1", now() - 2 * 3600);
-            let tokens: Vec<Option<&str>> = if verify {
-                vec![Some(&other), Some("junk"), Some(&expired), None]
-            } else {
-                vec![Some(&valid)]
-            };
-            for (index, token) in tokens.into_iter().enumerate() {
-                let request_id = format!("exe_{index}");
-                let (status, body) = brain.submit("slack:T:C:1", &request_id, token).await;
-                assert_eq!(status, 200, "{body}");
-                assert_eq!(body["created"], true, "{body}");
-                let stream = events(&brain, "slack:T:C:1", &request_id).await;
-                assert!(stream.contains("The answer is 42."), "{stream}");
-                assert!(stream.contains(crate::codemode::UNAVAILABLE), "{stream}");
-            }
-            assert!(seen.lock().unwrap().is_empty());
+        let (brain, seen, _) = brain_with_cells(None).await;
+        let (other_thread, _) = brain.token("slack:T:C:2", now());
+        let (expired, _) = brain.token("slack:T:C:1", now() - 2 * 3600);
+        let (private, _) = keys::pair();
+        let (other_key, _) = TurnTokenSigner::from_pem(private.as_bytes())
+            .unwrap()
+            .sign(
+                &TurnGrant {
+                    principal: "prn_channel".into(),
+                    requester: None,
+                    thread_key: "slack:T:C:1".into(),
+                    execution_id: "exe_1".into(),
+                    tools: ToolPolicy::default(),
+                },
+                now(),
+            )
+            .unwrap();
+        let tokens = [
+            Some(other_thread.as_str()),
+            Some("junk"),
+            Some(expired.as_str()),
+            Some(other_key.as_str()),
+            None,
+        ];
+        for (index, token) in tokens.into_iter().enumerate() {
+            let request_id = format!("exe_{index}");
+            let (status, body) = brain.submit("slack:T:C:1", &request_id, token).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["created"], true, "{body}");
+            let stream = events(&brain, "slack:T:C:1", &request_id).await;
+            assert!(stream.contains("The answer is 42."), "{stream}");
+            assert!(stream.contains(crate::codemode::UNAVAILABLE), "{stream}");
         }
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// api-rs mints a new token for every retry of a request. The retry is the
@@ -491,7 +542,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_retry_is_the_same_turn_with_its_first_token() {
         let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let (brain, seen, _) = brain_with_cells(true, Some(std::sync::Arc::clone(&gate))).await;
+        let (brain, seen, _) = brain_with_cells(Some(std::sync::Arc::clone(&gate))).await;
         let thread = "slack:T:C:1";
         let (first, _) = brain.token(thread, now() - 60);
         let (second, _) = brain.token(thread, now());
@@ -616,8 +667,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_queued_turns_token_does_not_reach_the_running_turn() {
         let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-        let (brain, seen, bodies) =
-            brain_with_cells(true, Some(std::sync::Arc::clone(&gate))).await;
+        let (brain, seen, bodies) = brain_with_cells(Some(std::sync::Arc::clone(&gate))).await;
         let thread = "slack:T:C:8";
         let (first, _) = brain.token(thread, now() - 60);
         let (second, _) = brain.token(thread, now());
@@ -663,7 +713,7 @@ mod tests {
         )
         .await;
         let (model_url, bodies) = model_server(None).await;
-        let brain = brain_with(true, &model_url, Some(&executor)).await;
+        let brain = brain_with(&model_url, &executor).await;
         let thread = "slack:T:C:9";
         let (token, _) = brain.token(thread, now());
         let (status, body) = brain.submit(thread, "exe_1", Some(&token)).await;
@@ -776,5 +826,205 @@ mod tests {
             .find(|item| item["type"] == "function_call_output")
             .unwrap();
         assert_eq!(output["call_id"], "call_cell_1");
+    }
+
+    /// The developer texts of one model request, in order.
+    fn developer_texts(body: &Value) -> Vec<String> {
+        body["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["role"] == "developer")
+            .flat_map(|item| item["content"].as_array().cloned().unwrap_or_default())
+            .filter_map(|part| part["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// A thread's first turn pins its custom system prompt, after the base
+    /// prompt and the Code Mode instructions, for life: later turns keep it
+    /// whatever they bring, and a new thread takes the current one. Reads
+    /// before the first turn pin nothing, and a stream following the thread
+    /// from before its first turn sees every turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_first_turn_pins_the_system_prompt() {
+        let (brain, _, bodies) = brain_with_cells(None).await;
+        let turn = |thread: &str, request_id: &str, system_prompt: Option<&str>| {
+            let (token, _) = brain.token(thread, now());
+            let mut body = json!({
+                "request_id": request_id,
+                "input_line": {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
+                "tool_token": token,
+            });
+            if let Some(system_prompt) = system_prompt {
+                body["system_prompt"] = json!(system_prompt);
+            }
+            body
+        };
+        // The instructions of the latest model request: the developer texts
+        // that carry the brain's base prompt. A pinned prompt is sent once.
+        let latest = || {
+            let bodies = bodies.lock().unwrap();
+            developer_texts(bodies.last().unwrap())
+                .into_iter()
+                .filter(|text| text.contains(crate::prompt::BASE.trim()))
+                .collect::<Vec<_>>()
+        };
+        let thread = "slack:T:C:prompt";
+
+        let status = brain
+            .client
+            .get(format!("{}/v1/threads/{thread}", brain.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            status.json::<Value>().await.unwrap(),
+            json!({"running": null, "queued": []})
+        );
+        let follower = tokio::spawn({
+            let client = brain.client.clone();
+            let url = format!("{}/v1/threads/{thread}/events", brain.url);
+            async move {
+                let mut response = client.get(url).send().await.unwrap();
+                let mut seen = String::new();
+                while seen.matches("session.execution_completed").count() < 3 {
+                    match response.chunk().await.unwrap() {
+                        Some(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+                        None => break,
+                    }
+                }
+                seen
+            }
+        });
+
+        for (request_id, system_prompt) in [
+            ("exe_1", Some("  Answer like a pirate.\n")),
+            ("exe_2", Some("Answer like a poet.")),
+            ("exe_3", None),
+        ] {
+            let (status, body) = brain
+                .submit_body(thread, turn(thread, request_id, system_prompt))
+                .await;
+            assert_eq!(status, 200, "{body}");
+            let stream = events(&brain, thread, request_id).await;
+            assert!(stream.contains("The answer is 42."), "{stream}");
+            let instructions = latest();
+            assert_eq!(instructions.len(), 1, "{instructions:?}");
+            let text = &instructions[0];
+            let tools = text
+                .find(centaur_codemode_protocol::tools::INSTRUCTIONS)
+                .expect("the Code Mode instructions reach the model");
+            let custom = text.find("---\n\nAnswer like a pirate.\n").expect(text);
+            assert!(tools < custom, "the custom prompt comes last");
+            assert!(!text.contains("poet"), "{text}");
+        }
+
+        let other = "slack:T:C:other";
+        let (status, body) = brain
+            .submit_body(other, turn(other, "exe_4", Some("Answer like a poet.")))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, other, "exe_4").await;
+        let instructions = latest();
+        assert!(instructions[0].contains("---\n\nAnswer like a poet.\n"));
+
+        let none = "slack:T:C:none";
+        let (status, body) = brain
+            .submit_body(none, turn(none, "exe_5", Some(" ")))
+            .await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, none, "exe_5").await;
+        let instructions = latest();
+        assert!(!instructions[0].contains("Answer like"), "{instructions:?}");
+
+        let followed = tokio::time::timeout(Duration::from_secs(30), follower)
+            .await
+            .expect("the follower sees every turn")
+            .unwrap();
+        for execution in ["exe_1", "exe_2", "exe_3"] {
+            assert!(
+                followed.contains(&format!("\"execution_id\":\"{execution}\"")),
+                "{execution}: {followed}"
+            );
+        }
+    }
+
+    /// Only a valid submitted turn sets a thread up: a rejected request pins
+    /// nothing, and a read in the gap between the pin and the turn creates no
+    /// session, so the session starts with the turn's own model.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_a_valid_turn_sets_up_a_thread() {
+        let (brain, _, bodies) = brain_with_cells(None).await;
+        let thread = "slack:T:C:setup";
+        let (token, _) = brain.token(thread, now());
+        let (status, body) = brain
+            .submit_body(
+                thread,
+                json!({
+                    "request_id": "exe_0",
+                    "input_line": {"type": "interrupt"},
+                    "system_prompt": "Answer like a pirate.",
+                }),
+            )
+            .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(
+            brain.sessions.resolve(thread).await.unwrap().system_prompt,
+            None
+        );
+
+        // The pin a submit makes before it reaches the worker, then reads.
+        brain
+            .sessions
+            .pin(thread, Some("Answer like a poet."))
+            .await
+            .unwrap();
+        let status = brain
+            .client
+            .get(format!("{}/v1/threads/{thread}", brain.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            status.json::<Value>().await.unwrap(),
+            json!({"running": null, "queued": []})
+        );
+        let interrupt = brain
+            .client
+            .post(format!("{}/v1/threads/{thread}/interrupt", brain.url))
+            .json(&json!({"reason": "test"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            interrupt.json::<Value>().await.unwrap()["interrupted"],
+            false
+        );
+
+        let (status, body) = brain
+            .submit_body(
+                thread,
+                json!({
+                    "request_id": "exe_1",
+                    "input_line": {"type": "user", "model": "terra", "message": {"content": [{"type": "text", "text": "hi"}]}},
+                    "tool_token": token,
+                    "system_prompt": "Answer like a pirate.",
+                }),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        events(&brain, thread, "exe_1").await;
+        let bodies = bodies.lock().unwrap();
+        let last = bodies.last().unwrap();
+        assert_eq!(last["model"], "gpt-6.1-terra", "the turn's model");
+        let instructions = developer_texts(last)
+            .into_iter()
+            .find(|text| text.contains(crate::prompt::BASE.trim()))
+            .unwrap();
+        assert!(
+            instructions.contains("Answer like a poet."),
+            "the pinned prompt"
+        );
+        assert!(!instructions.contains("pirate"), "{instructions}");
     }
 }

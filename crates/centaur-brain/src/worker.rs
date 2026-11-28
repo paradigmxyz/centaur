@@ -33,6 +33,7 @@ use tracing::{info, warn};
 use crate::{
     blocks::{self, Input},
     codemode::{self, CodeMode},
+    prompt,
 };
 
 const PG_CONNECTIONS: usize = 8;
@@ -56,8 +57,8 @@ pub struct Config {
     pub thinking: String,
     pub openai_base_url: Option<String>,
     pub anthropic_base_url: Option<String>,
-    /// Registers the Code Mode tools on every thread when set.
-    pub code_mode: Option<Arc<CodeMode>>,
+    /// The Code Mode tools every thread gets.
+    pub code_mode: Arc<CodeMode>,
 }
 
 /// A Centaur thread and the nanocode session that holds it.
@@ -65,6 +66,9 @@ pub struct Config {
 pub struct ThreadRef {
     pub key: String,
     pub session_id: String,
+    /// The custom system prompt pinned by the thread's first turn, empty for
+    /// none. `None` until then: such a thread has never had a turn.
+    pub system_prompt: Option<String>,
 }
 
 pub enum Command {
@@ -151,6 +155,7 @@ async fn run(config: Config, mut commands: mpsc::UnboundedReceiver<Command>) -> 
         code_mode: config.code_mode,
         threads: Default::default(),
         opening: Default::default(),
+        opened: watch::channel(0).0,
     });
     info!(model = %brain.default_model, thinking = ?brain.thinking, "brain ready");
     while let Some(command) = commands.recv().await {
@@ -179,10 +184,22 @@ struct Brain {
     thinking: Thinking,
     openai_base_url: Option<String>,
     anthropic_base_url: Option<String>,
-    code_mode: Option<Arc<CodeMode>>,
+    code_mode: Arc<CodeMode>,
     threads: Mutex<HashMap<String, Arc<Thread>>>,
     /// Serializes opening, so a thread is opened once.
     opening: tokio::sync::Mutex<()>,
+    /// Bumped whenever a thread opens, so an event stream waiting for a
+    /// thread's first turn looks again at once.
+    opened: watch::Sender<u64>,
+}
+
+/// How [`Brain::thread`] may open a thread that is not open yet.
+enum Open {
+    /// Only a thread whose nanocode session exists: reads never create one.
+    Existing,
+    /// Create the session if it is new, with this model. Only a submitted
+    /// turn creates a session, so it starts with the turn's model.
+    Create(Option<ModelSelection>),
 }
 
 /// One Centaur thread: a nanocode session and its durable inbox.
@@ -212,15 +229,20 @@ impl Brain {
                 let _ = reply.send(outcome);
             }
             Command::Interrupt { thread, reply } => {
-                let outcome = match self.thread(&thread, None).await {
-                    Ok(thread) => thread.interrupt().await,
+                let outcome = match self.thread(&thread, Open::Existing).await {
+                    Ok(Some(thread)) => thread.interrupt().await,
+                    Ok(None) => Ok(None),
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(outcome);
             }
             Command::Status { thread, reply } => {
-                let outcome = match self.thread(&thread, None).await {
-                    Ok(thread) => thread.status().await,
+                let outcome = match self.thread(&thread, Open::Existing).await {
+                    Ok(Some(thread)) => thread.status().await,
+                    Ok(None) => Ok(ThreadStatus {
+                        running: None,
+                        queued: Vec::new(),
+                    }),
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(outcome);
@@ -230,8 +252,20 @@ impl Brain {
                 after,
                 reply,
             } => {
-                let outcome = match self.thread(&thread, None).await {
-                    Ok(thread) => thread.page(after).await,
+                // Subscribed first, so a thread opening after the lookup
+                // still wakes the stream.
+                let opened = self.opened.subscribe();
+                let outcome = match self.thread(&thread, Open::Existing).await {
+                    Ok(Some(open)) => open.page(after).await,
+                    // No turn yet, so no events. The stream looks again when
+                    // a thread opens.
+                    Ok(None) => Ok(Page {
+                        session_id: thread.session_id.clone(),
+                        events: Vec::new(),
+                        next_cursor: after,
+                        has_more: false,
+                        wake: opened,
+                    }),
                     Err(error) => Err(error.to_string()),
                 };
                 let _ = reply.send(outcome);
@@ -259,9 +293,12 @@ impl Brain {
         };
         let model = turn.model.as_deref().and_then(|model| model.parse().ok());
         let thread = self
-            .thread(thread_ref, model)
+            .thread(thread_ref, Open::Create(model))
             .await
-            .map_err(|error| SubmitError::Internal(error.to_string()))?;
+            .map_err(|error| SubmitError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                SubmitError::Internal("the thread's system prompt is not pinned".into())
+            })?;
         let outcome = thread
             .submit(request_id, &turn.text, &thread_ref.key, steer, tool_token)
             .await?;
@@ -270,26 +307,37 @@ impl Brain {
     }
 
     /// The open thread, opening it (and resuming its pending turns) if needed.
+    /// `None` when `open` is [`Open::Existing`] and the thread has no session
+    /// yet. A thread whose system prompt is not pinned has never had a turn,
+    /// so it has none either.
     async fn thread(
         self: &Arc<Self>,
         thread: &ThreadRef,
-        model: Option<ModelSelection>,
-    ) -> Result<Arc<Thread>, Error> {
+        open: Open,
+    ) -> Result<Option<Arc<Thread>>, Error> {
         let session_id = thread.session_id.clone();
-        if let Some(thread) = self.open_thread(&session_id) {
-            return Ok(thread);
+        if let Some(open) = self.open_thread(&session_id) {
+            return Ok(Some(open));
         }
+        let Some(system_prompt) = thread.system_prompt.as_deref() else {
+            return Ok(None);
+        };
         let _opening = self.opening.lock().await;
-        if let Some(thread) = self.open_thread(&session_id) {
-            return Ok(thread);
+        if let Some(open) = self.open_thread(&session_id) {
+            return Ok(Some(open));
         }
-        let thread = Arc::new(self.open(&session_id, &thread.key, model).await?);
+        let custom = prompt::custom(Some(system_prompt));
+        let Some(thread) = self.open(&session_id, &thread.key, open, custom).await? else {
+            return Ok(None);
+        };
+        let thread = Arc::new(thread);
         self.threads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id, Arc::clone(&thread));
+        self.opened.send_modify(|opened| *opened += 1);
         thread.drive();
-        Ok(thread)
+        Ok(Some(thread))
     }
 
     fn open_thread(&self, session_id: &str) -> Option<Arc<Thread>> {
@@ -300,49 +348,62 @@ impl Brain {
             .cloned()
     }
 
+    /// Open a thread's session with its pinned custom system prompt, or
+    /// `None` for [`Open::Existing`] when the session does not exist.
     async fn open(
         &self,
         session_id: &str,
         thread_key: &str,
-        model: Option<ModelSelection>,
-    ) -> Result<Thread, Error> {
+        open: Open,
+        custom: Option<String>,
+    ) -> Result<Option<Thread>, Error> {
         let policy = Policy {
             restarts: TURN_RESTARTS,
             effects: codemode::effects(),
             ..Policy::default()
         };
         let parts = nanocode::turnlog(Arc::clone(&self.log_host), session_id, policy).await?;
+        let model = match open {
+            Open::Create(model) => model,
+            Open::Existing => {
+                if parts.store.summary(session_id).await?.is_none() {
+                    return Ok(None);
+                }
+                // An existing session keeps the model it was created with.
+                None
+            }
+        };
+        // Direct function tools. By default nanocode offers only its own code
+        // mode (`exec`, calling the tools from JavaScript) and refuses direct
+        // calls; with direct tools, the subagent tools are direct functions
+        // too.
         let mut tools = Tools::builder()
             .without_defaults()
             .effect_gate(Arc::clone(&parts.gate))
-            .cell_journals(parts.journals.clone());
-        if let Some(code_mode) = &self.code_mode {
-            // Direct function tools. By default nanocode offers only its own
-            // code mode (`exec`, calling the tools from JavaScript) and
-            // refuses direct calls; with direct tools, the subagent tools are
-            // direct functions too.
-            tools = tools.exposure(ToolExposure::DirectOnly);
-            let log: Arc<dyn codemode::Turns> = parts.log.clone();
-            for tool in code_mode.tools(thread_key, &log) {
-                tools = tools.tool(tool);
-            }
+            .cell_journals(parts.journals.clone())
+            .exposure(ToolExposure::DirectOnly);
+        let log: Arc<dyn codemode::Turns> = parts.log.clone();
+        for tool in self.code_mode.tools(thread_key, &log) {
+            tools = tools.tool(tool);
         }
         let tools = tools.build()?;
-        let code_mode = self.code_mode.is_some();
-        let mut runtime = Nanocode::builder()
-            .openai(openai(self.openai_base_url.as_deref(), code_mode)?)
-            .claude(claude(self.anthropic_base_url.as_deref(), code_mode))
+        let instructions: Arc<str> = prompt::compose(custom.as_deref()).into();
+        // With direct tools the model would also see nanocode's subagent
+        // tools; a brain turn gets exactly the Code Mode tools.
+        let runtime = Nanocode::builder()
+            .openai(openai(
+                self.openai_base_url.as_deref(),
+                Arc::clone(&instructions),
+            )?)
+            .claude(claude(self.anthropic_base_url.as_deref(), instructions))
             .tools(tools)
             .without_cua()
             .runner_management(false)
             .thinking(self.thinking)
-            .durability(parts.store.clone());
-        if code_mode {
-            // With direct tools the model would also see nanocode's subagent
-            // tools; a brain turn gets exactly the Code Mode tools.
-            runtime = runtime.without_subagents();
-        }
-        let runtime = runtime.build_async().await?;
+            .durability(parts.store.clone())
+            .without_subagents()
+            .build_async()
+            .await?;
         // Everything already in the log is durable; later events become
         // visible only once the host has committed them.
         let durable = last_seq(&parts.log).await?;
@@ -366,14 +427,18 @@ impl Brain {
         )
         .await?;
         nanocode_executor::spawn(pump);
-        info!(session_id, "opened session");
-        Ok(Thread {
+        info!(
+            session_id,
+            custom_system_prompt = custom.is_some(),
+            "opened session"
+        );
+        Ok(Some(Thread {
             session_id: session_id.to_owned(),
             inbox,
             wake,
             driving: AtomicBool::new(false),
             _runtime: runtime,
-        })
+        }))
     }
 }
 
@@ -613,9 +678,9 @@ async fn last_seq(log: &OneLog) -> Result<u64, Error> {
 }
 
 /// HTTPS SSE: the WebSocket transport does not follow a regional
-/// `OPENAI_BASE_URL`. With Code Mode, its instructions join the session's
-/// developer instructions.
-fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error> {
+/// `OPENAI_BASE_URL`. The thread's instructions follow nanocode's base system
+/// prompt as its additional (developer) instructions.
+fn openai(base_url: Option<&str>, instructions: Arc<str>) -> Result<CodexHarness, Error> {
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "OPENAI_API_KEY".to_owned());
     let mut builder = OpenAi::builder(key)
         .transport(nanocode::oai::transport::ResponsesTransport::Https)
@@ -623,34 +688,24 @@ fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error
     if let Some(base_url) = base_url {
         builder = builder.api_base_url(base_url.trim_end_matches('/'));
     }
-    let harness = CodexHarness::new(builder.build()?);
-    Ok(if code_mode {
-        harness.configure(|builder| {
-            Ok(builder.additional_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS))
-        })
-    } else {
-        harness
-    })
+    Ok(CodexHarness::new(builder.build()?)
+        .configure(move |builder| Ok(builder.additional_instructions(Arc::clone(&instructions)))))
 }
 
-/// With Code Mode, its instructions are the session's project instructions,
-/// which follow the base system prompt. That replaces the environment nanocode
+/// The thread's instructions are the session's project instructions, which
+/// follow the base system prompt. That replaces the environment nanocode
 /// would derive from the process's working directory, which the brain's
 /// agents cannot reach anyway.
-fn claude(base_url: Option<&str>, code_mode: bool) -> ClaudeHarness {
+fn claude(base_url: Option<&str>, instructions: Arc<str>) -> ClaudeHarness {
     let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "ANTHROPIC_API_KEY".to_owned());
     let base = base_url.map_or("https://api.anthropic.com/v1", |url| {
         url.trim_end_matches('/')
     });
-    let harness = ClaudeHarness::new(ClaudeClient::with_api_key(format!("{base}/messages"), key));
-    if code_mode {
-        harness.configure(|builder| {
+    ClaudeHarness::new(ClaudeClient::with_api_key(format!("{base}/messages"), key)).configure(
+        move |builder| {
             Ok(builder.environment(
-                ClaudeEnvironment::new()
-                    .project_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS),
+                ClaudeEnvironment::new().project_instructions(instructions.to_string()),
             ))
-        })
-    } else {
-        harness
-    }
+        },
+    )
 }

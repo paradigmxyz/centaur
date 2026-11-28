@@ -10,7 +10,7 @@ use centaur_console_db::areas::admin::{
     create_api_client, create_proxy, delete_api_client, delete_proxy, demote_user,
     detach_api_client_principal, disable_user, existing_role_ids, find_api_client_link,
     find_api_client_principal, make_default_api_client_principal, promote_user,
-    replace_default_roles, roles, rotate_api_client_secret, set_api_client_disabled,
+    replace_default_roles, roles, rotate_api_client_secret, set_api_client_disabled, system_prompt,
     system_setting, update_api_client, update_proxy, write_system_settings,
 };
 use sqlx::PgPool;
@@ -383,12 +383,23 @@ async fn system_settings_write_only_when_a_value_changes() {
 
     let mut values: SystemSettingValues = setting.values.clone();
     values.default_sandbox_sessions_read_enabled = !values.default_sandbox_sessions_read_enabled;
+    values.system_prompt = Some("Answer in French.".to_owned());
     write_system_settings(&fixture.pool, setting.id, &values, Some(&[role]))
         .await
         .unwrap();
     let stored = system_setting(&fixture.pool).await.unwrap();
     assert_eq!(stored.values, values);
     assert!(stored.updated_at > setting.updated_at);
+    assert_eq!(
+        system_prompt(&fixture.pool).await.unwrap().as_deref(),
+        Some("Answer in French.")
+    );
+    let mut blank = values.clone();
+    blank.system_prompt = Some("  \n".to_owned());
+    write_system_settings(&fixture.pool, setting.id, &blank, None)
+        .await
+        .unwrap();
+    assert_eq!(system_prompt(&fixture.pool).await.unwrap(), None);
     let role_row = roles(&fixture.pool)
         .await
         .unwrap()

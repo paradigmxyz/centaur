@@ -123,7 +123,7 @@ impl Args {
     /// The Code Mode turn-token signer, when
     /// `CENTAUR_CODEMODE_TOKEN_SIGNING_KEY` holds a PKCS#8 PEM Ed25519 key.
     /// Read from the environment only, never a flag, since it is a private
-    /// key. Without it `nanocode` turns run without Code Mode tools.
+    /// key. Required with `CENTAUR_BRAIN_URL`.
     pub(crate) fn codemode_token_signer(
         &self,
     ) -> Result<Option<Arc<TurnTokenSigner>>, ServerError> {
