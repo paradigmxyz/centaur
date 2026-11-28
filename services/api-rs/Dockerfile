@@ -5,7 +5,7 @@
 # Build the Console SPA: the shell and hashed assets into
 # services/console/public/spa. The runtime image serves both from disk; api-rs
 # embeds no web bundle.
-FROM docker.io/library/node:24-slim AS web
+FROM docker.io/library/node:25-slim AS web
 WORKDIR /repo
 RUN npm install -g pnpm@10.34.9
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
