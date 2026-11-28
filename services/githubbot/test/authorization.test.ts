@@ -3,6 +3,7 @@ import {
   authorAssociationFromRaw,
   DEFAULT_ALLOWED_AUTHOR_ASSOCIATIONS,
   isCommentAuthorAllowed,
+  isPrivateRepository,
   resolveAllowedAuthorAssociations,
 } from "../src/authorization";
 
@@ -74,5 +75,28 @@ describe("isCommentAuthorAllowed", () => {
     const opts = { allowedAuthorAssociations: ["contributor"] };
     expect(isCommentAuthorAllowed(raw("CONTRIBUTOR"), opts)).toBe(true);
     expect(isCommentAuthorAllowed(raw("MEMBER"), opts)).toBe(false);
+  });
+});
+
+describe("isPrivateRepository", () => {
+  type Octokit = Parameters<typeof isPrivateRepository>[0];
+  const octokit = (get: () => Promise<unknown>) =>
+    ({ rest: { repos: { get } } }) as unknown as Octokit;
+
+  test("true only for a repository GitHub reports as private", async () => {
+    expect(
+      await isPrivateRepository(octokit(async () => ({ data: { private: true } })), "o", "r"),
+    ).toBe(true);
+    expect(
+      await isPrivateRepository(octokit(async () => ({ data: { private: false } })), "o", "r"),
+    ).toBe(false);
+    expect(await isPrivateRepository(octokit(async () => ({ data: {} })), "o", "r")).toBe(false);
+  });
+
+  test("fails closed when the repository can't be read", async () => {
+    const failing = octokit(async () => {
+      throw new Error("Not Found");
+    });
+    expect(await isPrivateRepository(failing, "o", "r")).toBe(false);
   });
 });

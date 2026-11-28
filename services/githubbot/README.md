@@ -20,9 +20,10 @@ reviewer** like any other collaborator.
   diff hunk it's anchored to are injected into the turn so the agent knows exactly what it's looking
   at; for a **PR conversation thread** the agent is pointed at `gh pr view`/`gh pr diff` to fetch the
   PR itself. A 👀 reaction acks the triggering comment while the bot works, settling to 🚀 / 😕. The
-  reply is one comment: the answer with the chain-of-thought folded into a collapsed `<details>`
-  section. Mention detection is the adapter's (matches the bot account's `@username`). Only authors
-  whose GitHub `author_association` is allowed (default `OWNER` / `MEMBER` / `COLLABORATOR`) can drive
+  reply is one comment: the answer, plus the chain-of-thought folded into a collapsed `<details>`
+  section on private repositories only (it carries tool commands and their output, so a public
+  repository, or one whose visibility can't be read, gets the answer alone). Mention detection is
+  the adapter's (matches the bot account's `@username`). Only authors whose GitHub `author_association` is allowed (default `OWNER` / `MEMBER` / `COLLABORATOR`) can drive
   a turn — the agent runs in a write-capable sandbox and posts its transcript back, so untrusted
   commenters can't steer it. Widen or open it with `GITHUBBOT_ALLOWED_AUTHOR_ASSOCIATIONS` (`*` allows
   everyone, e.g. a fully-private repo). Lifecycle triggers (assignment, review-request) are already

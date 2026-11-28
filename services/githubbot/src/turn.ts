@@ -5,7 +5,8 @@ import {
 } from "@centaur/rendering";
 import type { GitHubAdapter } from "@chat-adapter/github";
 import type { Thread } from "chat";
-import { buildCommentReplyBody, CommentReplyCollector } from "./comment-bot";
+import { isPrivateRepository } from "./authorization";
+import { buildTurnReplyBody, CommentReplyCollector } from "./comment-bot";
 import { runExclusive } from "./context";
 import { resolveStickyProvider } from "./overrides";
 import {
@@ -328,16 +329,11 @@ export async function runSessionTurn(input: {
     historyForwarded: true,
     lastEventId,
   });
-  const body = result.failed
-    ? buildCommentReplyBody({
-        answer: `⚠️ I ran into an error before finishing:\n\n${result.errorText || "unknown error"}`,
-        cotLines: result.cotLines,
-      })
-    : buildCommentReplyBody({
-        answer: result.answer,
-        cotLines: result.cotLines,
-        fallback: result.fallbackText,
-      });
+  const subject = parseGithubThreadKey(threadKey);
+  const showChainOfThought = subject
+    ? await isPrivateRepository(adapter.octokit, subject.owner, subject.repo)
+    : false;
+  const body = buildTurnReplyBody(result, showChainOfThought);
   try {
     await thread.post(body);
   } catch (error) {
