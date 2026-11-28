@@ -11,8 +11,9 @@
 use std::collections::BTreeMap;
 
 use centaur_console_db::areas::admin::{
-    ProxyChange, ProxyRow, admin_proxy, create_proxy as db_create_proxy,
-    delete_proxy as db_delete_proxy, update_proxy as db_update_proxy,
+    PROXY_LIST_FROM, PROXY_LIST_ORDER, PROXY_SELECT, ProxyChange, ProxyRow, admin_proxy,
+    create_proxy as db_create_proxy, delete_proxy as db_delete_proxy,
+    update_proxy as db_update_proxy,
 };
 use centaur_console_db::areas::principals::{
     GrantWrite, Grantee as DbGrantee, PermissionWrite, PrincipalError, PrincipalWrite, RoleWrite,
@@ -332,6 +333,25 @@ pub(crate) async fn delete_proxy(pool: &PgPool, id: &str) -> Result<()> {
     db_delete_proxy(pool, proxy_id)
         .await
         .map_err(IronControlError::ConsoleDb)
+}
+
+/// Proxies whose labels contain every entry in `labels`. The tokens are never
+/// returned: this is a sweep/reconciliation listing, not a credential read.
+pub(crate) async fn list_proxies_by_labels(
+    pool: &PgPool,
+    labels: &BTreeMap<String, String>,
+) -> Result<Vec<Proxy>> {
+    let rows: Vec<ProxyRow> = sqlx::query_as(&format!(
+        "{PROXY_SELECT} {PROXY_LIST_FROM} {PROXY_LIST_ORDER}"
+    ))
+    .bind(None::<i64>)
+    .bind(string_map_value(labels))
+    .fetch_all(pool)
+    .await
+    .map_err(centaur_console_db::Error::from)?;
+    rows.into_iter()
+        .map(|row| proxy_from_row(row, None))
+        .collect()
 }
 
 async fn resolve_principal(pool: &PgPool, reference: Option<&str>) -> Result<Option<i64>> {

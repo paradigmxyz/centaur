@@ -26,6 +26,7 @@ bytes = { version = "1", features = ["serde"] }
 centaur-api-server = { path = "crates/centaur-api-server" }
 centaur-codemode-protocol = { path = "crates/centaur-codemode-protocol" }
 centaur-console-db = { path = "crates/centaur-console-db" }
+centaur-hands = { path = "crates/centaur-hands" }
 centaur-iron-control = { path = "crates/centaur-iron-control" }
 centaur-iron-proxy = { path = "crates/centaur-iron-proxy" }
 centaur-sandbox-core = { path = "crates/centaur-sandbox-core" }

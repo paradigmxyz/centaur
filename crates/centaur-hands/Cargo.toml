@@ -1,0 +1,30 @@
+[package]
+name = "centaur-hands"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Warm pool and lease control plane for Centaur hands"
+
+[dependencies]
+async-trait.workspace = true
+centaur-iron-control.workspace = true
+centaur-sandbox-core.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+centaur-session-sqlx.workspace = true
+
+[lints]
+workspace = true

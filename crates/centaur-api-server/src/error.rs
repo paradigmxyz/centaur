@@ -42,6 +42,21 @@ pub enum ApiError {
     Sqlx(#[from] sqlx::Error),
 }
 
+impl From<centaur_hands::HandsError> for ApiError {
+    fn from(error: centaur_hands::HandsError) -> Self {
+        match error {
+            centaur_hands::HandsError::Store(error) => Self::Sqlx(error),
+            centaur_hands::HandsError::NotFound => Self::NotFound("no such hand lease".to_owned()),
+            centaur_hands::HandsError::Capacity => {
+                Self::ServiceUnavailable("all hands are in use".to_owned())
+            }
+            centaur_hands::HandsError::Invalid(message) => Self::BadRequest(message),
+            centaur_hands::HandsError::NotReady(message) => Self::ServiceUnavailable(message),
+            centaur_hands::HandsError::Backend(message) => Self::Internal(message),
+        }
+    }
+}
+
 impl From<ThreadKeyError> for ApiError {
     fn from(error: ThreadKeyError) -> Self {
         Self::BadRequest(error.to_string())

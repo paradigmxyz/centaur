@@ -122,7 +122,16 @@ spec:
             # with the public key; it cannot mint them.
             - name: CENTAUR_CODEMODE_EXECUTOR_URL
               value: {{ printf "http://%s:8790" (include "centaur.codemodeExecutorName" .) | quote }}
+{{- end }}
+{{- if or .Values.codemode.executor.enabled .Values.hands.enabled }}
 {{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_PUBLIC_KEY" "key" "token-public-key") | indent 12 }}
+{{- end }}
+{{- if .Values.hands.enabled }}
+            # Hands: check out a warm pod for this turn and release it on idle.
+            - name: CENTAUR_HANDS_URL
+              value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "api-rs")) .Values.apiRs.port | quote }}
+            - name: CENTAUR_HANDS_IDLE_SECONDS
+              value: {{ .Values.hands.idleSeconds | quote }}
 {{- end }}
             - name: RUST_LOG
               value: info

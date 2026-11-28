@@ -9,17 +9,14 @@ description = "Wire contract between api-rs, centaur-brain, and the Code Mode ex
 
 [features]
 # Test helpers (`token::testing`) for crates that exercise turn tokens.
-testing = ["dep:aws-lc-rs"]
+testing = []
 
 [dependencies]
-aws-lc-rs = { version = "1", optional = true }
+aws-lc-rs = "1"
 jsonwebtoken = { workspace = true, features = ["use_pem"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-aws-lc-rs = "1"
 
 [lints]
 workspace = true

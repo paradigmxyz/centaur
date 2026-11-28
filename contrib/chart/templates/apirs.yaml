@@ -1,4 +1,10 @@
 {{- if .Values.apiRs.enabled }}
+{{- if .Values.hands.enabled }}
+{{- $handsNamespace := .Values.hands.namespace | default "" | trim }}
+{{- if and $handsNamespace (ne $handsNamespace .Release.Namespace) }}
+{{- fail (printf "hands.namespace must be empty or the release namespace %q: hand pods use the release namespace's RBAC and NetworkPolicies" .Release.Namespace) }}
+{{- end }}
+{{- end }}
 {{- $console := include "centaur.consoleValues" . | fromYaml -}}
 {{- $companyContext := include "centaur.companyContextValues" . | fromYaml -}}
 {{- $mcpPublicUrl := default .Values.slackbotv2.mcpPublicUrl .Values.apiRs.mcpPublicUrl -}}
@@ -115,7 +121,7 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "delete", "get"]
+    verbs: ["create", "delete", "get", "list", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
@@ -354,10 +360,48 @@ spec:
             - name: CENTAUR_BRAIN_URL
               value: {{ printf "http://%s:%v" (include "centaur.componentName" (dict "root" . "component" "brain")) .Values.brain.port | quote }}
 {{- end }}
-{{- if .Values.codemode.executor.enabled }}
+{{- if or .Values.codemode.executor.enabled .Values.hands.enabled }}
             # Signs the turn token api-rs hands the brain with every nanocode
-            # turn; only api-rs holds this key.
+            # turn; hands leases verify the same token. Only api-rs holds this key.
 {{ include "centaur.codemodeSecretEnv" (dict "root" . "name" "CENTAUR_CODEMODE_TOKEN_SIGNING_KEY" "key" "token-signing-key") | indent 12 }}
+{{- end }}
+{{- if .Values.hands.enabled }}
+            - name: CENTAUR_HANDS_ENABLED
+              value: "true"
+            - name: CENTAUR_HANDS_IMAGE
+              value: {{ printf "%s:%s" .Values.hands.image.repository .Values.hands.image.tag | quote }}
+            - name: CENTAUR_HANDS_IMAGE_PULL_POLICY
+              value: {{ .Values.hands.image.pullPolicy | quote }}
+            - name: CENTAUR_HANDS_POOL_DEFAULT_SIZE
+              value: {{ .Values.hands.pool.default.size | quote }}
+            - name: CENTAUR_HANDS_POOL_LARGE_SIZE
+              value: {{ .Values.hands.pool.large.size | quote }}
+{{- if .Values.hands.resources.default }}
+            - name: CENTAUR_HANDS_RESOURCES_DEFAULT
+              value: {{ toJson .Values.hands.resources.default | quote }}
+{{- end }}
+{{- if .Values.hands.resources.large }}
+            - name: CENTAUR_HANDS_RESOURCES_LARGE
+              value: {{ toJson .Values.hands.resources.large | quote }}
+{{- end }}
+            - name: CENTAUR_HANDS_LEASE_SECONDS
+              value: {{ .Values.hands.leaseSeconds | quote }}
+            - name: CENTAUR_HANDS_IDLE_SECONDS
+              value: {{ .Values.hands.idleSeconds | quote }}
+            - name: CENTAUR_HANDS_MAX_HANDS
+              value: {{ .Values.hands.maxHands | quote }}
+            - name: CENTAUR_HANDS_NAMESPACE
+              value: {{ default .Release.Namespace .Values.hands.namespace | quote }}
+            - name: CENTAUR_HANDS_REPLENISH_INTERVAL_SECONDS
+              value: {{ .Values.hands.replenishIntervalSeconds | quote }}
+            - name: CENTAUR_HANDS_SWEEP_INTERVAL_SECONDS
+              value: {{ .Values.hands.sweepIntervalSeconds | quote }}
+            - name: CENTAUR_HANDS_COLD_CREATE_TIMEOUT_SECONDS
+              value: {{ .Values.hands.coldCreateTimeoutSeconds | quote }}
+            - name: CENTAUR_HANDS_WARMING_TIMEOUT_SECONDS
+              value: {{ .Values.hands.warmingTimeoutSeconds | quote }}
+            - name: CENTAUR_HANDS_ORPHAN_GRACE_SECONDS
+              value: {{ .Values.hands.orphanGraceSeconds | quote }}
 {{- end }}
 {{- if not (hasKey .Values.apiRs.extraEnv "KUBERNETES_WORKFLOW_DIRS") }}
             - name: KUBERNETES_WORKFLOW_DIRS

@@ -8,8 +8,11 @@
 // A reply can instead run a shell command first: the model answers with a
 // call to the harness's shell tool, then with its text once the tool's output
 // comes back. A reply with a `cell` calls the Code Mode tool `centaur_execute`
-// with that JavaScript instead. Commands can reach /_e2e/echo/<match> on the provider hosts,
-// which records the X-E2E-Credential header iron-proxy injected.
+// with that JavaScript instead. A reply with `calls` makes a sequence of tool
+// calls, each only after the previous one's output comes back, and answers with
+// its text when they are done; a call can be a native function tool, a shell
+// command, or a Code Mode cell. Commands can reach /_e2e/echo/<match> on the
+// provider hosts, which records the X-E2E-Credential header iron-proxy injected.
 //
 // Provider traffic: HTTPS on 8443 (cert for the provider hostnames).
 // Test control:     HTTP on 8080 (port-forwarded to the test runner).
@@ -17,7 +20,28 @@ import { randomUUID } from 'node:crypto'
 
 /** A provider error to answer with instead of text: an HTTP error from Anthropic, a failed response from OpenAI. */
 type ProviderError = { status: number; type: string; code?: string; message: string }
-type Reply = { match: string; text: string; delayMs?: number; error?: ProviderError; run?: string; cell?: string }
+/** One tool call in a scripted sequence. */
+type ScriptedCall = {
+  /** A native function tool to call. */
+  tool?: string
+  /** Its arguments; defaults to an empty object. */
+  arguments?: unknown
+  /** A shell command to run through the harness's shell or freeform exec tool. */
+  run?: string
+  /** A Code Mode cell to run through `centaur_execute`. */
+  cell?: string
+  /** Hold this call back before answering it. */
+  delayMs?: number
+}
+type Reply = {
+  match: string
+  text: string
+  delayMs?: number
+  error?: ProviderError
+  run?: string
+  cell?: string
+  calls?: ScriptedCall[]
+}
 /** A request a tool command made to the echo path, and the test credential it carried. */
 type Echo = { at: string; match: string; credential?: string }
 type Recorded = {
@@ -151,12 +175,10 @@ function openaiEvents(
   const text = reply?.text ?? 'ok'
   const responseId = `resp_${randomUUID()}`
   const itemId = `msg_${randomUUID()}`
-  const answered = hasToolOutput(body.input)
-  const toolCall = reply?.run && !answered
-    ? shellCall([...(body.tools ?? []), ...declaredTools(conversation)], reply.run)
-    : reply?.cell && !answered
-      ? cellCall([...(body.tools ?? []), ...declaredTools(conversation)], reply.cell)
-      : undefined
+  const tools = [...(body.tools ?? []), ...declaredTools(conversation)]
+  const steps = scriptedCalls(reply)
+  const step = steps[answeredCalls(conversation)]
+  const toolCall = step ? scriptedCall(tools, step) : undefined
   if (toolCall) {
     const output = (status: string) => ({
       id: responseId, object: 'response', model: body.model, status, output: [toolCall],
@@ -173,7 +195,7 @@ function openaiEvents(
         { type: 'response.output_item.done', output_index: 0, item: toolCall },
         { type: 'response.completed', response: output('completed') }
       ].map((event, sequence) => ({ ...event, sequence_number: sequence })),
-      delayMs: 0
+      delayMs: step?.delayMs ?? reply?.delayMs ?? 0
     }
   }
   const message = (status: string, content: unknown[]) => ({
@@ -264,9 +286,46 @@ function record(
   return reply
 }
 
-/** Whether this request returns the output of a tool call the model made. */
-function hasToolOutput(input: unknown): boolean {
-  return Array.isArray(input) && input.some((item: any) => String(item?.type ?? '').endsWith('_call_output'))
+/** The calls a reply scripts, in order. `run` and `cell` are single-call shorthand. */
+function scriptedCalls(reply: Reply | undefined): ScriptedCall[] {
+  if (!reply) return []
+  if (reply.calls) return reply.calls
+  if (reply.run !== undefined) return [{ run: reply.run }]
+  if (reply.cell !== undefined) return [{ cell: reply.cell }]
+  return []
+}
+
+/**
+ * How many of a scripted sequence's calls have been answered. Tool outputs of
+ * earlier turns are before the newest user message; this turn's follow them.
+ */
+function answeredCalls(conversation: unknown[]): number {
+  let lastUser = -1
+  conversation.forEach((item: any, index) => {
+    if (item?.role === 'user') lastUser = index
+  })
+  return conversation
+    .slice(lastUser + 1)
+    .filter((item: any) => String(item?.type ?? '').endsWith('_call_output')).length
+}
+
+/** One scripted call, in the shape its harness expects. */
+function scriptedCall(tools: any[], step: ScriptedCall): Record<string, unknown> {
+  if (step.tool !== undefined) return functionCall(tools, step.tool, step.arguments ?? {})
+  if (step.run !== undefined) return shellCall(tools, step.run)
+  if (step.cell !== undefined) return cellCall(tools, step.cell)
+  throw new Error(`a scripted call names no tool, run, or cell: ${JSON.stringify(step)}`)
+}
+
+/** A call to a native function tool the harness declared. */
+function functionCall(tools: any[], name: string, args: unknown): Record<string, unknown> {
+  if (!tools.some(tool => tool?.name === name)) {
+    log('model_server_no_tool', { tool: name, tools: tools.map(tool => tool?.name) })
+  }
+  return {
+    type: 'function_call', id: `fc_${randomUUID()}`, call_id: `call_${randomUUID()}`, status: 'completed',
+    name, arguments: JSON.stringify(args)
+  }
 }
 
 /**

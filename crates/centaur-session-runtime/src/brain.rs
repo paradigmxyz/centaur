@@ -127,6 +127,8 @@ impl BrainClient {
     ///
     /// `tool_token` is the turn's Code Mode token: the brain forwards it with
     /// every Code Mode call, and without one the turn has no Code Mode tools.
+    /// `hands_token` is the separate credential for hand leases; it is never
+    /// accepted by the Code Mode executor or tenancy proxy.
     pub async fn submit_turn(
         &self,
         thread_key: &ThreadKey,
@@ -134,6 +136,7 @@ impl BrainClient {
         input_line: Value,
         steer: bool,
         tool_token: Option<&str>,
+        hands_token: Option<&str>,
     ) -> Result<TurnSubmitted, BrainError> {
         let response = self
             .control
@@ -143,6 +146,7 @@ impl BrainClient {
                 input_line,
                 steer,
                 tool_token,
+                hands_token,
             })
             .send()
             .await?;
@@ -258,6 +262,10 @@ struct SubmitTurn<'a> {
     /// principal; absent when the turn gets no Code Mode tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_token: Option<&'a str>,
+    /// The turn's hands token, with the same grant as `tool_token` but the
+    /// `centaur-hands` audience. Absent when hands are disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hands_token: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -501,7 +509,7 @@ mod tests {
         });
 
         let submitted = client
-            .submit_turn(&thread_key(), "exe_abc", line.clone(), false, None)
+            .submit_turn(&thread_key(), "exe_abc", line.clone(), false, None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -516,7 +524,7 @@ mod tests {
 
         // Resubmitting the same request id is an idempotent replay.
         let replay = client
-            .submit_turn(&thread_key(), "exe_abc", line, false, Some("token"))
+            .submit_turn(&thread_key(), "exe_abc", line, false, Some("token"), None)
             .await
             .unwrap();
         assert!(!replay.created);
@@ -548,6 +556,7 @@ mod tests {
                 "exe_abc",
                 json!({"type": "user"}),
                 false,
+                None,
                 None,
             )
             .await

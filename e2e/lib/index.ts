@@ -28,11 +28,45 @@ export type Channel = { id: string; name: string }
 export type ProviderError = { status: number; type: string; code?: string; message: string }
 
 /**
+ * One tool call in a scripted sequence. A `tool` is a native function tool; a
+ * `run` is a shell command through the harness's shell or freeform exec tool;
+ * a `cell` is a Code Mode cell through `centaur_execute`.
+ */
+export type ScriptedCall =
+  | { run: string; delayMs?: number }
+  | { cell: string; delayMs?: number }
+  | { tool: string; arguments?: unknown; delayMs?: number }
+
+/**
  * A scripted model answer, matched by a token placed in the user's message.
  * `run` first has the harness run a shell command through its shell tool;
- * `cell` first has it run a Code Mode cell through `centaur_execute`.
+ * `cell` first has it run a Code Mode cell through `centaur_execute`; `calls`
+ * makes a sequence of tool calls, one after another.
  */
-export type Script = { token: string; text: string; delayMs?: number; error?: ProviderError; run?: string; cell?: string }
+export type Script = {
+  token: string
+  text: string
+  delayMs?: number
+  error?: ProviderError
+  run?: string
+  cell?: string
+  calls?: ScriptedCall[]
+}
+
+/** One `hand_boxes` row: a warm, leased, or deleting hand. */
+export type HandBox = {
+  id: string
+  size: string
+  state: string
+  pod_name: string
+  pod_ip: string | null
+  lease_id: string | null
+  thread_key: string | null
+  principal: string | null
+  requester: string | null
+  leased_at: Date | null
+  lease_expires_at: Date | null
+}
 
 export type Execution = { execution_id: string; status: string; error: string | null }
 
@@ -160,6 +194,13 @@ export const model = {
   runsCell(code: string, text = 'Ran the cell.'): Script {
     return { token: `e2e-${randomUUID().slice(0, 8)}`, text, cell: code }
   },
+  /**
+   * Scripts the model to make a sequence of tool calls, each after the previous
+   * one's output, then answer with `text`.
+   */
+  sequence(calls: ScriptedCall[], text = 'Done.'): Script {
+    return { token: `e2e-${randomUUID().slice(0, 8)}`, text, calls }
+  },
   /** What the model received as the output of a script's tool call, verbatim. */
   async toolOutput(script: Script): Promise<string> {
     for (const { body } of await modelRequests(script.token)) {
@@ -169,6 +210,22 @@ export const model = {
       if (outputs.length > 0) return outputs.join('\n')
     }
     throw new Error(`the model received no tool output for script ${script.token}`)
+  },
+  /**
+   * Every tool output the model received for a script, in call order. A
+   * sequence's outputs arrive across several requests, and a request may replay
+   * earlier ones, so they are deduplicated by call id.
+   */
+  async toolOutputs(script: Script): Promise<string[]> {
+    const outputs = new Map<string, string>()
+    for (const { body } of await modelRequests(script.token)) {
+      for (const [index, item] of (Array.isArray(body.input) ? body.input : []).entries()) {
+        if (!String(item?.type ?? '').endsWith('_call_output')) continue
+        const output = typeof item.output === 'string' ? item.output : contentText(item.output)
+        outputs.set(String(item.call_id ?? `${index}:${output}`), output)
+      }
+    }
+    return [...outputs.values()]
   },
   /** What the harness's shell tool returned for a `runs` script's command, as the model received it. */
   async commandOutput(script: Script): Promise<string> {
@@ -266,6 +323,13 @@ export const cluster = {
   async killSandbox(sandboxId: string): Promise<void> {
     await kubectl({}, 'delete', 'pod', sandboxId, '--grace-period=0', '--force')
   },
+  /** A pod as the cluster holds it now, or undefined once it is gone. */
+  async pod(name: string): Promise<{ name: string; phase: string; labels: Record<string, string> } | undefined> {
+    const out = await kubectl({}, 'get', 'pod', name, '--ignore-not-found', '-o', 'json')
+    if (!out) return undefined
+    const pod = JSON.parse(out)
+    return { name: pod.metadata?.name ?? name, phase: pod.status?.phase ?? 'Unknown', labels: pod.metadata?.labels ?? {} }
+  },
   /** Restarts a release component and waits for the new pods to be ready. */
   async restart(component: string): Promise<void> {
     // The new pods replace the old ones and their logs; keep them for failures earlier in the run.
@@ -298,6 +362,28 @@ export const cluster = {
       '-l', `centaur.ai/sandbox-id=${sandboxId}`, '-o', 'name'
     )
     return out.split('\n').filter(Boolean)
+  }
+}
+
+export const hands = {
+  /** A thread's live lease: its durable `hand_boxes` row while it is leased. */
+  async lease(thread: Thread): Promise<HandBox | undefined> {
+    const [row]: HandBox[] = await db`
+      select id, size, state, pod_name, pod_ip, lease_id, thread_key, principal, requester,
+        leased_at, lease_expires_at
+      from hand_boxes
+      where thread_key = ${thread.key} and state = 'leased'
+      order by leased_at desc limit 1`
+    return row
+  },
+  /** Hands of one size in a state: `ready` is the warm pool. */
+  async boxes(state: string, size = 'default'): Promise<HandBox[]> {
+    return db`
+      select id, size, state, pod_name, pod_ip, lease_id, thread_key, principal, requester,
+        leased_at, lease_expires_at
+      from hand_boxes
+      where state = ${state} and size = ${size}
+      order by created_at`
   }
 }
 
@@ -1007,7 +1093,7 @@ async function registerScript(script: Script): Promise<void> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       match: script.token, text: script.text, delayMs: script.delayMs, error: script.error, run: script.run,
-      cell: script.cell
+      cell: script.cell, calls: script.calls
     })
   })
   if (!response.ok) throw new Error(`registering the model script failed: ${response.status}`)

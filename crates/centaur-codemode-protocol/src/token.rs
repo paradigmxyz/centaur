@@ -6,14 +6,22 @@
 //! the public key, so they can verify a token but never mint one: a confused
 //! or compromised agent loop cannot act for a principal it was not handed.
 
+use aws_lc_rs::{
+    encoding::AsDer,
+    signature::{Ed25519KeyPair, KeyPair},
+};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const ISSUER: &str = "centaur-api";
 pub const AUDIENCE: &str = "centaur-codemode";
+/// The audience of the hands token: a distinct credential so the Code Mode
+/// turn token cannot authorize hand leases, even though both are forwarded to
+/// the brain.
+pub const HANDS_AUDIENCE: &str = "centaur-hands";
 /// How long a turn token is valid: the longest a turn is expected to run.
-/// A steer re-mints it, so a turn that keeps being steered never runs out.
+/// Steers reuse the running turn's token, which a new turn mints again.
 pub const TTL_SECS: i64 = 60 * 60;
 /// Clock skew tolerated between api-rs and the verifiers.
 const LEEWAY_SECS: u64 = 30;
@@ -80,6 +88,7 @@ pub enum TokenError {
 #[derive(Clone)]
 pub struct TurnTokenSigner {
     key: EncodingKey,
+    verifier: TurnTokenVerifier,
 }
 
 impl std::fmt::Debug for TurnTokenSigner {
@@ -91,16 +100,55 @@ impl std::fmt::Debug for TurnTokenSigner {
 impl TurnTokenSigner {
     /// From a PKCS#8 PEM Ed25519 private key.
     pub fn from_pem(pem: &[u8]) -> Result<Self, TokenError> {
-        EncodingKey::from_ed_pem(pem)
-            .map(|key| Self { key })
-            .map_err(|error| TokenError::Key(error.to_string()))
+        let key =
+            EncodingKey::from_ed_pem(pem).map_err(|error| TokenError::Key(error.to_string()))?;
+        let pair = Ed25519KeyPair::from_pkcs8(key.as_bytes())
+            .map_err(|error| TokenError::Key(error.to_string()))?;
+        let public_der = pair
+            .public_key()
+            .as_der()
+            .map_err(|error| TokenError::Key(error.to_string()))?;
+        let verifier = TurnTokenVerifier {
+            key: DecodingKey::from_ed_der(public_der.as_ref()),
+            audience: AUDIENCE.to_owned(),
+        };
+        Ok(Self { key, verifier })
     }
 
-    /// Mint a token for `grant`, valid from `now` (unix seconds) for [`TTL_SECS`].
+    /// A verifier for tokens this signer mints, derived from the private key's
+    /// public half. api-rs uses this for its own protected routes so it needs
+    /// no second copy of the deployment key pair.
+    #[must_use]
+    pub fn verifier(&self) -> TurnTokenVerifier {
+        self.verifier.clone()
+    }
+
+    /// A verifier that accepts only tokens minted for `audience`.
+    #[must_use]
+    pub fn verifier_for(&self, audience: &str) -> TurnTokenVerifier {
+        TurnTokenVerifier {
+            key: self.verifier.key.clone(),
+            audience: audience.to_owned(),
+        }
+    }
+
+    /// Mint a Code Mode turn token for `grant`, valid from `now` (unix
+    /// seconds) for [`TTL_SECS`].
     pub fn sign(&self, grant: &TurnGrant, now: i64) -> Result<(String, TurnClaims), TokenError> {
+        self.sign_for(grant, now, AUDIENCE)
+    }
+
+    /// Mint a token for `grant` with an explicit audience. The claims and TTL
+    /// are the same as a turn token; only the audience differs.
+    pub fn sign_for(
+        &self,
+        grant: &TurnGrant,
+        now: i64,
+        audience: &str,
+    ) -> Result<(String, TurnClaims), TokenError> {
         let claims = TurnClaims {
             iss: ISSUER.to_owned(),
-            aud: AUDIENCE.to_owned(),
+            aud: audience.to_owned(),
             sub: grant.principal.clone(),
             requester: grant.requester.clone(),
             thread_key: grant.thread_key.clone(),
@@ -119,6 +167,7 @@ impl TurnTokenSigner {
 #[derive(Clone)]
 pub struct TurnTokenVerifier {
     key: DecodingKey,
+    audience: String,
 }
 
 impl std::fmt::Debug for TurnTokenVerifier {
@@ -131,7 +180,10 @@ impl TurnTokenVerifier {
     /// From an SPKI PEM Ed25519 public key.
     pub fn from_pem(pem: &[u8]) -> Result<Self, TokenError> {
         DecodingKey::from_ed_pem(pem)
-            .map(|key| Self { key })
+            .map(|key| Self {
+                key,
+                audience: AUDIENCE.to_owned(),
+            })
             .map_err(|error| TokenError::Key(error.to_string()))
     }
 
@@ -139,7 +191,7 @@ impl TurnTokenVerifier {
     pub fn verify(&self, token: &str) -> Result<TurnClaims, TokenError> {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[ISSUER]);
-        validation.set_audience(&[AUDIENCE]);
+        validation.set_audience(&[self.audience.as_str()]);
         validation.set_required_spec_claims(&["iss", "aud", "exp", "sub"]);
         validation.leeway = LEEWAY_SECS;
         let data = jsonwebtoken::decode::<TurnClaims>(token, &self.key, &validation)
@@ -266,6 +318,45 @@ mod tests {
         assert!(
             verifier.verify(&parts.join(".")).is_err(),
             "a tampered token"
+        );
+    }
+
+    #[test]
+    fn derives_a_verifier_from_the_signing_key() {
+        let (private, _) = testing::pair();
+        let signer = TurnTokenSigner::from_pem(private.as_bytes()).expect("signer");
+        let (token, claims) = signer.sign(&grant(), now()).expect("sign");
+        assert_eq!(signer.verifier().verify(&token).expect("verify"), claims);
+    }
+
+    #[test]
+    fn hands_tokens_have_a_distinct_audience_and_cannot_use_the_codemode_verifier() {
+        let (private, _) = testing::pair();
+        let signer = TurnTokenSigner::from_pem(private.as_bytes()).expect("signer");
+        let (hands, claims) = signer
+            .sign_for(&grant(), now(), HANDS_AUDIENCE)
+            .expect("sign hands token");
+        assert_eq!(claims.aud, HANDS_AUDIENCE);
+        assert_eq!(claims.exp - claims.iat, TTL_SECS);
+        assert!(
+            signer.verifier().verify(&hands).is_err(),
+            "the Code Mode verifier rejects a hands token"
+        );
+        assert_eq!(
+            signer
+                .verifier_for(HANDS_AUDIENCE)
+                .verify(&hands)
+                .expect("hands verifier accepts its token"),
+            claims
+        );
+
+        let (codemode, _) = signer.sign(&grant(), now()).expect("sign turn token");
+        assert!(
+            signer
+                .verifier_for(HANDS_AUDIENCE)
+                .verify(&codemode)
+                .is_err(),
+            "the hands verifier rejects a Code Mode turn token"
         );
     }
 

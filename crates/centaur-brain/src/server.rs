@@ -77,6 +77,11 @@ struct SubmitRequest {
     /// retry of a request, which must not look like a different turn.
     #[serde(default)]
     tool_token: Option<String>,
+    /// The turn's hands token, a separate token for the lease API. The brain
+    /// carries it without verifying it; the lease API does that, so the brain
+    /// needs no hands key and cannot widen the token's audience.
+    #[serde(default)]
+    hands_token: Option<String>,
 }
 
 async fn submit(
@@ -88,6 +93,10 @@ async fn submit(
         return error(StatusCode::BAD_REQUEST, "request_id is required");
     }
     let tool_token = verified_token(&state, &thread_key, request.tool_token.as_deref());
+    let hands_token = carried_token(
+        request.hands_token.as_deref(),
+        tool_token.as_ref().map(|token| token.expires_at),
+    );
     let thread = match state.thread(thread_key).await {
         Ok(thread) => thread,
         Err(response) => return *response,
@@ -98,6 +107,7 @@ async fn submit(
         input_line: request.input_line,
         steer: request.steer,
         tool_token,
+        hands_token,
         reply,
     })
     .await;
@@ -149,6 +159,31 @@ fn verified_token(state: &AppState, thread_key: &str, token: Option<&str>) -> Op
         token: token.to_owned(),
         expires_at: claims.exp,
     })
+}
+
+/// A token the brain carries for another service, with its expiry when the
+/// token reveals one.
+///
+/// The hands token is deliberately not verified here: the lease API is its
+/// only audience and verifies it. Reading the unverified `exp` is local
+/// bookkeeping so a lease call with a dead token is refused before the
+/// network; `fallback` is the companion turn token's expiry, since api-rs
+/// mints both from the same grant and TTL.
+fn carried_token(token: Option<&str>, fallback: Option<i64>) -> Option<TurnToken> {
+    let token = token.map(str::trim).filter(|token| !token.is_empty())?;
+    Some(TurnToken {
+        token: token.to_owned(),
+        expires_at: unverified_expiry(token).or(fallback).unwrap_or(i64::MAX),
+    })
+}
+
+/// The `exp` claim of a JWT without checking its signature or audience.
+fn unverified_expiry(token: &str) -> Option<i64> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("exp").and_then(Value::as_i64)
 }
 
 async fn status(State(state): State<AppState>, Path(thread_key): Path<String>) -> Response {
@@ -348,8 +383,13 @@ mod tests {
         client: reqwest::Client,
     }
 
-    /// A brain on an in-memory log, with Code Mode when given its URL.
-    async fn brain_with(verify: bool, model_url: &str, code_mode_url: Option<&str>) -> Brain {
+    /// A brain on an in-memory log, with Code Mode and hands when given theirs.
+    async fn brain_with(
+        verify: bool,
+        model_url: &str,
+        code_mode_url: Option<&str>,
+        hands: Option<std::sync::Arc<crate::hands::Hands>>,
+    ) -> Brain {
         let (private, public) = keys::pair();
         let (commands, receiver) = mpsc::unbounded_channel();
         let code_mode = code_mode_url.map(|url| {
@@ -365,6 +405,7 @@ mod tests {
         });
         worker::spawn(
             worker::Config {
+                hands,
                 database_url: None,
                 default_model: "luna".into(),
                 thinking: "low".into(),
@@ -431,6 +472,36 @@ mod tests {
             .as_secs() as i64
     }
 
+    /// The hands token is carried, not verified here: its expiry is read
+    /// locally when present, and a token that reveals none still rides along.
+    #[test]
+    fn a_hands_token_is_carried_with_its_expiry() {
+        let (private, _) = keys::pair();
+        let signer = TurnTokenSigner::from_pem(private.as_bytes()).unwrap();
+        let grant = TurnGrant {
+            principal: "prn_channel".into(),
+            requester: None,
+            thread_key: "slack:T:C:1".into(),
+            execution_id: "exe_1".into(),
+            tools: ToolPolicy::default(),
+        };
+        let (token, claims) = signer.sign(&grant, now()).unwrap();
+        let carried = carried_token(Some(&token), None).unwrap();
+        assert_eq!(carried.token, token);
+        assert_eq!(carried.expires_at, claims.exp);
+        assert!(carried_token(Some("  "), Some(claims.exp)).is_none());
+        assert_eq!(
+            carried_token(Some("opaque"), Some(claims.exp))
+                .unwrap()
+                .expires_at,
+            claims.exp
+        );
+        assert_eq!(
+            carried_token(Some("opaque"), None).unwrap().expires_at,
+            i64::MAX
+        );
+    }
+
     /// A brain whose model runs one cell per turn, on a mock executor.
     async fn brain_with_cells(
         verify: bool,
@@ -453,7 +524,7 @@ mod tests {
         .await;
         let (model_url, bodies) = model_server(gate).await;
         (
-            brain_with(verify, &model_url, Some(&executor)).await,
+            brain_with(verify, &model_url, Some(&executor), None).await,
             seen,
             bodies,
         )
@@ -505,6 +576,78 @@ mod tests {
         let stream = events(&brain, thread, "exe_1").await;
         assert!(stream.contains("The answer is 42."), "{stream}");
         assert_eq!(seen.lock().unwrap()[0].1, format!("Bearer {first}"));
+    }
+
+    /// With hands on, a thread's model sees the hand tools, nanocode's code
+    /// mode, and instructions that explain hands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn hand_tools_and_instructions_reach_the_model_only_when_enabled() {
+        use crate::hands::tests::{Seen, fake_api};
+        let seen = Seen::default();
+        let api = fake_api(None, 404, seen.clone()).await;
+        let hands = std::sync::Arc::new(
+            crate::hands::Hands::new(
+                &format!("http://{api}"),
+                Duration::from_secs(600),
+                tokio::runtime::Handle::current(),
+            )
+            .unwrap(),
+        );
+        use crate::codemode::tests::{Seen as ExecutorSeen, serve};
+        let executor_seen = ExecutorSeen::default();
+        let executor = serve(
+            vec![(
+                "/v1/exec",
+                200,
+                json!({"ok": true, "result": 1, "logs": []}),
+            )],
+            &executor_seen,
+        )
+        .await;
+        let (model_url, bodies) = model_server(None).await;
+        let brain = brain_with(true, &model_url, None, Some(hands)).await;
+        let thread = "slack:T:C:11";
+        let (token, _) = brain.token(thread, now());
+        let (status, body) = brain.submit(thread, "exe_1", Some(&token)).await;
+        assert_eq!(status, 200, "{body}");
+        let stream = events(&brain, thread, "exe_1").await;
+        assert!(stream.contains("The answer is 42."), "{stream}");
+
+        // nanocode sends the catalog as a namespaced developer item.
+        let request = bodies.lock().unwrap()[0].to_string();
+        for name in [
+            crate::hands::CHECKOUT,
+            crate::hands::RELEASE,
+            "exec",
+            "wait",
+        ] {
+            let definition = format!("\"name\":\"{name}\"");
+            assert!(
+                request.contains(&definition),
+                "{name} is offered: {request}"
+            );
+        }
+        assert!(request.contains("Hands: this conversation"), "{request}");
+
+        // Without hands, the same thread gets the Code Mode tools and neither
+        // nanocode's code mode nor the hand tools.
+        let brain = brain_with(true, &model_url, Some(&executor), None).await;
+        let thread = "slack:T:C:12";
+        let (token, _) = brain.token(thread, now());
+        let (status, body) = brain.submit(thread, "exe_1", Some(&token)).await;
+        assert_eq!(status, 200, "{body}");
+        let stream = events(&brain, thread, "exe_1").await;
+        assert!(stream.contains("The answer is 42."), "{stream}");
+        let request = bodies.lock().unwrap().last().cloned().unwrap().to_string();
+        assert!(
+            request.contains("\"name\":\"centaur_execute\""),
+            "{request}"
+        );
+        for name in [crate::hands::CHECKOUT, crate::hands::RELEASE, "exec"] {
+            let definition = format!("\"name\":\"{name}\"");
+            assert!(!request.contains(&definition), "{name} is off: {request}");
+        }
+        assert!(!request.contains("Hands: this conversation"), "{request}");
     }
 
     /// A scripted OpenAI Responses endpoint: it calls `centaur_execute` once,
@@ -663,7 +806,7 @@ mod tests {
         )
         .await;
         let (model_url, bodies) = model_server(None).await;
-        let brain = brain_with(true, &model_url, Some(&executor)).await;
+        let brain = brain_with(true, &model_url, Some(&executor), None).await;
         let thread = "slack:T:C:9";
         let (token, _) = brain.token(thread, now());
         let (status, body) = brain.submit(thread, "exe_1", Some(&token)).await;

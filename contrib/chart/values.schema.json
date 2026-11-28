@@ -442,6 +442,53 @@
         }
       }
     },
+    "hands": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string" }
+          }
+        },
+        "pool": {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "object",
+              "properties": { "size": { "type": "integer", "minimum": 0 } }
+            },
+            "large": {
+              "type": "object",
+              "properties": { "size": { "type": "integer", "minimum": 0 } }
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "default": { "type": "object" },
+            "large": { "type": "object" }
+          }
+        },
+        "leaseSeconds": { "type": "integer", "minimum": 1 },
+        "idleSeconds": { "type": "integer", "minimum": 1 },
+        "maxHands": { "type": "integer", "minimum": 0 },
+        "clusterCidrs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "namespace": { "type": "string" },
+        "replenishIntervalSeconds": { "type": "integer", "minimum": 1 },
+        "sweepIntervalSeconds": { "type": "integer", "minimum": 1 },
+        "coldCreateTimeoutSeconds": { "type": "integer", "minimum": 1 },
+        "warmingTimeoutSeconds": { "type": "integer", "minimum": 1 },
+        "orphanGraceSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
     "brain": {
       "allOf": [{ "$ref": "#/definitions/podScheduling" }],
       "type": "object",

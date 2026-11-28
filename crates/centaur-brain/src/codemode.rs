@@ -440,7 +440,11 @@ pub struct Turn {
 #[derive(Clone, Debug)]
 pub struct Running {
     pub request_id: String,
+    /// The turn's Code Mode token, for the executor and proxy.
     pub token: Option<TurnToken>,
+    /// The turn's hands token, for the lease API. It is a different token from
+    /// `token`, so a token forwarded to the executor cannot lease a hand.
+    pub hands_token: Option<TurnToken>,
 }
 
 type RunningFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Running>, String>> + Send + 'a>>;
@@ -466,14 +470,17 @@ impl Turns for OneLog {
             struct Metadata {
                 #[serde(default)]
                 tool_token: Option<TurnToken>,
+                #[serde(default)]
+                hands_token: Option<TurnToken>,
             }
             // Metadata the brain did not write reads as no token.
-            let token = serde_json::from_str::<Metadata>(record.metadata.get())
-                .ok()
-                .and_then(|metadata| metadata.tool_token);
+            let metadata = serde_json::from_str::<Metadata>(record.metadata.get()).ok();
             Ok(Some(Running {
                 request_id: record.request_id,
-                token,
+                token: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.tool_token.clone()),
+                hands_token: metadata.and_then(|metadata| metadata.hands_token),
             }))
         })
     }
@@ -896,6 +903,7 @@ pub(crate) mod tests {
                 token: "t".into(),
                 expires_at: now_secs() + 60,
             }),
+            hands_token: None,
         })));
         let output = execute_on_nanocode(&code_mode, running, "return 7").await;
         assert!(output.success);
@@ -943,6 +951,7 @@ pub(crate) mod tests {
             Fixed(Some(Running {
                 request_id: "exe_2".into(),
                 token: None,
+                hands_token: None,
             })),
         ] {
             let output = execute_on_nanocode(&code_mode, Arc::new(turns), "1").await;

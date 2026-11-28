@@ -33,6 +33,7 @@ use tracing::{info, warn};
 use crate::{
     blocks::{self, Input},
     codemode::{self, CodeMode},
+    hands,
 };
 
 const PG_CONNECTIONS: usize = 8;
@@ -58,6 +59,8 @@ pub struct Config {
     pub anthropic_base_url: Option<String>,
     /// Registers the Code Mode tools on every thread when set.
     pub code_mode: Option<Arc<CodeMode>>,
+    /// Registers the hand tools on every thread when set.
+    pub hands: Option<Arc<hands::Hands>>,
 }
 
 /// A Centaur thread and the nanocode session that holds it.
@@ -75,6 +78,9 @@ pub enum Command {
         steer: bool,
         /// The turn's verified Code Mode token, kept in its own metadata.
         tool_token: Option<codemode::TurnToken>,
+        /// The turn's hands token, kept next to the Code Mode token. The lease
+        /// API verifies it; the brain only carries it.
+        hands_token: Option<codemode::TurnToken>,
         reply: oneshot::Sender<Result<SubmitOutcome, SubmitError>>,
     },
     Interrupt {
@@ -149,6 +155,7 @@ async fn run(config: Config, mut commands: mpsc::UnboundedReceiver<Command>) -> 
         openai_base_url: config.openai_base_url,
         anthropic_base_url: config.anthropic_base_url,
         code_mode: config.code_mode,
+        hands: config.hands,
         threads: Default::default(),
         opening: Default::default(),
     });
@@ -180,6 +187,7 @@ struct Brain {
     openai_base_url: Option<String>,
     anthropic_base_url: Option<String>,
     code_mode: Option<Arc<CodeMode>>,
+    hands: Option<Arc<hands::Hands>>,
     threads: Mutex<HashMap<String, Arc<Thread>>>,
     /// Serializes opening, so a thread is opened once.
     opening: tokio::sync::Mutex<()>,
@@ -191,7 +199,10 @@ struct Thread {
     inbox: TurnInbox<OneLog>,
     wake: watch::Sender<u64>,
     driving: AtomicBool,
-    /// Kept alive for the inbox's lifetime.
+    /// The thread's hands, when hands are configured.
+    hands: Option<Arc<hands::ThreadHands>>,
+    /// Kept alive for the inbox's lifetime, and for the runner pool the hand
+    /// tools attach hands to.
     _runtime: Nanocode,
 }
 
@@ -204,10 +215,18 @@ impl Brain {
                 input_line,
                 steer,
                 tool_token,
+                hands_token,
                 reply,
             } => {
                 let outcome = self
-                    .submit(&thread, &request_id, &input_line, steer, tool_token)
+                    .submit(
+                        &thread,
+                        &request_id,
+                        &input_line,
+                        steer,
+                        tool_token,
+                        hands_token,
+                    )
                     .await;
                 let _ = reply.send(outcome);
             }
@@ -246,6 +265,7 @@ impl Brain {
         input_line: &Value,
         steer: bool,
         tool_token: Option<codemode::TurnToken>,
+        hands_token: Option<codemode::TurnToken>,
     ) -> Result<SubmitOutcome, SubmitError> {
         let line = serde_json::to_string(input_line)
             .map_err(|error| SubmitError::BadRequest(error.to_string()))?;
@@ -263,7 +283,14 @@ impl Brain {
             .await
             .map_err(|error| SubmitError::Internal(error.to_string()))?;
         let outcome = thread
-            .submit(request_id, &turn.text, &thread_ref.key, steer, tool_token)
+            .submit(
+                request_id,
+                &turn.text,
+                &thread_ref.key,
+                steer,
+                tool_token,
+                hands_token,
+            )
             .await?;
         thread.drive();
         Ok(outcome)
@@ -306,43 +333,78 @@ impl Brain {
         thread_key: &str,
         model: Option<ModelSelection>,
     ) -> Result<Thread, Error> {
+        let hands_on = self.hands.is_some();
         let policy = Policy {
             restarts: TURN_RESTARTS,
-            effects: codemode::effects(),
+            effects: if hands_on {
+                hands::effects()
+            } else {
+                codemode::effects()
+            },
             ..Policy::default()
         };
         let parts = nanocode::turnlog(Arc::clone(&self.log_host), session_id, policy).await?;
+        let log: Arc<dyn codemode::Turns> = parts.log.clone();
         let mut tools = Tools::builder()
             .without_defaults()
             .effect_gate(Arc::clone(&parts.gate))
             .cell_journals(parts.journals.clone());
-        if let Some(code_mode) = &self.code_mode {
+        let code_mode = self.code_mode.is_some();
+        if code_mode || hands_on {
             // Direct function tools. By default nanocode offers only its own
             // code mode (`exec`, calling the tools from JavaScript) and
             // refuses direct calls; with direct tools, the subagent tools are
-            // direct functions too.
-            tools = tools.exposure(ToolExposure::DirectOnly);
-            let log: Arc<dyn codemode::Turns> = parts.log.clone();
+            // direct functions too. Hands need nanocode's code mode as well,
+            // because a hand's shell and file tools are called from a cell
+            // that runs on the hand.
+            tools = tools.exposure(if hands_on {
+                ToolExposure::DirectAndCodeMode
+            } else {
+                ToolExposure::DirectOnly
+            });
+        }
+        if let Some(code_mode) = &self.code_mode {
             for tool in code_mode.tools(thread_key, &log) {
                 tools = tools.tool(tool);
             }
         }
+        let hands = self
+            .hands
+            .as_ref()
+            .map(|hands| hands.thread(thread_key, session_id, Arc::clone(&log)));
+        if let Some(hands) = &hands {
+            for tool in hands.tools() {
+                tools = tools.tool(tool);
+            }
+        }
         let tools = tools.build()?;
-        let code_mode = self.code_mode.is_some();
         let mut runtime = Nanocode::builder()
-            .openai(openai(self.openai_base_url.as_deref(), code_mode)?)
-            .claude(claude(self.anthropic_base_url.as_deref(), code_mode))
+            .openai(openai(
+                self.openai_base_url.as_deref(),
+                code_mode,
+                hands_on,
+            )?)
+            .claude(claude(
+                self.anthropic_base_url.as_deref(),
+                code_mode,
+                hands_on,
+            ))
             .tools(tools)
             .without_cua()
             .runner_management(false)
             .thinking(self.thinking)
             .durability(parts.store.clone());
-        if code_mode {
-            // With direct tools the model would also see nanocode's subagent
-            // tools; a brain turn gets exactly the Code Mode tools.
+        if code_mode || hands_on {
+            // Direct tools would also expose nanocode's subagent tools; a
+            // brain turn gets exactly the tools this conversation is given.
             runtime = runtime.without_subagents();
         }
         let runtime = runtime.build_async().await?;
+        if let Some(hands) = &hands {
+            // The pool belongs to the runtime, which exists only now.
+            hands.bind(&runtime.runner_pool());
+            hands.spawn_idle();
+        }
         // Everything already in the log is durable; later events become
         // visible only once the host has committed them.
         let durable = last_seq(&parts.log).await?;
@@ -372,6 +434,7 @@ impl Brain {
             inbox,
             wake,
             driving: AtomicBool::new(false),
+            hands,
             _runtime: runtime,
         })
     }
@@ -385,8 +448,16 @@ impl Thread {
         thread_key: &str,
         steer: bool,
         tool_token: Option<codemode::TurnToken>,
+        hands_token: Option<codemode::TurnToken>,
     ) -> Result<SubmitOutcome, SubmitError> {
         let internal = |error: &dyn std::fmt::Display| SubmitError::Internal(error.to_string());
+        if let Some(hands) = &self.hands {
+            // A new turn rebinds the thread's lease to this requester, and
+            // reconnects to a lease a previous brain process left behind. It
+            // runs detached: a slow or unavailable lease API must not hold up
+            // the turn's submission.
+            hands.turn_started(hands_token.as_ref());
+        }
         let running = self.running().await.map_err(|error| internal(&error))?;
         // The turn's Code Mode token lives in its own record, and only there:
         // nanocode stores, resumes, and retires it with this turn. A retry of
@@ -394,6 +465,9 @@ impl Thread {
         let mut metadata = json!({"thread_key": thread_key});
         if let Some(token) = tool_token {
             metadata["tool_token"] = json!(token);
+        }
+        if let Some(token) = hands_token {
+            metadata["hands_token"] = json!(token);
         }
         let submission = Submission {
             request_id: request_id.to_owned(),
@@ -613,9 +687,23 @@ async fn last_seq(log: &OneLog) -> Result<u64, Error> {
 }
 
 /// HTTPS SSE: the WebSocket transport does not follow a regional
-/// `OPENAI_BASE_URL`. With Code Mode, its instructions join the session's
-/// developer instructions.
-fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error> {
+/// `OPENAI_BASE_URL`. With Code Mode or hands, its instructions join the
+/// session's developer instructions.
+fn instructions(code_mode: bool, hands: bool) -> String {
+    let mut text = String::new();
+    if code_mode {
+        text.push_str(centaur_codemode_protocol::tools::INSTRUCTIONS);
+    }
+    if hands {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(crate::hands::INSTRUCTIONS);
+    }
+    text
+}
+
+fn openai(base_url: Option<&str>, code_mode: bool, hands: bool) -> Result<CodexHarness, Error> {
     let key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "OPENAI_API_KEY".to_owned());
     let mut builder = OpenAi::builder(key)
         .transport(nanocode::oai::transport::ResponsesTransport::Https)
@@ -624,12 +712,11 @@ fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error
         builder = builder.api_base_url(base_url.trim_end_matches('/'));
     }
     let harness = CodexHarness::new(builder.build()?);
-    Ok(if code_mode {
-        harness.configure(|builder| {
-            Ok(builder.additional_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS))
-        })
-    } else {
+    let note = instructions(code_mode, hands);
+    Ok(if note.is_empty() {
         harness
+    } else {
+        harness.configure(move |builder| Ok(builder.additional_instructions(note.clone())))
     })
 }
 
@@ -637,20 +724,18 @@ fn openai(base_url: Option<&str>, code_mode: bool) -> Result<CodexHarness, Error
 /// which follow the base system prompt. That replaces the environment nanocode
 /// would derive from the process's working directory, which the brain's
 /// agents cannot reach anyway.
-fn claude(base_url: Option<&str>, code_mode: bool) -> ClaudeHarness {
+fn claude(base_url: Option<&str>, code_mode: bool, hands: bool) -> ClaudeHarness {
     let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "ANTHROPIC_API_KEY".to_owned());
     let base = base_url.map_or("https://api.anthropic.com/v1", |url| {
         url.trim_end_matches('/')
     });
     let harness = ClaudeHarness::new(ClaudeClient::with_api_key(format!("{base}/messages"), key));
-    if code_mode {
-        harness.configure(|builder| {
-            Ok(builder.environment(
-                ClaudeEnvironment::new()
-                    .project_instructions(centaur_codemode_protocol::tools::INSTRUCTIONS),
-            ))
-        })
-    } else {
+    let note = instructions(code_mode, hands);
+    if note.is_empty() {
         harness
+    } else {
+        harness.configure(move |builder| {
+            Ok(builder.environment(ClaudeEnvironment::new().project_instructions(note.clone())))
+        })
     }
 }

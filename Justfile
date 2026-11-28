@@ -35,7 +35,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-codemode _build-token-broker _build-brain _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent; do
+      for recipe in _build-api-rs _build-company-context _build-proxy-sync _build-codemode _build-hand _build-token-broker _build-brain _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -51,6 +51,7 @@ _build-all-sequential:
     just _build-company-context
     just _build-proxy-sync
     just _build-codemode
+    just _build-hand
     just _build-token-broker
     just _build-brain
     just _build-iron-proxy
@@ -69,6 +70,7 @@ build-one service:
       company-context) just _build-company-context ;;
       proxy-sync) just _build-proxy-sync ;;
       codemode) just _build-codemode ;;
+      hand) just _build-hand ;;
       token-broker) just _build-token-broker ;;
       brain) just _build-brain ;;
       iron-proxy) just _build-iron-proxy ;;
@@ -93,6 +95,9 @@ _build-proxy-sync:
 
 _build-codemode:
     {{docker_build}} -t centaur-codemode:latest -f services/codemode/Dockerfile .
+
+_build-hand:
+    {{docker_build}} -t centaur-hand:latest -f services/hand/Dockerfile .
 
 _build-token-broker:
     {{docker_build}} -t centaur-token-broker:latest -f services/token-broker/Dockerfile .
@@ -131,7 +136,7 @@ _build-workflow-python:
 _push-registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-brain centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-hand centaur-token-broker centaur-brain centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
       target="{{registry}}/library/${img}:latest"
       echo "pushing ${img}:latest -> ${target}..."
       docker tag "${img}:latest" "${target}"
@@ -144,7 +149,7 @@ _push-registry:
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-token-broker centaur-brain centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
+    for img in centaur-api-rs centaur-company-context centaur-proxy-sync centaur-codemode centaur-hand centaur-token-broker centaur-brain centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done

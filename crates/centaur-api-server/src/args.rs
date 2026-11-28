@@ -13,10 +13,13 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use centaur_api_server::{
-    ConsoleSessionConfig, DiscoveredToolProxyFragment, SandboxRuntime, ToolDiscoveryConfig,
-    discover_persona_registry, discover_tool_proxy_fragment,
+    ConsoleSessionConfig, DiscoveredToolProxyFragment, HandsRuntime, SandboxRuntime,
+    ToolDiscoveryConfig, discover_persona_registry, discover_tool_proxy_fragment,
 };
 use centaur_codemode_protocol::TOKEN_SIGNING_KEY_ENV;
+use centaur_hands::{
+    HandInfra, HandK8sConfig, HandPool, HandPoolConfig, HandSize, KubernetesHandInfra, PgHandStore,
+};
 use centaur_iron_control::{
     IdentityInput, IronControlClient, IronControlError, PrincipalInput, RegisterError, RoleSpec,
     SessionRegistrar, register_role,
@@ -95,6 +98,8 @@ pub(crate) struct Args {
     console_session: ConsoleSessionArgs,
     #[command(flatten)]
     console_bootstrap: ConsoleBootstrapArgs,
+    #[command(flatten)]
+    hands: HandsArgs,
 }
 
 impl Args {
@@ -138,6 +143,108 @@ impl Args {
         })?;
         info!("nanocode turns get Code Mode turn tokens");
         Ok(Some(Arc::new(signer)))
+    }
+
+    pub(crate) fn hands_enabled(&self) -> bool {
+        self.hands.enabled
+    }
+
+    /// Build the hand pool and its hands-token verifier when hands are enabled.
+    /// The verifier comes from api-rs's own token signing key and accepts only
+    /// the `centaur-hands` audience, so a Code Mode turn token cannot lease a
+    /// hand.
+    pub(crate) async fn hands_runtime(
+        &self,
+        pool: PgPool,
+        bootstrap_principal: &str,
+    ) -> Result<Option<HandsRuntime>, ServerError> {
+        if !self.hands.enabled {
+            return Ok(None);
+        }
+        let signer = self.codemode_token_signer()?.ok_or_else(|| {
+            ServerError::UnsupportedConfig(
+                "hands require CENTAUR_CODEMODE_TOKEN_SIGNING_KEY so leases can verify turn tokens"
+                    .to_owned(),
+            )
+        })?;
+        let iron_control_client = self.sandbox.iron_control.required_client()?;
+        let proxy = self.sandbox.iron_proxy.to_config()?;
+        let control_url = self.sandbox.iron_control.settings()?.control_url;
+        let namespace = clean_optional_value(self.hands.namespace.as_deref())
+            .unwrap_or_else(|| self.sandbox.k8s_namespace.clone());
+        let kube = self.sandbox.kube_client().await?;
+        let infra = KubernetesHandInfra::new(
+            kube,
+            iron_control_client,
+            HandK8sConfig {
+                namespace,
+                image: clean_optional_value(self.hands.image.as_deref())
+                    .unwrap_or_else(|| "centaur-hand:latest".to_owned()),
+                image_pull_policy: clean_optional_value(self.hands.image_pull_policy.as_deref())
+                    .or_else(|| self.sandbox.agent_image_pull_policy.clone()),
+                image_pull_secrets: self
+                    .sandbox
+                    .image_pull_secrets
+                    .iter()
+                    .map(|secret| secret.trim())
+                    .filter(|secret| !secret.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                iron_proxy_image: proxy.image.clone(),
+                iron_proxy_image_pull_policy: proxy.image_pull_policy.clone(),
+                iron_proxy_resources: proxy.resources.clone(),
+                iron_proxy_env_from_secret_names: proxy.env_from_secret_names.clone(),
+                iron_proxy_extra_env: proxy.extra_env.clone(),
+                iron_proxy_upstream_deny_cidrs: proxy.upstream_deny_cidrs.clone(),
+                ca_cert_secret_name: proxy.ca_cert_secret_name.clone(),
+                ca_cert_secret_key: proxy.ca_cert_secret_key.clone(),
+                ca_key_secret_name: proxy.ca_key_secret_name.clone(),
+                ca_key_secret_key: proxy.ca_key_secret_key.clone(),
+                control_url,
+                bootstrap_principal: bootstrap_principal.to_owned(),
+                resources_default: resource_requirements(
+                    self.hands.resources_default_json.as_deref(),
+                    "CENTAUR_HANDS_RESOURCES_DEFAULT",
+                )?,
+                resources_large: resource_requirements(
+                    self.hands.resources_large_json.as_deref(),
+                    "CENTAUR_HANDS_RESOURCES_LARGE",
+                )?,
+                node_selector: self.sandbox.node_selector()?,
+                tolerations: self.sandbox.tolerations()?,
+                runtime_class_name: clean_optional_value(
+                    self.sandbox.runtime_class_name.as_deref(),
+                ),
+                priority_class_name: clean_optional_value(
+                    self.sandbox.priority_class_name.as_deref(),
+                ),
+                pod_annotations: self.sandbox.pod_annotations()?,
+            },
+        );
+        let config = HandPoolConfig {
+            pool_sizes: BTreeMap::from([
+                (HandSize::Default, self.hands.pool_default_size),
+                (HandSize::Large, self.hands.pool_large_size),
+            ]),
+            replenish_interval: Duration::from_secs(self.hands.replenish_interval_secs),
+            sweep_interval: Duration::from_secs(self.hands.sweep_interval_secs),
+            lease_duration: Duration::from_secs(self.hands.lease_seconds),
+            cold_create_timeout: Duration::from_secs(self.hands.cold_create_timeout_secs),
+            warming_timeout: Duration::from_secs(self.hands.warming_timeout_secs),
+            orphan_grace: Duration::from_secs(self.hands.orphan_grace_secs),
+            max_hands: self.hands.max_hands,
+        };
+        info!(
+            pool_default = self.hands.pool_default_size,
+            pool_large = self.hands.pool_large_size,
+            max_hands = self.hands.max_hands,
+            lease_seconds = self.hands.lease_seconds,
+            idle_seconds = self.hands.idle_seconds,
+            "hand pool and lease API enabled"
+        );
+        let infra: Arc<dyn HandInfra> = Arc::new(infra);
+        let hand_pool = HandPool::new(Arc::new(PgHandStore::new(pool)), infra, config);
+        Ok(Some(HandsRuntime::new(Arc::new(hand_pool), &signer)))
     }
 
     /// The image Code Mode sandboxes run. Missing or blank falls back to
@@ -944,6 +1051,131 @@ pub(crate) struct ServerArgs {
         default_value_t = 15
     )]
     execution_adoption_interval_secs: u64,
+}
+
+#[derive(Debug, ClapArgs)]
+struct HandsArgs {
+    /// Serve the hand lease API and keep a warm pool of hand pods.
+    #[arg(
+        id = "hands_enabled",
+        long = "hands-enabled",
+        env = "CENTAUR_HANDS_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    enabled: bool,
+    /// Hand image. Users extend the base image and select it here.
+    #[arg(id = "hands_image", long = "hands-image", env = "CENTAUR_HANDS_IMAGE")]
+    image: Option<String>,
+    #[arg(
+        id = "hands_image_pull_policy",
+        long = "hands-image-pull-policy",
+        env = "CENTAUR_HANDS_IMAGE_PULL_POLICY"
+    )]
+    image_pull_policy: Option<String>,
+    /// Ready default-size hands the replenisher keeps.
+    #[arg(
+        id = "hands_pool_default_size",
+        long = "hands-pool-default-size",
+        env = "CENTAUR_HANDS_POOL_DEFAULT_SIZE",
+        default_value_t = 0
+    )]
+    pool_default_size: usize,
+    /// Ready large-size hands the replenisher keeps.
+    #[arg(
+        id = "hands_pool_large_size",
+        long = "hands-pool-large-size",
+        env = "CENTAUR_HANDS_POOL_LARGE_SIZE",
+        default_value_t = 0
+    )]
+    pool_large_size: usize,
+    /// Default-size hand container resources as a JSON Kubernetes
+    /// `ResourceRequirements` object.
+    #[arg(
+        id = "hands_resources_default",
+        long = "hands-resources-default",
+        env = "CENTAUR_HANDS_RESOURCES_DEFAULT"
+    )]
+    resources_default_json: Option<String>,
+    /// Large-size hand container resources as JSON.
+    #[arg(
+        id = "hands_resources_large",
+        long = "hands-resources-large",
+        env = "CENTAUR_HANDS_RESOURCES_LARGE"
+    )]
+    resources_large_json: Option<String>,
+    #[arg(
+        id = "hands_lease_seconds",
+        long = "hands-lease-seconds",
+        env = "CENTAUR_HANDS_LEASE_SECONDS",
+        default_value_t = 3600,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    lease_seconds: u64,
+    /// Idle seconds the brain uses before releasing a hand. api-rs records it
+    /// for operators; the brain enforces it.
+    #[arg(
+        id = "hands_idle_seconds",
+        long = "hands-idle-seconds",
+        env = "CENTAUR_HANDS_IDLE_SECONDS",
+        default_value_t = 1800
+    )]
+    idle_seconds: u64,
+    /// Cap on warming + ready + leased hands. 0 leaves it unbounded.
+    #[arg(
+        id = "hands_max_hands",
+        long = "hands-max-hands",
+        env = "CENTAUR_HANDS_MAX_HANDS",
+        default_value_t = 20
+    )]
+    max_hands: usize,
+    /// Namespace hand pods run in. Defaults to the sandbox namespace.
+    #[arg(
+        id = "hands_namespace",
+        long = "hands-namespace",
+        env = "CENTAUR_HANDS_NAMESPACE"
+    )]
+    namespace: Option<String>,
+    #[arg(
+        id = "hands_replenish_interval_seconds",
+        long = "hands-replenish-interval-seconds",
+        env = "CENTAUR_HANDS_REPLENISH_INTERVAL_SECONDS",
+        default_value_t = 5,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    replenish_interval_secs: u64,
+    #[arg(
+        id = "hands_sweep_interval_seconds",
+        long = "hands-sweep-interval-seconds",
+        env = "CENTAUR_HANDS_SWEEP_INTERVAL_SECONDS",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    sweep_interval_secs: u64,
+    #[arg(
+        id = "hands_cold_create_timeout_seconds",
+        long = "hands-cold-create-timeout-seconds",
+        env = "CENTAUR_HANDS_COLD_CREATE_TIMEOUT_SECONDS",
+        default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    cold_create_timeout_secs: u64,
+    #[arg(
+        id = "hands_warming_timeout_seconds",
+        long = "hands-warming-timeout-seconds",
+        env = "CENTAUR_HANDS_WARMING_TIMEOUT_SECONDS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    warming_timeout_secs: u64,
+    #[arg(
+        id = "hands_orphan_grace_seconds",
+        long = "hands-orphan-grace-seconds",
+        env = "CENTAUR_HANDS_ORPHAN_GRACE_SECONDS",
+        default_value_t = 120,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    orphan_grace_secs: u64,
 }
 
 #[derive(Debug, ClapArgs)]

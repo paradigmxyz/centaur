@@ -203,6 +203,12 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: {{ . | quote }}
 {{- end }}
+{{- if .Values.hands.enabled }}
+        # Brain turns check out, renew, reconnect, and release hand leases.
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "brain") | nindent 14 }}
+{{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
@@ -351,6 +357,17 @@ spec:
         - protocol: TCP
           port: {{ .Values.brain.port }}
 {{- end }}
+{{- if .Values.hands.enabled }}
+    # Hand pods' iron-proxy management API: api-rs waits for the lease
+    # principal to be acknowledged before it returns a hand.
+    - to:
+        - podSelector:
+            matchLabels:
+              centaur.ai/workload: hand
+      ports:
+        - protocol: TCP
+          port: {{ .Values.ironProxy.service.managementPort }}
+{{- end }}
     # Code Mode sandboxes (centaur.ai/workload=codemode, created by api-rs) serve
     # the connector HTTP API on a fixed port. api-rs calls them directly: their
     # outbound traffic goes through their own paired iron-proxy, not this one.
@@ -430,6 +447,24 @@ spec:
       ports:
         - protocol: TCP
           port: 8790
+{{- end }}
+{{- if .Values.hands.enabled }}
+    # Hands: checkout, renew, reconnect, and release leases.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.apiRs.port }}
+    # The hand protocol on a leased pod.
+    - to:
+        - podSelector:
+            matchLabels:
+              centaur.ai/workload: hand
+      ports:
+        - protocol: TCP
+          port: 7070
 {{- end }}
     # Direct HTTPS to model providers until model egress moves behind a dedicated
     # iron-proxy with a model-only principal (follow-up).
@@ -643,6 +678,75 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+---
+{{- end }}
+{{- if .Values.hands.enabled }}
+# Hand pods are the brain's single-use Linux boxes. Ingress is the hand
+# protocol from brain pods, the iron-proxy management API from api-rs (the
+# lease principal barrier), and the readiness probe port. Egress is the public
+# internet except the cluster's pod/service ranges, plus DNS and proxy-sync.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "hands") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "hands") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      centaur.ai/workload: hand
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "brain") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7070
+    # api-rs waits for the proxy to acknowledge the lease principal before it
+    # returns the hand.
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api-rs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9092
+    # Kubelet probes originate from the node, not a pod, so the health port is
+    # open. It serves only /healthz.
+    - ports:
+        - protocol: TCP
+          port: 7071
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The iron-proxy sidecar pulls its principal configuration from proxy-sync.
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "proxy-sync") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.proxySync.port }}
+    # Everything else is direct egress without credentials; only the cluster's
+    # own ranges stay denied.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+{{- with .Values.hands.clusterCidrs }}
+            except:
+{{ toYaml . | nindent 14 }}
+{{- end }}
 ---
 {{- end }}
 {{- if eq .Values.ironProxy.secretSource "onepassword-connect" }}
