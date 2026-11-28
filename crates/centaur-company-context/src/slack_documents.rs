@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::{
         SLACK_CHANNEL_DAY_EMBED_TASK, SLACK_CONVERSATION_PROJECT_TASK, SLACK_DOCUMENT_ID_PREFIX,
+        TASK_RETRY_INTERVAL,
     },
     embeddings::EmbeddingsClient,
     errors::is_rejected,
@@ -107,6 +108,11 @@ async fn project_conversation(
         else {
             continue;
         };
+        let Some(requested_at) = claim_day(&state.pool, conversation_id, *day, revision).await?
+        else {
+            continue;
+        };
+        let attempt = requested_at.timestamp_micros();
         state
             .absurd
             .spawn(
@@ -118,7 +124,7 @@ async fn project_conversation(
                 },
                 SpawnOptions {
                     idempotency_key: Some(format!(
-                        "slack.channel_day.embed:{conversation_id}:{day}:{revision}:{}",
+                        "slack.channel_day.embed:{conversation_id}:{day}:{revision}:{}:{attempt}",
                         state.embeddings.model()
                     )),
                     ..SpawnOptions::default()
@@ -141,9 +147,10 @@ async fn project_conversation(
 
 /// Returns the channel days to render: those never rendered, rendered before
 /// a message, the channel name, or a rendered user name changed, rendered by
-/// another projection version, or still awaiting publication.
+/// another projection version, or awaiting publication that was not requested
+/// within the retry interval.
 async fn stale_days(pool: &PgPool, conversation_id: &str) -> Result<Vec<NaiveDate>> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar(&format!(
         r#"
         SELECT messages.projection_day
         FROM company_context_system.slack_messages messages
@@ -159,7 +166,13 @@ async fn stale_days(pool: &PgPool, conversation_id: &str) -> Result<Vec<NaiveDat
             OR max(messages.updated_at) > days.rendered_at
             OR days.projection_version <> $2
             OR days.channel_name <> conversations.name
-            OR days.embedding_status = 'pending'
+            OR (
+                days.embedding_status = 'pending'
+                AND (
+                    days.task_requested_at IS NULL
+                    OR days.task_requested_at < NOW() - INTERVAL '{TASK_RETRY_INTERVAL}'
+                )
+            )
             OR EXISTS (
                 SELECT 1
                 FROM company_context_system.slack_users users
@@ -167,11 +180,43 @@ async fn stale_days(pool: &PgPool, conversation_id: &str) -> Result<Vec<NaiveDat
                   AND users.updated_at > days.rendered_at
             )
         ORDER BY 1
-        "#,
-    )
+        "#
+    ))
     .bind(conversation_id)
     .bind(PROJECTION_VERSION)
     .fetch_all(pool)
+    .await?)
+}
+
+/// Records that a channel day awaiting publication is being enqueued. Returns
+/// the time of the request, which distinguishes the task from earlier ones,
+/// or `None` if the day changed or another projection requested it within the
+/// retry interval.
+async fn claim_day(
+    pool: &PgPool,
+    conversation_id: &str,
+    day: NaiveDate,
+    revision: i64,
+) -> Result<Option<DateTime<Utc>>> {
+    Ok(sqlx::query_scalar(&format!(
+        r#"
+        UPDATE company_context_system.slack_channel_days
+        SET task_requested_at = NOW()
+        WHERE conversation_id = $1
+          AND day = $2
+          AND revision = $3
+          AND embedding_status = 'pending'
+          AND (
+              task_requested_at IS NULL
+              OR task_requested_at < NOW() - INTERVAL '{TASK_RETRY_INTERVAL}'
+          )
+        RETURNING task_requested_at
+        "#
+    ))
+    .bind(conversation_id)
+    .bind(day)
+    .bind(revision)
+    .fetch_optional(pool)
     .await?)
 }
 
@@ -260,6 +305,10 @@ async fn project_day(
                 WHEN slack_channel_days.content_hash = EXCLUDED.content_hash
                     THEN slack_channel_days.last_error
                 ELSE ''
+            END,
+            task_requested_at = CASE
+                WHEN slack_channel_days.content_hash = EXCLUDED.content_hash
+                    THEN slack_channel_days.task_requested_at
             END,
             updated_at = NOW()
         WHERE slack_channel_days.rendered_at <= EXCLUDED.rendered_at
@@ -1146,6 +1195,62 @@ mod tests {
         assert_eq!(vectors, 0);
 
         server.abort();
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn unpublished_days_are_requested_again_once_overdue() {
+        let Ok(database_url) = env::var("COMPANY_CONTEXT_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set COMPANY_CONTEXT_TEST_DATABASE_URL to a ParadeDB Postgres URL");
+            return;
+        };
+        let database = TestDatabase::create(&database_url, "slack_day_retries").await;
+        let pool = &database.pool;
+        pool.execute(
+            r#"
+            INSERT INTO company_context_system.slack_conversations (conversation_id, team_id, kind, name)
+            VALUES ('C1', 'T1', 'public_channel', 'general');
+            INSERT INTO company_context_system.slack_messages
+                (conversation_id, message_ts, thread_ts, user_id, subtype, text, occurred_at, raw_payload)
+            VALUES ('C1', '1700000000.000000', NULL, 'U1', NULL, 'ship it', to_timestamp(1700000000), '{}');
+            "#,
+        )
+        .await
+        .unwrap();
+        let day = NaiveDate::from_ymd_opt(2023, 11, 14).unwrap();
+        let overdue = || {
+            pool.execute(
+                "UPDATE company_context_system.slack_channel_days SET task_requested_at = NOW() - INTERVAL '2 hours'",
+            )
+        };
+
+        // Requesting a rendered day's publication holds it for the retry
+        // interval, so projections neither render nor enqueue it again.
+        assert_eq!(project_day(pool, "C1", day, 6000).await.unwrap(), Some(1));
+        let first = claim_day(pool, "C1", day, 1).await.unwrap().unwrap();
+        assert!(claim_day(pool, "C1", day, 1).await.unwrap().is_none());
+        assert!(stale_days(pool, "C1").await.unwrap().is_empty());
+
+        // Its task never published it, for example because it exhausted its
+        // attempts. Once the request is overdue, the next projection renders
+        // the unchanged day and enqueues a new attempt of the same revision.
+        overdue().await.unwrap();
+        assert_eq!(stale_days(pool, "C1").await.unwrap(), [day]);
+        assert_eq!(project_day(pool, "C1", day, 6000).await.unwrap(), Some(1));
+        let second = claim_day(pool, "C1", day, 1).await.unwrap().unwrap();
+        assert!(second > first);
+
+        // A changed day is a new revision, requested at once.
+        pool.execute(
+            "UPDATE company_context_system.slack_messages SET text = 'shipped', updated_at = NOW()",
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale_days(pool, "C1").await.unwrap(), [day]);
+        assert_eq!(project_day(pool, "C1", day, 6000).await.unwrap(), Some(2));
+        assert!(claim_day(pool, "C1", day, 1).await.unwrap().is_none());
+        assert!(claim_day(pool, "C1", day, 2).await.unwrap().is_some());
+
         database.drop().await;
     }
 }
