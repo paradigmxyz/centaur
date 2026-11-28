@@ -260,6 +260,12 @@ codex:
   #       # Optional (default true); false stops Codex from sending its hosted
   #       # web_search tool to this provider, for endpoints that reject it.
   #       webSearch: false
+  #       # Optional extra headers the endpoint requires (for example a gateway
+  #       # or tenant key): header name -> secret name in the configured
+  #       # secret source. iron-proxy injects them only for the baseUrl host;
+  #       # sandboxes never see the values. Authorization stays with apiKeyEnv.
+  #       secretHeaders:
+  #         X-Gateway-Key: PRIVATE_RESPONSES_GATEWAY_KEY
   #       # Optional metadata for natural-language selection and display.
   #       models:
   #         example-model:

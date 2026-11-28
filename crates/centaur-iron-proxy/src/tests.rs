@@ -144,6 +144,64 @@ fn custom_provider_web_search_must_be_boolean() {
 }
 
 #[test]
+fn custom_provider_secret_headers_inject_only_for_the_provider_host() {
+    let fragments = custom_provider_auth_fragments(
+        &serde_json::json!({"private": {
+            "name": "Private", "baseUrl": "https://inference.example.com/v1",
+            "apiKeyEnv": "PRIVATE_API_KEY",
+            "secretHeaders": {"X-Gateway-Key": "PRIVATE_GATEWAY_KEY"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let secrets = &fragments[0].transforms[0].config.secrets;
+    assert_eq!(secrets.len(), 2);
+    let header = &secrets[1];
+    assert!(header.replace.is_none());
+    assert_eq!(
+        header.inject.as_ref().unwrap()["header"].as_str(),
+        Some("X-Gateway-Key")
+    );
+    assert_eq!(
+        header.source.as_ref().unwrap()["placeholder"].as_str(),
+        Some("PRIVATE_GATEWAY_KEY")
+    );
+    assert_eq!(
+        header.rules[0]["host"].as_str(),
+        Some("inference.example.com")
+    );
+    // Only the bearer placeholder reaches the sandbox; the header value never does.
+    let placeholders = placeholder_env(&fragments);
+    assert_eq!(placeholders.keys().collect::<Vec<_>>(), ["PRIVATE_API_KEY"]);
+}
+
+#[test]
+fn custom_provider_secret_headers_reject_unsafe_names_and_values() {
+    for headers in [
+        serde_json::json!({"Authorization": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"host": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"Transfer-Encoding": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"X-Key": "PRIVATE_GATEWAY_KEY", "x-key": "OTHER_KEY"}),
+        serde_json::json!({"X Key": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"X-Key\n- injected": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"-X-Key": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"": "PRIVATE_GATEWAY_KEY"}),
+        serde_json::json!({"X-Key": "private-gateway-key"}),
+        serde_json::json!({"X-Key": ""}),
+        serde_json::json!(["X-Key"]),
+    ] {
+        let config = serde_json::json!({"private": {
+            "name": "Private", "baseUrl": "https://inference.example.com/v1",
+            "apiKeyEnv": "PRIVATE_API_KEY", "secretHeaders": headers
+        }});
+        assert!(
+            custom_provider_auth_fragments(&config.to_string()).is_err(),
+            "accepted {config}"
+        );
+    }
+}
+
+#[test]
 fn custom_provider_fragments_reject_unsafe_or_malformed_config() {
     for raw in [
         r#"{"bad.id":{"name":"Bad","baseUrl":"https://inference.example.com/v1","apiKeyEnv":"BAD_API_KEY","defaultModel":"model"}}"#,

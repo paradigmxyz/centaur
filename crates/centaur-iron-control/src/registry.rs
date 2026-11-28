@@ -1106,6 +1106,37 @@ transforms:
     }
 
     #[test]
+    fn custom_provider_secret_header_registers_host_scoped_inject_secret() {
+        let fragments = centaur_iron_proxy::custom_provider_auth_fragments(
+            r#"{"private":{"name":"Private","baseUrl":"https://inference.example.com/v1",
+                "apiKeyEnv":"PRIVATE_API_KEY","secretHeaders":{"X-Gateway-Key":"PRIVATE_GATEWAY_KEY"}}}"#,
+        )
+        .unwrap();
+        let inputs = secret_inputs_from_fragment("infra", &fragments[0], &env_policy()).unwrap();
+        let [SecretInput::Static(bearer), SecretInput::Static(header)] = inputs.as_slice() else {
+            panic!("expected two static secrets");
+        };
+        assert_eq!(
+            bearer.replace_config.as_ref().unwrap().proxy_value,
+            "PRIVATE_API_KEY"
+        );
+        assert!(header.replace_config.is_none());
+        let inject = header.inject_config.as_ref().unwrap();
+        assert_eq!(inject.header.as_deref(), Some("X-Gateway-Key"));
+        assert_eq!(header.source.source_type, "env");
+        assert_eq!(
+            header.source.config,
+            json!({ "var": "PRIVATE_GATEWAY_KEY" })
+        );
+        assert_eq!(header.rules.len(), 1);
+        assert_eq!(
+            header.rules[0].host.as_deref(),
+            Some("inference.example.com")
+        );
+        assert_ne!(bearer.foreign_id, header.foreign_id);
+    }
+
+    #[test]
     fn onepassword_policy_builds_op_ref() {
         let fragment = load_fragment_str(
             r#"
