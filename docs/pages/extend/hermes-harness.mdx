@@ -28,7 +28,9 @@ inside a Centaur sandbox:
   (default 60).
 - **Skills, delegation, MCP** — Hermes's skill library, `delegate_task`
   subagents, and MCP client all run inside the sandbox process; no extra
-  wiring needed.
+  wiring needed. Centaur's own skills are wired in too: startup writes the
+  workspace skills directory into `skills.external_dirs`, so the deployment's
+  skills show up in Hermes's library alongside its own.
 - **Interrupts** — Centaur's interrupt maps to Hermes's
   `session.interrupt`, ending the turn as Interrupted without killing the
   gateway, so the session survives for the next message.
@@ -43,6 +45,7 @@ inside a Centaur sandbox:
 | `HERMES_CONTINUE_SESSION_ID` | Resume a specific Hermes session id after a sandbox restart. |
 | `HERMES_CRON_TICK_SECONDS` | Cron tick interval; `0` disables the ticker. |
 | `HERMES_APPROVAL_MODE` | Defaults to `off` inside the sandbox — Centaur owns the safety boundary (isolated sandbox + iron-proxy egress). |
+| `HERMES_CONFIG_OVERLAY` | YAML (or JSON) fragment deep-merged into `$HERMES_HOME/config.yaml` at startup — the Hermes counterpart of `CODEX_CONFIG_OVERLAY` / `CLAUDE_SETTINGS_OVERLAY`. Use it for `model.default`, `providers`, or anything else Hermes reads, without forking the image. |
 
 Model/provider selection follows Hermes's own configuration
 (`$HERMES_HOME/config.yaml` + `.env`), so any provider Hermes supports works
@@ -56,6 +59,29 @@ outside any interactive session), so give the sandbox `HERMES_HOME` a
 `config.yaml` with `model.default` set — a `.env` with provider keys alone is
 enough for turns, but not for scheduled jobs.
 :::
+
+## Configuring Hermes from a deployment
+
+Hermes reads `$HERMES_HOME/config.yaml` rather than harness flags, so the
+sandbox composes that file at startup (`compose-hermes-config`), merging two
+inputs over whatever Hermes has already written there:
+
+1. `skills.external_dirs` gains the workspace skills directory that
+   `install-tool-shims --refresh-skills` populates.
+2. `HERMES_CONFIG_OVERLAY` — a YAML or JSON mapping, deep-merged last:
+
+```yaml
+sandbox:
+  extraEnv:
+    HERMES_CONFIG_OVERLAY: |
+      model:
+        default: <model-id>
+        provider: <provider-id>
+```
+
+The merge preserves existing keys and de-duplicates the skills entry, so it is
+safe to rerun against a persistent `HERMES_HOME`. An overlay that is not a
+mapping, or is invalid YAML, is ignored with a warning on stderr.
 
 ## Persistence model
 
