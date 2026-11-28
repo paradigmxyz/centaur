@@ -5,21 +5,30 @@ import { Link } from "react-router";
 import { z } from "zod";
 
 import { ErrorAlert } from "@/components/alerts";
-import { FieldShell, fieldId, TextField } from "@/components/form/fields";
+import { FieldShell, fieldId, SelectField, TextField } from "@/components/form/fields";
 import { applyApiErrors } from "@/components/form/form-errors";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { UserTypeahead, type UserOption } from "@/components/user-typeahead";
 import { ApiError, errorMessage } from "@/lib/api";
 
-import { useEditorCandidates, userLabel, type Skill, type SkillInput, type SkillUser } from "../api";
+import {
+  useEditorCandidates,
+  userLabel,
+  type Skill,
+  type SkillInput,
+  type SkillUser,
+  type SkillVisibility,
+} from "../api";
 import { validationMessages } from "./helpers";
 
 const schema = z.object({
   name: z.string().trim().min(1, "can't be blank").max(64, "is too long (maximum is 64 characters)"),
   description: z.string().trim().min(1, "can't be blank"),
   instructions: z.string().trim().min(1, "can't be blank"),
+  visibility: z.enum(["private", "shared"]),
   editor_ids: z.array(z.string()),
+  reader_ids: z.array(z.string()),
 });
 
 type SkillFormValues = z.infer<typeof schema>;
@@ -32,14 +41,21 @@ function skillFormValues(skill: Skill): SkillFormValues {
     name: skill.name,
     description: skill.description,
     instructions: skill.instructions,
+    visibility: skill.visibility,
     editor_ids: skill.editors.map((editor) => editor.id),
+    reader_ids: (skill.readers ?? []).map((reader) => reader.id),
   };
 }
+
+const VISIBILITY_OPTIONS: { value: SkillVisibility; label: string }[] = [
+  { value: "private", label: "Private: owner, readers, and editors" },
+  { value: "shared", label: "Public: everyone" },
+];
 
 interface SkillFormProps {
   /** The skill being edited; undefined for New. */
   skill?: Skill;
-  /** Whether the caller may manage editors (owner, or anyone creating a skill). */
+  /** Whether the caller may manage access: visibility, readers, and editors (owner, or anyone creating a skill). */
   canManageEditors: boolean;
   /** Called with the request body; throw the ApiError to show it on the form. */
   onSubmit: (input: SkillInput) => Promise<void>;
@@ -51,7 +67,14 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
     resolver: zodResolver(schema),
     defaultValues: skill
       ? skillFormValues(skill)
-      : { name: "", description: "", instructions: NEW_SKILL_INSTRUCTIONS, editor_ids: [] },
+      : {
+          name: "",
+          description: "",
+          instructions: NEW_SKILL_INSTRUCTIONS,
+          visibility: "shared",
+          editor_ids: [],
+          reader_ids: [],
+        },
   });
   const errors = form.formState.errors;
   const serverError = errors.root?.server?.message;
@@ -63,7 +86,11 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
       instructions: values.instructions,
     };
     if (skill) input.lock_version = skill.lock_version;
-    if (canManageEditors) input.editor_ids = values.editor_ids;
+    if (canManageEditors) {
+      input.visibility = values.visibility;
+      input.editor_ids = values.editor_ids;
+      input.reader_ids = values.reader_ids;
+    }
     try {
       await onSubmit(input);
     } catch (error) {
@@ -105,13 +132,39 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
       </div>
 
       {canManageEditors ? (
-        <Controller
-          control={form.control}
-          name="editor_ids"
-          render={({ field }) => (
-            <EditorPicker value={field.value} onChange={field.onChange} current={skill?.editors ?? []} />
-          )}
-        />
+        <>
+          <SelectField
+            control={form.control}
+            name="visibility"
+            label="Visibility"
+            className="max-w-xl"
+            options={VISIBILITY_OPTIONS}
+          />
+          <Controller
+            control={form.control}
+            name="reader_ids"
+            render={({ field }) => (
+              <UserPicker
+                access="readers"
+                value={field.value}
+                onChange={field.onChange}
+                current={skill?.readers ?? []}
+              />
+            )}
+          />
+          <Controller
+            control={form.control}
+            name="editor_ids"
+            render={({ field }) => (
+              <UserPicker
+                access="editors"
+                value={field.value}
+                onChange={field.onChange}
+                current={skill?.editors ?? []}
+              />
+            )}
+          />
+        </>
       ) : (
         <div>
           <h2 className="mb-2 text-sm font-medium">Editors</h2>
@@ -160,15 +213,29 @@ export function SkillForm({ skill, canManageEditors, onSubmit, cancelTo }: Skill
   );
 }
 
-function EditorPicker({
+const PICKER_COPY = {
+  readers: {
+    title: "Readers",
+    hint: "Readers can find and read this skill but cannot edit it. Public skills stay visible to everyone. Only you can see or manage readers.",
+  },
+  editors: {
+    title: "Editors",
+    hint: "Editors can read and update this skill. Their names and emails are visible to anyone who can view the skill. Only you can manage editors, visibility, or archiving.",
+  },
+} as const;
+
+function UserPicker({
+  access,
   value,
   onChange,
   current,
 }: {
+  access: keyof typeof PICKER_COPY;
   value: string[];
   onChange: (ids: string[]) => void;
   current: SkillUser[];
 }) {
+  const copy = PICKER_COPY[access];
   const candidates = useEditorCandidates(true);
   const options = useMemo<UserOption[]>(() => {
     const byId = new Map<string, SkillUser>();
@@ -180,7 +247,7 @@ function EditorPicker({
 
   return (
     <div>
-      <p className="mb-2 block text-sm font-medium">Editors</p>
+      <p className="mb-2 block text-sm font-medium">{copy.title}</p>
       {candidates.isError && (
         <ErrorAlert className="mb-2 max-w-xl">Could not load console users: {errorMessage(candidates.error)}</ErrorAlert>
       )}
@@ -189,15 +256,12 @@ function EditorPicker({
           options={options}
           value={value}
           onChange={onChange}
-          label="Editors"
+          label={copy.title}
           placeholder="Search console users by name or email"
-          emptyText="No additional editors."
+          emptyText={`No additional ${copy.title.toLowerCase()}.`}
         />
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Editors can read and update this skill. Their names and emails are visible to anyone who can view the skill.
-        Only you can manage editors, visibility, or archiving.
-      </p>
+      <p className="mt-2 text-xs text-muted-foreground">{copy.hint}</p>
     </div>
   );
 }

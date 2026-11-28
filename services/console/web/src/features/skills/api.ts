@@ -33,6 +33,8 @@ export interface Skill extends Omit<SkillSummary, "viewer"> {
   checksum: string;
   created_at: string | null;
   editors: SkillUser[];
+  /** Explicit read-only grants; present for the owner only. */
+  readers?: SkillUser[];
   viewer: { owner: boolean; can_edit: boolean; can_manage: boolean; can_unshare: boolean };
 }
 
@@ -41,8 +43,12 @@ export interface SkillInput {
   description: string;
   instructions: string;
   lock_version?: number;
+  /** Only owners may send it; the server ignores it otherwise. */
+  visibility?: SkillVisibility;
   /** Omit to keep the current editors (only owners may send it). */
   editor_ids?: string[];
+  /** Omit to keep the current readers (only owners may send it). */
+  reader_ids?: string[];
 }
 
 export function userLabel(user: SkillUser): string {

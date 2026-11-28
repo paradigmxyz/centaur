@@ -62,6 +62,19 @@ function SkillDetail() {
           <SkillMarkdown markdown={skill.instructions} />
         </section>
 
+        {skill.readers && skill.readers.length > 0 && (
+          <section aria-labelledby="skill-readers-heading" className="rounded-xl border bg-card p-5 shadow-xs">
+            <h2 id="skill-readers-heading" className="mb-3 text-sm font-semibold">
+              Readers
+            </h2>
+            <ul className="space-y-2 text-sm text-muted-foreground">
+              {skill.readers.map((reader) => (
+                <li key={reader.id}>{userLabel(reader)}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {skill.editors.length > 0 && (
           <section aria-labelledby="skill-editors-heading" className="rounded-xl border bg-card p-5 shadow-xs">
             <h2 id="skill-editors-heading" className="mb-3 text-sm font-semibold">

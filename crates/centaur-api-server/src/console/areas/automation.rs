@@ -150,6 +150,13 @@ pub(crate) fn sandbox(routes: GuardedRoutes) -> GuardedRoutes {
                 .delete(sandbox_skills_remove_editor),
             Capability::SandboxSkills,
         )
+        .sandbox(
+            "/skills/{id}/readers",
+            get(sandbox_skills_readers)
+                .post(sandbox_skills_add_reader)
+                .delete(sandbox_skills_remove_reader),
+            Capability::SandboxSkills,
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -1765,6 +1772,9 @@ struct SkillDetailPayload<'a> {
     checksum: String,
     created_at: &'a str,
     editors: Vec<UserPayload<'a>>,
+    /// The explicit readers, shown to the owner only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readers: Option<Vec<UserPayload<'a>>>,
     viewer: SkillDetailViewer,
 }
 
@@ -1773,6 +1783,7 @@ fn skill_detail<'a>(
     viewer_id: i64,
     viewer_is_admin: bool,
     editors: &'a [db::SkillUser],
+    readers: Option<&'a [db::SkillUser]>,
 ) -> SkillDetailPayload<'a> {
     let owner = skill.user_id == viewer_id;
     SkillDetailPayload {
@@ -1782,6 +1793,9 @@ fn skill_detail<'a>(
         checksum: db::skill_checksum(&skill.name, &skill.description, &skill.content),
         created_at: skill.created_at.as_str(),
         editors: editors.iter().map(UserPayload::new).collect(),
+        readers: readers
+            .filter(|_| owner)
+            .map(|readers| readers.iter().map(UserPayload::new).collect()),
         viewer: SkillDetailViewer {
             owner,
             can_edit: owner || editors.iter().any(|editor| editor.id == viewer_id),
@@ -1792,8 +1806,8 @@ fn skill_detail<'a>(
 }
 
 /// The writable skill fields (`name`, `description`, `instructions`,
-/// `lock_version`) plus the sandbox create action's `visibility` and the
-/// owner's `editor_ids`. Each handler reads only the fields it permits.
+/// `lock_version`) plus `visibility` and the owner's `editor_ids` and
+/// `reader_ids`. Each handler reads only the fields it permits.
 #[derive(Debug, Default, serde::Deserialize)]
 struct SkillData {
     #[serde(default)]
@@ -1810,10 +1824,13 @@ struct SkillData {
     /// Absent keeps the current editors.
     #[serde(default)]
     editor_ids: Option<Vec<String>>,
+    /// Absent keeps the current readers.
+    #[serde(default)]
+    reader_ids: Option<Vec<String>>,
 }
 
-/// A skill write's `data` attributes. Only the sandbox's create action permits
-/// `visibility`; every other action leaves it alone.
+/// A skill write's `data` attributes. `visibility` is read only when the
+/// action permits it: on create, and on an owner's Console update.
 fn skill_draft(data: &SkillData, lock_version: bool, visibility: bool) -> db::SkillDraft {
     let mut draft = db::SkillDraft {
         name: data.name.clone(),
@@ -1879,7 +1896,12 @@ async fn skill_detail_response(
     status: StatusCode,
 ) -> Result<Response, ApiError> {
     let editors = db::skill_editors(pool, skill.id).await.map_err(internal)?;
-    let payload = skill_detail(skill, user.id, user.admin, &editors);
+    let readers = if skill.user_id == user.id {
+        Some(db::skill_readers(pool, skill.id).await.map_err(internal)?)
+    } else {
+        None
+    };
+    let payload = skill_detail(skill, user.id, user.admin, &editors, readers.as_deref());
     Ok((status, Json(DataPayload { data: payload })).into_response())
 }
 
@@ -1926,9 +1948,10 @@ async fn skills_create(
     ConsoleData(data): ConsoleData<SkillData>,
 ) -> Result<Response, ApiError> {
     let pool = pool(&state)?;
-    let draft = skill_draft(&data, false, false);
+    let draft = skill_draft(&data, false, true);
     let editor_oids = data.editor_ids.clone().unwrap_or_default();
-    match db::create_skill(&pool, user.id, draft, &editor_oids).await {
+    let reader_oids = data.reader_ids.clone().unwrap_or_default();
+    match db::create_skill(&pool, user.id, draft, &editor_oids, &reader_oids).await {
         Ok(skill) => skill_detail_response(&pool, &skill, &user, StatusCode::CREATED).await,
         Err(error) => Ok(skill_write_error(error)),
     }
@@ -1947,14 +1970,24 @@ async fn skills_update(
     let Some(skill) = skill else {
         return Ok(record_not_found(SkillModel::not_found()));
     };
-    let draft = skill_draft(&data, true, false);
-    // Only the owner manages editors; an editor's write keeps them.
-    let editor_oids = if skill.user_id == user.id {
-        data.editor_ids.clone()
+    // Only the owner manages visibility, editors, and readers; an editor's
+    // write keeps them.
+    let owner = skill.user_id == user.id;
+    let draft = skill_draft(&data, true, owner);
+    let (editor_oids, reader_oids) = if owner {
+        (data.editor_ids.clone(), data.reader_ids.clone())
     } else {
-        None
+        (None, None)
     };
-    match db::update_skill(&pool, &skill, draft, editor_oids.as_deref()).await {
+    match db::update_skill(
+        &pool,
+        &skill,
+        draft,
+        editor_oids.as_deref(),
+        reader_oids.as_deref(),
+    )
+    .await
+    {
         Ok(skill) => skill_detail_response(&pool, &skill, &user, StatusCode::OK).await,
         Err(error) => Ok(skill_write_error(error)),
     }
@@ -2217,6 +2250,36 @@ async fn sandbox_editor_payload(
     })
 }
 
+/// The owner's view of a skill's read grants.
+#[derive(Serialize)]
+struct ReaderManagementPayload {
+    id: String,
+    visibility: String,
+    readers: Vec<EditorPayload>,
+    lock_version: i32,
+}
+
+async fn sandbox_reader_payload(
+    pool: &sqlx::PgPool,
+    skill: &db::Skill,
+) -> Result<ReaderManagementPayload, ApiError> {
+    let readers = db::skill_readers(pool, skill.id).await.map_err(internal)?;
+    Ok(ReaderManagementPayload {
+        id: skill.oid(),
+        visibility: skill.visibility.clone(),
+        readers: readers
+            .into_iter()
+            .map(|reader| EditorPayload {
+                id: reader.oid(),
+                email: reader.email,
+                name: reader.name,
+                status: reader.status,
+            })
+            .collect(),
+        lock_version: skill.lock_version,
+    })
+}
+
 async fn sandbox_visible_skill(
     pool: &sqlx::PgPool,
     viewer_id: Option<i64>,
@@ -2326,8 +2389,9 @@ async fn sandbox_skills_create(
         return Ok(sandbox_authoring_forbidden());
     };
     let draft = skill_draft(&data, false, true);
-    // The sandbox never manages editors; a new skill starts with none.
-    match db::create_skill(&pool, user.id, draft, &[]).await {
+    // The sandbox never manages access on create; a new skill starts with no
+    // editors or readers.
+    match db::create_skill(&pool, user.id, draft, &[], &[]).await {
         Ok(skill) => Ok((
             StatusCode::CREATED,
             Json(DataPayload {
@@ -2351,7 +2415,7 @@ async fn sandbox_skills_update(
         Err(response) => return Ok(response),
     };
     let draft = skill_draft(&data, true, false);
-    match db::update_skill(&pool, &skill, draft, None).await {
+    match db::update_skill(&pool, &skill, draft, None, None).await {
         Ok(skill) => Ok(Json(DataPayload {
             data: sandbox_author_payload(&skill),
         })
@@ -2514,6 +2578,99 @@ async fn sandbox_skills_remove_editor(
         data: sandbox_editor_payload(&pool, &skill).await?,
     })
     .into_response())
+}
+
+/// The owner-only reader list.
+async fn sandbox_skills_readers(
+    State(state): State<AppState>,
+    context: SandboxContext,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let pool = pool(&state)?;
+    let (_, skill) = match sandbox_authored_skill(&pool, &context, &id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
+    };
+    Ok(no_store(json_data(
+        sandbox_reader_payload(&pool, &skill).await?,
+    )))
+}
+
+/// The owner skill and the user a reader request names, or the response that
+/// refuses it. Adding resolves active users; removing resolves any user, so a
+/// disabled user's grant can still be revoked.
+async fn sandbox_reader_target(
+    pool: &sqlx::PgPool,
+    context: &SandboxContext,
+    id: &str,
+    data: &SkillEditorData,
+    adding: bool,
+) -> Result<Result<(db::Skill, db::SkillUser), Response>, ApiError> {
+    let (_, skill) = match sandbox_authored_skill(pool, context, id, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(Err(response)),
+    };
+    let reference = match data.validate_fields() {
+        Ok(()) => data.user.trim(),
+        Err(errors) => return Ok(Err(invalid(errors))),
+    };
+    let reader = match sandbox_resolve_editor(pool, reference, adding).await? {
+        Ok(reader) => reader,
+        Err(response) => return Ok(Err(response)),
+    };
+    if adding && reader.id == skill.user_id {
+        let mut errors = FieldErrors::default();
+        errors.add("user", "is already the skill owner");
+        return Ok(Err(invalid(errors)));
+    }
+    Ok(Ok((skill, reader)))
+}
+
+async fn sandbox_skills_add_reader(
+    State(state): State<AppState>,
+    context: SandboxContext,
+    Path(id): Path<String>,
+    ConsoleData(data): ConsoleData<SkillEditorData>,
+) -> Result<Response, ApiError> {
+    let pool = pool(&state)?;
+    let (skill, reader) = match sandbox_reader_target(&pool, &context, &id, &data, true).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
+    };
+    db::add_skill_reader(&pool, skill.id, reader.id)
+        .await
+        .map_err(internal)?;
+    sandbox_reloaded_readers(&pool, skill.id).await
+}
+
+/// Idempotent: revoking a grant the user does not hold succeeds.
+async fn sandbox_skills_remove_reader(
+    State(state): State<AppState>,
+    context: SandboxContext,
+    Path(id): Path<String>,
+    ConsoleData(data): ConsoleData<SkillEditorData>,
+) -> Result<Response, ApiError> {
+    let pool = pool(&state)?;
+    let (skill, reader) = match sandbox_reader_target(&pool, &context, &id, &data, false).await? {
+        Ok(found) => found,
+        Err(response) => return Ok(response),
+    };
+    db::remove_skill_reader(&pool, skill.id, reader.id)
+        .await
+        .map_err(internal)?;
+    sandbox_reloaded_readers(&pool, skill.id).await
+}
+
+async fn sandbox_reloaded_readers(
+    pool: &sqlx::PgPool,
+    skill_id: i64,
+) -> Result<Response, ApiError> {
+    let Some(skill) = db::skill_by_id(pool, skill_id).await.map_err(internal)? else {
+        return Ok(record_not_found(SkillModel::not_found()));
+    };
+    Ok(no_store(json_data(
+        sandbox_reader_payload(pool, &skill).await?,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -2878,7 +3035,7 @@ mod tests {
     #[test]
     fn a_skill_detail_replaces_the_summary_viewer_flags() {
         let skill = skill();
-        let detail = serde_json::to_value(skill_detail(&skill, 3, false, &[])).unwrap();
+        let detail = serde_json::to_value(skill_detail(&skill, 3, false, &[], Some(&[]))).unwrap();
         assert_eq!(
             detail,
             json!({
@@ -2908,8 +3065,13 @@ mod tests {
                 ),
                 "created_at": "2026-01-10T12:00:00Z",
                 "editors": [],
+                "readers": [],
             })
         );
+
+        // Only the owner sees the readers.
+        let viewed = serde_json::to_value(skill_detail(&skill, 4, false, &[], Some(&[]))).unwrap();
+        assert!(viewed.get("readers").is_none());
 
         // The summary is the same payload without the document fields.
         let summary = serde_json::to_value(skill_summary_of(&skill, 4)).unwrap();

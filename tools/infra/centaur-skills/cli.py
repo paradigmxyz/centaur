@@ -92,10 +92,15 @@ def create(
     visibility: Annotated[
         SkillVisibility, typer.Option("--visibility", help="Who can discover and read the skill")
     ] = SkillVisibility.shared,
+    private: Annotated[
+        bool, typer.Option("--private", help="Shorthand for --visibility private")
+    ] = False,
 ) -> None:
     """Create a private or shared Console-authored skill."""
     resolved_instructions = _resolve_instructions(instructions, instructions_file, required=True)
     assert resolved_instructions is not None
+    if private:
+        visibility = SkillVisibility.private
     with get_client() as client:
         result = client.create(
             name, description, resolved_instructions, visibility=visibility.value
@@ -189,6 +194,38 @@ def remove_editor(
     """Remove an editor from an owned Console-authored skill."""
     with get_client() as client:
         result = client.remove_editor(identifier, user)
+    print(json.dumps({"data": result}, indent=2, default=str))
+
+
+@app.command("readers")
+def readers(
+    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+) -> None:
+    """List the users granted read access to an owned skill."""
+    with get_client() as client:
+        result = client.list_readers(identifier)
+    print(json.dumps({"data": result}, indent=2, default=str))
+
+
+@app.command("add-reader")
+def add_reader(
+    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+    user: str = typer.Argument(..., help="Exact Console user email or usr_ OID"),
+) -> None:
+    """Grant a Console user read access to an owned skill."""
+    with get_client() as client:
+        result = client.add_reader(identifier, user)
+    print(json.dumps({"data": result}, indent=2, default=str))
+
+
+@app.command("remove-reader")
+def remove_reader(
+    identifier: str = typer.Argument(..., help="OID of an owned skill"),
+    user: str = typer.Argument(..., help="Exact Console user email or usr_ OID"),
+) -> None:
+    """Revoke a Console user's read access to an owned skill."""
+    with get_client() as client:
+        result = client.remove_reader(identifier, user)
     print(json.dumps({"data": result}, indent=2, default=str))
 
 

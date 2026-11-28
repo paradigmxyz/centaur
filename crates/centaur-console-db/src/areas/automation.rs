@@ -1794,7 +1794,7 @@ pub const SKILL_RESERVED_NAMES: [&str; 1] = ["search"];
 /// The message for a skill write based on stale content.
 pub const SKILL_STALE_MESSAGE: &str =
     "This skill changed since you opened it. Review the latest content before saving.";
-/// The error for an editor selection naming an unavailable user.
+/// The error for an editor or reader selection naming an unavailable user.
 pub const SKILL_EDITORS_UNAVAILABLE: &str = "include an unavailable user";
 
 /// A skill row with its author, as the catalog returns it.
@@ -1832,7 +1832,7 @@ impl Skill {
     }
 }
 
-/// A user the console lists as an editor or a candidate.
+/// A user the console lists as an editor, a reader, or a candidate.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SkillUser {
     pub id: i64,
@@ -1852,9 +1852,9 @@ impl SkillUser {
 pub enum SkillsTab {
     /// The directory tab: every shared active skill.
     Directory,
-    /// The caller's own and edited skills.
+    /// The caller's own and edited skills, plus private skills it may read.
     Mine,
-    /// Shared skills plus the caller's own.
+    /// Shared skills plus the ones the caller owns, edits, or may read.
     Catalog,
 }
 
@@ -1877,11 +1877,28 @@ fn editable_scope(bind: &str) -> String {
     )
 }
 
-/// `Skill.catalog_visible_to(user)`: shared active skills plus the caller's.
+/// The skills the caller holds a read grant on, archived or not.
+fn read_grant(bind: &str) -> String {
+    format!("skills.id IN (SELECT skill_id FROM skill_readers WHERE user_id = {bind})")
+}
+
+/// `Skill.catalog_visible_to(user)`: shared active skills plus the ones the
+/// caller owns, edits, or may read.
 fn catalog_scope(bind: &str) -> String {
     format!(
-        "(skills.archived_at IS NULL AND (skills.visibility = 'shared' OR {editable}))",
-        editable = editable_scope(bind)
+        "(skills.archived_at IS NULL AND (skills.visibility = 'shared' OR {editable} OR {read}))",
+        editable = editable_scope(bind),
+        read = read_grant(bind)
+    )
+}
+
+/// The My Skills tab: the caller's editable skills plus the private ones
+/// shared with it for reading.
+fn mine_scope(bind: &str) -> String {
+    format!(
+        "({editable} OR (skills.archived_at IS NULL AND skills.visibility = 'private' AND {read}))",
+        editable = editable_scope(bind),
+        read = read_grant(bind)
     )
 }
 
@@ -1901,7 +1918,7 @@ pub async fn list_skills(
     query: Option<&str>,
 ) -> Result<Vec<Skill>> {
     let scope = match (tab, viewer_id) {
-        (SkillsTab::Mine, Some(viewer_id)) => editable_scope(&format!("{viewer_id}")),
+        (SkillsTab::Mine, Some(viewer_id)) => mine_scope(&format!("{viewer_id}")),
         (SkillsTab::Mine, None) => "false".to_owned(),
         // The directory tab is the shared active scope, not the wider catalog
         // scope the show action uses.
@@ -2018,14 +2035,50 @@ pub async fn skill_by_id(pool: &PgPool, id: i64) -> Result<Option<Skill>> {
     find_skill(pool, "true", id).await
 }
 
+/// Which skill access list a query reads or writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillAccess {
+    /// `skill_editors`: read and update.
+    Editors,
+    /// `skill_readers`: read only.
+    Readers,
+}
+
+impl SkillAccess {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Editors => "skill_editors",
+            Self::Readers => "skill_readers",
+        }
+    }
+
+    /// The form field an unavailable selection is reported under.
+    fn field(self) -> &'static str {
+        match self {
+            Self::Editors => "editors",
+            Self::Readers => "readers",
+        }
+    }
+}
+
 /// `skill.editors.active.order(:email)`.
 pub async fn skill_editors(pool: &PgPool, skill_id: i64) -> Result<Vec<SkillUser>> {
-    Ok(sqlx::query_as(
+    skill_users(pool, SkillAccess::Editors, skill_id).await
+}
+
+/// `skill.readers.active.order(:email)`.
+pub async fn skill_readers(pool: &PgPool, skill_id: i64) -> Result<Vec<SkillUser>> {
+    skill_users(pool, SkillAccess::Readers, skill_id).await
+}
+
+async fn skill_users(pool: &PgPool, access: SkillAccess, skill_id: i64) -> Result<Vec<SkillUser>> {
+    let table = access.table();
+    Ok(sqlx::query_as(&format!(
         "SELECT users.id, users.email, users.name, users.status \
-         FROM skill_editors JOIN users ON users.id = skill_editors.user_id \
-         WHERE skill_editors.skill_id = $1 AND users.status = 'active' \
-         ORDER BY users.email ASC",
-    )
+         FROM {table} JOIN users ON users.id = {table}.user_id \
+         WHERE {table}.skill_id = $1 AND users.status = 'active' \
+         ORDER BY users.email ASC"
+    ))
     .bind(skill_id)
     .fetch_all(pool)
     .await?)
@@ -2328,22 +2381,24 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     )
 }
 
-/// Save a new skill.
+/// Save a new skill with its initial editors and readers.
 pub async fn create_skill(
     pool: &PgPool,
     owner_id: i64,
     draft: SkillDraft,
     editor_oids: &[String],
+    reader_oids: &[String],
 ) -> SkillWriteResult<Skill> {
     let mut tx = begin_write(pool).await?;
-    let (editors, invalid) = resolve_editors(&mut tx, owner_id, editor_oids).await?;
+    let (editors, editors_invalid) = resolve_editors(&mut tx, owner_id, editor_oids).await?;
+    let (readers, readers_invalid) = resolve_editors(&mut tx, owner_id, reader_oids).await?;
     let (name, description, content) = merged(None, &draft);
     validated(
         &mut tx,
         None,
         &draft,
         (&name, &description, &content),
-        invalid,
+        &unavailable(editors_invalid, readers_invalid),
     )
     .await?;
     let visibility = draft
@@ -2366,24 +2421,40 @@ pub async fn create_skill(
     .bind(&visibility)
     .fetch_one(&mut *tx)
     .await?;
-    let sql = format!(
-        "{} ON CONFLICT DO NOTHING",
-        write::insert_sql("skill_editors", &["skill_id", "user_id"])
-    );
-    for editor in &editors {
-        sqlx::query(&sql)
-            .bind(id)
-            .bind(editor.id)
-            .execute(&mut *tx)
-            .await?;
+    for (access, users) in [
+        (SkillAccess::Editors, &editors),
+        (SkillAccess::Readers, &readers),
+    ] {
+        let sql = format!(
+            "{} ON CONFLICT DO NOTHING",
+            write::insert_sql(access.table(), &["skill_id", "user_id"])
+        );
+        for user in users {
+            sqlx::query(&sql)
+                .bind(id)
+                .bind(user.id)
+                .execute(&mut *tx)
+                .await?;
+        }
     }
     tx.commit().await?;
     skill_by_id(pool, id).await?.ok_or(SkillWriteError::Missing)
 }
 
-fn errors_with_editors(mut errors: FieldErrors, invalid: bool) -> FieldErrors {
-    if invalid {
-        errors.add("editors", SKILL_EDITORS_UNAVAILABLE);
+/// The access lists whose selection named an unavailable user.
+fn unavailable(editors: bool, readers: bool) -> Vec<SkillAccess> {
+    [
+        (editors, SkillAccess::Editors),
+        (readers, SkillAccess::Readers),
+    ]
+    .into_iter()
+    .filter_map(|(invalid, access)| invalid.then_some(access))
+    .collect()
+}
+
+fn errors_with_access(mut errors: FieldErrors, unavailable: &[SkillAccess]) -> FieldErrors {
+    for access in unavailable {
+        errors.add(access.field(), SKILL_EDITORS_UNAVAILABLE);
     }
     errors
 }
@@ -2406,13 +2477,13 @@ fn merged(skill: Option<&Skill>, draft: &SkillDraft) -> (String, String, String)
 }
 
 /// The shared skill-write guard: validate the merged attributes and refuse the
-/// write when either the validation or the editor selection failed.
+/// write when the validation or an editor or reader selection failed.
 async fn validated(
     executor: &mut PgConnection,
     skill_id: Option<i64>,
     draft: &SkillDraft,
     (name, description, content): (&str, &str, &str),
-    invalid: bool,
+    unavailable: &[SkillAccess],
 ) -> SkillWriteResult<()> {
     let errors = validate_skill(
         executor,
@@ -2425,23 +2496,30 @@ async fn validated(
         },
     )
     .await?;
-    if !errors.is_empty() || invalid {
-        return Err(SkillWriteError::Invalid(errors_with_editors(
-            errors, invalid,
+    if !errors.is_empty() || !unavailable.is_empty() {
+        return Err(SkillWriteError::Invalid(errors_with_access(
+            errors,
+            unavailable,
         )));
     }
     Ok(())
 }
 
-/// Updates an existing skill. `editor_oids` of `None` keeps the current editors.
+/// Updates an existing skill. `editor_oids` or `reader_oids` of `None` keeps
+/// the current editors or readers.
 pub async fn update_skill(
     pool: &PgPool,
     skill: &Skill,
     draft: SkillDraft,
     editor_oids: Option<&[String]>,
+    reader_oids: Option<&[String]>,
 ) -> SkillWriteResult<Skill> {
     let mut tx = begin_write(pool).await?;
-    let (editors, invalid) = match editor_oids {
+    let (editors, editors_invalid) = match editor_oids {
+        Some(oids) => resolve_editors(&mut tx, skill.user_id, oids).await?,
+        None => (Vec::new(), false),
+    };
+    let (readers, readers_invalid) = match reader_oids {
         Some(oids) => resolve_editors(&mut tx, skill.user_id, oids).await?,
         None => (Vec::new(), false),
     };
@@ -2451,7 +2529,7 @@ pub async fn update_skill(
         Some(skill.id),
         &draft,
         (&name, &description, &content),
-        invalid,
+        &unavailable(editors_invalid, readers_invalid),
     )
     .await?;
     let expected = draft.lock_version.unwrap_or(skill.lock_version);
@@ -2478,7 +2556,10 @@ pub async fn update_skill(
         return Err(SkillWriteError::Stale);
     }
     if editor_oids.is_some() {
-        replace_skill_editors(&mut tx, skill.id, &editors).await?;
+        replace_skill_users(&mut tx, SkillAccess::Editors, skill.id, &editors).await?;
+    }
+    if reader_oids.is_some() {
+        replace_skill_users(&mut tx, SkillAccess::Readers, skill.id, &readers).await?;
     }
     tx.commit().await?;
     skill_by_id(pool, skill.id)
@@ -2486,26 +2567,31 @@ pub async fn update_skill(
         .ok_or(SkillWriteError::Missing)
 }
 
-async fn replace_skill_editors(
+async fn replace_skill_users(
     executor: &mut PgConnection,
+    access: SkillAccess,
     skill_id: i64,
-    editors: &[SkillUser],
+    users: &[SkillUser],
 ) -> Result<()> {
-    let ids: Vec<i64> = editors.iter().map(|editor| editor.id).collect();
-    sqlx::query("DELETE FROM skill_editors WHERE skill_id = $1 AND NOT (user_id = ANY($2))")
-        .bind(skill_id)
-        .bind(&ids)
-        .execute(&mut *executor)
-        .await?;
-    for editor in editors {
-        sqlx::query(
-            "INSERT INTO skill_editors (skill_id, user_id, created_at, updated_at) \
-             VALUES ($1, $2, now(), now()) ON CONFLICT DO NOTHING",
-        )
-        .bind(skill_id)
-        .bind(editor.id)
-        .execute(&mut *executor)
-        .await?;
+    let table = access.table();
+    let ids: Vec<i64> = users.iter().map(|user| user.id).collect();
+    sqlx::query(&format!(
+        "DELETE FROM {table} WHERE skill_id = $1 AND NOT (user_id = ANY($2))"
+    ))
+    .bind(skill_id)
+    .bind(&ids)
+    .execute(&mut *executor)
+    .await?;
+    let sql = format!(
+        "INSERT INTO {table} (skill_id, user_id, created_at, updated_at) \
+         VALUES ($1, $2, now(), now()) ON CONFLICT DO NOTHING"
+    );
+    for user in users {
+        sqlx::query(&sql)
+            .bind(skill_id)
+            .bind(user.id)
+            .execute(&mut *executor)
+            .await?;
     }
     Ok(())
 }
@@ -2551,11 +2637,27 @@ pub async fn archive_skill(pool: &PgPool, skill_id: i64) -> Result<()> {
 
 /// Assign an active user to the skill and touch it.
 pub async fn add_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<()> {
+    add_skill_user(pool, SkillAccess::Editors, skill_id, user_id).await
+}
+
+/// Grant an active user read access to the skill, touching it when the grant
+/// is new.
+pub async fn add_skill_reader(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<()> {
+    add_skill_user(pool, SkillAccess::Readers, skill_id, user_id).await
+}
+
+async fn add_skill_user(
+    pool: &PgPool,
+    access: SkillAccess,
+    skill_id: i64,
+    user_id: i64,
+) -> Result<()> {
     let mut tx = begin_write(pool).await?;
-    let inserted = sqlx::query(
-        "INSERT INTO skill_editors (skill_id, user_id, created_at, updated_at) \
+    let inserted = sqlx::query(&format!(
+        "INSERT INTO {} (skill_id, user_id, created_at, updated_at) \
          VALUES ($1, $2, now(), now()) ON CONFLICT DO NOTHING",
-    )
+        access.table()
+    ))
     .bind(skill_id)
     .bind(user_id)
     .execute(&mut *tx)
@@ -2569,12 +2671,29 @@ pub async fn add_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> Res
 
 /// Remove an editor from the skill, returning whether one was removed.
 pub async fn remove_skill_editor(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<bool> {
+    remove_skill_user(pool, SkillAccess::Editors, skill_id, user_id).await
+}
+
+/// Revoke a user's read grant on the skill, returning whether one was removed.
+pub async fn remove_skill_reader(pool: &PgPool, skill_id: i64, user_id: i64) -> Result<bool> {
+    remove_skill_user(pool, SkillAccess::Readers, skill_id, user_id).await
+}
+
+async fn remove_skill_user(
+    pool: &PgPool,
+    access: SkillAccess,
+    skill_id: i64,
+    user_id: i64,
+) -> Result<bool> {
     let mut tx = begin_write(pool).await?;
-    let deleted = sqlx::query("DELETE FROM skill_editors WHERE skill_id = $1 AND user_id = $2")
-        .bind(skill_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+    let deleted = sqlx::query(&format!(
+        "DELETE FROM {} WHERE skill_id = $1 AND user_id = $2",
+        access.table()
+    ))
+    .bind(skill_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
     if deleted.rows_affected() == 0 {
         return Ok(false);
     }
@@ -2594,7 +2713,7 @@ async fn touch_skill(executor: &mut PgConnection, skill_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// The user behind a sandbox editor reference: an OID or an email.
+/// The user behind a sandbox editor or reader reference: an OID or an email.
 pub async fn resolve_editor_user(
     pool: &PgPool,
     reference: &str,
