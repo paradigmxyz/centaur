@@ -213,7 +213,7 @@ impl ActivitySummaryWorker {
                 &thread_key,
                 notification.event_id.saturating_sub(1),
                 None,
-                8,
+                1,
             )
             .await?;
         let Some(event) = events

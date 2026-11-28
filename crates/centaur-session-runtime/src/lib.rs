@@ -5078,7 +5078,9 @@ async fn run_stdout_pump(
             };
             line_count += 1;
             let output_value = serde_json::from_str::<Value>(&line).ok();
-            if let Some(harness_thread_id) = harness_thread_id_from_output_line(&line)
+            if let Some(harness_thread_id) = output_value
+                .as_ref()
+                .and_then(harness_thread_id_from_output_line)
                 && let Err(error) = ctx
                     .store
                     .update_harness_thread_id(&thread_key, Some(&harness_thread_id))
@@ -5090,7 +5092,8 @@ async fn run_stdout_pump(
             let execution_id = active_execution
                 .as_ref()
                 .map(|execution| execution.execution_id.as_str());
-            let Some(output_execution_id) = output_state.execution_for_line(execution_id, &line)
+            let Some(output_execution_id) =
+                output_state.execution_for_line(execution_id, output_value.as_ref())
             else {
                 // Output no execution owns never reaches a client: a harness
                 // turn that ran after its execution ended, or a finished
@@ -5187,7 +5190,8 @@ async fn run_stdout_pump(
             }
             if let Some(execution) = active_execution
                 && execution.execution_id == output_execution_id
-                && let Some(terminal) = output_state.observe(&output_execution_id, &line)
+                && let Some(terminal) =
+                    output_state.observe(&output_execution_id, output_value.as_ref())
             {
                 record_terminal_output(
                     &ctx,
@@ -5381,19 +5385,19 @@ impl StdoutPumpState {
     fn execution_for_line(
         &mut self,
         active_execution_id: Option<&str>,
-        line: &str,
+        value: Option<&Value>,
     ) -> Option<String> {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        let Some(value) = value else {
             return active_execution_id.map(ToOwned::to_owned);
         };
 
-        if let Some(known_execution_id) = self.known_execution_for_value(&value) {
+        if let Some(known_execution_id) = self.known_execution_for_value(value) {
             if active_execution_id == Some(known_execution_id.as_str()) {
-                self.remember_value_execution(&value, &known_execution_id);
+                self.remember_value_execution(value, &known_execution_id);
                 return Some(known_execution_id);
             }
             if terminal_output(
-                &value,
+                value,
                 self.final_answer_text_by_execution
                     .get(&known_execution_id)
                     .map(|answer| answer.text.as_str())
@@ -5407,22 +5411,22 @@ impl StdoutPumpState {
         }
 
         let active_execution_id = active_execution_id?;
-        self.remember_value_execution(&value, active_execution_id);
+        self.remember_value_execution(value, active_execution_id);
         Some(active_execution_id.to_owned())
     }
 
-    fn observe(&mut self, execution_id: &str, line: &str) -> Option<TerminalOutput> {
-        let value: Value = serde_json::from_str(line).ok()?;
+    fn observe(&mut self, execution_id: &str, value: Option<&Value>) -> Option<TerminalOutput> {
+        let value = value?;
         if let Some(answer) = self.final_answer_text_by_execution.get_mut(execution_id) {
-            answer.observe(&value);
-            return terminal_output(&value, &answer.text);
+            answer.observe(value);
+            return terminal_output(value, &answer.text);
         }
         let answer = self
             .final_answer_text_by_execution
             .entry(execution_id.to_owned())
             .or_default();
-        answer.observe(&value);
-        terminal_output(&value, &answer.text)
+        answer.observe(value);
+        terminal_output(value, &answer.text)
     }
 
     fn should_record_first_token(&self, execution_id: &str, value: Option<&Value>) -> bool {
@@ -7190,8 +7194,7 @@ fn is_transient_steering_startup_error(error: &SessionRuntimeError) -> bool {
     )
 }
 
-fn harness_thread_id_from_output_line(line: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(line).ok()?;
+fn harness_thread_id_from_output_line(value: &Value) -> Option<String> {
     let event_type = value.get("type").and_then(Value::as_str);
     if event_type != Some("thread.started") {
         return None;
@@ -8862,6 +8865,10 @@ mod tests {
         assert!(!is_transient_steering_startup_error(&store));
     }
 
+    fn parsed(line: &str) -> Option<Value> {
+        serde_json::from_str(line).ok()
+    }
+
     #[test]
     fn stdout_state_drops_late_output_from_inactive_turn() {
         let mut state = StdoutPumpState::default();
@@ -8869,11 +8876,14 @@ mod tests {
         let delta = r#"{"type":"item.agentMessage.delta","turnId":"turn-old","itemId":"msg-old","delta":"late"}"#;
 
         assert_eq!(
-            state.execution_for_line(Some("exe-old"), started),
+            state.execution_for_line(Some("exe-old"), parsed(started).as_ref()),
             Some("exe-old".to_owned())
         );
-        assert_eq!(state.execution_for_line(None, delta), None);
-        assert_eq!(state.execution_for_line(Some("exe-new"), delta), None);
+        assert_eq!(state.execution_for_line(None, parsed(delta).as_ref()), None);
+        assert_eq!(
+            state.execution_for_line(Some("exe-new"), parsed(delta).as_ref()),
+            None
+        );
     }
 
     #[test]
@@ -8886,13 +8896,13 @@ mod tests {
             r#"{"type":"turn.completed","turn":{"id":"turn-1","status":"completed"},"usage":null}"#;
 
         assert_eq!(
-            state.execution_for_line(Some("exe-1"), started),
+            state.execution_for_line(Some("exe-1"), parsed(started).as_ref()),
             Some("exe-1".to_owned())
         );
-        assert_eq!(state.observe("exe-1", delta), None);
-        assert_eq!(state.observe("exe-1", completed), None);
+        assert_eq!(state.observe("exe-1", parsed(delta).as_ref()), None);
+        assert_eq!(state.observe("exe-1", parsed(completed).as_ref()), None);
         assert_eq!(
-            state.observe("exe-1", terminal),
+            state.observe("exe-1", parsed(terminal).as_ref()),
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
                 result_text: Some("Final canonical answer.".to_owned())
@@ -8912,19 +8922,19 @@ mod tests {
             r#"{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"msg-1","type":"agentMessage","phase":"commentary","text":"Need to fix the failing test:"}}}"#,
         ] {
             assert_eq!(
-                state.execution_for_line(Some("exe-1"), line),
+                state.execution_for_line(Some("exe-1"), parsed(line).as_ref()),
                 Some("exe-1".to_owned())
             );
-            assert_eq!(state.observe("exe-1", line), None);
+            assert_eq!(state.observe("exe-1", parsed(line).as_ref()), None);
         }
         let terminal = r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","error":null}}}"#;
 
         assert_eq!(
-            state.execution_for_line(Some("exe-1"), terminal),
+            state.execution_for_line(Some("exe-1"), parsed(terminal).as_ref()),
             Some("exe-1".to_owned())
         );
         assert_eq!(
-            state.observe("exe-1", terminal),
+            state.observe("exe-1", parsed(terminal).as_ref()),
             Some(TerminalOutput::Completed {
                 reason: "turn_completed",
                 result_text: Some("The failing test is fixed.".to_owned())
@@ -8975,18 +8985,20 @@ mod tests {
     fn harness_thread_id_is_extracted_from_thread_started_output() {
         assert_eq!(
             harness_thread_id_from_output_line(
-                r#"{"type":"thread.started","thread_id":"codex-thread-1"}"#
+                &json!({"type": "thread.started", "thread_id": "codex-thread-1"})
             ),
             Some("codex-thread-1".to_owned())
         );
         assert_eq!(
             harness_thread_id_from_output_line(
-                r#"{"type":"thread.started","threadId":"codex-thread-2"}"#
+                &json!({"type": "thread.started", "threadId": "codex-thread-2"})
             ),
             Some("codex-thread-2".to_owned())
         );
         assert_eq!(
-            harness_thread_id_from_output_line(r#"{"type":"turn.started","turn_id":"turn-1"}"#),
+            harness_thread_id_from_output_line(
+                &json!({"type": "turn.started", "turn_id": "turn-1"})
+            ),
             None
         );
     }
