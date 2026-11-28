@@ -47,6 +47,8 @@ pgdata/
 services/sandbox/repos/
 
 # Agent / AI IDE config
+# Composed prompts can contain private information.
+/crates/harness-server/AGENTS.md
 .agents/*
 !.agents/skills/
 !.agents/plugins/
